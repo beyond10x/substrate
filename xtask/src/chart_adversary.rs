@@ -245,7 +245,7 @@ fn adversary_a_service_selecting_by_a_controller_label_is_refused() {
 /// counted: an installer told another name at the default, or a daemon passed the flag, passes.
 #[test]
 fn adversary_a_profile_flag_in_its_one_word_spelling_is_counted() {
-    const DEFAULT: &str = "substrate-host-exec-v1";
+    const DEFAULT: &str = "substrate-host-exec-v2";
     const NAMED: &str = "substrate-host-exec-v1-lane-a";
     const OTHER: &str = "--apparmor-profile=substrate-host-exec-v1-lane-b";
     let mut admitted = Vec::new();
@@ -319,14 +319,23 @@ fn adversary_the_chart_and_the_binaries_admit_the_same_profile_names() {
             .wrapping_add(1_442_695_040_888_963_407);
         usize::try_from(state >> 33).unwrap()
     };
-    let mut names = vec![
-        String::new(),
-        profile_name::DEFAULT.to_owned(),
-        format!("{}-", profile_name::DEFAULT),
-        format!("{}\n", profile_name::DEFAULT),
-        format!("{}-a\n", profile_name::DEFAULT),
-        "unconfined".to_owned(),
+    // Both policy versions, and the bases either side of them that neither copy may admit.
+    let bases = [
+        profile_name::V1,
+        profile_name::V2,
+        "substrate-host-exec-v0",
+        "substrate-host-exec-v3",
+        "substrate-host-exec-v",
     ];
+    let mut names = vec![String::new(), "unconfined".to_owned()];
+    for base in bases {
+        names.extend([
+            base.to_owned(),
+            format!("{base}-"),
+            format!("{base}\n"),
+            format!("{base}-a\n"),
+        ]);
+    }
     for _ in 0..4000 {
         let length = next() % 45;
         let suffix: String = (0..length)
@@ -340,7 +349,15 @@ fn adversary_the_chart_and_the_binaries_admit_the_same_profile_names() {
             })
             .collect();
         let joint = ["-", "-", "-", "", "x", "--"][next() % 6];
-        names.push(format!("{}{joint}{suffix}", profile_name::DEFAULT));
+        let base = bases[next() % bases.len()];
+        names.push(format!("{base}{joint}{suffix}"));
+    }
+    for version in profile_name::Version::ALL {
+        assert!(
+            validator.is_valid(&json!(version.base())),
+            "the chart refuses {}",
+            version.base()
+        );
     }
     let disagree: Vec<(&String, bool, bool)> = names
         .iter()

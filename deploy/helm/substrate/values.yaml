@@ -29,7 +29,7 @@ identity:
     port: 443
 execution:
   enabled: false
-  appArmorProfile: substrate-host-exec-v1
+  appArmorProfile: substrate-host-exec-v2
   projectQuotas:
     enabled: false
     ids: ""

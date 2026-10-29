@@ -11,6 +11,11 @@ use std::{
 };
 use tokio::process::{Child, Command};
 
+#[path = "../../../test-support/readiness.rs"]
+mod readiness;
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
 fn binary() -> PathBuf {
     if let Some(path) = std::env::var_os("SUBSTRATE_TEST_DAEMON") {
         return path.into();
@@ -54,7 +59,7 @@ async fn start(root: &Path, cgroup: &Path, allow: bool) -> (Child, Client) {
         command.arg("--allow-unrecorded-sessions");
     }
     let mut child = command.spawn().unwrap();
-    let client = tokio::time::timeout(Duration::from_secs(20), async {
+    let ready = tokio::time::timeout(readiness::DAEMON_READINESS, async {
         loop {
             assert!(
                 child.try_wait().unwrap().is_none(),
@@ -71,8 +76,16 @@ async fn start(root: &Path, cgroup: &Path, allow: bool) -> (Child, Client) {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .expect("daemon startup deadline");
+    .await;
+    let Ok(client) = ready else {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        panic!(
+            "daemon startup deadline of {:?} elapsed: {}",
+            readiness::DAEMON_READINESS,
+            std::fs::read_to_string(root.join("stderr.log")).unwrap_or_default()
+        );
+    };
     (child, client)
 }
 fn scan(root: &Path, canary: &[u8]) -> Vec<String> {
@@ -121,7 +134,7 @@ async fn delegated_sdk_streaming_never_records_terminal_canaries() {
             "restart",
             "recorded",
         ] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = unix_socket::tempdir("socket");
             let root = dir.path();
             std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
             let (mut child, mut client) = start(root, &cgroup, ending != "policy").await;
@@ -463,10 +476,12 @@ async fn delegated_sdk_streaming_never_records_terminal_canaries() {
 
 #[tokio::test]
 async fn unsupported_driver_refuses_unrecorded_before_dispatch() {
+    let data = unix_socket::tempdir("owned/substrate.sock");
     let mut daemon = b10x_substrate_sdk::ManagedDaemon::builder()
-        .temporary()
+        .data_dir(data.path().join("owned"))
         .deployment("unsupported112")
         .external_binary(binary())
+        .startup_timeout(readiness::DAEMON_READINESS)
         .allow_unrecorded_sessions(true)
         .start()
         .await

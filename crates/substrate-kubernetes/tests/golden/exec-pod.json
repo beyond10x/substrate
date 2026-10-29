@@ -1,0 +1,178 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "annotations": {
+      "b10x-substrate/operation": "sha256:abababababababababababababababababababababababababababababababab"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "b10x-substrate",
+      "b10x-substrate/deployment": "c453bs4zphyuzprofz7gvtqiby",
+      "b10x-substrate/exec": "w2ojbcvbcyt6rti5r4xmabwt5c",
+      "b10x-substrate/role": "pod"
+    },
+    "name": "sbx-ex-w2ojbcvbcyt6rti5r4xmabwt5c",
+    "namespace": "substrate",
+    "ownerReferences": [
+      {
+        "apiVersion": "v1",
+        "controller": false,
+        "kind": "PersistentVolumeClaim",
+        "name": "sbx-ws-omrgy5iumyrviy7b2h7fy6hgr3",
+        "uid": "00000000-0000-4000-8000-000000000001"
+      }
+    ]
+  },
+  "spec": {
+    "activeDeadlineSeconds": 31,
+    "affinity": {
+      "nodeAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": {
+          "nodeSelectorTerms": [
+            {
+              "matchExpressions": [
+                {
+                  "key": "kubernetes.io/hostname",
+                  "operator": "In",
+                  "values": [
+                    "node-a"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "command": [
+          "/.substrate/substrate-executor",
+          "run",
+          "eyJhcmd2IjpbIi9iaW4vZWNobyIsIiQoSE9NRSkgJCQiXSwiZW52Ijp7IlBBVEgiOiIvdXNyL2JpbjovYmluIn0sIm1lbW9yeV9ieXRlcyI6NjcxMDg4NjQsImNwdV9taWxsaWNvcmVzIjo1MDAsIm91dHB1dF9ieXRlcyI6NjU1MzZ9"
+        ],
+        "image": "registry.invalid/busybox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "run",
+        "resources": {
+          "limits": {
+            "cpu": "500m",
+            "ephemeral-storage": "88080384",
+            "memory": "67108864"
+          },
+          "requests": {
+            "cpu": "500m",
+            "ephemeral-storage": "88080384",
+            "memory": "67108864"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "privileged": false,
+          "readOnlyRootFilesystem": true,
+          "runAsGroup": 65532,
+          "runAsNonRoot": true,
+          "runAsUser": 65532,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "stdin": false,
+        "tty": false,
+        "volumeMounts": [
+          {
+            "mountPath": "/workspace",
+            "name": "workspace",
+            "readOnly": false
+          },
+          {
+            "mountPath": "/.substrate",
+            "name": "substrate",
+            "readOnly": true
+          }
+        ],
+        "workingDir": "/workspace"
+      }
+    ],
+    "enableServiceLinks": false,
+    "hostIPC": false,
+    "hostNetwork": false,
+    "hostPID": false,
+    "initContainers": [
+      {
+        "command": [
+          "/substrate-executor",
+          "install",
+          "/x/substrate-executor"
+        ],
+        "image": "registry.invalid/substrate/executor@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "executor",
+        "resources": {
+          "limits": {
+            "cpu": "500m",
+            "ephemeral-storage": "88080384",
+            "memory": "67108864"
+          },
+          "requests": {
+            "cpu": "500m",
+            "ephemeral-storage": "88080384",
+            "memory": "67108864"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "privileged": false,
+          "readOnlyRootFilesystem": true,
+          "runAsGroup": 65532,
+          "runAsNonRoot": true,
+          "runAsUser": 65532,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/x",
+            "name": "substrate"
+          }
+        ]
+      }
+    ],
+    "restartPolicy": "Never",
+    "securityContext": {
+      "runAsGroup": 65532,
+      "runAsNonRoot": true,
+      "runAsUser": 65532,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "terminationGracePeriodSeconds": 5,
+    "volumes": [
+      {
+        "name": "workspace",
+        "persistentVolumeClaim": {
+          "claimName": "sbx-ws-omrgy5iumyrviy7b2h7fy6hgr3"
+        }
+      },
+      {
+        "emptyDir": {
+          "sizeLimit": "67108864"
+        },
+        "name": "substrate"
+      }
+    ]
+  }
+}

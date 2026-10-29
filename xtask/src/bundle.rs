@@ -45,6 +45,7 @@ use crate::repo;
 use crate::report::Report;
 
 mod host_process;
+mod namespace_driver;
 mod omitted_entries;
 mod process_events;
 mod read_only_roots;
@@ -908,6 +909,14 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     // ADR 0036 S12 binds every bundle from `0.24.0` on.
     if process_events::applies_to(version) {
         process_events::check(released, failures);
+    }
+    // Design 34 § 11 binds every bundle from `0.25.0` on.
+    if namespace_driver::applies_to(version) {
+        namespace_driver::check(released, failures);
+    }
+    if version == "0.25.0" {
+        namespace_driver::check_introduction(released, failures);
+        return;
     }
     if version == "0.24.0" {
         process_events::check_introduction(released, failures);
@@ -5910,7 +5919,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 24, "every released bundle must be checked");
+        assert_eq!(checked, 25, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

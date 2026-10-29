@@ -42,7 +42,10 @@ or unbounded.”
 
 ## One contract, capability-gated behavior
 
-The shipped driver is the Linux host driver. The contract separates its resource model from
+The released driver is the Linux host driver; a Kubernetes namespace driver is in development
+source.
+
+The contract separates each driver's resource model from
 backend-specific enforcement. A caller should ask which capabilities this daemon
 verified, not which driver happens to be behind it. An absent capability produces `unserved` or a
 more specific refusal.

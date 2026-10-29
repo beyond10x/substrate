@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-29T10:40:20Z",
+  "actor": "human:timo",
+  "artifact": "story:kubernetes-namespace-driver-entry-gate",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo xtask namespace-lane observe at df7c6f57709cd03786ce271d5d5cd5e302022688: Namespace-lane: df7c6f57709cd03786ce271d5d5cd5e302022688 8 2026-10-29T10:40:20Z",
+    "reference": "https://github.com/beyond10x/substrate/commit/df7c6f57709cd03786ce271d5d5cd5e302022688"
+  }
+}

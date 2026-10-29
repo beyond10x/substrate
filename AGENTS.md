@@ -43,7 +43,15 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.24.0` exist; `0.24.0` adds ADR 0036 S12: one route,
+   through `0.25.0` exist; `0.25.0` adds no route and publishes design 34 § 11 (ADR 0047): the
+   capability snapshot's `driver` admits `kubernetes` beside `host` (`HostDriverKind`), the
+   optional neutral fact `confinement.no-egress` (`CONFINEMENT_NO_EGRESS_FACT`), and three named
+   refusals at 501, `exec.inline-capsule-unserved`, `exec.signal-unserved` and
+   `workspace.adopt-unserved`, each published by a vector on a namespace-driver machine and held
+   to its `DRIVER_UNSERVED_REFUSALS` row by `cargo xtask check-bundle 0.25.0`
+   (`xtask/src/bundle/namespace_driver.rs`); the host driver publishes none of them and its
+   answers do not change;
+   `0.24.0` added ADR 0036 S12: one route,
    `GET /v1/processes/{process_id}/events`, a WebSocket under the `process` scope with no
    capability predicate, whose frames are `schemas/process-stream-item.json` (a record's
    `process.*` events and its log lines in one order, a `gap`, one terminal `ended`, an opaque
@@ -102,8 +110,9 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon and Rust SDK advertise `substrate-wire/0.24.0` with the SHA-256 of that bundle's
-   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); ADR 0036 S12 records the process event stream, ADR 0010 the read-only roots, ADR 0038 the writable-root
+   The daemon and Rust SDK advertise `substrate-wire/0.25.0` with the SHA-256 of that bundle's
+   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); design 34 § 11 records the
+   namespace-driver additions, ADR 0036 S12 the process event stream, ADR 0010 the read-only roots, ADR 0038 the writable-root
    additions, design 26 records the working
    directory and aperture-list additions, design 21 records the Git source and
    observation additions, ADR 0028 records the preceding route promotion, and the gate retains the
@@ -172,7 +181,7 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   deliberately not committed (`docs/design/09-delegated-context-and-grant-attribution.md` § 6), so
   the vectors are verify-only. They do **not** verify with `delegated_signing_key` in
   `crates/substrate-daemon/tests/runtime_vectors.rs`, whose published seed signs only the
-  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.24.0`. The exception is scoped by rule
+  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.25.0`. The exception is scoped by rule
   **and** by path; a JWT anywhere else, including any other vector, is still a finding. Proven, not
   asserted: the same token in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-*.json`
   is allowed and in `crates/substrate-daemon/src/` is caught. **Widening this allowlist is a
@@ -206,7 +215,7 @@ In order: `cargo xtask check-ess`, `cargo xtask check-docs`,
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, one bounded
-`cargo xtask check-bundles 0.5.0 ... 0.24.0`,
+`cargo xtask check-bundles 0.5.0 ... 0.25.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 
@@ -224,6 +233,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 
 | verb | what it refuses, or produces | in `gate.sh`? |
 |---|---|---|
+| `check-ess` | an ESS specification under `spec/` that the pinned `ess` does not validate with `--strict-requires`, a scenario of the workspace, host-process or confinement projection that fails against the interpreted reference, or a committed projection that is not what the pinned `ess` regenerates: `spec/operations-suite.json`, the workspace, host-process and confinement suites, their generated Rust types, the capture type and the CLI contract under `spec/generated/cli` (§ *Executable specification*) | yes |
+| `check-docs` | a public page missing from `PAGES` or from `website/sidebars.ts`, or out of their order or grouping; a release-notes page that does not end with the newest released `CHANGELOG.md` section; a start-page link that does not resolve; a derived site table that disagrees with `spec/`; a reading load above `website/ux/baseline.json`; or a `website/ux/findings/` record that breaks its rules (§ *Public website*) | yes |
 | `check-toolchain [--root <dir>]` | a Rust version the three pinning files disagree on | yes |
 | `check-links` | a machine-local Markdown link, or a repository-relative target that is not there | yes |
 | `check-mcp-boundary` | a publishable MCP crate, a Substrate implementation dependency, an unpinned/featured MCP stack, or a built-in unbounded/remote transport | yes |
@@ -236,10 +247,12 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
-| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.24.0` in one invocation |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-four |
+| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.25.0` in one invocation |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-five |
+| `namespace-lane check [--bless]` | a lane object that differs from its golden in `xtask/tests/golden/namespace-lane/`, a Role that is not ADR 0047 decision 3's table as the ADR writes it, or a driver-side object that is cluster-scoped or lacks a design 34 § 4 ownership key | no — `.github/workflows/namespace-lane.yml`, and its cases under `cargo test` |
+| `namespace-lane observe [--admin-kubeconfig <file>] [--executor-image <ref>]` | runs design 34 § 10.3's O1 to O4, O6 to O8 and O10 on a kind cluster of its own (`substrate-namespace-lane-<id>`) through `b10x-substrate-kubernetes-client`, never `kubectl`. It then runs design 34's steps 3 to 7 against the shipped daemon with `--driver kubernetes`: it builds that daemon and the vectors' test binary before the cluster exists, and pushes the executor image to the lane's registry unless `--executor-image` names one, which `--admin-kubeconfig` requires. It also refuses a kubeconfig whose server is not `https://127.0.0.1:<port>`, and never reads `KUBECONFIG`; a given one is refused before it is read under `~/.kube` (of `HOME` and of the uid's passwd entry) or as a file `KUBECONFIG` names, then for a cluster or user member kind never writes (`tls-server-name`, `proxy-url`, `exec`, `auth-provider`), a context or cluster not `kind-substrate-namespace-lane-<id>`, and, before any write, no node `substrate-namespace-lane-<id>-control-plane`; prints `Namespace-lane: <sha> <count> <RFC 3339 UTC>` only when every observation ran at a clean, unmoved `HEAD`, every step case passed or was declared absent with its reason, what the run created was removed and no signal arrived; `<count>` is still the observations' | no — a workstation run |
 | `chart-lane static [--helm <path>]` | a rendering of `deploy/helm/substrate` that breaks ADR 0046 (a second Service selecting the pods, a Service certificate name, an unretained ledger claim, a token, a capability, host namespace or host path the profile does not grant, an open NetworkPolicy rule), or a privilege, cgroup, mount, quota, transport or egress posture the chart renders instead of refusing | no — `chart-lane.yml` |
-| `chart-lane cluster --image <ref> --node-image <ref>` | creates and deletes its own kind cluster, then refuses a pod that is not ready on its own pool node, a certificate that verifies under the Service name, a ledger that does not survive a rolling restart, an undeclared egress that arrives, an execution pod `baseline` admits, or an uninstall that leaves more than the ledger claims; a scenario it cannot prove is reported absent | no — `chart-lane.yml` |
+| `chart-lane cluster --image <ref> --node-image <ref>` | creates and deletes its own kind cluster, then refuses a pod that is not ready on its own pool node, a certificate that verifies under the Service name, a ledger that does not survive a rolling restart, an undeclared egress that arrives, an execution pod `baseline` admits, or an uninstall that leaves more than the ledger claims; a scenario it cannot prove is reported absent. `--node-profiles` (K9 C, a workstation) runs one worker built from `fixtures/chart-lab/Dockerfile` and also refuses an image whose `org.opencontainers.image.revision` is not `HEAD`, a recipe not built on `--node-image`, and a worker without `AppArmor`, without `/sbin/apparmor_parser`, already holding the run's own profile name in the shared kernel, or without a cgroup v2 `cpu`/`memory`/`pids` hierarchy, naming every scenario that did not run; it names its profile `substrate-host-exec-v2-lane-<ulid>`, fresh per run (design 33 § 7), installs the execution-enabled chart with the node profiles under that `execution.appArmorProfile`, runs the four execution scenarios, removes only that profile, and prints `Chart-lane:` only when every scenario in `SCENARIOS` passed and the removal succeeded at an unmoved, clean `HEAD` | no — `chart-lane.yml`; `--node-profiles` by hand before a release |
 | `package-chart --version <v> --image-digest <d> --out <dir>` | produces the released chart, a byte-for-byte reproducible archive, with its version set and its default image pinned to the daemon digest | no — `release.yml` |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
@@ -328,6 +341,19 @@ child group so the delegation root stays process-free, and sets the variable. Do
 delegated lane cannot run here: a user session's own scope is root-owned, so `mkdir` in it fails,
 and an absent lane looks identical to a green one if you only read `cargo test`.
 
+**The runner has a third lane, the namespace lane.** It runs only when
+`SUBSTRATE_VECTORS_KUBERNETES_CONFIG` names a namespace driver's kubeconfig. It starts the shipped
+daemon with `--driver kubernetes` on its Unix socket, as deployment `dep_namespace_vectors`, and
+runs `NAMESPACE_CASES` (56) once. These are selected by the facts a kind cluster publishes: a
+probed snapshot with `confinement.no-egress` absent, the workspace and file routes, the promoted
+route inventory, `exec.sandbox-unavailable` (501) for an exec, and a destroy that reaches 404.
+Unset, the lane prints that it is absent and that no case ran, and is **never reported as
+passed**. Only `cargo xtask namespace-lane observe` sets the variable, as its step 5
+([`xtask/src/namespace_lane_run.rs`](xtask/src/namespace_lane_run.rs)). Beside it, that verb runs
+ADR 0047 decision 13's driver-specific cases once each and names every unreachable case absent with
+its reason. The recorded run: `Namespace-lane: df7c6f57709cd03786ce271d5d5cd5e302022688 8
+2026-10-29T10:40:20Z`, 1107 s on a workstation (§ *Releases*).
+
 ### The real project-quota lane
 
 **`cargo xtask quota-lane` is the only thing that runs the seven `real_quota_*` cases, and nothing
@@ -394,8 +420,8 @@ cases, because they are in a different crate and outside `DELEGATED_CASES`.
 **The gate verifies every released bundle, not just `0.1.0`.** The four
 `run python3 scripts/check-contract-bundle*.py` lines in `scripts/gate.sh` run the
 four frozen Python checkers, and the line after them runs `cargo xtask check-bundles` for `0.5.0`
-through `0.24.0`, so
-a green gate *is* evidence that all twenty-four still hold. Cutting a successor bundle therefore means
+through `0.25.0`, so
+a green gate *is* evidence that all twenty-five still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 
@@ -447,10 +473,16 @@ distribution decision, not a release convenience (ADR 0030).
 builds the distinct `daemon` and `mcp` runtime targets from one shared pinned builder in `Dockerfile`
 and packages the explicitly pinned current development bundle with
 `cargo xtask package-bundle`. It publishes
-`ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
-`ghcr.io/beyond10x/b10x-substrate-mcp:<version>`, plus
-`ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`; keyless-signs all three digests and verifies
-all three signatures **before** it announces anything. It also exports `substrate-daemon` and the
+`ghcr.io/beyond10x/b10x-substrate-daemon:<version>`,
+`ghcr.io/beyond10x/b10x-substrate-mcp:<version>` and
+`ghcr.io/beyond10x/b10x-substrate-executor:<version>`, plus
+`ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`; keyless-signs all four digests and verifies
+all four signatures **before** it announces anything. The executor image is the `executor` target,
+the static musl `substrate-executor` on an empty base built from the same pinned `rust` image
+(design 34 § 10.4); it is pushed only after its `version` handshake names `substrate-executor/1`,
+the tag's version and the tagged commit, and its executable has no interpreter. A recovery of a tag
+whose Dockerfile has no `executor` stage publishes none and says so; a tag push without it is
+refused. It also exports `substrate-daemon` and the
 `b10x-substrate` CLI from that same builder stage (Dockerfile target `release-binaries`) and attaches
 four files to the GitHub release:
 `substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz`,
@@ -466,7 +498,7 @@ publishes without the four files, and its release notes and summary say so; a ta
 stage is refused. It refuses — publishing nothing — a tag that is
 not the bare version form (so `0.2.2-rc.0` produces nothing), a lightweight tag, a commit that is not
 an ancestor of `main`, a version that disagrees with `[workspace.package] version`, a commit for
-which `gate.yml` has not concluded `success`, an existing daemon or MCP version tag on an initial
+which `gate.yml` has not concluded `success`, an existing daemon, MCP or executor version tag on an initial
 tag-push run, or an existing bundle tag whose digest differs from the deterministic local package.
 An explicit protected-`main` recovery dispatch may reuse an image already written by that same
 release only after its source-revision label and exact shipped binary pass again; it never replaces
@@ -484,8 +516,9 @@ commit** (ADR 0046, K7 and K9). The preflight waits for `.github/workflows/chart
 recorded `success` for that exact commit, as it does for `gate.yml`, and refuses a tag without one.
 Both steps count only a `push` run on `main` or a `workflow_dispatch` run of this repository: a
 pull-request run tested a merge, not the tagged tree. The scenarios the chart lane reports absent
-(always the four execution-enabled ones it cannot run on kind) are read from that run's
-annotations and printed under the chart lane in the release notes and both job summaries.
+(always the four execution-enabled ones it cannot run on a hosted kind node) are read from that
+run's annotations and printed under the chart lane in the release notes and both job summaries; the
+local record below is what proves those four.
 That workflow runs on every push to `main`, so every taggable commit has a run; on pull requests it
 runs only when the chart, its xtask modules, the daemon and the crates it links, the toolchain, the
 `Dockerfile` or a release workflow changes. An existing chart tag refuses a tag push before any
@@ -501,7 +534,7 @@ so; a tag push without a chart is refused. A first push can create the chart pac
 the anonymous read-back fails before anything is announced; make the package public and dispatch a
 recovery.
 
-**Two of those three images ship for adopters outside this collection, and that is deliberate.** No
+**Two of those images ship for adopters outside this collection, and that is deliberate.** No
 repository in the `beyond10x` collection pulls `ghcr.io/beyond10x/b10x-substrate-wire` or
 `ghcr.io/beyond10x/b10x-substrate-mcp`: the only in-collection consumer of the wire contract,
 `harness/crates/harness-substrate`, pins the *crate* `b10x-substrate-wire` by Git revision, not the
@@ -559,22 +592,95 @@ not satisfy it. The line is written into the GitHub release under *Quota lane* a
 recovery dispatch may pass it as the `quota_evidence` input instead. The step's refusals are executed
 offline against throwaway tagged repositories by `xtask/tests/release_workflow.rs`.
 
+**A release that publishes the chart also requires a recorded local chart-lane run for the tagged
+commit** (ADR 0046, K9 C), in the same shape. The hosted chart lane reports the four
+execution-enabled scenarios absent, because a hosted node loads no Localhost seccomp or AppArmor
+profile. Before tagging, build the daemon image from that commit with
+`--build-arg SOURCE_SHA=<sha>` (the lane refuses an image whose `org.opencontainers.image.revision`
+is not `HEAD`), run `cargo xtask chart-lane cluster --node-profiles --image <ref> --node-image <ref>`
+with a clean checkout on a host whose kernel enables AppArmor, and put the line it prints in the
+annotated tag's message:
+
+```
+Chart-lane: <source-sha> <scenario-count> <RFC 3339 UTC>
+```
+
+The verb builds its kind node image from the committed
+[`fixtures/chart-lab/Dockerfile`](fixtures/chart-lab/Dockerfile): the hosted lane's
+`kindest/node` digest, which `--node-image` must name, plus the pinned `apparmor` package from the
+node's own Debian snapshot, its boot unit masked so the node never loads its distribution's
+profiles. The image is tagged `b10x-substrate-chart-lab:<key>` per checkout and never pushed. The
+cluster has one worker, because every kind node shares the host kernel and a second node's
+installer would find the first one's profile loaded without its own source. The worker gets the
+host's securityfs. Each run names its own AppArmor profile `substrate-host-exec-v2-lane-<ulid>`,
+a fresh lowercased ULID
+([design 33](docs/design/33-host-profile-name-parameter.md) § 7),
+so it never loads, selects or removes a profile it does not own; a `substrate-host-exec-v2` another
+workload holds in the shared kernel does not stop it. The chart is installed with one pod,
+`execution.enabled`, that name as `execution.appArmorProfile` and `nodeProfiles.enabled` in
+`privileged` namespaces, and the verb runs every scenario in the literal
+`SCENARIOS` array of [`xtask/src/chart_cluster.rs`](xtask/src/chart_cluster.rs): exactly the four
+the hosted lane reports absent, namely the bootstrap's drop to uid 65532 with a confined exec
+through it, the Localhost seccomp profile, the run's own enforced AppArmor label,
+and the 0400 key served after the drop. The six hosted scenarios stay the hosted lane's. A missing
+prerequisite is a refusal that names it and every scenario that did not run, and prints no record;
+the run's own name already loaded in the kernel is one, because the installer refuses a loaded
+profile whose source its fresh node does not hold and the run did not load it. After the scenarios
+the verb uninstalls the release, waits until none of its pods remain, and removes its own profile,
+by name, with `apparmor_parser --remove` on the node, which holds the source; a failed removal is
+no record and names the profile left loaded. A run that dies before teardown leaves only its own
+uniquely named profile loaded, which blocks no later run.
+`release.yml` refuses to publish without the line, refuses a record naming any other commit,
+refuses a count other than the number of entries in that array at the tagged commit (one quoted
+name per line, matching its declared length), and applies the same calendar, one-line and
+three-field rules; the line is written into the GitHub release under *Chart lane* and into both job
+summaries, and a recovery dispatch may pass it as the `chart_evidence` input instead. A tagged
+source without `deploy/helm/substrate` needs no record. The step's refusals are executed offline by
+`xtask/tests/release_workflow.rs`.
+
+**A release also requires a recorded namespace-lane run for the tagged commit**
+(`decision-blocker:namespace-lane-runs-on-a-workstation`, D182), in the same shape: the kind cluster
+design 34 § 10.3's observations need does not fit the CI budget, so `namespace-lane.yml` runs only
+the static checks. Before tagging, run `cargo xtask namespace-lane observe` at that commit with a
+clean checkout and put the line it prints in the annotated tag's message:
+
+```
+Namespace-lane: <source-sha> <observation-count> <RFC 3339 UTC>
+```
+
+`release.yml` refuses to publish without it, refuses a record naming any other commit, refuses a
+count other than the number of entries in the literal `OBSERVATIONS` array of
+[`xtask/src/namespace_lane.rs`](xtask/src/namespace_lane.rs) at the tagged commit (the length the
+verb records; the declared length must equal the entries), and applies the same calendar, one-line
+and three-field rules; another lane's line does not satisfy it. The line is written into the GitHub
+release under *Namespace lane* and into both job summaries, and a recovery dispatch may pass it as
+the `namespace_evidence` input instead. A tag push whose source has no `xtask/src/namespace_lane.rs`
+is refused; only a recovery of an older tag needs no record, and its notes say so. The preflight
+also waits for `.github/workflows/namespace-lane.yml`'s own recorded `success` for that exact
+commit, as it does for `gate.yml` and counting the same runs, and refuses a tag without one; a tag
+push whose source has no `namespace-lane.yml` is refused, and only a recovery of such a tag needs
+no run, which its notes say. Both steps' refusals are executed offline by
+`xtask/tests/release_workflow.rs`.
+
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
-release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **`0.14.0` is the published
-release** (2026-10-27, tagged commit `0b9d50c`): daemon
-`ghcr.io/beyond10x/b10x-substrate-daemon:0.14.0` at
-`sha256:a22fc8a1707ac750eb86115422e26ecfb2fde64fb3df588e9fced32ef2a52182`, disposable MCP
-`ghcr.io/beyond10x/b10x-substrate-mcp:0.14.0` at
-`sha256:c6844980db262412db962228bb263421e285d57226e7c8a3a28fbbb85d589d42`, and development bundle
-`ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at
-`sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, plus the two binary
-archives under a signed `SHA256SUMS`. All were keyless-signed and verified with the exact tagged
-workflow identity (`release.yml@refs/tags/0.14.0`), and the three images were anonymously read back
-before the GitHub release was announced.
+release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **`0.15.0` is the published
+release** (2026-10-29, tagged commit `0739628`): daemon
+`ghcr.io/beyond10x/b10x-substrate-daemon:0.15.0` at
+`sha256:9bc33712eba8e359f08effba22162eef2c7b5f78e39bf4c8ebd66fea6ba139ba`, disposable MCP
+`ghcr.io/beyond10x/b10x-substrate-mcp:0.15.0` at
+`sha256:7b1b0bf9aa5400a9643c33e66cb39fee7ddc1783491827e23cd892889c486555`, development bundle
+`ghcr.io/beyond10x/b10x-substrate-wire:0.24.0` at
+`sha256:3623da7d342a2d6ce4623fa4b7b1910a7c47ca9a33b4056295cb2ab758f8be53` and chart
+`oci://ghcr.io/beyond10x/charts/b10x-substrate` `0.15.0` at
+`sha256:dd1d06e105bdd99fa1b628d8b1f7796a05f894002b39899fca14fdf772c8e2b1`, plus the two binary
+archives under a signed `SHA256SUMS`. The tag-push run failed, so a protected-`main` recovery
+dispatch published them: all were keyless-signed and verified with that run's workflow identity
+(`release.yml@refs/heads/main`) before the GitHub release was announced. It predates the executor
+image, so it published none; `0.16.0` is the first release that does.
 Do not maintain a second digest list here: the digests of every release are the GitHub release's own
-([0.14.0](https://github.com/beyond10x/substrate/releases/tag/0.14.0)) and
+([0.15.0](https://github.com/beyond10x/substrate/releases/tag/0.15.0)) and
 [CHANGELOG.md](CHANGELOG.md)'s.
 
 **Ruleset `main-requires-the-full-gate` (id 23425552, no bypass actors) requires that check on `main` (`gh api repos/beyond10x/substrate/rules/branches/main` → `required_status_checks` beside `creation`, `update`, `deletion`, `non_fast_forward` and the two email patterns); the legacy `GET …/branches/main/protection` still answers 404 `Branch not protected`, because rulesets are not branch protection.** The gate is also enforced at release time: `release.yml` reads

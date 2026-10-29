@@ -128,6 +128,8 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             network: true,
         }),
         exec_no_egress: exec.then_some(true),
+        // Design 34 N5: the neutral fact is the namespace driver's; the host publishes the Linux one.
+        confinement_no_egress: None,
         exec_workspace_scoped_write: workspace_scoped_write.then_some(true),
         exec_cgroup_limits: exec.then_some(CgroupLimitFacts {
             processes: true,
@@ -489,7 +491,10 @@ fn bind(
     })
 }
 
-fn probe_lease_clock() -> bool {
+/// Whether this host can serve explicit leases: its boot id and uptime read as a lease clock needs
+/// them. Every driver the daemon runs publishes `leases.explicit` from this, because the daemon,
+/// not the driver, keeps lease time.
+pub fn probe_lease_clock() -> bool {
     let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id");
     let uptime = std::fs::read_to_string("/proc/uptime");
     boot_id.is_ok_and(|value| {
@@ -514,12 +519,19 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
     if !config.bubblewrap.is_file() || !socat.is_file() {
         return false;
     }
-    let Ok(sentinel) = tempfile::tempdir() else {
-        return false;
-    };
-    let socket = sentinel.path().join("host.sock");
-    let Ok(_listener) = std::os::unix::net::UnixListener::bind(&socket) else {
-        return false;
+    // The sentinel's path is measured against `sun_path` before it binds, in a private directory
+    // that fits whatever `TMPDIR` is (`crate::private_socket`). A socket that cannot be placed
+    // still withholds the floor, and the reason is logged with the length and the limit, so a
+    // daemon refusing every exec says why instead of looking like a host without confinement.
+    let sentinel = match crate::private_socket::bind_private("host.sock") {
+        Ok(sentinel) => sentinel,
+        Err(reason) => {
+            tracing::warn!(
+                %reason,
+                "confinement floor withheld: the probe's sentinel socket could not be bound"
+            );
+            return false;
+        }
     };
     // One sandbox per family the profile refuses, and the floor needs **both**. The Unix one is
     // what this probe has always measured; the vsock one is review finding 7's, and it is here
@@ -541,7 +553,7 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
             };
             let Ok(output) = bubblewrap_probe_command(
                 &config.bubblewrap,
-                sentinel.path(),
+                sentinel.directory(),
                 seccomp.as_raw_fd(),
                 target,
             )

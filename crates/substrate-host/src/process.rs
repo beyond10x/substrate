@@ -16,15 +16,16 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use substrate_wire::{
     AppliedConfinement, AppliedExecutionCapsule, AppliedFilesystem, AppliedNetwork, Base64Content,
-    Base64Encoding, BaselineEnvironment, CapabilitySnapshot, EXECUTION_CAPSULE_MOUNT, Exec,
-    ExecExit, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState,
-    ExecutionCapsuleInput, OutputSlice, OutputStream, PipeSessionStartInput, PtyWindow,
-    ResourceUsage, SandboxProfile, SessionMode, Signal,
+    Base64Encoding, CapabilitySnapshot, EXECUTION_CAPSULE_MOUNT, Exec, ExecExit, ExecKind,
+    ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState, ExecutionCapsuleInput,
+    OutputSlice, OutputStream, PipeSessionStartInput, PtyWindow, ResourceUsage, SandboxProfile,
+    SessionMode, Signal,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Notify, mpsc};
 
+use crate::environment::baseline_value;
 pub use crate::observation::{ExecObservation, PipeFrame, PipeStream};
 use crate::output_retention::{KeptOutput, OutputRetention, Retention, RetentionBuffer};
 use crate::{DispatchOutcome, DriverError, HostConfig};
@@ -3892,15 +3893,6 @@ fn validate_environment(input: &ExecStartInput) -> Result<(), DriverError> {
         return Err(crate::environment::refused());
     }
     crate::environment::check(&input.env.set)
-}
-
-const fn baseline_value(name: BaselineEnvironment) -> &'static str {
-    match name {
-        BaselineEnvironment::Lang | BaselineEnvironment::LcAll => "C.UTF-8",
-        BaselineEnvironment::Path => "/usr/bin:/bin",
-        BaselineEnvironment::Term => "dumb",
-        BaselineEnvironment::Tz => "UTC",
-    }
 }
 
 fn signal_from_number(number: i32) -> Option<Signal> {

@@ -78,7 +78,7 @@ impl CommitEffectSink for ReentrantEffects {
     }
 }
 
-fn scope(subject: &str) -> Scope {
+pub(crate) fn scope(subject: &str) -> Scope {
     Scope {
         deployment: "dep_test".to_owned(),
         subject: subject.to_owned(),
@@ -107,7 +107,7 @@ fn operation(subject: &str, hash: &str) -> NewOperation {
     )
 }
 
-fn operation_named(
+pub(crate) fn operation_named(
     subject: &str,
     operation: &str,
     kind: &str,
@@ -129,7 +129,7 @@ fn operation_named(
     }
 }
 
-fn workspace(id: &str) -> Workspace {
+pub(crate) fn workspace(id: &str) -> Workspace {
     Workspace {
         id: id.to_owned(),
         kind: WorkspaceKind::Workspace,
@@ -151,7 +151,7 @@ fn adopted(id: &str, root_name: &str) -> Workspace {
     }
 }
 
-fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
+pub(crate) fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
     StoredExec {
         resource: Exec {
             unrecorded_output: None,

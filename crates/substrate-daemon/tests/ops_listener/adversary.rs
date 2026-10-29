@@ -366,7 +366,7 @@ async fn adversary_the_ninth_connection_is_closed_and_the_header_deadline_frees_
 #[tokio::test]
 async fn adversary_a_method_not_allowed_on_the_unix_listener_is_counted_among_the_refusals() {
     use std::os::unix::fs::MetadataExt as _;
-    let root = TempDir::new().expect("temporary root");
+    let root = unix_socket::tempdir("control.sock");
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
         .expect("private daemon root");
     let uid = std::fs::metadata(root.path()).expect("root metadata").uid();

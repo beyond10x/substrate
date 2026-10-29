@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:kubernetes-namespace-driver-entry-gate
 kind: story
-status: proposed
+status: implemented
 title: The Kubernetes namespace driver has a closed authority gate
 summary: RBAC, namespace ownership, resource identity, reconciliation and cleanup are fixed and probed before Kubernetes-backed execution code.
 owner: substrate
@@ -15,9 +15,11 @@ relations:
 - depends_on: story:node-bound-kubernetes-serving-profile
 - depends_on: story:remote-clean-room-conformance
 - depends_on: story:driver-port-carries-no-host-types
-revision: 2
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-08-31T22:54:33Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-10-29T02:08:25Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-29T12:18:59Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":2}}}
 ---
 # Story: The Kubernetes namespace driver has a closed authority gate
 

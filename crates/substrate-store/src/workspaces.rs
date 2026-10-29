@@ -1,3 +1,4 @@
+use crate::backend::insert_backend_objects;
 use crate::events::{append_event, commit_effect};
 use crate::leases::{freeze_workspace_lease_if_due, upsert_lease};
 use crate::operations::{
@@ -6,8 +7,8 @@ use crate::operations::{
     resource_partition_at_capacity,
 };
 use crate::{
-    LeaseClock, NewLease, NewOperation, OperationCapacity, Reservation, ResourceCapacity, Scope,
-    Store, StoreError, StoredAnswer, to_i64,
+    BackendObjectKind, BackendReservation, LeaseClock, NewLease, NewOperation, OperationCapacity,
+    Reservation, ResourceCapacity, Scope, Store, StoreError, StoredAnswer, to_i64,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
@@ -107,6 +108,26 @@ impl Store {
         provisional: &Workspace,
         lease: Option<&NewLease>,
     ) -> Result<Reservation, StoreError> {
+        self.reserve_workspace_create_with_backend(
+            new,
+            root_name,
+            provisional,
+            lease,
+            &BackendReservation::default(),
+        )
+    }
+
+    /// [`Self::reserve_workspace_create`] that also reserves the backend object names a driver
+    /// will create for the workspace (design 34 § 4), in the transaction that records `accepted`.
+    /// A name the deployment already holds refuses the whole reservation and commits nothing.
+    pub fn reserve_workspace_create_with_backend(
+        &self,
+        new: &NewOperation,
+        root_name: &str,
+        provisional: &Workspace,
+        lease: Option<&NewLease>,
+        backend: &BackendReservation,
+    ) -> Result<Reservation, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(reservation) = existing_reservation(&transaction, new)? {
@@ -150,6 +171,14 @@ impl Store {
                 &new.operation,
             )?;
         }
+        insert_backend_objects(
+            &transaction,
+            &new.scope.deployment,
+            BackendObjectKind::Workspace,
+            &provisional.id,
+            &new.accepted_at,
+            backend,
+        )?;
         transaction.commit()?;
         drop(connection);
         self.report_committed(&[commit_effect(&new.scope, &event)]);

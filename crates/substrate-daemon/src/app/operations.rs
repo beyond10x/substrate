@@ -504,11 +504,7 @@ pub(super) fn validate_exec_input(
             ));
         }
     }
-    if facts.exec_namespaces.is_none()
-        || facts.exec_cgroup_limits.is_none()
-        || facts.exec_cgroup_kill != Some(true)
-        || facts.exec_no_egress != Some(true)
-    {
+    if !confinement_proved(&facts) {
         return Err(failure(
             StatusCode::NOT_IMPLEMENTED,
             request_id,
@@ -520,7 +516,47 @@ pub(super) fn validate_exec_input(
             false,
         ));
     }
+    // Design 34 § 6.4: after the confinement check, so a start no driver may run still hears
+    // `exec.sandbox-unavailable` first. The host publishes `exec.inline-capsule` whenever it
+    // publishes the four Linux facts, so this answers no start the host admits.
+    if mutation.input.capsule.is_some() && facts.exec_inline_capsule.is_none() {
+        let refusal = capsule_unserved();
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            refusal.code,
+            refusal.message,
+            refusal.address,
+            false,
+        ));
+    }
     Ok(())
+}
+
+/// Exec admission (ADR 0047 N6, design 34 § 6.4): the four Linux facts, or design 30's neutral
+/// set — the four `confinement.family.*` facts, `confinement.whole-tree-kill` and
+/// `confinement.no-egress`.
+///
+/// The published bundle carries `confinement.no-egress` and neither the families nor whole-tree
+/// kill, so no snapshot can state the neutral set yet and only the Linux arm can admit. A
+/// snapshot that carries `confinement.no-egress` alone is not admission: a missing guarantee is a
+/// refusal, never an optimistic reading of a partial set (invariant 3).
+fn confinement_proved(facts: &substrate_wire::CapabilityFacts) -> bool {
+    facts.exec_namespaces.is_some()
+        && facts.exec_cgroup_limits.is_some()
+        && facts.exec_cgroup_kill == Some(true)
+        && facts.exec_no_egress == Some(true)
+}
+
+/// The published row for an inline capsule a driver does not serve, read from the wire crate's
+/// one table so the code, address and message cannot drift from the bundle's vector.
+fn capsule_unserved() -> substrate_wire::UnservedRefusal {
+    substrate_wire::DRIVER_UNSERVED_REFUSALS
+        .into_iter()
+        .find(|refusal| refusal.code == substrate_wire::EXEC_INLINE_CAPSULE_UNSERVED)
+        .expect("the wire crate publishes the inline-capsule refusal")
 }
 
 /// Daemon-side admission for the apertures a start selects, by name (ADR 0013, design 26 § 2).

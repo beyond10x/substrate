@@ -1,0 +1,939 @@
+#![forbid(unsafe_code)]
+//! Design 34 slice U3: the backend ledger, through the daemon.
+//!
+//! The host driver names no backend object, so it writes no ledger row and every answer it gives
+//! is the one it gave before the ledger existed. A driver that names objects has them reserved in
+//! the transaction that records `accepted`, before it is dispatched (ADR 0005). After a restart, an
+//! exec whose `pod` row never had a uid bound and whose driver answers `NotFound` is dispatch
+//! absence and fails; a bound uid, or no row at all, keeps today's physical-absence reading
+//! (§ 5.1).
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use axum::Extension;
+use axum::body::{Body, to_bytes};
+use axum::http::{Method, Request, StatusCode};
+use chrono::{DateTime, TimeZone as _, Utc};
+use serde_json::{Value, json};
+use substrate_daemon::{App, Authority, Identity, SystemAuthority, operation_digest, router};
+use substrate_host::{
+    BackendKind, BackendLedger as _, BackendName, BackendRole, DispatchOutcome, Driver,
+    DriverError, ExecObservation, HostConfig, HostDriver, UidBinding, WorkspaceDestroyProgress,
+};
+use substrate_store::{BackendObjectKind, BackendObjectRole, Scope, Store};
+use substrate_wire::{
+    CapabilitySnapshot, Exec, ExecExit, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput,
+    ExecState, FileAbsence, FileObservation, FileReadQuery, FileReadResult, LeaseObservation,
+    OperationOutcome, OperationState, OutputSlice, Workspace, WorkspaceAbsence,
+    WorkspaceCreateInput,
+};
+use tempfile::TempDir;
+use tower::ServiceExt as _;
+
+const SUBJECT: &str = "local:1000";
+const DEPLOYMENT: &str = "dep_backend_ledger";
+
+fn scope() -> Scope {
+    Scope {
+        deployment: DEPLOYMENT.to_owned(),
+        subject: SUBJECT.to_owned(),
+    }
+}
+
+fn pod_name(id: &str) -> String {
+    format!("sbx-ex-{}", id.to_ascii_lowercase())
+}
+
+/// The host driver with the four Linux exec facts published, so an exec start reaches dispatch on
+/// a host without delegation. With `names` false it names exactly what the host driver names;
+/// with it true it names a PVC and keeper per workspace and a Pod per exec, as the namespace
+/// driver will. Every start answers `OutcomeUnknown` and every exec reads `NotFound`: the crash
+/// window of § 5.1.
+struct Fixture {
+    host: Arc<HostDriver>,
+    store: Arc<Store>,
+    names: bool,
+    /// For each start, how many backend rows the exec already had when the driver was called.
+    rows_at_dispatch: Mutex<Vec<usize>>,
+    /// The dispatch bound the fixture states, changed between maintenance rounds.
+    bound: Mutex<Option<Duration>>,
+    /// When set, every start is refused before anything is created (`NotDispatched`).
+    refuse: AtomicBool,
+    /// When set, every start answers the exec running (`Observed`).
+    run: AtomicBool,
+    /// When set, a restart's question about an exec answers it exited 4 with stdout.
+    end_on_recovery: AtomicBool,
+    /// Every exec a restart asked about, as the daemon recorded it.
+    recovered: Mutex<Vec<ExecObservation>>,
+}
+
+impl Fixture {
+    fn state_bound(&self, bound: Option<Duration>) {
+        *self.bound.lock().expect("fixture lock") = bound;
+    }
+}
+
+/// The system authority with its clock stopped at one instant, so every timestamp the daemon
+/// takes from it is recognisable.
+struct StoppedClock(DateTime<Utc>);
+
+impl Authority for StoppedClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.0
+    }
+
+    fn request_id(&self) -> String {
+        SystemAuthority.request_id()
+    }
+
+    fn workspace_id(&self) -> String {
+        SystemAuthority.workspace_id()
+    }
+
+    fn exec_id(&self) -> String {
+        SystemAuthority.exec_id()
+    }
+
+    fn session_id(&self) -> String {
+        SystemAuthority.session_id()
+    }
+
+    fn snapshot_id(&self) -> String {
+        SystemAuthority.snapshot_id()
+    }
+
+    fn lease_clock(&self) -> Result<substrate_store::LeaseClock, String> {
+        SystemAuthority.lease_clock()
+    }
+}
+
+#[async_trait::async_trait]
+impl Driver for Fixture {
+    fn machine(&self) -> CapabilitySnapshot {
+        let mut capability = self.host.machine();
+        capability.facts.exec_namespaces = Some(substrate_wire::NamespaceFacts {
+            user: true,
+            mount: true,
+            pid: true,
+            ipc: true,
+            uts: true,
+            network: true,
+        });
+        capability.facts.exec_cgroup_limits = Some(substrate_wire::CgroupLimitFacts {
+            processes: true,
+            memory: true,
+            cpu: true,
+        });
+        capability.facts.exec_cgroup_kill = Some(true);
+        capability.facts.exec_no_egress = Some(true);
+        capability
+    }
+
+    async fn shutdown(&self) -> Result<(), DriverError> {
+        self.host.shutdown().await
+    }
+
+    fn workspace_root_identity(&self, id: &str) -> Result<String, DriverError> {
+        self.host.workspace_root_identity(id)
+    }
+
+    fn dispatch_bound(&self) -> Option<Duration> {
+        *self.bound.lock().expect("fixture lock")
+    }
+
+    fn backend_names(&self, kind: BackendKind, id: &str) -> Vec<BackendName> {
+        if !self.names {
+            return self.host.backend_names(kind, id);
+        }
+        let id = id.to_ascii_lowercase();
+        match kind {
+            BackendKind::Workspace => vec![
+                BackendName {
+                    role: BackendRole::Pvc,
+                    name: format!("sbx-ws-{id}"),
+                },
+                BackendName {
+                    role: BackendRole::Keeper,
+                    name: format!("sbx-ws-{id}-keeper"),
+                },
+            ],
+            BackendKind::Exec => vec![BackendName {
+                role: BackendRole::Pod,
+                name: format!("sbx-ex-{id}"),
+            }],
+            BackendKind::Probe => Vec::new(),
+        }
+    }
+
+    async fn create_workspace(
+        &self,
+        id: &str,
+        root_name: &str,
+        input: &WorkspaceCreateInput,
+    ) -> DispatchOutcome<Workspace> {
+        self.host.create_workspace(id, root_name, input).await
+    }
+
+    async fn observe_workspace(
+        &self,
+        id: &str,
+        root_name: &str,
+        previous: &Workspace,
+    ) -> Result<Workspace, DriverError> {
+        self.host.observe_workspace(id, root_name, previous).await
+    }
+
+    async fn read_workspace_path(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        query: &FileReadQuery,
+    ) -> Result<substrate_host::Listed<FileReadResult>, DriverError> {
+        self.host
+            .read_workspace_path(workspace_id, root_name, path, query)
+            .await
+    }
+
+    async fn write_workspace_file(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        content: &[u8],
+    ) -> Result<FileObservation, DriverError> {
+        self.host
+            .write_workspace_file(workspace_id, root_name, path, content)
+            .await
+    }
+
+    async fn delete_workspace_file(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+    ) -> Result<FileAbsence, DriverError> {
+        self.host
+            .delete_workspace_file(workspace_id, root_name, path)
+            .await
+    }
+
+    async fn destroy_workspace(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+    ) -> Result<WorkspaceDestroyProgress, DriverError> {
+        self.host.destroy_workspace(workspace_id, root_name).await
+    }
+
+    async fn forget_workspace(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+    ) -> Result<WorkspaceAbsence, DriverError> {
+        self.host.forget_workspace(workspace_id, root_name).await
+    }
+
+    async fn start_exec(
+        &self,
+        id: &str,
+        _workspace_root_name: &str,
+        input: &ExecStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        let rows = self
+            .store
+            .backend_objects(DEPLOYMENT, BackendObjectKind::Exec, id)
+            .expect("ledger read at dispatch");
+        self.rows_at_dispatch
+            .lock()
+            .expect("fixture lock")
+            .push(rows.len());
+        if self.refuse.load(Ordering::SeqCst) {
+            return DispatchOutcome::NotDispatched(DriverError::refused(
+                "exec.sandbox-unavailable",
+                "The fixture refuses the start before creating anything.",
+                "exec",
+            ));
+        }
+        if self.run.load(Ordering::SeqCst) {
+            return DispatchOutcome::Observed(ExecObservation {
+                resource: Exec {
+                    unrecorded_output: None,
+                    id: id.to_owned(),
+                    kind: ExecKind::Exec,
+                    workspace: input.workspace.clone(),
+                    state: ExecState::Running,
+                    observed_at: Utc::now(),
+                    requested: input.sandbox.clone(),
+                    applied: None,
+                    exit: None,
+                    usage: None,
+                    lease: None,
+                    refusal: None,
+                },
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                stdout_kept: None,
+                stderr_kept: None,
+                output_complete: false,
+                cgroup: Some(pod_name(id)),
+                leader_pid: None,
+            });
+        }
+        DispatchOutcome::OutcomeUnknown(DriverError::failed(
+            "exec.containment-unproven",
+            "The fixture cannot prove whether the exec runs.",
+        ))
+    }
+
+    async fn observe_exec(&self, _id: &str) -> Result<ExecObservation, DriverError> {
+        Err(DriverError::not_found())
+    }
+
+    async fn recover_exec(
+        &self,
+        previous: &ExecObservation,
+    ) -> Result<ExecObservation, DriverError> {
+        self.recovered
+            .lock()
+            .expect("fixture lock")
+            .push(previous.clone());
+        if !self.end_on_recovery.load(Ordering::SeqCst) {
+            return self.observe_exec(&previous.resource.id).await;
+        }
+        let mut ended = previous.clone();
+        ended.resource.state = ExecState::Exited;
+        ended.resource.exit = Some(ExecExit {
+            code: Some(4),
+            signal: None,
+        });
+        ended.resource.observed_at = Utc::now();
+        ended.stdout = b"before the restart".to_vec();
+        ended.output_complete = true;
+        Ok(ended)
+    }
+
+    async fn output(&self, id: &str, query: &ExecOutputQuery) -> Result<OutputSlice, DriverError> {
+        self.host.output(id, query).await
+    }
+
+    async fn signal(
+        &self,
+        _id: &str,
+        _input: &ExecSignalInput,
+    ) -> Result<ExecObservation, DriverError> {
+        Err(DriverError::not_found())
+    }
+
+    fn completed_execs(&self) -> Vec<ExecObservation> {
+        Vec::new()
+    }
+
+    fn set_exec_lease(&self, _id: &str, _lease: Option<LeaseObservation>) {}
+
+    fn acknowledge_exec(&self, _persisted: &ExecObservation) {}
+
+    fn discard_superseded_exec(&self, _id: &str) {}
+}
+
+struct Harness {
+    directory: TempDir,
+    store: Arc<Store>,
+    app: Arc<App>,
+}
+
+impl Harness {
+    fn host() -> Self {
+        let directory = tempfile::tempdir().expect("temporary harness");
+        let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
+        let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+            .expect("host driver");
+        let app = App::new(Arc::clone(&store), driver, DEPLOYMENT);
+        Self {
+            directory,
+            store,
+            app,
+        }
+    }
+
+    fn fixture(names: bool) -> (Self, Arc<Fixture>) {
+        let directory = tempfile::tempdir().expect("temporary harness");
+        let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
+        let driver = Arc::new(Fixture {
+            host: HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+                .expect("host driver"),
+            store: Arc::clone(&store),
+            names,
+            rows_at_dispatch: Mutex::new(Vec::new()),
+            bound: Mutex::new(None),
+            refuse: AtomicBool::new(false),
+            run: AtomicBool::new(false),
+            end_on_recovery: AtomicBool::new(false),
+            recovered: Mutex::new(Vec::new()),
+        });
+        let app = App::new(Arc::clone(&store), driver.clone(), DEPLOYMENT);
+        (
+            Self {
+                directory,
+                store,
+                app,
+            },
+            driver,
+        )
+    }
+
+    /// The same state directory and store under a new daemon run over `driver`.
+    fn restart(&self, driver: Arc<dyn Driver>) -> Arc<App> {
+        assert!(self.directory.path().join("state.db").is_file());
+        App::new(Arc::clone(&self.store), driver, DEPLOYMENT)
+    }
+
+    async fn call(&self, method: Method, uri: &str, body: Body) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-request-id", "req_backend_ledger")
+            .body(body)
+            .expect("request");
+        let identity = Identity {
+            subject: SUBJECT.to_owned(),
+            actor: "backend-ledger-test".to_owned(),
+            principal: None,
+        };
+        let response = router(Arc::clone(&self.app))
+            .layer(Extension(identity))
+            .oneshot(request)
+            .await
+            .expect("router response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 2_097_152)
+            .await
+            .expect("response body");
+        (
+            status,
+            serde_json::from_slice(&bytes).expect("JSON response"),
+        )
+    }
+
+    async fn create_workspace(&self, operation: &str) -> (StatusCode, Value) {
+        self.call(
+            Method::POST,
+            "/v1/workspaces",
+            mutation(
+                operation,
+                json!({ "source": "empty", "labels": { "case": "backend-ledger" } }),
+            ),
+        )
+        .await
+    }
+
+    async fn start_exec(&self, operation: &str, workspace: &str) -> (StatusCode, Value) {
+        let snapshot = self.app.driver.machine().snapshot;
+        self.call(
+            Method::POST,
+            "/v1/execs",
+            mutation(
+                operation,
+                json!({
+                    "workspace": workspace,
+                    "argv": ["/bin/true"],
+                    "env": { "allow": [], "set": {} },
+                    "sandbox": {
+                        "capability_snapshot": snapshot,
+                        "network": "none",
+                        "profile": "workspace",
+                        "require": true
+                    },
+                    "limits": {
+                        "timeout_ms": 5000,
+                        "output_bytes": 65536,
+                        "processes": 16,
+                        "memory_bytes": 67_108_864,
+                        "cpu_millis": 1000
+                    },
+                    "wait": false
+                }),
+            ),
+        )
+        .await
+    }
+
+    fn ledger_rows(&self) -> i64 {
+        let connection = rusqlite::Connection::open(self.directory.path().join("state.db"))
+            .expect("second connection");
+        connection
+            .query_row("SELECT COUNT(*) FROM backend_objects", [], |row| row.get(0))
+            .expect("ledger row count")
+    }
+
+    fn physically_absent(&self, exec: &str) -> Option<bool> {
+        let connection = rusqlite::Connection::open(self.directory.path().join("state.db"))
+            .expect("second connection");
+        connection
+            .query_row(
+                "SELECT physically_absent FROM execs WHERE deployment = ?1 AND id = ?2",
+                rusqlite::params![DEPLOYMENT, exec],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+            .map(|value| value == 1)
+    }
+
+    fn operation(&self, operation: &str) -> substrate_wire::OperationRecord {
+        self.store
+            .operation(&scope(), operation)
+            .expect("operation read")
+            .expect("operation recorded")
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn mutation(operation: &str, input: Value) -> Body {
+    Body::from(serde_json::to_vec(&json!({ "op": operation, "input": input })).expect("JSON"))
+}
+
+fn workspace_id(created: &Value) -> String {
+    created["result"]["id"]
+        .as_str()
+        .expect("workspace id")
+        .to_owned()
+}
+
+fn exec_id(harness: &Harness, operation: &str) -> String {
+    harness
+        .operation(operation)
+        .resource
+        .expect("exec resource")
+}
+
+/// The host driver itself: a workspace is created, replayed and read exactly as before, an exec
+/// start answers what this host answers, and the ledger holds no row.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_host_driver_writes_no_backend_row_and_answers_as_before() {
+    let harness = Harness::host();
+    let (status, created) = harness.create_workspace("01JBACKENDHOSTCREATE0001").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = workspace_id(&created);
+    assert!(id.starts_with("ws_"), "{created}");
+    assert_eq!(created["result"]["state"], "ready", "{created}");
+    assert_eq!(created["result"]["origin"], "created", "{created}");
+    let (status, replayed) = harness.create_workspace("01JBACKENDHOSTCREATE0001").await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(replayed["result"], created["result"]);
+    let (status, read) = harness
+        .call(Method::GET, &format!("/v1/workspaces/{id}"), Body::empty())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["result"]["id"], created["result"]["id"]);
+
+    let (status, started) = harness.start_exec("01JBACKENDHOSTEXEC000001", &id).await;
+    let facts = &harness.app.driver.machine().facts;
+    if facts.exec_namespaces.is_none() {
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{started}");
+        assert_eq!(started["error"]["code"], "exec.sandbox-unavailable");
+    } else {
+        assert!(status.is_success(), "{status} {started}");
+    }
+    assert_eq!(harness.ledger_rows(), 0);
+}
+
+/// The default name set read through a dispatched start: nothing is reserved, and after a
+/// restart the exec's `NotFound` is physical absence, exactly as before: the operation stays
+/// `unknown` and the exec row stays, marked absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_backend_names_restart_absence_stays_unknown_as_before() {
+    let (harness, driver) = Harness::fixture(false);
+    let (status, created) = harness.create_workspace("01JBACKENDNONECREATE0001").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    let (status, started) = harness
+        .start_exec("01JBACKENDNONEEXEC000001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    assert_eq!(started["error"]["code"], "operation.outcome-unknown");
+    assert_eq!(*driver.rows_at_dispatch.lock().expect("fixture lock"), [0]);
+    let exec = exec_id(&harness, "01JBACKENDNONEEXEC000001");
+    assert_eq!(harness.ledger_rows(), 0);
+
+    let restarted = harness.restart(driver);
+    restarted.sweep_expired().await;
+    let record = harness.operation("01JBACKENDNONEEXEC000001");
+    assert_eq!(record.state, OperationState::Unknown);
+    assert_eq!(harness.physically_absent(&exec), Some(true));
+}
+
+/// A named Pod is durable before dispatch. Its `NotFound`, with no uid ever bound, is not dispatch
+/// absence while the driver's dispatch bound has not passed since the row was reserved: the exec
+/// stays `unknown`, unmarked, and is asked about again. Once the bound has passed, the same answer
+/// is dispatch absence: the start fails and the exec row is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unbound_pod_row_is_dispatch_absence_only_past_the_dispatch_bound() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDNAMECREATE0001").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    let workspace_rows = harness
+        .store
+        .backend_objects(DEPLOYMENT, BackendObjectKind::Workspace, &workspace)
+        .expect("workspace rows");
+    assert_eq!(
+        workspace_rows
+            .iter()
+            .map(|row| (row.role, row.operation_digest.clone(), row.uid.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                BackendObjectRole::Keeper,
+                operation_digest(SUBJECT, "01JBACKENDNAMECREATE0001"),
+                None
+            ),
+            (
+                BackendObjectRole::Pvc,
+                operation_digest(SUBJECT, "01JBACKENDNAMECREATE0001"),
+                None
+            ),
+        ]
+    );
+
+    let (status, started) = harness
+        .start_exec("01JBACKENDNAMEEXEC000001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    assert_eq!(*driver.rows_at_dispatch.lock().expect("fixture lock"), [1]);
+    let exec = exec_id(&harness, "01JBACKENDNAMEEXEC000001");
+    assert_eq!(harness.ledger_rows(), 3);
+
+    // Before the bound, in process and after a restart alike.
+    driver.state_bound(Some(Duration::from_hours(1)));
+    harness.app.sweep_expired().await;
+    let restarted = harness.restart(driver.clone());
+    restarted.sweep_expired().await;
+    let record = harness.operation("01JBACKENDNAMEEXEC000001");
+    assert_eq!(record.state, OperationState::Unknown);
+    assert_eq!(harness.physically_absent(&exec), Some(false));
+    let pod = harness
+        .store
+        .backend_objects(DEPLOYMENT, BackendObjectKind::Exec, &exec)
+        .expect("pod row");
+    assert_eq!(pod.len(), 1);
+    assert_eq!((pod[0].uid.as_deref(), pod[0].settled_at), (None, None));
+
+    // Past the bound.
+    driver.state_bound(Some(Duration::ZERO));
+    restarted.sweep_expired().await;
+    let record = harness.operation("01JBACKENDNAMEEXEC000001");
+    assert_eq!(record.state, OperationState::Terminal);
+    assert!(
+        matches!(&record.outcome, Some(OperationOutcome::Error { error }) if !error.retriable),
+        "{:?}",
+        record.outcome
+    );
+    assert!(
+        harness
+            .store
+            .exec(&scope(), &exec)
+            .expect("exec read")
+            .is_none()
+    );
+}
+
+/// A driver that states no dispatch bound never has absence read as dispatch absence, however old
+/// its unbound row: the exec keeps today's physical-absence reading.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_dispatch_bound_an_unbound_pod_row_is_never_dispatch_absence() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDNOBOUNDCREATE1").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    let (status, started) = harness
+        .start_exec("01JBACKENDNOBOUNDEXEC001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    let exec = exec_id(&harness, "01JBACKENDNOBOUNDEXEC001");
+    assert_eq!(driver.dispatch_bound(), None);
+
+    let restarted = harness.restart(driver);
+    restarted.sweep_expired().await;
+    let record = harness.operation("01JBACKENDNOBOUNDEXEC001");
+    assert_eq!(record.state, OperationState::Unknown);
+    assert_eq!(harness.physically_absent(&exec), Some(true));
+}
+
+/// A Pod row whose uid was bound is the object that was stored: its `NotFound` after a restart is
+/// physical absence, as today, and a second uid for the same name is refused as a collision.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bound_pod_row_reads_restart_absence_as_physical_absence() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDBINDCREATE0001").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    let (status, started) = harness
+        .start_exec("01JBACKENDBINDEXEC000001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    let exec = exec_id(&harness, "01JBACKENDBINDEXEC000001");
+
+    let ledger = harness.app.backend_ledger();
+    let recorded = ledger
+        .recorded(BackendKind::Exec, &exec)
+        .expect("recorded rows");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].role, BackendRole::Pod);
+    assert_eq!(recorded[0].name, pod_name(&exec));
+    assert_eq!(
+        ledger.bind_uid(&pod_name(&exec), "uid-1").expect("bind"),
+        UidBinding::Bound
+    );
+    assert_eq!(
+        ledger
+            .bind_uid(&pod_name(&exec), "uid-2")
+            .expect("second uid"),
+        UidBinding::Collision {
+            bound: "uid-1".to_owned()
+        }
+    );
+
+    // Even past the dispatch bound, a bound uid is physical absence.
+    driver.state_bound(Some(Duration::ZERO));
+    let restarted = harness.restart(driver);
+    restarted.sweep_expired().await;
+    let record = harness.operation("01JBACKENDBINDEXEC000001");
+    assert_eq!(record.state, OperationState::Unknown);
+    assert_eq!(harness.physically_absent(&exec), Some(true));
+}
+
+/// Design 34 § 5.1 and ADR 0047 decision 8: an exec whose `pod` row holds no uid is dispatch
+/// absence once its object is absent. A driver that read the Pod absent and closed its row with
+/// `settle` before it answered `NotFound` must get the same answer as one that did not settle.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settled_unbound_pod_row_still_reads_restart_absence_as_dispatch_absence() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDSETTLECREATE0001").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    let (status, started) = harness
+        .start_exec("01JBACKENDSETTLEEXEC000001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    let exec = exec_id(&harness, "01JBACKENDSETTLEEXEC000001");
+
+    let ledger = harness.app.backend_ledger();
+    assert!(
+        ledger
+            .settle(&pod_name(&exec))
+            .expect("settle the absent Pod row")
+    );
+    assert_eq!(
+        ledger.bind_uid(&pod_name(&exec), "uid-late").expect("bind"),
+        UidBinding::Settled
+    );
+
+    // Past the dispatch bound, which every dispatch-absence reading needs (§ 5.1).
+    driver.state_bound(Some(Duration::ZERO));
+    let restarted = harness.restart(driver);
+    restarted.sweep_expired().await;
+    let record = harness.operation("01JBACKENDSETTLEEXEC000001");
+    assert_eq!(record.state, OperationState::Terminal, "{record:?}");
+    assert!(
+        matches!(&record.outcome, Some(OperationOutcome::Error { error }) if !error.retriable),
+        "{:?}",
+        record.outcome
+    );
+    assert!(
+        harness
+            .store
+            .exec(&scope(), &exec)
+            .expect("exec read")
+            .is_none()
+    );
+}
+
+fn pod_row(harness: &Harness, exec: &str) -> substrate_store::BackendObject {
+    let rows = harness
+        .store
+        .backend_objects(DEPLOYMENT, BackendObjectKind::Exec, exec)
+        .expect("pod row");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    rows.into_iter().next().expect("one pod row")
+}
+
+/// The running daemon's own maintenance round, with no restart (§ 5.1): a start that answered
+/// `OutcomeUnknown` is reconciled live. Inside the bound the unbound row stays open and the exec
+/// `unknown`, unmarked; past it the start fails, the exec row is gone, and the Pod row is settled
+/// in the same commit, at the operation's terminal instant.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_sweep_reads_an_unbound_pod_row_as_dispatch_absence_and_settles_it() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDLIVECREATE00001").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    let (status, started) = harness
+        .start_exec("01JBACKENDLIVEEXEC0000001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    let exec = exec_id(&harness, "01JBACKENDLIVEEXEC0000001");
+
+    driver.state_bound(Some(Duration::from_hours(1)));
+    harness.app.sweep_expired().await;
+    let record = harness.operation("01JBACKENDLIVEEXEC0000001");
+    assert_eq!(record.state, OperationState::Unknown);
+    assert_eq!(harness.physically_absent(&exec), Some(false));
+    let open = pod_row(&harness, &exec);
+    assert_eq!((open.uid.as_deref(), open.settled_at), (None, None));
+
+    driver.state_bound(Some(Duration::ZERO));
+    harness.app.sweep_expired().await;
+    let record = harness.operation("01JBACKENDLIVEEXEC0000001");
+    assert_eq!(record.state, OperationState::Terminal, "{record:?}");
+    assert!(
+        matches!(&record.outcome, Some(OperationOutcome::Error { error }) if !error.retriable),
+        "{:?}",
+        record.outcome
+    );
+    assert!(
+        harness
+            .store
+            .exec(&scope(), &exec)
+            .expect("exec read")
+            .is_none()
+    );
+    let settled = pod_row(&harness, &exec);
+    assert_eq!(settled.uid, None);
+    assert!(settled.settled_at.is_some(), "{settled:?}");
+    assert_eq!(settled.settled_at, record.terminal_at);
+}
+
+/// A start the driver refuses before creating anything is dispatch absence at once: the exec row
+/// is gone and its reserved Pod row is settled in the transaction that records the refusal, so no
+/// sweep of unsettled rows ever looks for an object that was never created.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_start_settles_its_pod_row_with_the_refusal() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDREFUSECREATE001").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    driver.refuse.store(true, Ordering::SeqCst);
+    let (status, started) = harness
+        .start_exec("01JBACKENDREFUSEEXEC00001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    assert_eq!(started["error"]["code"], "exec.sandbox-unavailable");
+    assert_eq!(*driver.rows_at_dispatch.lock().expect("fixture lock"), [1]);
+    let record = harness.operation("01JBACKENDREFUSEEXEC00001");
+    assert_eq!(record.state, OperationState::Terminal, "{record:?}");
+    let exec = record.resource.clone().expect("exec resource");
+    assert!(
+        harness
+            .store
+            .exec(&scope(), &exec)
+            .expect("exec read")
+            .is_none()
+    );
+    let settled = pod_row(&harness, &exec);
+    assert_eq!(settled.uid, None);
+    assert!(settled.settled_at.is_some(), "{settled:?}");
+    assert_eq!(settled.settled_at, record.terminal_at);
+    let unsettled = harness
+        .store
+        .unsettled_backend_objects(DEPLOYMENT, None, 16)
+        .expect("unsettled rows");
+    assert!(
+        unsettled
+            .iter()
+            .all(|row| row.kind != BackendObjectKind::Exec),
+        "{unsettled:?}"
+    );
+}
+
+/// Every ledger timestamp the daemon writes is read from its own authority, the clock its dispatch
+/// bound is measured against, never from the system clock beside it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ledger_port_stamps_rows_with_the_daemon_authority_clock() {
+    let directory = tempfile::tempdir().expect("temporary harness");
+    let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
+    let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+        .expect("host driver");
+    let at = Utc
+        .with_ymd_and_hms(2001, 2, 3, 4, 5, 6)
+        .single()
+        .expect("instant");
+    let app = App::with_authority(
+        Arc::clone(&store),
+        driver,
+        DEPLOYMENT,
+        Arc::new(StoppedClock(at)),
+    );
+    let ledger = app.backend_ledger();
+    let name = "sbx-pr-aaaaaaaaaaaaaaaa-pod";
+    ledger
+        .reserve_probe(
+            "aaaaaaaaaaaaaaaa",
+            &[BackendName {
+                role: BackendRole::Pod,
+                name: name.to_owned(),
+            }],
+        )
+        .expect("reserve probe");
+    assert!(ledger.settle(name).expect("settle probe row"));
+    let rows = store
+        .backend_objects(DEPLOYMENT, BackendObjectKind::Probe, "aaaaaaaaaaaaaaaa")
+        .expect("probe rows");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].created_at, rows[0].settled_at), (at, Some(at)));
+}
+
+/// Design 34 § 5, the exec start row's restart column, through a real daemon restart: an exec
+/// that was running when the daemon stopped is asked about with the exec as the restart pass
+/// recorded it (`unknown`, its own id, workspace and request), because a driver that kept nothing
+/// in memory answers from that and its backend ledger. An end the driver then shows is kept: the
+/// exit and the output replace `unknown`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_asks_the_driver_with_the_recorded_exec_and_keeps_the_end_it_shows() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDRECOVERCREATE01").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    driver.run.store(true, Ordering::SeqCst);
+    let (status, started) = harness
+        .start_exec("01JBACKENDRECOVEREXEC0001", &workspace)
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let exec = exec_id(&harness, "01JBACKENDRECOVEREXEC0001");
+
+    driver.end_on_recovery.store(true, Ordering::SeqCst);
+    let restarted = harness.restart(driver.clone());
+    restarted.sweep_expired().await;
+
+    let asked = driver.recovered.lock().expect("fixture lock").clone();
+    let first = asked.first().expect("the restart asked the driver");
+    assert_eq!(first.resource.id, exec);
+    assert_eq!(first.resource.state, ExecState::Unknown);
+    assert_eq!(first.resource.workspace, workspace);
+    assert_eq!(
+        first.resource.requested.capability_snapshot,
+        started["result"]["requested"]["capability_snapshot"]
+            .as_str()
+            .expect("the requested snapshot")
+    );
+    let stored = harness
+        .store
+        .exec(&scope(), &exec)
+        .expect("exec read")
+        .expect("exec recorded");
+    assert_eq!(stored.resource.state, ExecState::Exited);
+    assert_eq!(
+        stored.resource.exit,
+        Some(ExecExit {
+            code: Some(4),
+            signal: None
+        })
+    );
+    assert_eq!(stored.stdout, b"before the restart");
+    assert!(stored.output_complete);
+    assert_eq!(harness.physically_absent(&exec), Some(false));
+}

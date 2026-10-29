@@ -57,6 +57,7 @@ RUN apt-get update && \
 COPY --from=sandbox-builder /out/bwrap /usr/bin/bwrap
 COPY --from=sandbox-builder /out/bubblewrap-COPYING /usr/share/licenses/bubblewrap/COPYING
 COPY deploy/apparmor/substrate-host-execution /usr/share/substrate/apparmor/substrate-host-execution
+COPY deploy/apparmor/substrate-host-execution-v2 /usr/share/substrate/apparmor/substrate-host-execution-v2
 
 FROM execution-prerequisites AS daemon
 ARG SOURCE_SHA=unknown
@@ -92,6 +93,33 @@ ENTRYPOINT ["/usr/local/bin/container-pty-check"]
 FROM scratch AS release-binaries
 COPY --from=builder /out/substrate-daemon /substrate-daemon
 COPY --from=builder /out/b10x-substrate /b10x-substrate
+
+FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS executor-builder
+WORKDIR /src
+ARG CARGO_BUILD_JOBS=2
+ARG CARGO_INCREMENTAL=0
+ARG SOURCE_SHA=unknown
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends musl-tools && \
+    rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=b10x-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=b10x-substrate-executor-target,target=/src/target,sharing=locked \
+    find Cargo.toml Cargo.lock crates -path '*/target' -prune -o -type f -exec touch {} + && \
+    rustup target add x86_64-unknown-linux-musl && \
+    SUBSTRATE_EXECUTOR_SOURCE="$SOURCE_SHA" cargo build --locked --release \
+      --target x86_64-unknown-linux-musl -p b10x-substrate-executor --bin substrate-executor && \
+    install -D /src/target/x86_64-unknown-linux-musl/release/substrate-executor /out/substrate-executor
+RUN readelf -lW /out/substrate-executor > /phdrs && grep -q '^Program Headers:' /phdrs && ! grep -q INTERP /phdrs
+
+FROM scratch AS executor
+ARG SOURCE_SHA=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_SHA \
+      org.opencontainers.image.source="https://github.com/beyond10x/substrate"
+COPY --from=executor-builder /out/substrate-executor /substrate-executor
+COPY LICENSE THIRD_PARTY_LICENSES.html /usr/share/licenses/substrate/
+ENTRYPOINT ["/substrate-executor"]
 
 # Preserve `docker build .` as the daemon image while release automation selects both named
 # runtime targets explicitly. The alias adds no bytes to the daemon image.

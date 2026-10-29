@@ -14,11 +14,22 @@ products / agent / Flux / autodev
                  ▼
         substrate service contract
                  │
-       ┌─────────┼──────────┐
-       ▼         ▼          ▼
-     host      Docker    Kubernetes later
-     driver     driver       driver
+       ┌─────────┼──────────────┐
+       ▼         ▼              ▼
+     host      Kubernetes      Docker
+     driver    namespace       driver
+               driver          (later)
 ```
+
+| driver | state | serves |
+|---|---|---|
+| host (`substrate-host`) | released | workspaces, confined exec, sessions, host processes |
+| Kubernetes namespace (`substrate-kubernetes`, [ADR 0047](../adr/0047-a-kubernetes-namespace-driver-serves-workspaces-on-pvcs-and-execs-as-pods.md)) | development source, unreleased | empty workspaces on a PVC with a keeper Pod; every exec start is refused `exec.sandbox-unavailable` until its probe proves confinement |
+| Docker | proposed | none |
+
+A daemon runs exactly one driver, chosen by `--driver` and never by a request. The namespace
+driver reaches its Pods only through the Kubernetes API server, and its keeper and exec Pods run
+the static `substrate-executor`, which links neither the host driver nor the store.
 
 ## Control flow
 

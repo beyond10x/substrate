@@ -163,6 +163,9 @@ async fn read_head(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Vec
     Ok(bytes)
 }
 
+#[path = "../../../test-support/readiness.rs"]
+mod readiness;
+
 fn daemon_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("SUBSTRATE_TEST_DAEMON") {
         return path.into();
@@ -234,7 +237,7 @@ impl Fixture {
             command.arg("--cgroup-root").arg(cgroup);
         }
         let mut child = command.spawn().expect("spawn remote daemon");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + readiness::DAEMON_READINESS;
         loop {
             if let Some(status) = child.try_wait().expect("inspect remote daemon") {
                 let mut stderr = String::new();
@@ -248,10 +251,13 @@ impl Fixture {
             if TcpStream::connect(address).await.is_ok() {
                 break;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "remote daemon readiness timeout"
-            );
+            if tokio::time::Instant::now() >= deadline {
+                let stderr = readiness::stderr_of_unready(&mut child).await;
+                panic!(
+                    "remote daemon readiness timeout after {:?}: {stderr}",
+                    readiness::DAEMON_READINESS
+                );
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         Self {

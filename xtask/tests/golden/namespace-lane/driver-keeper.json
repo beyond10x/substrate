@@ -1,0 +1,85 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "annotations": {
+      "b10x-substrate/operation": "sha256:f39dac6cbaba535e2c207cd0cd8f154974223c848f727f98b3564cea569b41cf"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "b10x-substrate",
+      "b10x-substrate/deployment": "3ezejz5qqey66ehnufvaof3cor",
+      "b10x-substrate/probe": "abcdefghijklmnop",
+      "b10x-substrate/role": "keeper"
+    },
+    "name": "sbx-pr-abcdefghijklmnop-keeper",
+    "namespace": "substrate-namespace-lane",
+    "ownerReferences": [
+      {
+        "apiVersion": "v1",
+        "controller": false,
+        "kind": "PersistentVolumeClaim",
+        "name": "sbx-pr-abcdefghijklmnop-pvc",
+        "uid": "00000000-0000-4000-8000-000000000001"
+      }
+    ]
+  },
+  "spec": {
+    "activeDeadlineSeconds": 600,
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "command": [
+          "sh",
+          "-c",
+          "echo keeper > /workspace/keeper && exec sleep 3600"
+        ],
+        "image": "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "keeper",
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "32Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "32Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/workspace",
+            "name": "workspace"
+          }
+        ]
+      }
+    ],
+    "restartPolicy": "Never",
+    "securityContext": {
+      "runAsGroup": 65532,
+      "runAsNonRoot": true,
+      "runAsUser": 65532,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "terminationGracePeriodSeconds": 1,
+    "volumes": [
+      {
+        "name": "workspace",
+        "persistentVolumeClaim": {
+          "claimName": "sbx-pr-abcdefghijklmnop-pvc"
+        }
+      }
+    ]
+  }
+}

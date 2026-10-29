@@ -1,3 +1,4 @@
+use crate::backend::{BackendObjectKind, settle_unbound_backend_objects};
 use crate::events::{append_event, commit_effect};
 use crate::execs::mark_exec_unknown;
 use crate::execs::upsert_exec;
@@ -282,6 +283,18 @@ impl Store {
              AND resource_kind = ?3 AND resource_id = ?4",
             params![scope.deployment, scope.subject, resource_kind, resource_id],
         )?;
+        // An exec's dispatch absence is a refusal before anything was created or, in recovery,
+        // an unbound `pod` row past the dispatch bound: its never-stored rows close with it.
+        // A workspace's is not yet decided by the ledger (design 34 U8), so its rows stay open.
+        if resource_kind == "exec" {
+            settle_unbound_backend_objects(
+                &transaction,
+                &scope.deployment,
+                BackendObjectKind::Exec,
+                resource_id,
+                terminal_at,
+            )?;
+        }
         transaction.commit()?;
         drop(connection);
         self.report_committed(&[commit_effect(scope, &event)]);

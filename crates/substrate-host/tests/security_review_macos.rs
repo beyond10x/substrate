@@ -19,6 +19,9 @@ use substrate_host::confinement::{
 };
 use substrate_host::seatbelt;
 
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
 const BASH: &str = "/bin/bash";
 const LIMIT: Duration = Duration::from_secs(45);
 
@@ -336,6 +339,7 @@ async fn a_unix_socket_connect_from_a_run_is_refused() {
     let adapter = macos();
     let (_root, workspace) = canonical_tempdir();
     let socket = workspace.join("s");
+    unix_socket::assert_fits(&socket);
     let listener = UnixListener::bind(&socket).expect("listener");
     listener
         .set_nonblocking(true)

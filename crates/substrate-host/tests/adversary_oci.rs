@@ -6,7 +6,6 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -21,6 +20,9 @@ use substrate_host::confinement::{
     oci::{self, OciRequest},
 };
 use substrate_wire::{ReadOnlyRoot, Signal};
+
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
 
 const LANE_ENV: &str = "SUBSTRATE_OCI_LANE";
 const RUNTIME_ENV: &str = "SUBSTRATE_OCI_RUNTIME";
@@ -466,7 +468,7 @@ async fn adversary_oci_a_container_that_never_started_is_not_a_command_exit() {
 #[test]
 fn adversary_oci_a_socket_under_a_read_only_root_is_not_reachable() {
     let (_ro, read_only) = canonical_tempdir();
-    let _listener = UnixListener::bind(read_only.join("s")).expect("listener");
+    let _listener = unix_socket::bind_in(&read_only, "s");
     let (_ws, workspace) = canonical_tempdir();
     let adapter = confinement::open(AdapterRequest::Oci(OciRequest {
         runtime: fake_docker().clone(),

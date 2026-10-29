@@ -61,14 +61,14 @@ A run is `local` exactly when its opened adapter proves `declared_insecure`: `lo
 request's `adapter`, and `OpenAdapter` makes the row's facts agree with its name: no `local` row
 lacks `declared_insecure`, so no `local` profile is admitted without a reason or reported
 `declared_insecure: false`. Admission never compares the requested `adapter` with a literal:
-ESS 0.75.0 synthesis ignores a `when:` guard on an identity input bound to a captured instance
+ESS 0.76.0 synthesis ignores a `when:` guard on an identity input bound to a captured instance
 ([beyond10x/ess#693](https://github.com/beyond10x/ess/issues/693)). `OpenAdapter`'s guards do
 name adapters: it creates the row, so the identity is bound to no captured instance, and its
 synthesized scenarios agree with `interpreted`.
 
 ### Image digests
 
-A pinned reference ends with `@sha256:` and exactly 64 lowercase hex characters. ESS 0.75.0 has no
+A pinned reference ends with `@sha256:` and exactly 64 lowercase hex characters. ESS 0.76.0 has no
 pattern predicate and no substring operator (its predicate reference, *Text shapes without
 patterns*), so the model cannot state "the 64 characters after `@sha256:`, each lowercase hex".
 It states every part it can, and refuses `confinement.image-unpinned` unless the reference:
@@ -127,18 +127,18 @@ authored scenarios above.
 
 Synthesis writes 5 scenarios, all on `OpenAdapter`, and refuses 32 obligations, every one on
 `AdmitProfile`. The open refusals that keep a `local` row declared insecure and an `oci` or `pod`
-row digest-pinned are guards on the adapter identity, and with them ESS 0.75.0 synthesis arranges
+row digest-pinned are guards on the adapter identity, and with them ESS 0.76.0 synthesis arranges
 no adapter row for an admission (`ESS-SYNTH-003`, "no candidate of the 15 tried satisfies
 `substrate.confinement.Adapter` stored related row selecting this branch", and `ESS-SYNTH-001` for
 the reserved fields and `adapter-not-open`). The model
 keeps the refusals and the authored scenarios carry admission: each of the 37 outcomes of the two
 commands has at least one scenario among the 65 authored. All 70 scenarios pass against ESS
-0.75.0's `interpreted` target.
+0.76.0's `interpreted` target.
 
 ## Open questions (`UNMAPPED:` in `confinement.yaml`)
 
 - `OpenAdapter` accepts `inner` beside an adapter other than `systemd`, and `systemd` without
-  `inner`. Refusing either at open made ESS 0.75.0 synthesis refuse every admission
+  `inner`. Refusing either at open made ESS 0.76.0 synthesis refuse every admission
   (`ESS-SYNTH-002`). Admission refuses a requested `inner` that differs from the opened row's,
   which the model decides without a source.
 - The audit record of a refusal (`ProfileRefused`): an adapter-test obligation, above.

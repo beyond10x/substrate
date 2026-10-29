@@ -2,7 +2,7 @@ domain: substrate.workspaces
 summary: A workspace, the directory name it is served from, and how it came to be served.
 types:
   # The single-component root-name set `validate_root_name` admits
-  # (crates/substrate-host/src/fs.rs): ASCII alphanumerics, `_` and `-`, not
+  # (crates/substrate-guarded/src/fs.rs): ASCII alphanumerics, `_` and `-`, not
   # empty, no leading `-`. `.`, `..`, `/`, NUL and hidden names are outside the
   # alphabet, so no root name can reach `.substrate-apertures` or any other
   # `.substrate-*` service directory. 255 is Linux NAME_MAX, the wire constant

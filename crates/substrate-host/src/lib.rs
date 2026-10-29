@@ -5,6 +5,8 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 mod aperture;
+// The backend ledger port of design 34 § 4, beside `Driver`.
+mod backend;
 // The confinement contract (atlas ADR 0109, ADR 0044): a profile, the adapter trait, the registry
 // of six adapters, and the `local` and `linux` adapters. Reached in process, never on the wire.
 pub mod confinement;
@@ -17,9 +19,6 @@ pub mod confinement;
 mod confinement_types;
 #[cfg(target_os = "linux")]
 mod egress;
-mod environment;
-#[cfg(target_os = "linux")]
-mod fs;
 #[cfg(target_os = "linux")]
 mod git;
 pub mod host_process;
@@ -27,6 +26,9 @@ mod observation;
 // Which bytes of a bounded output stream a run keeps (design 29). Published through `confinement`,
 // which re-exports its public types.
 mod output_retention;
+// The probe's sentinel socket, on a path `bind(2)` accepts under any TMPDIR.
+#[cfg(target_os = "linux")]
+mod private_socket;
 #[cfg(target_os = "linux")]
 mod probe;
 #[cfg(target_os = "linux")]
@@ -69,11 +71,19 @@ use substrate_wire::{
     LeaseObservation, OutputSlice, Workspace, WorkspaceAbsence, WorkspaceCreateInput,
     WorkspaceTree, WorkspaceTreeQuery,
 };
-use thiserror::Error;
+// Guarded workspace I/O and the environment rule live in `substrate-guarded` (design 34 § 2), so a
+// binary that must not link this crate shares them; `crate::fs` and `crate::environment` still
+// name them here.
+use substrate_guarded::environment;
+#[cfg(target_os = "linux")]
+use substrate_guarded::fs;
 use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 pub use aperture::EgressAperture;
+pub use backend::{
+    BackendKind, BackendLedger, BackendName, BackendRecord, BackendRole, UidBinding,
+};
 pub use observation::{ExecObservation, PipeFrame, PipeStream};
 use output_retention::OutputRetention;
 // The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
@@ -83,6 +93,11 @@ pub use host_process::{
     LogStreamSelection, LogTail, ProcessExit, ProcessLogs, ProcessSupervisor, Reattached,
     SocketProtocol, StopCause, StoredProcessLogs,
 };
+// The port's error and listing types, declared beside guarded I/O and re-exported so every
+// existing `substrate_host::` path to them compiles unchanged.
+#[cfg(target_os = "linux")]
+pub use probe::probe_lease_clock;
+pub use substrate_guarded::{DriverError, DriverErrorClass, Listed};
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::HostDriver;
 
@@ -477,26 +492,6 @@ impl HostConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DriverErrorClass {
-    Refused,
-    Conflict,
-    Unserved,
-    Exhausted,
-    Failed,
-    NotFound,
-}
-
-#[derive(Debug, Error)]
-#[error("{code}: {message}")]
-pub struct DriverError {
-    pub class: DriverErrorClass,
-    pub code: &'static str,
-    pub message: String,
-    pub address: Option<String>,
-    pub retriable: bool,
-}
-
 pub enum DispatchOutcome<T> {
     Observed(T),
     NotDispatched(DriverError),
@@ -512,79 +507,6 @@ pub enum WorkspaceDestroyProgress {
     Absent(WorkspaceAbsence),
 }
 
-impl DriverError {
-    pub fn refused(code: &'static str, message: impl Into<String>, address: &str) -> Self {
-        Self {
-            class: DriverErrorClass::Refused,
-            code,
-            message: message.into(),
-            address: Some(address.to_owned()),
-            retriable: false,
-        }
-    }
-
-    pub fn not_found() -> Self {
-        Self {
-            class: DriverErrorClass::NotFound,
-            code: "resource.not-found",
-            message: "Resource was not found.".to_owned(),
-            address: Some("resource".to_owned()),
-            retriable: false,
-        }
-    }
-
-    pub fn unserved(code: &'static str, message: impl Into<String>, address: &str) -> Self {
-        Self {
-            class: DriverErrorClass::Unserved,
-            code,
-            message: message.into(),
-            address: Some(address.to_owned()),
-            retriable: false,
-        }
-    }
-
-    pub fn exhausted(code: &'static str, message: impl Into<String>, address: &str) -> Self {
-        Self {
-            class: DriverErrorClass::Exhausted,
-            code,
-            message: message.into(),
-            address: Some(address.to_owned()),
-            retriable: true,
-        }
-    }
-
-    pub fn failed(code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            class: DriverErrorClass::Failed,
-            code,
-            message: message.into(),
-            address: None,
-            retriable: true,
-        }
-    }
-}
-
-/// A listing and the number of entries it omitted because the wire cannot name them (ADR 0043).
-///
-/// The count travels beside the wire object, not in it, because the directory page and the tree
-/// are closed objects; the daemon answers it as `substrate_wire::OMITTED_ENTRIES_HEADER`. A
-/// result that lists nothing, such as a file read, omits nothing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Listed<T> {
-    pub value: T,
-    pub omitted_entries: u64,
-}
-
-impl<T> Listed<T> {
-    /// A result that omitted no entry.
-    pub fn complete(value: T) -> Self {
-        Self {
-            value,
-            omitted_entries: 0,
-        }
-    }
-}
-
 #[async_trait]
 pub trait Driver: Send + Sync {
     fn machine(&self) -> CapabilitySnapshot;
@@ -598,6 +520,27 @@ pub trait Driver: Send + Sync {
     ///
     /// Returns a typed refusal when the logical identifier cannot be represented safely.
     fn workspace_root_identity(&self, id: &str) -> Result<String, DriverError>;
+
+    /// The backend objects this driver will create for one resource, named before any of them
+    /// is (design 34 § 4). The daemon reserves them in the transaction that records the
+    /// operation's `accepted` state. A driver that creates nothing outside its host names none,
+    /// and nothing is written.
+    ///
+    /// An exec whose `pod` row has no uid bound is the one case the daemon may read as dispatch
+    /// absence when [`Driver::observe_exec`] answers `NotFound` (§ 5.1), and only once
+    /// [`Driver::dispatch_bound`] has passed since the row was reserved.
+    fn backend_names(&self, _kind: BackendKind, _id: &str) -> Vec<BackendName> {
+        Vec::new()
+    }
+
+    /// How long after a name is reserved a create can still store its object (design 34 § 5.1,
+    /// the N9 bound). The daemon reads `NotFound` for an unbound `pod` row as dispatch absence
+    /// only once this much time has passed since the row's `created_at`; before that it keeps the
+    /// exec `unknown` and asks again next round. `None`, the default, means absence is never read
+    /// as dispatch absence.
+    fn dispatch_bound(&self) -> Option<std::time::Duration> {
+        None
+    }
 
     async fn create_workspace(
         &self,
@@ -624,6 +567,13 @@ pub trait Driver: Send + Sync {
         root_name: &str,
         previous: &Workspace,
     ) -> Result<Workspace, DriverError>;
+
+    /// The refusal a driver that adopts no operator directory answers every `workspace.adopt`
+    /// with. The daemon asks before it looks up any name, so the answer does not depend on who
+    /// holds the name. `None`, the default, serves adoption.
+    fn adopt_refusal(&self) -> Option<DriverError> {
+        None
+    }
 
     async fn read_workspace_path(
         &self,
@@ -900,6 +850,20 @@ pub trait Driver: Send + Sync {
     }
 
     async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError>;
+
+    /// Restart reconciliation's question about an exec the daemon recorded `unknown`: `previous`
+    /// is the exec as the daemon recorded it, which a driver that kept nothing across the restart
+    /// needs to answer with the exec's own identity, request and applied record (as
+    /// `observe_workspace` takes the recorded workspace). `NotFound` means what it means from
+    /// `observe_exec`.
+    ///
+    /// A driver that keeps nothing across a restart answers exactly as `observe_exec` does.
+    async fn recover_exec(
+        &self,
+        previous: &ExecObservation,
+    ) -> Result<ExecObservation, DriverError> {
+        self.observe_exec(&previous.resource.id).await
+    }
 
     async fn output(&self, id: &str, query: &ExecOutputQuery) -> Result<OutputSlice, DriverError>;
 

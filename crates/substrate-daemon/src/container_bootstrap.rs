@@ -438,7 +438,9 @@ mod tests {
     #[test]
     fn requires_exactly_the_configured_profile_enforced() {
         let default = ProfileName::default();
-        assert!(require_label("substrate-host-exec-v1 (enforce)\n", &default).is_ok());
+        assert!(require_label("substrate-host-exec-v2 (enforce)\n", &default).is_ok());
+        let v1: ProfileName = "substrate-host-exec-v1".parse().unwrap();
+        assert!(require_label("substrate-host-exec-v1 (enforce)\n", &v1).is_ok());
         let lane: ProfileName = "substrate-host-exec-v1-lane-01k8xyz".parse().unwrap();
         assert!(require_label("substrate-host-exec-v1-lane-01k8xyz (enforce)\n", &lane).is_ok());
         for (label, profile) in [
@@ -446,7 +448,11 @@ mod tests {
             ("substrate-host-exec-v1-lane-01k8xyz (complain)", &lane),
             ("substrate-host-exec-v1-lane-other (enforce)", &lane),
             ("substrate-host-exec-v1-lane-01k8xyz (enforce)", &default),
-            ("substrate-host-exec-v1 (complain)", &default),
+            ("substrate-host-exec-v1-lane-01k8xyz (enforce)", &v1),
+            ("substrate-host-exec-v1 (complain)", &v1),
+            ("substrate-host-exec-v2 (complain)", &default),
+            ("substrate-host-exec-v1 (enforce)", &default),
+            ("substrate-host-exec-v2 (enforce)", &v1),
             ("unconfined", &default),
             ("cri-containerd.apparmor.d (enforce)", &default),
         ] {
@@ -462,8 +468,9 @@ mod tests {
     #[test]
     fn adversary_a_label_merely_containing_the_enforced_name_is_refused() {
         let default = ProfileName::default();
+        let v1: ProfileName = "substrate-host-exec-v1".parse().unwrap();
         let lane: ProfileName = "substrate-host-exec-v1-lane-a".parse().unwrap();
-        for profile in [&default, &lane] {
+        for profile in [&default, &v1, &lane] {
             let label = profile.enforced_label();
             for refused in [
                 format!("docker-default//{label}"),

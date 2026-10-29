@@ -13,8 +13,8 @@ use substrate_host::{
 #[cfg(test)]
 use substrate_store::NewOperation;
 use substrate_store::{
-    CommitEffectSink, ExecWrite, ExpiredLease, LeaseClock, LeaseResource, Scope, Store, StoreError,
-    WorkspaceAdmission,
+    BackendObject, BackendObjectKind, BackendObjectRole, CommitEffectSink, ExecWrite, ExpiredLease,
+    LeaseClock, LeaseResource, Scope, Store, StoreError, WorkspaceAdmission,
 };
 use substrate_wire::{
     ExecSignalInput, ExecState, OperationState, WorkspaceAbsence, WorkspaceKind, WorkspaceOrigin,
@@ -27,7 +27,7 @@ use crate::delegation::DelegatedContextPolicy;
 
 use super::events::{EventStreamLimits, EventStreamPolicy, EventWakeups};
 use super::metrics::MetricsStreamPolicy;
-use super::operations::{driver_detail, linux_lease_clock, stored_exec};
+use super::operations::{driver_detail, linux_lease_clock, observation_from_stored, stored_exec};
 use super::sessions::{PendingContainments, PipeAttachmentLimits, PipeSessionPolicy};
 use super::{
     LEASE_CLEANUP_BATCH, MAINTENANCE_DRIVER_TIMEOUT, PROVISIONAL_RECOVERY_BATCH,
@@ -69,6 +69,42 @@ fn workspace_stripe(domain: &WorkspaceLockDomain, workspace: &str) -> usize {
     let mut hasher = DefaultHasher::new();
     workspace.hash(&mut hasher);
     usize::try_from(hasher.finish()).unwrap_or(usize::MAX) % domain.stripes.len()
+}
+
+/// How design 34 § 5.1 reads an exec the driver reports not found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecAbsence {
+    /// An unbound `pod` row inside the driver's dispatch bound: ask again next round.
+    Undecided,
+    /// An unbound `pod` row past the bound: the create never landed.
+    Dispatch,
+    /// No unbound `pod` row, no bound, or a terminal operation: physical absence.
+    Physical,
+}
+
+fn exec_absence(
+    rows: &[BackendObject],
+    bound: Option<std::time::Duration>,
+    now: DateTime<Utc>,
+    open: bool,
+) -> ExecAbsence {
+    // Keyed on the uid alone (design 34 § 5.1): a row the driver closed with `settle` after
+    // reading its object absent still never had a create answered.
+    let unbound = rows
+        .iter()
+        .find(|row| row.role == BackendObjectRole::Pod && row.uid.is_none());
+    match (unbound, bound) {
+        (Some(row), Some(bound)) if open => {
+            let past = chrono::Duration::from_std(bound)
+                .is_ok_and(|bound| now.signed_duration_since(row.created_at) >= bound);
+            if past {
+                ExecAbsence::Dispatch
+            } else {
+                ExecAbsence::Undecided
+            }
+        }
+        _ => ExecAbsence::Physical,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +349,17 @@ impl App {
         })
     }
 
+    /// The `BackendLedger` port over this daemon's store and deployment, handed to a driver at
+    /// open (design 34 § 4). It stamps rows from this daemon's authority clock.
+    #[must_use]
+    pub fn backend_ledger(&self) -> crate::StoreBackendLedger {
+        crate::StoreBackendLedger::new(
+            Arc::clone(&self.store),
+            self.deployment.clone(),
+            Arc::clone(&self.authority),
+        )
+    }
+
     pub(super) fn scope(&self, identity: &Identity) -> Scope {
         Scope {
             deployment: self.deployment.clone(),
@@ -528,6 +575,7 @@ impl App {
                         .await;
                 }
                 Err(error) if error.class == DriverErrorClass::NotFound => {
+                    // Reads no backend ledger row or dispatch bound yet; design 34 U8 adds both.
                     let (status, mut detail) = driver_detail(Some(&candidate.operation), &error);
                     detail.retriable = false;
                     let _ = self
@@ -564,9 +612,11 @@ impl App {
             let _workspace_guard = self
                 .lock_workspace(&candidate.scope, &candidate.stored.resource.workspace)
                 .await;
-            match run_maintenance_driver(self.driver.observe_exec(&candidate.stored.resource.id))
-                .await
-            {
+            // The driver is asked with the exec as recorded: one that kept nothing across the
+            // restart answers from it and its backend ledger (design 34 § 5); the host driver
+            // answers exactly as `observe_exec` does.
+            let previous = observation_from_stored(candidate.stored.clone());
+            match run_maintenance_driver(self.driver.recover_exec(&previous)).await {
                 Ok(observation) => {
                     if candidate.operation_state == OperationState::Terminal {
                         let _ = self
@@ -597,6 +647,53 @@ impl App {
                     }
                 }
                 Err(error) if error.class == DriverErrorClass::NotFound => {
+                    // Design 34 § 5.1: an exec whose `pod` row holds no bound uid never had its
+                    // create answered. Its absence is dispatch absence (the operation fails with
+                    // no resource) only once the driver's dispatch bound has passed since the row
+                    // was reserved, checked here against the daemon's own clock. Before that the
+                    // exec stays `unknown`, unmarked, and is asked about again next round. A
+                    // driver that states no bound, or names nothing (the host driver), keeps the
+                    // physical-absence reading below, exactly as before.
+                    let Ok(rows) = self
+                        .store_io(|| {
+                            self.store.backend_objects(
+                                &candidate.scope.deployment,
+                                BackendObjectKind::Exec,
+                                &candidate.stored.resource.id,
+                            )
+                        })
+                        .await
+                    else {
+                        continue;
+                    };
+                    let absence = exec_absence(
+                        &rows,
+                        self.driver.dispatch_bound(),
+                        self.authority.now(),
+                        candidate.operation_state != OperationState::Terminal,
+                    );
+                    if absence == ExecAbsence::Undecided {
+                        continue;
+                    }
+                    if absence == ExecAbsence::Dispatch {
+                        let (status, mut detail) =
+                            driver_detail(Some(&candidate.operation), &error);
+                        detail.retriable = false;
+                        let _ = self
+                            .store_io(|| {
+                                self.store.complete_dispatch_absence(
+                                    &candidate.scope,
+                                    &candidate.operation,
+                                    &self.authority.now().to_rfc3339(),
+                                    status.as_u16(),
+                                    "exec",
+                                    &candidate.stored.resource.id,
+                                    &detail,
+                                )
+                            })
+                            .await;
+                        continue;
+                    }
                     // Absence after restart proves only that no process remains now. It cannot
                     // prove whether dispatch crossed the launch barrier before the crash. Preserve
                     // the durable `unknown` operation/exec result while recording physical absence

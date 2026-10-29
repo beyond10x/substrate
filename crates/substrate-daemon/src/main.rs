@@ -7,8 +7,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use clap::Parser;
 use substrate_daemon::{
-    DaemonConfig, DelegatedContextKey, EgressAperture, GitSourceConfig, HostedIdentityConfig,
-    OpsListenerConfig, SecretSlot, TcpDaemonConfig, TlsDaemonConfig, WritableRootConfig, serve,
+    DaemonConfig, DelegatedContextKey, DriverSelection, EgressAperture, GitSourceConfig,
+    HostedIdentityConfig, OpsListenerConfig, SecretSlot, TcpDaemonConfig, TlsDaemonConfig,
+    WritableRootConfig, serve,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -232,8 +233,44 @@ struct Arguments {
     #[arg(long, env = "SUBSTRATE_STATE")]
     state: PathBuf,
 
-    #[arg(long, env = "SUBSTRATE_WORKSPACES")]
-    workspaces: PathBuf,
+    /// The driver this daemon opens (design 34 § 3): configuration, never a request.
+    #[arg(
+        long,
+        env = "SUBSTRATE_DRIVER",
+        value_enum,
+        default_value_t = DriverChoice::Host
+    )]
+    driver: DriverChoice,
+
+    /// Design 28's self-contained JSON kubeconfig carrying the `b10x-substrate/namespace-driver`
+    /// extension. Required with `--driver kubernetes` and refused with `host`; no other cluster
+    /// configuration is ever read. Every host-only flag conflicts with it.
+    #[arg(
+        long,
+        env = "SUBSTRATE_KUBERNETES_CONFIG",
+        value_name = "PATH",
+        required_if_eq("driver", "kubernetes"),
+        conflicts_with_all = [
+            "workspaces",
+            "cgroup_root",
+            "bubblewrap",
+            "project_quota_ids",
+            "exec_cpu_cores",
+            "git_sources",
+            "secret_slots",
+            "egress_apertures",
+            "writable_roots",
+            "ca_bundle",
+        ]
+    )]
+    kubernetes_config: Option<PathBuf>,
+
+    #[arg(
+        long,
+        env = "SUBSTRATE_WORKSPACES",
+        required_unless_present = "kubernetes_config"
+    )]
+    workspaces: Option<PathBuf>,
 
     #[arg(long, env = "SUBSTRATE_DEPLOYMENT")]
     deployment: String,
@@ -457,8 +494,37 @@ struct Arguments {
     ops_require_facts: Vec<String>,
 }
 
+/// The value of `--driver`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum DriverChoice {
+    Host,
+    Kubernetes,
+}
+
+impl Arguments {
+    /// What clap cannot state: a namespace configuration beside the host driver is refused, never
+    /// ignored, so an operator who forgot `--driver kubernetes` hears it at startup.
+    fn validated(self) -> Result<Self, clap::Error> {
+        if self.driver == DriverChoice::Host && self.kubernetes_config.is_some() {
+            return Err(<Self as clap::CommandFactory>::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--kubernetes-config is read only with --driver kubernetes",
+            ));
+        }
+        Ok(self)
+    }
+}
+
 impl From<Arguments> for DaemonConfig {
     fn from(arguments: Arguments) -> Self {
+        let driver = match arguments.driver {
+            DriverChoice::Host => DriverSelection::Host,
+            DriverChoice::Kubernetes => DriverSelection::Kubernetes {
+                config: arguments
+                    .kubernetes_config
+                    .expect("clap requires a configuration with the kubernetes driver"),
+            },
+        };
         let tcp = arguments.tcp_listen.map(|listen| TcpDaemonConfig {
             listen,
             path_prefix: arguments.tcp_path_prefix.unwrap_or_else(|| "/".to_owned()),
@@ -494,7 +560,8 @@ impl From<Arguments> for DaemonConfig {
         Self {
             socket: arguments.socket,
             state: arguments.state,
-            workspaces: arguments.workspaces,
+            driver,
+            workspaces: arguments.workspaces.unwrap_or_default(),
             deployment: arguments.deployment,
             allow_uids: arguments.allow_uids,
             allow_unrecorded_sessions: arguments.allow_unrecorded_sessions,
@@ -528,7 +595,9 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    let arguments = Arguments::parse();
+    let arguments = Arguments::parse()
+        .validated()
+        .unwrap_or_else(|error| error.exit());
     let exit_on_stdin_close = arguments.exit_on_stdin_close;
     let daemon = serve(arguments.into());
     tokio::pin!(daemon);
@@ -648,6 +717,85 @@ mod tests {
             .is_err(),
             "a required fact without the operational listener is refused"
         );
+    }
+
+    const KUBERNETES: [&str; 11] = [
+        "substrate-daemon",
+        "--socket",
+        "s.sock",
+        "--state",
+        "s.db",
+        "--deployment",
+        "test",
+        "--driver",
+        "kubernetes",
+        "--kubernetes-config",
+        "k.json",
+    ];
+
+    /// Design 34 § 3: `--driver` defaults to `host`, which keeps requiring `--workspaces`.
+    #[test]
+    fn the_driver_defaults_to_the_host_which_requires_its_workspace_root() {
+        let default = Arguments::try_parse_from(REQUIRED).expect("default arguments");
+        assert_eq!(
+            super::DaemonConfig::from(default.validated().expect("host")).driver,
+            super::DriverSelection::Host
+        );
+        let without_workspaces = REQUIRED
+            .into_iter()
+            .filter(|argument| !matches!(*argument, "--workspaces" | "ws"));
+        assert!(Arguments::try_parse_from(without_workspaces).is_err());
+        let configured = Arguments::try_parse_from(
+            REQUIRED
+                .into_iter()
+                .chain(["--kubernetes-config", "k.json"]),
+        )
+        .and_then(Arguments::validated);
+        assert!(
+            configured.is_err(),
+            "a namespace configuration beside the host driver is refused, never ignored"
+        );
+    }
+
+    /// `--driver kubernetes` takes its configuration file and no workspace root.
+    #[test]
+    fn the_kubernetes_driver_takes_its_configuration_and_no_workspace_root() {
+        let parsed = Arguments::try_parse_from(KUBERNETES)
+            .and_then(Arguments::validated)
+            .expect("kubernetes arguments");
+        let config = super::DaemonConfig::from(parsed);
+        assert_eq!(
+            config.driver,
+            super::DriverSelection::Kubernetes {
+                config: "k.json".into()
+            }
+        );
+        assert_eq!(config.workspaces, std::path::PathBuf::new());
+        assert!(
+            Arguments::try_parse_from(KUBERNETES.into_iter().take(9)).is_err(),
+            "--driver kubernetes without its configuration is refused"
+        );
+    }
+
+    /// The host-only flags conflict with `kubernetes` in clap (design 34 § 3).
+    #[test]
+    fn every_host_only_flag_conflicts_with_the_kubernetes_driver() {
+        for host_only in [
+            ["--workspaces", "ws"],
+            ["--cgroup-root", "/sys/fs/cgroup/x"],
+            ["--bubblewrap", "/usr/bin/bwrap"],
+            ["--project-quota-ids", "200000-200127"],
+            ["--exec-cpu-cores", "2"],
+            ["--git-source", "origin=https://git.invalid/"],
+            ["--secret-slot", "token=/run/token"],
+            ["--egress-aperture", "model=127.0.0.1:443/tcp"],
+            ["--writable-root", "cache=/srv/cache"],
+            ["--ca-bundle", "/etc/ca.pem"],
+        ] {
+            let refused = Arguments::try_parse_from(KUBERNETES.into_iter().chain(host_only))
+                .and_then(Arguments::validated);
+            assert!(refused.is_err(), "{host_only:?} beside --driver kubernetes");
+        }
     }
 
     #[test]

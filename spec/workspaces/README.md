@@ -15,7 +15,7 @@ not the daemon; the daemon's native tests (`crates/substrate-daemon/src/app/test
 ## Types (`identifier.yaml`)
 
 - `substrate.workspaces.RootName` is the single-component root-name set `validate_root_name`
-  admits (`crates/substrate-host/src/fs.rs`): ASCII alphanumerics, `_` and `-`, 1 to 255
+  admits (`crates/substrate-guarded/src/fs.rs`): ASCII alphanumerics, `_` and `-`, 1 to 255
   characters (Linux `NAME_MAX`), and no leading `-`. `.`, `..`, `/`, NUL and hidden names are
   outside the alphabet. It was `WorkspaceId` in the ADR 0034 cut. It is renamed because the wire
   workspace id stays `ws_…`, so this set names a directory, not a workspace. Its generated Rust
@@ -25,7 +25,7 @@ not the daemon; the daemon's native tests (`crates/substrate-daemon/src/app/test
   The model's alphabet has to hold the prefix's `_`, so it also admits a `_` after the prefix,
   which the wire pattern refuses.
 
-Under ESS 0.75.0 the generated `RootName` decoder checks the alphabet and the length bound; the
+Under ESS 0.76.0 the generated `RootName` decoder checks the alphabet and the length bound; the
 leading-`-` rule and the other invariants stay runtime obligations. The adopt input decodes its
 root name without that check, so the daemon's admission refuses it and records the operation.
 The daemon's admission is the evidence for these rules, not this model.
@@ -45,7 +45,7 @@ establishes it with a `setup:` row, and a conformance target makes it with `mkdi
   - a missing entry: `resource.not-found`;
   - an entry that is not a directory, or one the daemon's uid does not own:
     `workspace.path-escape`, the code `observe_workspace` gives create
-    (`crates/substrate-host/src/fs.rs:139`);
+    (`crates/substrate-guarded/src/fs.rs:147`);
   - a full subject partition: `workspace.capacity`.
 
   All of these are declared `external:` (see the limits below). Otherwise the outcome writes a
@@ -65,7 +65,7 @@ refusal is the daemon test's to assert.
 ## Scenarios
 
 Synthesis writes 18 scenarios. Five more are authored under `scenarios/`. All 23 pass against
-ESS 0.75.0's `interpreted` target, which checks the model, not the daemon.
+ESS 0.76.0's `interpreted` target, which checks the model, not the daemon.
 
 | file | claim |
 |---|---|

@@ -217,7 +217,7 @@ confinement/pod.rs: pub const POD_MAX_TRACKED_RUNS: usize = 128;
 confinement/pod.rs: pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 confinement/pod.rs: pub const MANAGED_BY: &str = "b10x-substrate";
 confinement/pod.rs: pub const RUN_LABEL: &str = "b10x-substrate/run";
-confinement/pod.rs: pub const CONTAINER: &str = "run";
+confinement/pod.rs: pub const CONTAINER: &str = kubernetes::RUN_CONTAINER;
 confinement/pod.rs: pub const WORKSPACE_MOUNT: &str = "/workspace";
 confinement/pod.rs: pub const POD_DEFAULT_EPHEMERAL_STORAGE_BYTES: u64 = 1 << 30;
 confinement/pod.rs: pub const LOG_ACCESS_PROBE: &str = "substrate-log-access-probe";
@@ -238,7 +238,9 @@ confinement/pod.rs: struct PodSettings > pub ephemeral_storage_bytes: u64,
 confinement/pod.rs: pub fn proof() -> AdapterFacts
 confinement/pod.rs: pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError>
 confinement/pod.rs: pub fn open_pod_timed(request: PodRequest, timing: PodTiming) -> Result<Arc<PodAdapter>, ConfinementError>
-confinement/pod.rs: impl<T> Drop for AbortOnDrop<T>
+confinement/pod.rs: impl Deref for Api
+confinement/pod.rs: impl Deref for Api > type Target = kubernetes::Api;
+confinement/pod.rs: impl DerefMut for Api
 confinement/pod.rs: pub fn check_profile(settings: &PodSettings, profile: &ConfinementProfile) -> Result<(), ConfinementError>
 confinement/pod.rs: pub fn render_manifests(settings: &PodSettings, profile: &ConfinementProfile, command: &Command, run: &str) -> Result<Value, ConfinementError>
 confinement/pod.rs: pub struct PodAdapter
@@ -394,24 +396,6 @@ lib.rs: struct HostConfig > pub exec_cpu_cores: u32,
 lib.rs: struct HostConfig > pub host_processes: bool,
 lib.rs: struct HostConfig > pub writable_roots: Vec<DeclaredWritableRoot>,
 lib.rs: impl HostConfig > pub fn minimum(workspace_root: impl Into<PathBuf>) -> Self
-lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum DriverErrorClass
-lib.rs: enum DriverErrorClass > Refused,
-lib.rs: enum DriverErrorClass > Conflict,
-lib.rs: enum DriverErrorClass > Unserved,
-lib.rs: enum DriverErrorClass > Exhausted,
-lib.rs: enum DriverErrorClass > Failed,
-lib.rs: enum DriverErrorClass > NotFound,
-lib.rs: #[derive(Debug, Error)] pub struct DriverError
-lib.rs: struct DriverError > pub class: DriverErrorClass,
-lib.rs: struct DriverError > pub code: &'static str,
-lib.rs: struct DriverError > pub message: String,
-lib.rs: struct DriverError > pub address: Option<String>,
-lib.rs: struct DriverError > pub retriable: bool,
-lib.rs: impl DriverError > pub fn refused(code: &'static str, message: impl Into<String>, address: &str) -> Self
-lib.rs: impl DriverError > pub fn not_found() -> Self
-lib.rs: impl DriverError > pub fn unserved(code: &'static str, message: impl Into<String>, address: &str) -> Self
-lib.rs: impl DriverError > pub fn exhausted(code: &'static str, message: impl Into<String>, address: &str) -> Self
-lib.rs: impl DriverError > pub fn failed(code: &'static str, message: impl Into<String>) -> Self
 observation.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum PipeStream
 observation.rs: enum PipeStream > Stdout,
 observation.rs: enum PipeStream > Stderr,
@@ -427,6 +411,24 @@ output_retention.rs: struct KeptOutput > pub retention: Retention,
 output_retention.rs: struct KeptOutput > pub observed_bytes: Option<u64>,
 output_retention.rs: struct KeptOutput > pub head_bytes: u64,
 output_retention.rs: struct KeptOutput > pub tail_bytes: u64,
+substrate-guarded/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum DriverErrorClass
+substrate-guarded/src/lib.rs: enum DriverErrorClass > Refused,
+substrate-guarded/src/lib.rs: enum DriverErrorClass > Conflict,
+substrate-guarded/src/lib.rs: enum DriverErrorClass > Unserved,
+substrate-guarded/src/lib.rs: enum DriverErrorClass > Exhausted,
+substrate-guarded/src/lib.rs: enum DriverErrorClass > Failed,
+substrate-guarded/src/lib.rs: enum DriverErrorClass > NotFound,
+substrate-guarded/src/lib.rs: #[derive(Debug, Error)] pub struct DriverError
+substrate-guarded/src/lib.rs: struct DriverError > pub class: DriverErrorClass,
+substrate-guarded/src/lib.rs: struct DriverError > pub code: &'static str,
+substrate-guarded/src/lib.rs: struct DriverError > pub message: String,
+substrate-guarded/src/lib.rs: struct DriverError > pub address: Option<String>,
+substrate-guarded/src/lib.rs: struct DriverError > pub retriable: bool,
+substrate-guarded/src/lib.rs: impl DriverError > pub fn refused(code: &'static str, message: impl Into<String>, address: &str) -> Self
+substrate-guarded/src/lib.rs: impl DriverError > pub fn not_found() -> Self
+substrate-guarded/src/lib.rs: impl DriverError > pub fn unserved(code: &'static str, message: impl Into<String>, address: &str) -> Self
+substrate-guarded/src/lib.rs: impl DriverError > pub fn exhausted(code: &'static str, message: impl Into<String>, address: &str) -> Self
+substrate-guarded/src/lib.rs: impl DriverError > pub fn failed(code: &'static str, message: impl Into<String>) -> Self
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct WritableHostRoot
 substrate-wire/src/lib.rs: struct WritableHostRoot > pub host: String,
 substrate-wire/src/lib.rs: struct WritableHostRoot > pub mount: String,
@@ -451,6 +453,8 @@ substrate-wire/src/lib.rs: struct CapabilitySnapshot > #[serde(skip_serializing_
 substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub facts: CapabilityFacts,
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] pub enum HostDriverKind
 substrate-wire/src/lib.rs: enum HostDriverKind > #[serde(rename = "host")] Host,
+substrate-wire/src/lib.rs: enum HostDriverKind > #[serde(rename = "kubernetes")] Kubernetes,
+substrate-wire/src/lib.rs: impl HostDriverKind > pub const ALL: [Self; 2] = [Self::Host, Self::Kubernetes];
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct CapabilityFacts
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.pull", skip_serializing_if = "Option::is_none")] pub events_pull: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.stream", skip_serializing_if = "Option::is_none")] pub events_stream: Option<bool>,
@@ -473,6 +477,7 @@ substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.argv-only", skip_serializing_if = "Option::is_none")] pub exec_argv_only: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.namespaces", skip_serializing_if = "Option::is_none")] pub exec_namespaces: Option<NamespaceFacts>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.no-egress", skip_serializing_if = "Option::is_none")] pub exec_no_egress: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.no-egress", default, skip_serializing_if = "Option::is_none")] pub confinement_no_egress: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.workspace-scoped-write", skip_serializing_if = "Option::is_none")] pub exec_workspace_scoped_write: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.cgroup-limits", skip_serializing_if = "Option::is_none")] pub exec_cgroup_limits: Option<CgroupLimitFacts>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.cgroup-kill", skip_serializing_if = "Option::is_none")] pub exec_cgroup_kill: Option<bool>,

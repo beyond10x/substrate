@@ -239,7 +239,7 @@ impl Check {
 /// Every code `substrate_refusals_total` names: the codes the wire crate names as constants.
 /// Any other code is counted as `other`. `tests::the_refusal_codes_are_the_wire_constants` holds
 /// this list to the wire crate's source, so a constant added there fails until it is added here.
-const REFUSAL_CODES: [&str; 107] = [
+const REFUSAL_CODES: [&str; 110] = [
     substrate_wire::EXEC_METRICS_UNSERVED,
     substrate_wire::EXEC_SCRATCH_QUOTA_UNSERVED,
     substrate_wire::EXEC_SCRATCH_QUOTA_LIMIT,
@@ -347,6 +347,9 @@ const REFUSAL_CODES: [&str; 107] = [
     substrate_wire::PROCESS_EXPIRES_AT_INVALID,
     substrate_wire::PROCESS_EVENTS_READERS_EXCEEDED,
     substrate_wire::LEASE_EXPIRED,
+    substrate_wire::EXEC_INLINE_CAPSULE_UNSERVED,
+    substrate_wire::EXEC_SIGNAL_UNSERVED,
+    substrate_wire::WORKSPACE_ADOPT_UNSERVED,
 ];
 
 /// One counter per label combination.
@@ -891,13 +894,28 @@ impl Readiness {
 /// when it was not free in time.
 type StoreProbe = Arc<dyn Fn(Duration) -> Result<Option<i64>, ()> + Send + Sync>;
 
+/// The facts of the startup capability snapshot readiness reads (D5 A). The snapshot is taken
+/// once, when the driver's open sequence has finished or failed (design 34 § 6.1); until then
+/// the `driver` check fails. A host driver's open finishes before the daemon serves, so its
+/// snapshot is taken as the operational listener starts.
+#[derive(Clone, Default)]
+pub(crate) struct StartupFacts(Arc<std::sync::OnceLock<BTreeSet<String>>>);
+
+impl StartupFacts {
+    /// Takes the snapshot `facts` publish, the first time only: a later call changes nothing,
+    /// because readiness does not re-read the driver (D5 B is deferred).
+    pub(crate) fn take(&self, facts: &substrate_wire::CapabilityFacts) {
+        self.0.get_or_init(|| present_facts(facts));
+    }
+}
+
 /// What the operational listener answers from: the application, the maintenance tasks it watches,
 /// and the facts readiness requires of the startup capability snapshot (D5 A).
 pub(crate) struct Operations {
     app: Arc<App>,
     maintenance: Vec<AbortHandle>,
     required_facts: Vec<String>,
-    present_facts: BTreeSet<String>,
+    startup: StartupFacts,
     store_probe: StoreProbe,
     output_stalls: fn() -> u64,
 }
@@ -907,6 +925,7 @@ impl Operations {
         app: Arc<App>,
         maintenance: Vec<AbortHandle>,
         required_facts: Vec<String>,
+        startup: StartupFacts,
         output_stalls: fn() -> u64,
     ) -> Arc<Self> {
         let store = Arc::clone(&app.store);
@@ -914,6 +933,7 @@ impl Operations {
             app,
             maintenance,
             required_facts,
+            startup,
             Arc::new(move |wait| store.schema_version(wait).map_err(|_| ())),
             output_stalls,
         )
@@ -923,15 +943,15 @@ impl Operations {
         app: Arc<App>,
         maintenance: Vec<AbortHandle>,
         required_facts: Vec<String>,
+        startup: StartupFacts,
         store_probe: StoreProbe,
         output_stalls: fn() -> u64,
     ) -> Arc<Self> {
-        let present_facts = present_facts(&app.driver.machine().facts);
         Arc::new(Self {
             app,
             maintenance,
             required_facts,
-            present_facts,
+            startup,
             store_probe,
             output_stalls,
         })
@@ -961,10 +981,11 @@ impl Operations {
             && MaintenanceTask::ALL
                 .into_iter()
                 .all(|task| self.app.telemetry.maintenance_fresh(task));
-        let driver = self
-            .required_facts
-            .iter()
-            .all(|fact| self.present_facts.contains(fact));
+        let driver = self.startup.0.get().is_some_and(|present| {
+            self.required_facts
+                .iter()
+                .all(|fact| present.contains(fact))
+        });
         Readiness {
             checks: [store, schema, maintenance, driver],
             accepting: self.app.telemetry.accepting.load(Ordering::Acquire),
@@ -1164,8 +1185,8 @@ mod tests {
     use substrate_wire::{ErrorClass, ErrorDetail};
 
     use super::{
-        Check, MaintenanceTask, Operations, ProcessStats, REFUSAL_CODES, Readiness, StoreProbe,
-        Telemetry,
+        Check, MaintenanceTask, Operations, ProcessStats, REFUSAL_CODES, Readiness, StartupFacts,
+        StoreProbe, Telemetry,
     };
     use crate::app::App;
 
@@ -1202,7 +1223,7 @@ mod tests {
     fn the_series_count_is_pinned_at_its_maximum() {
         let telemetry = Telemetry::default();
         let exposition = telemetry.render(every_check_passes(), Some(&process()), 0);
-        assert_eq!(SERIES_MAXIMUM, 579);
+        assert_eq!(SERIES_MAXIMUM, 582);
         assert_eq!(samples(&exposition).len(), SERIES_MAXIMUM);
         let refusals = samples(&exposition)
             .iter()
@@ -1401,6 +1422,86 @@ mod tests {
         0
     }
 
+    /// The startup snapshot of `app`'s driver, taken now, as for a host daemon.
+    fn taken(app: &App) -> StartupFacts {
+        let startup = StartupFacts::default();
+        startup.take(&app.driver.machine().facts);
+        startup
+    }
+
+    /// D5 A and design 34 § 6.1: until the driver's open sequence has settled no snapshot is
+    /// taken, so `driver` fails even when no fact is required. The snapshot taken then is the one
+    /// readiness reads, with the facts that arrived before it, and it is taken once: a fact that
+    /// arrives later is not seen, and one lost later is not missed (D5 B stays deferred).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readiness_reads_the_one_snapshot_taken_once_the_open_sequence_settled() {
+        let (_directory, app) = app();
+        fresh(&app);
+        let pending = "store ok\nschema ok\nmaintenance ok\ndriver failed\n";
+        let ready = "store ok\nschema ok\nmaintenance ok\ndriver ok\n";
+        let required = vec!["events.pull".to_owned(), "exec.argv-only".to_owned()];
+        let startup = StartupFacts::default();
+        let probed = Operations::new(
+            Arc::clone(&app),
+            running(),
+            required,
+            startup.clone(),
+            no_stalls,
+        );
+        let unrequired = Operations::new(
+            Arc::clone(&app),
+            running(),
+            Vec::new(),
+            startup.clone(),
+            no_stalls,
+        );
+        for operations in [&probed, &unrequired] {
+            assert_eq!(
+                answer(operations, "/readyz").await,
+                (StatusCode::SERVICE_UNAVAILABLE, pending.to_owned())
+            );
+        }
+
+        // The open settled after its probe proved `exec.argv-only`.
+        startup.take(&substrate_wire::CapabilityFacts {
+            events_pull: Some(true),
+            exec_argv_only: Some(true),
+            ..substrate_wire::CapabilityFacts::default()
+        });
+        for operations in [&probed, &unrequired] {
+            assert_eq!(
+                answer(operations, "/readyz").await,
+                (StatusCode::OK, ready.to_owned())
+            );
+        }
+
+        // Taken once: a later snapshot without the fact changes nothing.
+        startup.take(&substrate_wire::CapabilityFacts::default());
+        assert_eq!(answer(&probed, "/readyz").await.0, StatusCode::OK);
+
+        // An open that failed: the snapshot lacks the probed fact, and stays without it.
+        let failed = StartupFacts::default();
+        failed.take(&substrate_wire::CapabilityFacts {
+            events_pull: Some(true),
+            ..substrate_wire::CapabilityFacts::default()
+        });
+        let unready = Operations::new(
+            Arc::clone(&app),
+            running(),
+            vec!["exec.argv-only".to_owned()],
+            failed.clone(),
+            no_stalls,
+        );
+        failed.take(&substrate_wire::CapabilityFacts {
+            exec_argv_only: Some(true),
+            ..substrate_wire::CapabilityFacts::default()
+        });
+        assert_eq!(
+            answer(&unready, "/readyz").await,
+            (StatusCode::SERVICE_UNAVAILABLE, pending.to_owned())
+        );
+    }
+
     /// Readiness reads the store, its schema version, both maintenance tasks and the required
     /// facts, and turns `503` naming the one that failed; liveness turns only when a maintenance
     /// task has ended.
@@ -1408,7 +1509,13 @@ mod tests {
     async fn readiness_names_each_failed_check_and_liveness_only_a_stopped_task() {
         let (_directory, app) = app();
         fresh(&app);
-        let ready = Operations::new(Arc::clone(&app), running(), Vec::new(), no_stalls);
+        let ready = Operations::new(
+            Arc::clone(&app),
+            running(),
+            Vec::new(),
+            taken(&app),
+            no_stalls,
+        );
         assert_eq!(
             answer(&ready, "/readyz").await,
             (
@@ -1426,6 +1533,7 @@ mod tests {
             Arc::clone(&app),
             running(),
             vec!["exec.never-published".to_owned(), "events.pull".to_owned()],
+            taken(&app),
             no_stalls,
         );
         assert_eq!(
@@ -1439,6 +1547,7 @@ mod tests {
             Arc::clone(&app),
             running(),
             vec!["events.pull".to_owned()],
+            taken(&app),
             no_stalls,
         );
         assert_eq!(answer(&met, "/readyz").await.0, StatusCode::OK);
@@ -1453,7 +1562,13 @@ mod tests {
         })
         .await
         .expect("aborted task ends");
-        let halted = Operations::new(Arc::clone(&app), stopped, Vec::new(), no_stalls);
+        let halted = Operations::new(
+            Arc::clone(&app),
+            stopped,
+            Vec::new(),
+            taken(&app),
+            no_stalls,
+        );
         assert_eq!(
             answer(&halted, "/livez").await,
             (StatusCode::SERVICE_UNAVAILABLE, "failed\n".to_owned())
@@ -1485,6 +1600,7 @@ mod tests {
             Arc::clone(&app),
             running(),
             Vec::new(),
+            taken(&app),
             failing,
             no_stalls,
         );
@@ -1512,6 +1628,7 @@ mod tests {
                 Arc::clone(&app),
                 running(),
                 Vec::new(),
+                taken(&app),
                 probe,
                 no_stalls,
             );
@@ -1530,6 +1647,7 @@ mod tests {
             Arc::clone(&app),
             running(),
             Vec::new(),
+            taken(&app),
             foreign,
             no_stalls,
         );
@@ -1546,7 +1664,13 @@ mod tests {
         app.telemetry.start_accepting();
         app.telemetry
             .maintenance_round(MaintenanceTask::LeaseSweep, Duration::from_millis(1));
-        let operations = Operations::new(Arc::clone(&app), running(), Vec::new(), no_stalls);
+        let operations = Operations::new(
+            Arc::clone(&app),
+            running(),
+            Vec::new(),
+            taken(&app),
+            no_stalls,
+        );
         assert_eq!(
             answer(&operations, "/readyz").await.1,
             "store ok\nschema ok\nmaintenance failed\ndriver ok\n"
