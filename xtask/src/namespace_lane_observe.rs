@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use substrate_kubernetes_client::{Api, ApiError, ListForm, Method};
 
 use crate::chart_cluster::output;
+use crate::driver_rules;
 use crate::namespace_lane_render::{self as render, PodShape, Probe};
 
 /// What one observation came to. A failure to run is an `Err`, never one of these.
@@ -38,42 +39,38 @@ const GONE_BOUND: Duration = Duration::from_mins(2);
 /// The bytes O10 sends through `pods/exec`: more than one 64 KiB input message.
 const EXEC_BYTES: usize = 200_000;
 
-/// The resource rules a service account holds in a v1.37 cluster before any binding of ours, as
-/// `(verb, group, resource)`: `system:basic-user`'s self reviews, and `get`, `list` and `watch` on
-/// `clustertrustbundles`, which the first lane run observed (design 34 § 10.3 O8: the pinned
-/// default set is corrected from the observation). O8 checks the review against them.
-pub const DEFAULT_RESOURCE_RULES: [(&str, &str, &str); 6] = [
-    ("create", "authentication.k8s.io", "selfsubjectreviews"),
-    ("create", "authorization.k8s.io", "selfsubjectaccessreviews"),
-    ("create", "authorization.k8s.io", "selfsubjectrulesreviews"),
-    ("get", "certificates.k8s.io", "clustertrustbundles"),
-    ("list", "certificates.k8s.io", "clustertrustbundles"),
-    ("watch", "certificates.k8s.io", "clustertrustbundles"),
-];
+/// The default grants O8 expects beside decision 3's table, as `(verb, group, resource)`: the
+/// driver's own `DEFAULT_RESOURCE_RULES` (`crates/substrate-kubernetes/src/rules.rs`), the one
+/// source both the startup review and this observation read.
+pub fn default_resource_rules() -> BTreeSet<(String, String, String)> {
+    driver_rules::DEFAULT_RESOURCE_RULES
+        .iter()
+        .flat_map(|(group, resource, verbs)| {
+            verbs.iter().map(move |verb| {
+                (
+                    (*verb).to_owned(),
+                    (*group).to_owned(),
+                    (*resource).to_owned(),
+                )
+            })
+        })
+        .collect()
+}
 
-/// The non-resource URLs a service account may `get` before any binding of ours:
-/// `system:discovery`'s and `system:public-info-viewer`'s, and the four issuer-discovery URLs of
-/// `system:service-account-issuer-discovery`, which the first lane run observed.
-pub const DEFAULT_NON_RESOURCE_URLS: [&str; 15] = [
-    "/.well-known/openid-configuration",
-    "/.well-known/openid-configuration/",
-    "/api",
-    "/api/*",
-    "/apis",
-    "/apis/*",
-    "/healthz",
-    "/livez",
-    "/openapi",
-    "/openapi/*",
-    "/openid/v1/jwks",
-    "/openid/v1/jwks/",
-    "/readyz",
-    "/version",
-    "/version/",
-];
+/// The default non-resource grants O8 expects, as `(verb, url)`: the driver's own
+/// `DEFAULT_NON_RESOURCE_RULES`.
+pub fn default_non_resource_rules() -> BTreeSet<(String, String)> {
+    driver_rules::DEFAULT_NON_RESOURCE_RULES
+        .iter()
+        .flat_map(|(verb, urls)| {
+            urls.iter()
+                .map(move |url| ((*verb).to_owned(), (*url).to_owned()))
+        })
+        .collect()
+}
 
 /// The cluster-scoped collections whose names provisioning records.
-const INVENTORY: [(&str, &str); 6] = [
+pub const INVENTORY: [(&str, &str); 6] = [
     ("/api/v1/namespaces", "NamespaceList"),
     ("/api/v1/persistentvolumes", "PersistentVolumeList"),
     (
@@ -932,18 +929,10 @@ pub fn rules_outcome(status: &Value) -> Result<Outcome> {
             ));
         }
     }
-    for (verb, group, resource) in DEFAULT_RESOURCE_RULES {
-        expected.insert((
-            verb.to_owned(),
-            group.to_owned(),
-            resource.to_owned(),
-            String::new(),
-        ));
+    for (verb, group, resource) in default_resource_rules() {
+        expected.insert((verb, group, resource, String::new()));
     }
-    let expected_urls: BTreeSet<(String, String)> = DEFAULT_NON_RESOURCE_URLS
-        .iter()
-        .map(|url| ("get".to_owned(), (*url).to_owned()))
-        .collect();
+    let expected_urls = default_non_resource_rules();
     let extra: Vec<_> = resources.difference(&expected).collect();
     let missing: Vec<_> = expected.difference(&resources).collect();
     let extra_urls: Vec<_> = urls.difference(&expected_urls).collect();
@@ -1066,13 +1055,17 @@ mod tests {
                 json!({"verbs": grant.verbs, "apiGroups": [grant.group], "resources": [grant.resource]})
             })
             .collect();
-        for (verb, group, resource) in DEFAULT_RESOURCE_RULES {
+        for (verb, group, resource) in default_resource_rules() {
             resource_rules
                 .push(json!({"verbs": [verb], "apiGroups": [group], "resources": [resource]}));
         }
+        let urls: Vec<String> = default_non_resource_rules()
+            .into_iter()
+            .map(|(_, url)| url)
+            .collect();
         json!({
             "resourceRules": resource_rules,
-            "nonResourceRules": [{"verbs": ["get"], "nonResourceURLs": DEFAULT_NON_RESOURCE_URLS}],
+            "nonResourceRules": [{"verbs": ["get"], "nonResourceURLs": urls}],
             "incomplete": false,
         })
     }

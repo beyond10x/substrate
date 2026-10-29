@@ -17,6 +17,11 @@ mod container_profiles;
 mod docs;
 mod ess;
 mod image_startup;
+// The driver's own allowed-rule set, compiled here from its one source file: O8 checks a real
+// review against exactly what the startup review allows, never a copy (design 34 § 10.3 O8).
+#[path = "../../crates/substrate-kubernetes/src/rules.rs"]
+#[allow(dead_code)]
+mod driver_rules;
 mod json;
 mod lane_record;
 mod licenses;
@@ -26,6 +31,7 @@ mod mcp_smoke;
 mod namespace_lane;
 mod namespace_lane_observe;
 mod namespace_lane_render;
+mod namespace_lane_run;
 mod package;
 mod packages;
 mod quota_fixture;

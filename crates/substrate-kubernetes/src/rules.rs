@@ -28,8 +28,10 @@ pub const ROLE_RULES: [(&str, &str, &[&str]); 6] = [
 ];
 
 /// The resource rules every authenticated subject holds in a conformant cluster, from
-/// `system:basic-user`. Pinned here and checked against a real cluster by the lane (O8).
-pub const DEFAULT_RESOURCE_RULES: [(&str, &str, &[&str]); 3] = [
+/// `system:basic-user`, plus the `clustertrustbundles` reads a v1.37 cluster grants them. Pinned
+/// here as the one source the lane's O8 compares a real review against; that row was corrected
+/// from O8's first observation (design 34 § 10.3 O8).
+pub const DEFAULT_RESOURCE_RULES: [(&str, &str, &[&str]); 4] = [
     (
         "authorization.k8s.io",
         "selfsubjectaccessreviews",
@@ -41,13 +43,22 @@ pub const DEFAULT_RESOURCE_RULES: [(&str, &str, &[&str]); 3] = [
         &["create"],
     ),
     ("authentication.k8s.io", "selfsubjectreviews", &["create"]),
+    (
+        "certificates.k8s.io",
+        "clustertrustbundles",
+        &["get", "list", "watch"],
+    ),
 ];
 
-/// The non-resource rules every authenticated subject holds, from `system:discovery` and
-/// `system:public-info-viewer`, as `(verb, URLs)`. Also checked by O8.
+/// The non-resource rules every authenticated subject holds, from `system:discovery`,
+/// `system:public-info-viewer` and `system:service-account-issuer-discovery`, as `(verb, URLs)`.
+/// Also checked by O8; the four issuer-discovery URLs were corrected from its first observation on
+/// v1.37.
 pub const DEFAULT_NON_RESOURCE_RULES: [(&str, &[&str]); 1] = [(
     "get",
     &[
+        "/.well-known/openid-configuration",
+        "/.well-known/openid-configuration/",
         "/api",
         "/api/*",
         "/apis",
@@ -56,6 +67,8 @@ pub const DEFAULT_NON_RESOURCE_RULES: [(&str, &[&str]); 1] = [(
         "/livez",
         "/openapi",
         "/openapi/*",
+        "/openid/v1/jwks",
+        "/openid/v1/jwks/",
         "/readyz",
         "/version",
         "/version/",
@@ -289,6 +302,54 @@ mod tests {
         }));
         assert_eq!(widened.excess, ["list /pods/exec"]);
         assert_eq!(widened.excess_total, 1);
+    }
+
+    /// What the namespace lane's first run observed a v1.37 kind cluster grant every
+    /// authenticated subject (design 34 § 10.3 O8), written out here rather than read from the
+    /// defaults under test: decision 3's table plus exactly this set opens, and one more rule is
+    /// still excess.
+    #[test]
+    fn decision_three_plus_the_observed_v1_37_default_set_passes_and_one_more_rule_is_excess() {
+        let mut resource_rules: Vec<serde_json::Value> = super::ROLE_RULES
+            .iter()
+            .map(|(group, resource, verbs)| {
+                json!({"verbs": verbs, "apiGroups": [group], "resources": [resource]})
+            })
+            .collect();
+        resource_rules.extend([
+            json!({"verbs": ["create"], "apiGroups": ["authentication.k8s.io"], "resources": ["selfsubjectreviews"]}),
+            json!({"verbs": ["create"], "apiGroups": ["authorization.k8s.io"], "resources": ["selfsubjectaccessreviews", "selfsubjectrulesreviews"]}),
+            json!({"verbs": ["get", "list", "watch"], "apiGroups": ["certificates.k8s.io"], "resources": ["clustertrustbundles"]}),
+        ]);
+        let observed = json!({
+            "resourceRules": resource_rules,
+            "nonResourceRules": [
+                {"verbs": ["get"], "nonResourceURLs": [
+                    "/.well-known/openid-configuration", "/.well-known/openid-configuration/",
+                    "/openid/v1/jwks", "/openid/v1/jwks/",
+                ]},
+                {"verbs": ["get"], "nonResourceURLs": [
+                    "/api", "/api/*", "/apis", "/apis/*", "/healthz", "/livez", "/openapi",
+                    "/openapi/*", "/readyz", "/version", "/version/",
+                ]},
+            ],
+            "incomplete": false,
+        });
+        let read = review(&observed);
+        assert!(read.excess.is_empty(), "{:?}", read.excess);
+        assert_eq!(read.excess_total, 0);
+
+        let mut widened = observed;
+        widened["resourceRules"]
+            .as_array_mut()
+            .expect("rules")
+            .push(json!({"verbs": ["create"], "apiGroups": ["certificates.k8s.io"], "resources": ["clustertrustbundles"]}));
+        let read = review(&widened);
+        assert_eq!(
+            read.excess,
+            ["create certificates.k8s.io/clustertrustbundles"]
+        );
+        assert_eq!(read.excess_total, 1);
     }
 
     /// A rule of a few thousand short strings states a product of billions of grants. The review
