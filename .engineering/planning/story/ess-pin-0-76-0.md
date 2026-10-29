@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:ess-pin-0-76-0
 kind: story
-status: active
+status: implemented
 title: The ESS pin moves to 0.76.0, wire bytes unchanged
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-29T05:11:22Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-29T05:11:22Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-29T12:18:56Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":2}}}
 ---
 # Story: the ESS pin moves to 0.76.0, wire bytes unchanged
 

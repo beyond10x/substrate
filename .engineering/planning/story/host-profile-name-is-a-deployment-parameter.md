@@ -2,14 +2,15 @@
 format: aep.planning-md/3
 id: story:host-profile-name-is-a-deployment-parameter
 kind: story
-status: active
+status: implemented
 title: The host execution profile name is a deployment parameter
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-28T22:17:15Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-28T22:17:16Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-29T12:18:57Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":2}}}
 ---
 # The host execution profile name is a deployment parameter
 

@@ -2,14 +2,15 @@
 format: aep.planning-md/3
 id: story:host-probe-socket-fits-sun-len
 kind: story
-status: active
+status: implemented
 title: The host probe's socket fits sun_path under any TMPDIR
 relations:
 - decomposes: epic:confinement-contract-family
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-29T05:06:26Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-29T05:06:26Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-29T12:18:57Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: the host probe's socket fits sun_path under any TMPDIR
 

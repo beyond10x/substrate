@@ -2,14 +2,15 @@
 format: aep.planning-md/3
 id: story:execution-profile-v2-admits-atime-remounts
 kind: story
-status: active
+status: implemented
 title: Execution profile v2 admits noatime and nodiratime remounts
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-29T02:06:53Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-29T02:06:53Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-29T12:18:57Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":2}}}
 ---
 # Story: execution profile v2 admits atime remounts
 

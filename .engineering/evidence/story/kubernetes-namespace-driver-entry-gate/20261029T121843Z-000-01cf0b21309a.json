@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-29T12:18:43Z",
+  "actor": "human:timo",
+  "artifact": "story:kubernetes-namespace-driver-entry-gate",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh at 8bfad4ab5da448167987826ca4487eff7a99ac8c",
+    "reference": "https://github.com/beyond10x/substrate/commit/8bfad4ab5da448167987826ca4487eff7a99ac8c"
+  }
+}

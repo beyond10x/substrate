@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:keeper-check-proves-guarded-io
 kind: story
-status: active
+status: implemented
 title: The keeper check proves guarded I/O and atomic replacement before they are published
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
 - depends_on: story:kubernetes-namespace-workspace-and-exec-slice
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-29T08:50:30Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-29T08:50:30Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-29T12:18:57Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: The keeper check proves guarded I/O and atomic replacement before they are published
 

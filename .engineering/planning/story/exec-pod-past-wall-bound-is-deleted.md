@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:exec-pod-past-wall-bound-is-deleted
 kind: story
-status: active
+status: implemented
 title: An exec Pod past its wall bound is deleted
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
 - depends_on: story:kubernetes-namespace-workspace-and-exec-slice
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-29T08:55:28Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-29T08:55:28Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-29T12:18:56Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: An exec Pod past its wall bound is deleted
 

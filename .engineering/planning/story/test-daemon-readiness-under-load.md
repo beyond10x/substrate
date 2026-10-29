@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:test-daemon-readiness-under-load
 kind: story
-status: active
+status: implemented
 title: A test daemon's readiness deadline holds on a loaded machine
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-29T04:25:46Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-29T04:25:46Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-29T12:18:58Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: a test daemon's readiness deadline holds on a loaded machine
 

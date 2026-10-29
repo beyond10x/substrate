@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:chart-lane-local-execution-record
 kind: story
-status: draft
+status: implemented
 title: A recorded local lane proves the execution-enabled serving pod (ADR 0046 K9 C)
 summary: A workstation kind lane with node profiles starts the execution-enabled pod and prints a Chart-lane record that release.yml requires.
 relations:
@@ -10,7 +10,11 @@ relations:
 - decomposes: epic:kubernetes-deployment-and-driver
 - depends_on: story:host-profile-name-is-a-deployment-parameter
 - depends_on: story:execution-profile-v2-admits-atime-remounts
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-29T12:18:59Z", actor: "human:timo", revision: 2, decided_on: {"recorded":{"test_result":1}}}
+- {from: "proposed", to: "active", at: "2026-10-29T12:18:59Z", actor: "human:timo", revision: 3, decided_on: {"recorded":{"test_result":1}}}
+- {from: "active", to: "implemented", at: "2026-10-29T12:18:59Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":2}}}
 ---
 # Story: a recorded local lane proves the execution-enabled serving pod
 

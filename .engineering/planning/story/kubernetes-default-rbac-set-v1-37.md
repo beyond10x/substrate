@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:kubernetes-default-rbac-set-v1-37
 kind: story
-status: active
+status: implemented
 title: The driver's pinned default RBAC set matches a v1.37 cluster
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
 - depends_on: story:kubernetes-namespace-workspace-and-exec-slice
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-29T08:50:31Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-29T08:50:32Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-29T12:18:58Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: The driver's pinned default RBAC set matches a v1.37 cluster
 
