@@ -160,10 +160,13 @@ mod imp {
     use substrate_wire::Signal;
     use tokio::sync::watch;
 
+    use super::super::live::{self, LiveOutput};
+    use super::super::stdin::{self, StdinWriter};
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
         ConfinementProfile, ContractFamily, FACT_ORDER, FAMILY_ORDER, Fact, InnerAdapter,
-        ProcessBounds, RenderedCommand, RunExit, RunId, RunObservation, RunOutput, RunState,
+        OutputEvent, ProcessBounds, RenderedCommand, RunExit, RunId, RunObservation, RunOutput,
+        RunState,
     };
     use super::{
         InnerRequest, SESSION_BUS_ENV, SYSTEMD_MAX_TRACKED_RUNS, SYSTEMD_OUTPUT_LIMIT_BYTES,
@@ -725,6 +728,26 @@ mod imp {
         async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
             self.inner.signal(run, signal).await
         }
+
+        async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {
+            self.inner.write_stdin(run, bytes).await
+        }
+
+        async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {
+            self.inner.close_stdin(run).await
+        }
+
+        async fn read_output(
+            &self,
+            run: &RunId,
+            timeout: Duration,
+        ) -> Result<Option<OutputEvent>, ConfinementError> {
+            self.inner.read_output(run, timeout).await
+        }
+
+        fn output_stalled(&self, run: &RunId) -> bool {
+            self.inner.output_stalled(run)
+        }
     }
 
     // ---- around `local` ----
@@ -763,6 +786,10 @@ mod imp {
         cgroup: PathBuf,
         phase: watch::Receiver<Phase>,
         captured: Arc<Mutex<Captured>>,
+        /// The run's standard input, when its profile piped it (design 32).
+        stdin: Option<Arc<StdinWriter>>,
+        /// The run's live output, when its profile asked for it (design 32).
+        live: Option<Arc<LiveOutput>>,
     }
 
     struct SystemdLocal {
@@ -936,11 +963,12 @@ mod imp {
     }
 
     /// Spawns `command` in `directory` as its own process group, joined to `cgroup` before it
-    /// executes.
+    /// executes, with the standard input `profile` asks for.
     fn spawn_in(
         cgroup: &Path,
         command: &Command,
         directory: &Path,
+        profile: &ConfinementProfile,
     ) -> Result<tokio::process::Child, ConfinementError> {
         let procs = std::fs::OpenOptions::new()
             .write(true)
@@ -962,7 +990,7 @@ mod imp {
             .env_clear()
             .envs(&command.env)
             .current_dir(directory)
-            .stdin(Stdio::null())
+            .stdin(stdin::stdio(profile.stdin))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
@@ -1115,12 +1143,13 @@ mod imp {
         }
 
         /// Ends the tree, its cgroup and its leader's process group, at the run's timeout or once
-        /// its cumulative CPU passes its budget.
+        /// its cumulative CPU passes its budget: an imposed end, which stops live delivery first.
         fn watch(
             cgroup: PathBuf,
             leader: Leader,
             bounds: ProcessBounds,
             mut phase: watch::Receiver<Phase>,
+            live: Option<Arc<LiveOutput>>,
         ) {
             let deadline = Instant::now() + Duration::from_millis(bounds.timeout_ms);
             let budget = bounds.cpu_millis.saturating_mul(1_000);
@@ -1137,6 +1166,9 @@ mod imp {
                     if Instant::now() >= deadline
                         || cpu_usage_micros(&cgroup).is_some_and(|used| used >= budget)
                     {
+                        if let Some(live) = &live {
+                            live.close();
+                        }
                         let _ = kill_tree(&cgroup);
                         leader.kill();
                         return;
@@ -1204,11 +1236,15 @@ mod imp {
             Ok(Self::observation(&run))
         }
 
-        /// `KILL` ends the whole tree through `cgroup.kill`, and the leader's process group;
-        /// another signal reaches the run's process group, as under `local`.
+        /// `KILL` stops live delivery, then ends the whole tree through `cgroup.kill`, and the
+        /// leader's process group; another signal reaches the run's process group, as under
+        /// `local`, and closes nothing.
         async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
             let run = self.run(run)?;
             if signal == Signal::Kill {
+                if let Some(live) = &run.live {
+                    live.close();
+                }
                 let killed = kill_tree(&run.cgroup);
                 run.leader.kill();
                 return killed.map_err(|error| {
@@ -1235,6 +1271,33 @@ mod imp {
             }
             Ok(())
         }
+
+        async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {
+            let run = self.run(run)?;
+            stdin::piped(run.stdin.as_ref())?.write(bytes).await
+        }
+
+        async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {
+            let run = self.run(run)?;
+            stdin::piped(run.stdin.as_ref())?.close().await;
+            Ok(())
+        }
+
+        async fn read_output(
+            &self,
+            run: &RunId,
+            timeout: Duration,
+        ) -> Result<Option<OutputEvent>, ConfinementError> {
+            let run = self.run(run)?;
+            live::live(run.live.as_ref())?
+                .read(timeout, || run.captured.lock().extent())
+                .await
+        }
+
+        fn output_stalled(&self, run: &RunId) -> bool {
+            self.run(run)
+                .is_ok_and(|run| run.live.as_ref().is_some_and(|live| live.stalled()))
+        }
     }
 
     impl SystemdLocal {
@@ -1256,9 +1319,10 @@ mod imp {
             );
             let cgroup = self.scope.join(&name);
             create_run_cgroup(&cgroup, &bounds)?;
-            let mut child = spawn_in(&cgroup, command, &directory).inspect_err(|_| {
-                let _ = std::fs::remove_dir(&cgroup);
-            })?;
+            let mut child = spawn_in(&cgroup, command, &directory, admitted.profile())
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_dir(&cgroup);
+                })?;
             let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {
                 let _ = kill_tree(&cgroup);
                 return Err(
@@ -1266,23 +1330,35 @@ mod imp {
                 );
             };
             let id = RunId::new(format!("systemd-{name}"));
+            let writer = stdin::child_writer(admitted.profile().stdin, child.stdin.take());
+            // The run record owns the writer; the reaper only reaches it, so dropping the adapter
+            // drops the pipe and the child reads end of file.
+            let ending = writer.as_ref().map(Arc::downgrade);
             let captured = Arc::new(Mutex::new(Captured::new(
                 admitted.profile().output_retention,
                 output_limit,
             )));
             let (phase, observed) = watch::channel(Phase::Running);
-            let stdout = child
-                .stdout
-                .take()
-                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true)));
-            let stderr = child
-                .stderr
-                .take()
-                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false)));
             let leader = Leader {
                 pid,
                 exited: Arc::new(Mutex::new(false)),
             };
+            // A stall ends the run as `signal(Kill)` does: the whole tree and the leader's group.
+            let (live, [stdout_feed, stderr_feed]) =
+                live::open(admitted.profile().output_delivery, || {
+                    let cgroup = cgroup.clone();
+                    let leader = leader.clone();
+                    Box::new(move || {
+                        let _ = kill_tree(&cgroup);
+                        leader.kill();
+                    })
+                });
+            let stdout = child.stdout.take().map(|stream| {
+                tokio::spawn(drain(stream, Arc::clone(&captured), true, stdout_feed))
+            });
+            let stderr = child.stderr.take().map(|stream| {
+                tokio::spawn(drain(stream, Arc::clone(&captured), false, stderr_feed))
+            });
             let exited = Arc::clone(&leader.exited);
             let tree = cgroup.clone();
             tokio::spawn(async move {
@@ -1307,6 +1383,10 @@ mod imp {
                     }
                 }
                 let drained = drain_tree(&tree, deadline).await && closed;
+                // The run's end, for its standard input too (design 32 § 2).
+                if let Some(writer) = ending.as_ref().and_then(std::sync::Weak::upgrade) {
+                    writer.end().await;
+                }
                 let _ = phase.send(match ended {
                     Ok(status) if drained => Phase::Ended(RunExit {
                         code: status.code(),
@@ -1315,7 +1395,13 @@ mod imp {
                     _ => Phase::Unknown,
                 });
             });
-            Self::watch(cgroup.clone(), leader.clone(), bounds, observed.clone());
+            Self::watch(
+                cgroup.clone(),
+                leader.clone(),
+                bounds,
+                observed.clone(),
+                live.clone(),
+            );
             self.runs.lock().push(Arc::new(LocalRun {
                 id: id.clone(),
                 leader,
@@ -1323,6 +1409,8 @@ mod imp {
                 cgroup,
                 phase: observed,
                 captured,
+                stdin: writer,
+                live,
             }));
             admitted.audit_start(&id, &command.argv[0]);
             Ok(id)
@@ -1364,6 +1452,8 @@ mod imp {
                     Fact::WholeTreeKill,
                     Fact::LocalPermitted,
                     Fact::HostNetwork,
+                    Fact::StdinPipe,
+                    Fact::OutputLive,
                 ]
             );
             assert!(super::super::super::check_open(&facts).is_ok());

@@ -789,3 +789,256 @@ async fn a_systemd_local_run_under_tail_keeps_the_last_bytes() {
     assert!(output.stdout_truncated);
     println!("{NAME}: executed");
 }
+
+// T13 of design 32, around `local`: the scope's run reads a piped standard input through the
+// adapter's own writer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_local_run_reads_its_piped_stdin() {
+    const NAME: &str = "ESS confinement systemd local stdin";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::stdin_echoes_and_ends_on_close(
+        &adapter,
+        &ConfinementProfile {
+            inner: Some(InnerAdapter::Local),
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            stdin: confinement::StdinMode::Piped { limit_bytes: 1_024 },
+            ..ConfinementProfile::default()
+        },
+        &[b"one\n", b"two\n", b"three\n"],
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T13 of design 32, around `linux`: `systemd` forwards the writes to the inner adapter's writer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_linux_run_reads_its_piped_stdin() {
+    const NAME: &str = "ESS confinement systemd linux stdin";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_scoped");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    support::stdin_echoes_and_ends_on_close(
+        &adapter,
+        &ConfinementProfile {
+            inner: Some(InnerAdapter::Linux),
+            workspace: Some(workspace),
+            stdin: confinement::StdinMode::Piped { limit_bytes: 1_024 },
+            ..ConfinementProfile::default()
+        },
+        &[b"one\n", b"two\n", b"three\n"],
+    )
+    .await;
+    drop(adapter);
+    println!("{NAME}: executed");
+}
+
+/// What T13's natural end writes: two lines on each stream, interleaved.
+const BOTH_STREAMS: &str =
+    "printf 'out-one\\n'; printf 'err-one\\n' >&2; printf 'out-two\\n'; printf 'err-two\\n' >&2";
+
+/// The `systemd` profile around `local` in `workspace`, output recorded only.
+fn local_recorded(workspace: &Path) -> ConfinementProfile {
+    ConfinementProfile {
+        inner: Some(InnerAdapter::Local),
+        local_reason: Some(REASON.into()),
+        workspace: Some(workspace.to_path_buf()),
+        ..ConfinementProfile::default()
+    }
+}
+
+/// The `systemd` profile around `linux` in `workspace`, output recorded only.
+fn linux_recorded(workspace: &Path) -> ConfinementProfile {
+    ConfinementProfile {
+        inner: Some(InnerAdapter::Linux),
+        workspace: Some(workspace.to_path_buf()),
+        ..ConfinementProfile::default()
+    }
+}
+
+// T13 of design 32, around `local`: T4.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_systemd_local_run_delivers_its_record() {
+    const NAME: &str = "ESS confinement systemd local live natural end";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::live_natural_end(
+        NAME,
+        &adapter,
+        &local_recorded(workspace.path()),
+        &support::sh(BOTH_STREAMS),
+        b"out-one\nout-two\n",
+        b"err-one\nerr-two\n",
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T13 of design 32, around `local`: T5.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_systemd_local_run_never_read_stalls_and_ends() {
+    const NAME: &str = "ESS confinement systemd local live stall";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::live_stall(
+        NAME,
+        &adapter,
+        &local_recorded(workspace.path()),
+        &support::sh("exec yes"),
+        1,
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T13 of design 32, around `linux`: T4, read through the wrapper.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_systemd_linux_run_delivers_its_record() {
+    const NAME: &str = "ESS confinement systemd linux live natural end";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_scoped");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    support::live_natural_end(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace),
+        &support::sh(BOTH_STREAMS),
+        b"out-one\nout-two\n",
+        b"err-one\nerr-two\n",
+    )
+    .await;
+    drop(adapter);
+    println!("{NAME}: executed");
+}
+
+// T13 of design 32, around `linux`: T5, `output_stalled` read through the wrapper.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_systemd_linux_run_never_read_stalls_and_ends() {
+    const NAME: &str = "ESS confinement systemd linux live stall";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_scoped");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    support::live_stall(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace),
+        &support::sh("exec yes"),
+        1,
+    )
+    .await;
+    drop(adapter);
+    println!("{NAME}: executed");
+}
+
+// ---- adversary pass on `story:adapter-live-output` ----
+
+// § 3: around `local`, a timeout is an imposed end that closes the queue first, not a stall
+// (`SystemdLocal::watch` closes it before `kill_tree`).
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_live_systemd_local_run_ended_by_its_timeout_did_not_stall() {
+    const NAME: &str = "ESS confinement systemd local adv live timeout";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::adv_live_timeout_is_not_a_stall(
+        NAME,
+        &adapter,
+        &ConfinementProfile {
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 400,
+                processes: 8,
+                memory_bytes: 64 << 20,
+                cpu_millis: 30_000,
+            }),
+            ..local_recorded(workspace.path())
+        },
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3: around `local`, `Kill` stops delivery at once; only the queued chunk is delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_killed_live_systemd_local_run_delivers_only_the_queued_chunk() {
+    const NAME: &str = "ESS confinement systemd local adv live kill";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let marker = workspace.path().join("written");
+    support::adv_live_kill_delivers_only_the_queued_chunk(
+        NAME,
+        &adapter,
+        &local_recorded(workspace.path()),
+        &marker,
+        &marker,
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3: around `linux`, `Kill` through the wrapper stops delivery at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_killed_live_systemd_linux_run_delivers_only_the_queued_chunk() {
+    const NAME: &str = "ESS confinement systemd linux adv live kill";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_scoped");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    support::adv_live_kill_delivers_only_the_queued_chunk(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace),
+        &workspace.join("written"),
+        &Path::new(substrate_wire::EXEC_WORKSPACE_MOUNT).join("written"),
+    )
+    .await;
+    drop(adapter);
+    println!("{NAME}: executed");
+}

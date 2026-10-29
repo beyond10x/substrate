@@ -20,8 +20,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use substrate_host::confinement::{
-    self, AdapterFacts, AdapterName, AuditRecord, AuditSink, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, ContractFamily, Fact, InnerAdapter,
+    self, AdapterFacts, AdapterName, AuditRecord, AuditSink, Command, ConfinementAdapter,
+    ConfinementError, ConfinementProfile, ContractFamily, Fact, InnerAdapter, OutputDelivery,
+    OutputEvent, PipeStream, RunId, RunOutput,
 };
 
 pub const SUITE: &str = include_str!("../../../../spec/confinement-suite.json");
@@ -210,6 +211,13 @@ pub struct Target<'a> {
     rows: Vec<Value>,
     view: String,
     audit: Arc<Mutex<Vec<AuditRecord>>>,
+    /// Facts the scenarios declare that this host's adapter does not prove, as its own probe
+    /// decided: removed from every open step's expected set, and an admission requiring one is
+    /// that fact's named refusal.
+    unproved: Vec<String>,
+    /// Set once an admission requiring an unproved fact was refused by its name: the authored
+    /// steps after it state the admission on a host that proves the fact.
+    refused_unproved: Option<String>,
     /// Refusal audit records asserted, across the scenario.
     pub refusals_audited: usize,
     /// Opens refused by `confinement::check_open` on the scenario's declared set.
@@ -217,8 +225,10 @@ pub struct Target<'a> {
 }
 
 impl<'a> Target<'a> {
-    pub fn new(opener: &'a mut Opener<'a>) -> Self {
+    pub fn new(opener: &'a mut Opener<'a>, unproved: &[Fact]) -> Self {
         Self {
+            unproved: unproved.iter().map(erased::Named::name).collect(),
+            refused_unproved: None,
             opener,
             opened: BTreeMap::new(),
             forced: BTreeMap::new(),
@@ -323,18 +333,25 @@ impl<'a> Target<'a> {
                 let facts = adapter.facts();
                 let observed = serde_json::to_value(facts).expect("adapter facts serialize");
                 // The scenario's open step is the adapter's declared set; the real adapter must
-                // have proved exactly that, in the contract's order.
+                // have proved exactly that, in the contract's order, less the facts this host's
+                // probe does not prove.
                 assert_eq!(
                     observed["served_families"],
                     json!(step.served_families),
                     "{} serves other families than the scenario declares",
                     step.adapter
                 );
+                let expected: Vec<&String> = step
+                    .facts
+                    .iter()
+                    .filter(|fact| !self.unproved.contains(fact))
+                    .collect();
                 assert_eq!(
                     observed["facts"],
-                    json!(step.facts),
-                    "{} proved other facts than the scenario declares",
-                    step.adapter
+                    json!(expected),
+                    "{} proved other facts than the scenario declares (unproved here: {:?})",
+                    step.adapter,
+                    self.unproved
                 );
                 assert_eq!(observed["adapter"], json!(step.adapter));
                 assert_eq!(
@@ -403,6 +420,40 @@ impl<'a> Target<'a> {
             "an admission writes exactly one audit record: {audited:?}"
         );
         let record = serde_json::to_value(&audited[0]).expect("audit record serializes");
+        let required_unproved: Vec<String> = strings(&input["required_facts"])
+            .into_iter()
+            .filter(|fact| self.unproved.contains(fact))
+            .collect();
+        if !required_unproved.is_empty() {
+            // The model's answer on this host: the open's set lacks the fact, so the admission is
+            // that fact's named refusal, audited, and admits nothing.
+            let error = result.err().unwrap_or_else(|| {
+                panic!("{name} admitted a profile requiring {required_unproved:?}, unproved here")
+            });
+            let (outcome, error_name, fields) = refusal(&error);
+            assert_eq!(error_name, "FactUnserved", "{error}");
+            assert_eq!(fields["adapter"], json!(name), "{error}");
+            let fact = text(&fields["fact"]).to_owned();
+            assert!(required_unproved.contains(&fact), "{error}");
+            assert_eq!(outcome, format!("fact-unserved-{}", kebab(&fact)));
+            assert_eq!(record["event"], "profile_refused", "{record}");
+            assert_eq!(record["code"], json!(error.code()), "{record}");
+            for (field, value) in fields.as_object().expect("fields") {
+                assert_eq!(
+                    &record[field], value,
+                    "refusal record field {field}: {record}"
+                );
+            }
+            self.refusals_audited += 1;
+            println!(
+                "  {name}: admission requiring {fact} refused {} by name",
+                error.code()
+            );
+            self.outcome = outcome;
+            self.error = Some((format!("{PREFIX}{error_name}"), fields));
+            self.refused_unproved = Some(fact);
+            return;
+        }
         match result {
             Ok(admitted) => {
                 let mut event =
@@ -497,6 +548,15 @@ impl<'a> Target<'a> {
     }
 
     pub fn step(&mut self, step: &Value) {
+        if let Some(fact) = &self.refused_unproved {
+            // The remaining steps state the admission on a host that proves `fact`.
+            assert_ne!(
+                text(&step["step"]),
+                "execute_command",
+                "a command follows an admission refused for {fact}"
+            );
+            return;
+        }
         match text(&step["step"]) {
             "configure_external_outcome" => {
                 let force = &step["force"];
@@ -607,23 +667,38 @@ impl<'a> Target<'a> {
 /// records were asserted and how many opens `confinement::check_open` refused.
 pub fn run(
     scenarios: &[(String, Value)],
-    mut opener: impl FnMut(&OpenStep) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError>,
+    opener: impl FnMut(&OpenStep) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError>,
 ) -> (usize, usize, usize) {
+    let (executed, audited, open_checks, refused_unproved) = run_without(scenarios, &[], opener);
+    assert_eq!(refused_unproved, 0);
+    (executed, audited, open_checks)
+}
+
+/// [`run`] on a host whose adapter does not prove `unproved`, as its own probe decided: each open
+/// step's expected set lacks those facts, and an admission requiring one must be that fact's
+/// named refusal. Also returns how many scenarios ended on such a refusal.
+pub fn run_without(
+    scenarios: &[(String, Value)],
+    unproved: &[Fact],
+    mut opener: impl FnMut(&OpenStep) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError>,
+) -> (usize, usize, usize, usize) {
     let mut executed = 0;
     let mut audited = 0;
     let mut open_checks = 0;
+    let mut refused_unproved = 0;
     for (id, scenario) in scenarios {
         println!("ESS scenario: {id}");
         let opener: &mut Opener<'_> = &mut opener;
-        let mut target = Target::new(opener);
+        let mut target = Target::new(opener, unproved);
         for step in scenario["steps"].as_array().expect("steps") {
             target.step(step);
         }
         audited += target.refusals_audited;
         open_checks += target.open_checks_refused;
+        refused_unproved += usize::from(target.refused_unproved.is_some());
         executed += 1;
     }
-    (executed, audited, open_checks)
+    (executed, audited, open_checks, refused_unproved)
 }
 
 /// What `seq 1 <last>` writes: every number from 1 to `last` on its own line.
@@ -773,4 +848,668 @@ pub fn tree(root: &std::path::Path) -> BTreeMap<std::path::PathBuf, Option<Vec<u
     let mut entries = BTreeMap::new();
     walk(root, root, &mut entries);
     entries
+}
+
+// ---- design 32's two stdin drivers (§ 9), shared by every adapter's lane ----
+
+/// The pending write the fill left: a task, so the write stays pending until the case ends or
+/// cancels it.
+pub type PendingWrite = tokio::task::JoinHandle<Result<(), ConfinementError>>;
+
+/// The fill of design 32 § 9: 64 KiB chunks to a child that does not read, each write raced
+/// against 100 ms, until one has not returned; at most 16 chunks, or the case fails. Returns the
+/// bytes of the completed writes and the write that has not returned, still pending.
+pub async fn fill(adapter: &Arc<dyn ConfinementAdapter>, run: &RunId) -> (u64, PendingWrite) {
+    let chunk = vec![b'x'; confinement::STDIN_CHUNK_BYTES];
+    let mut completed = 0_u64;
+    for _ in 0..16 {
+        let mut write = tokio::spawn({
+            let adapter = Arc::clone(adapter);
+            let run = run.clone();
+            let chunk = chunk.clone();
+            async move { adapter.write_stdin(&run, &chunk).await }
+        });
+        match tokio::time::timeout(std::time::Duration::from_millis(100), &mut write).await {
+            Ok(joined) => {
+                joined
+                    .expect("the write task")
+                    .expect("the pipe took the chunk");
+                completed += chunk.len() as u64;
+            }
+            Err(_) => return (completed, write),
+        }
+    }
+    panic!("16 chunks of 64 KiB went into a pipe nobody reads without one pending");
+}
+
+/// The gate of design 32 § 9: a marker file the child waits for. Dropped, it opens, so a case
+/// that fails before it opened the gate does not leave its child waiting.
+pub struct Gate {
+    host: std::path::PathBuf,
+    child: std::path::PathBuf,
+}
+
+impl Gate {
+    /// A gate whose marker is `go` in `directory`, a directory the child sees at the same path.
+    pub fn new(directory: &std::path::Path) -> Self {
+        Self::seen_as(directory, directory)
+    }
+
+    /// A gate whose marker is `go` in the host's `directory`, which the child sees at `child`.
+    pub fn seen_as(directory: &std::path::Path, child: &std::path::Path) -> Self {
+        Self {
+            host: directory.join("go"),
+            child: child.join("go"),
+        }
+    }
+
+    /// The shell line that waits for the gate to open.
+    pub fn line(&self) -> String {
+        format!(
+            "while [ ! -e '{}' ]; do sleep 0.05; done",
+            self.child.display()
+        )
+    }
+
+    pub fn open(&self) {
+        std::fs::write(&self.host, b"").expect("the gate opens");
+    }
+}
+
+impl Drop for Gate {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.host, b"");
+    }
+}
+
+/// `/bin/sh -c script` with a `PATH` that finds the tools the cases run.
+pub fn sh(script: &str) -> Command {
+    Command {
+        argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+        env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+    }
+}
+
+/// Asserts `error` is the refusal `code` with `status`.
+pub fn assert_refused(error: &ConfinementError, code: &str, status: u16) {
+    assert_eq!(error.code(), code, "{error}");
+    assert_eq!(error.status(), status, "{error}");
+}
+
+/// T2 of design 32 on any adapter: `cat` with `Piped` echoes three writes on stdout;
+/// `close_stdin` ends it with exit 0; a second `close_stdin` is `Ok`; a write after close is
+/// `session.input-closed`. `profile` is the adapter's own profile, with `Piped` set.
+pub async fn stdin_echoes_and_ends_on_close(
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    chunks: &[&[u8]],
+) {
+    stdin_echoes_through(adapter, profile, &sh("exec cat"), chunks).await;
+}
+
+/// T2 as [`stdin_echoes_and_ends_on_close`], with `cat` started as `command`: for an adapter
+/// under which `/bin/sh` may not run another program.
+pub async fn stdin_echoes_through(
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    command: &Command,
+    chunks: &[&[u8]],
+) {
+    let admitted = adapter.admit(profile).expect("a piped profile is admitted");
+    let run = adapter.start(&admitted, command).await.expect("cat starts");
+    for chunk in chunks {
+        adapter.write_stdin(&run, chunk).await.expect("written");
+    }
+    adapter.close_stdin(&run).await.expect("closed");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), adapter.wait(&run))
+        .await
+        .expect("cat ends on end of file")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    adapter
+        .close_stdin(&run)
+        .await
+        .expect("a second close is Ok");
+    assert_refused(
+        &adapter
+            .write_stdin(&run, b"late")
+            .await
+            .expect_err("a write after close"),
+        substrate_wire::SESSION_INPUT_CLOSED,
+        422,
+    );
+    let output = adapter.output(&run).await.expect("output");
+    assert_eq!(
+        output.stdout,
+        chunks.concat(),
+        "every byte crossed the pipe"
+    );
+}
+
+// ---- design 32 § 3: live output, the cases every adapter that proves `output_live` runs ----
+
+/// How long one read of a live case waits; no case comes near it.
+const READ_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `profile` with its output delivered live, at most `queued_chunks` chunks waiting.
+pub fn live(profile: &ConfinementProfile, queued_chunks: u32) -> ConfinementProfile {
+    ConfinementProfile {
+        output_delivery: OutputDelivery::Live { queued_chunks },
+        ..profile.clone()
+    }
+}
+
+/// Every event of a live run until `None`.
+pub async fn read_events(adapter: &Arc<dyn ConfinementAdapter>, run: &RunId) -> Vec<OutputEvent> {
+    let mut events = Vec::new();
+    while let Some(event) = adapter
+        .read_output(run, READ_WAIT)
+        .await
+        .expect("read_output")
+    {
+        events.push(event);
+        assert!(events.len() < 100_000, "a live run delivered no end");
+    }
+    assert_eq!(
+        adapter.read_output(run, READ_WAIT).await.expect("read"),
+        None,
+        "None from then on"
+    );
+    events
+}
+
+const fn stream_index(stream: PipeStream) -> usize {
+    match stream {
+        PipeStream::Stdout => 0,
+        PipeStream::Stderr => 1,
+    }
+}
+
+/// The bytes `events` delivered on stdout and stderr, and the loss events after the last chunk.
+/// Asserts design 32's ordering: each stream's chunks contiguous from offset 0, each 1 to 64 KiB,
+/// no chunk after a loss event, and no loss event twice.
+pub fn delivered(events: &[OutputEvent]) -> ([Vec<u8>; 2], Vec<OutputEvent>) {
+    let mut streams = [Vec::new(), Vec::new()];
+    let mut losses: Vec<OutputEvent> = Vec::new();
+    for event in events {
+        if let OutputEvent::Chunk {
+            stream,
+            offset,
+            bytes,
+        } = event
+        {
+            assert!(losses.is_empty(), "a chunk after {losses:?}");
+            assert!(
+                (1..=64 * 1024).contains(&bytes.len()),
+                "a chunk of {} bytes",
+                bytes.len()
+            );
+            let delivered = &mut streams[stream_index(*stream)];
+            assert_eq!(
+                *offset,
+                delivered.len() as u64,
+                "{stream:?}: offsets are contiguous"
+            );
+            delivered.extend_from_slice(bytes);
+        } else {
+            assert!(!losses.contains(event), "{event:?} twice");
+            losses.push(event.clone());
+        }
+    }
+    (streams, losses)
+}
+
+/// The record begins with exactly the bytes delivered, on each stream.
+pub fn assert_prefix(name: &str, output: &RunOutput, streams: &[Vec<u8>; 2]) {
+    assert!(
+        output.stdout.starts_with(&streams[0]),
+        "{name}: the delivered stdout is not a prefix of the record"
+    );
+    assert!(
+        output.stderr.starts_with(&streams[1]),
+        "{name}: the delivered stderr is not a prefix of the record"
+    );
+}
+
+/// T4 of design 32 on any adapter: `command` writes `stdout` and `stderr` and exits 0. Each
+/// stream's chunks are contiguous, the record equals the delivered bytes, then `None`, and
+/// nothing stalled.
+pub async fn live_natural_end(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    command: &Command,
+    stdout: &[u8],
+    stderr: &[u8],
+) {
+    let admitted = adapter
+        .admit(&live(profile, 16))
+        .expect("a live profile is admitted");
+    let run = adapter.start(&admitted, command).await.expect("started");
+    let events = read_events(adapter, &run).await;
+    let ended = tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    let (streams, losses) = delivered(&events);
+    assert!(losses.is_empty(), "{name}: {losses:?}");
+    assert_eq!(streams[0], stdout, "{name}: stdout delivered");
+    assert_eq!(streams[1], stderr, "{name}: stderr delivered");
+    assert_eq!(
+        output.stdout, streams[0],
+        "{name}: the record is what was delivered"
+    );
+    assert_eq!(
+        output.stderr, streams[1],
+        "{name}: the record is what was delivered"
+    );
+    assert!(!adapter.output_stalled(&run), "{name}");
+}
+
+/// T5 (and T11) of design 32 on any adapter: `command` writes without end and nothing reads.
+/// The run ends no sooner than 1 s and within 3 s after its start returned; the queued chunks are
+/// readable, then `Stalled` once, then `None`; `output_stalled` is true; the record begins with
+/// the delivered bytes. Returns the delivered bytes per stream.
+pub async fn live_stall(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    command: &Command,
+    queued_chunks: u32,
+) -> [Vec<u8>; 2] {
+    let admitted = adapter
+        .admit(&live(profile, queued_chunks))
+        .expect("a live profile is admitted");
+    let run = adapter.start(&admitted, command).await.expect("started");
+    let began = std::time::Instant::now();
+    tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the stall ends the run")
+        .expect("waited");
+    let took = began.elapsed();
+    assert!(
+        took >= std::time::Duration::from_secs(1),
+        "{name}: ended after {took:?}, before the stall deadline"
+    );
+    assert!(
+        took <= std::time::Duration::from_secs(3),
+        "{name}: ended {took:?} after its start"
+    );
+    assert!(adapter.output_stalled(&run), "{name}: output_stalled");
+    let events = read_events(adapter, &run).await;
+    let (streams, losses) = delivered(&events);
+    assert_eq!(losses, [OutputEvent::Stalled], "{name}");
+    assert!(
+        !streams[0].is_empty() || !streams[1].is_empty(),
+        "{name}: the queued chunks are readable"
+    );
+    let output = adapter.output(&run).await.expect("output");
+    assert_prefix(name, &output, &streams);
+    streams
+}
+
+/// T6 of design 32 on any adapter: `command` writes more than `bound` bytes of `y\n` to stdout and
+/// exits. `Bounded { Stdout }` follows the last chunk, then `None`; the record is truncated, holds
+/// exactly the bound, equals the delivered bytes and carries no marker.
+pub async fn live_bounded(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    command: &Command,
+    bound: usize,
+) {
+    let admitted = adapter
+        .admit(&live(profile, 16))
+        .expect("a live profile is admitted");
+    let run = adapter.start(&admitted, command).await.expect("started");
+    let events = read_events(adapter, &run).await;
+    let ended = tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    let (streams, losses) = delivered(&events);
+    assert_eq!(
+        losses,
+        [OutputEvent::Bounded {
+            stream: PipeStream::Stdout
+        }],
+        "{name}"
+    );
+    assert!(output.stdout_truncated, "{name}");
+    assert_eq!(streams[0].len(), bound, "{name}: delivered up to the bound");
+    assert_eq!(
+        output.stdout, streams[0],
+        "{name}: the record is what was delivered"
+    );
+    assert!(
+        output
+            .stdout
+            .chunks(2)
+            .all(|pair| pair == b"y\n" || pair == b"y"),
+        "{name}: the record carries no truncation marker"
+    );
+    assert!(!adapter.output_stalled(&run), "{name}");
+}
+
+/// Waits up to 10 s for `path` to exist.
+pub async fn appears(path: &std::path::Path) {
+    let deadline = tokio::time::Instant::now() + READ_WAIT;
+    while !path.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} did not appear",
+            path.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// T19 of design 32 on any adapter: a gated child writes `one\n`, waits for the gate, writes
+/// `two\n` and `three\n`, creates `marker` and sleeps without end. After the first chunk the test
+/// opens the gate, waits for the marker and sends `signal(Kill)`: the remaining queued chunks,
+/// then `None`, no `Stalled`; `output_stalled` is false; the chunks are a prefix of the record.
+/// `marker` is the host's path, `seen` the child's.
+pub async fn live_kill_is_a_prefix(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    gate: &Gate,
+    marker: &std::path::Path,
+    seen: &std::path::Path,
+) {
+    let admitted = adapter
+        .admit(&live(profile, 16))
+        .expect("a live profile is admitted");
+    let script = format!(
+        "printf 'one\\n'; {}; printf 'two\\n'; printf 'three\\n'; touch '{}'; \
+         while :; do sleep 0.05; done",
+        gate.line(),
+        seen.display()
+    );
+    let run = adapter
+        .start(&admitted, &sh(&script))
+        .await
+        .expect("started");
+    let first = adapter
+        .read_output(&run, READ_WAIT)
+        .await
+        .expect("read")
+        .expect("a first chunk");
+    assert_eq!(
+        first,
+        OutputEvent::Chunk {
+            stream: PipeStream::Stdout,
+            offset: 0,
+            bytes: b"one\n".to_vec()
+        },
+        "{name}"
+    );
+    gate.open();
+    appears(marker).await;
+    adapter
+        .signal(&run, substrate_wire::Signal::Kill)
+        .await
+        .expect("killed");
+    let mut events = vec![first];
+    events.extend(read_events(adapter, &run).await);
+    tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the kill ends the run")
+        .expect("waited");
+    let (streams, losses) = delivered(&events);
+    assert!(
+        losses.is_empty(),
+        "{name}: an imposed end names no loss: {losses:?}"
+    );
+    assert!(!adapter.output_stalled(&run), "{name}");
+    let output = adapter.output(&run).await.expect("output");
+    assert_prefix(name, &output, &streams);
+}
+
+// ---- adversary pass on `story:adapter-live-output`: cases every live adapter runs ----
+
+/// Design 32 § 3, *Delivery stops when the run is ended for it*: "On an imposed end the adapter
+/// stops delivery at once ... Chunks queued before that stay readable". With one queue slot, the
+/// child writes `A` and 32 KiB of `B\n` (less than one pipe holds, so it never blocks), then
+/// creates `marker` and sleeps. The slot holds the first chunk and the drain's next chunk waits
+/// for it; the test then sends `Kill` without having read anything. Exactly the one queued chunk
+/// may be delivered: the chunk that was waiting for a slot was not queued before the end. The
+/// record still holds every byte, so the delivered chunk is a strict prefix of it.
+///
+/// T19 cannot tell these apart: its child's bytes fit the 16-slot queue, so a `Kill` that closed
+/// nothing delivers the same events as one that closed the queue.
+pub async fn adv_live_kill_delivers_only_the_queued_chunk(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    marker: &std::path::Path,
+    seen: &std::path::Path,
+) {
+    const FOLLOWING: usize = 32 * 1024;
+    let admitted = adapter
+        .admit(&live(profile, 1))
+        .expect("a live profile is admitted");
+    let script = format!(
+        "printf A; yes B | head -c {FOLLOWING}; touch '{}'; while :; do sleep 0.05; done",
+        seen.display()
+    );
+    let run = adapter
+        .start(&admitted, &sh(&script))
+        .await
+        .expect("started");
+    appears(marker).await;
+    adapter
+        .signal(&run, substrate_wire::Signal::Kill)
+        .await
+        .expect("killed");
+    let events = read_events(adapter, &run).await;
+    tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the kill ends the run")
+        .expect("waited");
+    let (streams, losses) = delivered(&events);
+    assert!(losses.is_empty(), "{name}: {losses:?}");
+    assert!(!adapter.output_stalled(&run), "{name}");
+    let chunks = events
+        .iter()
+        .filter(|event| matches!(event, OutputEvent::Chunk { .. }))
+        .count();
+    assert_eq!(
+        chunks,
+        1,
+        "{name}: a queue of one held one chunk at the Kill; {} bytes were delivered",
+        streams[0].len()
+    );
+    assert!(streams[0].starts_with(b"A"), "{name}");
+    let output = adapter.output(&run).await.expect("output");
+    assert_eq!(
+        output.stdout.len(),
+        1 + FOLLOWING,
+        "{name}: the record is the complete account"
+    );
+    assert_prefix(name, &output, &streams);
+}
+
+/// Design 32 § 3, *One reader at a time*: "Concurrent calls are served one after the other, each
+/// with the next event." Two tasks read one run until each sees `None`. Together they hold every
+/// chunk exactly once: per stream, sorted by offset, the chunks are contiguous from 0 and are the
+/// record; no loss event, and each reader ends with `None`.
+pub async fn adv_live_two_readers_share_one_sequence(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+) {
+    let admitted = adapter
+        .admit(&live(profile, 16))
+        .expect("a live profile is admitted");
+    let run = adapter
+        .start(&admitted, &sh("seq 1 20000; seq 1 20000 >&2"))
+        .await
+        .expect("started");
+    let reader = |adapter: Arc<dyn ConfinementAdapter>, run: RunId| {
+        tokio::spawn(async move {
+            let mut events = Vec::new();
+            while let Some(event) = adapter
+                .read_output(&run, READ_WAIT)
+                .await
+                .expect("read_output")
+            {
+                events.push(event);
+            }
+            events
+        })
+    };
+    let first = reader(Arc::clone(adapter), run.clone());
+    let second = reader(Arc::clone(adapter), run.clone());
+    let mut events = first.await.expect("first reader");
+    events.extend(second.await.expect("second reader"));
+    tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    let mut chunks: [Vec<(u64, Vec<u8>)>; 2] = [Vec::new(), Vec::new()];
+    for event in events {
+        match event {
+            OutputEvent::Chunk {
+                stream,
+                offset,
+                bytes,
+            } => chunks[stream_index(stream)].push((offset, bytes)),
+            other => panic!("{name}: a loss event on a natural end: {other:?}"),
+        }
+    }
+    let output = adapter.output(&run).await.expect("output");
+    for (index, record) in [&output.stdout, &output.stderr].into_iter().enumerate() {
+        chunks[index].sort_by_key(|(offset, _)| *offset);
+        let mut joined = Vec::new();
+        for (offset, bytes) in &chunks[index] {
+            assert_eq!(
+                *offset,
+                joined.len() as u64,
+                "{name}: stream {index}: a chunk delivered twice or skipped"
+            );
+            joined.extend_from_slice(bytes);
+        }
+        assert_eq!(
+            &joined, record,
+            "{name}: stream {index}: two readers together delivered the record"
+        );
+    }
+    assert!(!adapter.output_stalled(&run), "{name}");
+}
+
+/// Design 32 § 3 with § 2: a run admitted with both a piped standard input and live output. `cat`
+/// echoes each write while it runs, so each write comes back as the next chunk before the next
+/// write is made; `close_stdin` ends it and `None` follows.
+pub async fn adv_live_echoes_piped_stdin_while_running(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    piped: &ConfinementProfile,
+) {
+    let admitted = adapter
+        .admit(&live(piped, 16))
+        .expect("a piped live profile is admitted");
+    let run = adapter
+        .start(&admitted, &sh("exec cat"))
+        .await
+        .expect("cat starts");
+    let mut offset = 0_u64;
+    for line in [&b"one\n"[..], b"two\n", b"three\n"] {
+        adapter.write_stdin(&run, line).await.expect("written");
+        assert_eq!(
+            adapter.read_output(&run, READ_WAIT).await.expect("read"),
+            Some(OutputEvent::Chunk {
+                stream: PipeStream::Stdout,
+                offset,
+                bytes: line.to_vec(),
+            }),
+            "{name}"
+        );
+        offset += line.len() as u64;
+    }
+    adapter.close_stdin(&run).await.expect("closed");
+    assert_eq!(
+        adapter.read_output(&run, READ_WAIT).await.expect("read"),
+        None,
+        "{name}"
+    );
+    let ended = tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("cat ends")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    assert_eq!(output.stdout, b"one\ntwo\nthree\n", "{name}");
+    assert!(!adapter.output_stalled(&run), "{name}");
+}
+
+/// Design 32 § 3 and the trait: `read_output` returns "`None` once both streams ended and every
+/// event was read". The child writes `x`, closes both of its streams and keeps running for 8 s.
+/// One read with a 15 s timeout after the chunk must answer `None` (whenever the adapter sees the
+/// streams end), never an error; the run is then killed.
+pub async fn adv_live_streams_closed_by_a_running_child_end_with_none(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+) {
+    let admitted = adapter
+        .admit(&live(profile, 16))
+        .expect("a live profile is admitted");
+    let run = adapter
+        .start(&admitted, &sh("printf x; exec >&- 2>&-; exec sleep 8"))
+        .await
+        .expect("started");
+    assert_eq!(
+        adapter.read_output(&run, READ_WAIT).await.expect("read"),
+        Some(OutputEvent::Chunk {
+            stream: PipeStream::Stdout,
+            offset: 0,
+            bytes: b"x".to_vec(),
+        }),
+        "{name}"
+    );
+    let after = adapter
+        .read_output(&run, std::time::Duration::from_secs(15))
+        .await;
+    let _ = adapter.signal(&run, substrate_wire::Signal::Kill).await;
+    let _ = tokio::time::timeout(READ_WAIT, adapter.wait(&run)).await;
+    match after {
+        Ok(None) => {}
+        other => panic!("{name}: after both streams closed, read_output answered {other:?}"),
+    }
+}
+
+/// Design 32 § 3: "An end is imposed when the adapter or the host ends the run and closes the
+/// live queue first: `signal(Kill)`, a timeout, ..." and "the stall alone is a named event".
+/// `profile` carries a run timeout well under the 1 s stall deadline; `yes` fills a one-slot queue
+/// nobody reads. The timeout ends the run, so no `Stalled` follows the queued chunk and
+/// `output_stalled` is false.
+pub async fn adv_live_timeout_is_not_a_stall(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+) {
+    let admitted = adapter
+        .admit(&live(profile, 1))
+        .expect("a live profile is admitted");
+    let run = adapter
+        .start(&admitted, &sh("exec yes"))
+        .await
+        .expect("started");
+    tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the timeout ends the run")
+        .expect("waited");
+    assert!(
+        !adapter.output_stalled(&run),
+        "{name}: the run ended at its timeout, before the stall deadline"
+    );
+    let events = read_events(adapter, &run).await;
+    let (streams, losses) = delivered(&events);
+    assert!(losses.is_empty(), "{name}: {losses:?}");
+    assert!(!streams[0].is_empty(), "{name}: the queued chunk");
 }

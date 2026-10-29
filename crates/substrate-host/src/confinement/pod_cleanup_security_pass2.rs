@@ -26,6 +26,7 @@ fn kept(run: &str, pod_seen: bool) -> Deferred {
         run: run.to_owned(),
         created: (chrono::Utc::now() - chrono::Duration::hours(1)).fixed_offset(),
         pod_seen,
+        trace: PodTrace::since(Some("1")),
     }
 }
 
@@ -36,6 +37,7 @@ fn owned_policy(run: &str, created: chrono::DateTime<chrono::Utc>) -> Value {
         "apiVersion": "meta.k8s.io/v1",
         "metadata": {
             "name": run,
+            "resourceVersion": "1",
             "creationTimestamp": created.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "labels": {MANAGED_BY_LABEL: MANAGED_BY, RUN_LABEL: run},
         },

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: epic:kubernetes-deployment-and-driver
 kind: epic
-status: proposed
+status: active
 title: Kubernetes deployment and namespace driver
 summary: A public node-bound serving profile and a namespace-scoped driver expose truthful Kubernetes-backed execution without turning Substrate into a fleet scheduler.
 owner: substrate
@@ -12,9 +12,10 @@ tags:
 - kubernetes
 relations:
 - depends_on: epic:remote-serving
-revision: 2
+revision: 3
 transitions:
 - {from: "draft", to: "proposed", at: "2026-08-31T22:54:30Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-10-28T19:32:44Z", actor: "human:timo", revision: 3}
 ---
 # Epic: Kubernetes deployment and namespace driver
 

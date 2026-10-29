@@ -12,6 +12,7 @@ because stability is a separate compatibility decision.
 Release [0.14.0](https://github.com/beyond10x/substrate/releases/tag/0.14.0), published on
 27 October 2026, ships the daemon and disposable MCP images with the signed
 `substrate-wire/0.23.0` development bundle. [Release notes](./releases.md) lists what changed.
+Release 0.15.0 is upcoming, not released.
 
 The current implementation is a Linux host slice. Treat every capability as deployment-specific and
 verify it through `GET /v1/machine`.
@@ -34,6 +35,18 @@ verify it through `GET /v1/machine`.
 | confinement adapters | in process, through `substrate_host::confinement` and `b10x-substrate confine run`: `local`, `linux`, `macos`, `systemd`, `oci` and `pod`, each declaring its families and facts; see [confinement adapters](./concepts/adapters.md) |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
 | distribution | Apache-2.0 source plus keyless-signed 0.14.0 daemon and MCP images and the signed 0.23.0 development bundle |
+
+## Coming in 0.15.0
+
+Implemented in source and not yet released:
+
+| Area | State in source |
+|---|---|
+| process events | one WebSocket stream of a host process's lifecycle and log lines, in development bundle `0.24.0` |
+| operational listener | opt-in `--ops-listen`: `/livez`, `/readyz` and OpenMetrics `/metrics` |
+| Kubernetes serving | a Helm chart running one node-bound daemon per node |
+| adapter input | piped standard input on `local`, `linux`, `macos` and `systemd`; `oci` only with Docker 29.7.2 server and client |
+| adapter output | live output while a run runs: in progress |
 
 ## Explicitly absent
 
@@ -59,7 +72,7 @@ in a broader architecture do not imply served endpoints.
   any error), so a completed revocation applies to the next request.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
 - Release `0.14.0` advertises `substrate-wire/0.23.0` and the SHA-256 of its inner
-  `bundle.json` as one claim. The outer OCI package has its own digest. Version `0.15.0`
+  `bundle.json` as one claim. The outer OCI package has its own digest. Bundle `0.15.0`
   deliberately replaced `/v1/pipe-sessions` with `/v1/sessions` and serves no compatibility alias.
 - Git materialization needs a configured source and transient Connector authority. The conditional
   `workspace.git` fact does not authorize arbitrary remote URLs.

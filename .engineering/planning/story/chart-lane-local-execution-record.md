@@ -8,6 +8,7 @@ summary: A workstation kind lane with node profiles starts the execution-enabled
 relations:
 - informed_by: story:node-bound-kubernetes-serving-profile
 - decomposes: epic:kubernetes-deployment-and-driver
+- depends_on: story:host-profile-name-is-a-deployment-parameter
 revision: 1
 ---
 # Story: a recorded local lane proves the execution-enabled serving pod

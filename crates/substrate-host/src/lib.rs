@@ -1181,14 +1181,20 @@ impl HostDriver {
 
     /// [`Driver::start_exec`] for the `linux` confinement adapter (design 29): keeping the bytes
     /// of each recorded stream `retention` chooses within the same bound (§ 6), and refusing a
-    /// writable subtree that holds a registered submodule (§ 2). `pub(crate)`, so no session and
-    /// no daemon route can ask for either.
+    /// writable subtree that holds a registered submodule (§ 2). With `stdin`, the run's standard
+    /// input is a pipe [`Self::write_pipe_session`] writes and the output is still recorded
+    /// (design 32 § 5). With `live`, the output is also queued, at most that many frames, for
+    /// [`Self::read_pipe_session`], under the session's backpressure and with no truncation
+    /// marker in the record. `pub(crate)`, so no session and no daemon route can ask for any of
+    /// them.
     pub(crate) async fn start_exec_for_adapter(
         &self,
         id: &str,
         workspace_root_name: &str,
         input: &ExecStartInput,
         retention: OutputRetention,
+        stdin: bool,
+        live: Option<usize>,
     ) -> DispatchOutcome<ExecObservation> {
         let workspace = match self.workspace_path(workspace_root_name) {
             Ok(value) => value,
@@ -1197,6 +1203,8 @@ impl HostDriver {
         let adapter = process::AdapterStart {
             retention,
             refuse_registered_submodules: true,
+            stdin,
+            live,
         };
         self.processes
             .start_for_adapter(id, &workspace, input, adapter)
@@ -1243,6 +1251,12 @@ impl HostDriver {
         timeout: std::time::Duration,
     ) -> Result<Option<PipeFrame>, DriverError> {
         self.processes.read_pipe(id, timeout).await
+    }
+
+    /// Whether exec `id`'s live output stopped at the stall deadline (ADR 0031): the `linux`
+    /// adapter's `output_stalled` (design 32 § 3). `false` for an exec this driver does not track.
+    pub(crate) fn output_stalled(&self, id: &str) -> bool {
+        self.processes.output_stalled(id)
     }
 
     /// Half-closes stdin without ending output observation.

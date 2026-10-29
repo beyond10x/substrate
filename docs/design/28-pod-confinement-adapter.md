@@ -53,8 +53,8 @@ credentials never appear in an error, a record or a log line.
 Open last sweeps the namespace (`approval-record:pod-orphan-policy-sweep-d124`). It lists the
 NetworkPolicies labelled `app.kubernetes.io/managed-by: b10x-substrate` and deletes one only when
 its name is the run its `b10x-substrate/run` label names, the Pod of that name does not exist, in
-any phase, and the API server's clock (its `Date`) puts the policy's `creationTimestamp` at least
-90 seconds back: twice the 30-second API timeout plus 30 seconds. `start` creates the policy, waits
+any phase, the API shows that Pod's container stopped (§ *A gone Pod*), and the API server's clock
+(its `Date`) puts the policy's `creationTimestamp` at least 90 seconds back: twice the 30-second API timeout plus 30 seconds. `start` creates the policy, waits
 up to 30 seconds for that answer, then creates the Pod and waits up to 30 seconds more, and the API
 server stamps a `creationTimestamp` in whole seconds before admission and storage, possibly on
 another member than the one whose `Date` the sweep reads; a younger policy may fence a run another
@@ -72,7 +72,8 @@ on a thread of its own: each round lists the metadata alone of the namespace's P
 bounded at 4 MiB, at most 64. A whole Pod of a run the adapter admits holds up to 256 KiB of argv
 and 256 KiB of environment, so a page of whole Pods of ten such runs would pass the bound and fail
 every round; a Pod's metadata holds neither. A kept policy
-whose Pod the list lacks is deleted after one more read of its Pod finds it gone, when the API has
+whose Pod the list lacks is deleted after one more read of its Pod finds it gone and the API shows
+its container stopped (§ *A gone Pod*), when the API has
 shown that Pod before (its start stored the Pod and creates it no more) or the policy is 90 seconds
 old by that list's `Date`. A young policy whose Pod was never seen therefore stays until it is 90
 seconds old, as at open. A round that fails is tried again at the next. The thread ends once
@@ -128,9 +129,11 @@ Pod carries one `ownerReference`, to that policy by the `uid` its create answere
 `controller: false` and no `blockOwnerDeletion`, so the garbage collector removes a Pod whose
 policy is gone and the Role needs nothing more; `render` shows the Pod without it, because the uid
 exists only once the policy is created. The
-minimal Role is `create`, `get`, `list`, `delete` on `pods` and `networkpolicies`, and `get` on
-`pods/log`; the CI lane runs with exactly that Role and the namespace labelled
-`pod-security.kubernetes.io/enforce: restricted`.
+minimal Role is `create`, `get`, `list`, `watch`, `delete` on `pods` and `networkpolicies`, and
+`get` on `pods/log`; the CI lane runs with exactly that Role and the namespace labelled
+`pod-security.kubernetes.io/enforce: restricted`. `watch` on `pods` is how the adapter learns
+whether a gone Pod's container stopped (§ *A gone Pod*, decision D173); the adapter watches no
+NetworkPolicy, and the one Role grants the verb on both resources.
 
 ## Refusals: profile and command fields
 
@@ -184,15 +187,16 @@ the start `confinement.pod-api-failed`, so a run whose policy another adapter's 
 between never starts; a removal after the read-back leaves the Pod to the garbage collector through
 its `ownerReference`. One task per run polls the Pod. When the API shows
 the container terminated, the task reads the container's log, at most the output bound plus one
-byte, then deletes the Pod and, once the Pod is confirmed gone, the policy, before `wait` reports
-the run ended. A Pod is never force-deleted: every deletion leaves the kubelet a grace of at least
-1 second, so a Pod gone after the adapter's own deletion is the kubelet's confirmation that its
-container stopped. A Pod's removal not confirmed within 2 minutes keeps its policy and reports the
+byte, then deletes the Pod and, once the Pod is confirmed gone and its container stopped (§ *A gone
+Pod*), the policy, before `wait` reports the run ended. The adapter never force-deletes a Pod:
+every deletion leaves the kubelet a grace of at least 1 second. Someone else may, so a Pod gone
+after the adapter's own deletion is not by itself the kubelet's confirmation that its container
+stopped. A Pod's removal not confirmed within 2 minutes keeps its policy and reports the
 run `Unknown` while the task keeps trying; so does an API that has not answered for 2 minutes,
 whatever the removal is doing, and a Pod someone else deleted. After `Unknown` the task deletes the
 Pod again, the pause between deletions doubling from 500 ms to 30 seconds, and reads it every 2
-seconds in between, until the API confirms the Pod gone, then removes the policy the same way; the
-run still reads `Unknown`. The task lives as long as the process that holds the adapter; the next
+seconds in between, until the API confirms the Pod gone, then removes the policy the same way once
+its container is shown stopped (§ *A gone Pod*); the run still reads `Unknown`. The task lives as long as the process that holds the adapter; the next
 open's sweep, and the adapter it opens, remove what it leaves. The adapter tracks at most 128 runs and makes room by forgetting runs that are over, oldest
 first; a run whose Pod's removal the API has not confirmed is not over for that count, so at 128 a
 start is refused `exec.tracking-capacity` and the removal tasks never outnumber the cap.
@@ -207,10 +211,46 @@ output. Only a container the API has not shown started reads as empty.
 
 `signal: Kill` reads the log, then deletes the Pod with a grace period of 1 second; `signal: Term`
 with 5 seconds; the kubelet sends `SIGTERM` and then `SIGKILL`. The run ends with that signal once
-the API shows the container terminated or the Pod gone; a kubelet that has not confirmed it within
-60 seconds leaves the run `Unknown`, because its container may still run. A Pod not ended 60 s
-after the wall bound is deleted the same way and ends as a `Kill`. The policy is deleted after the
-Pod in every case.
+the API shows the container terminated, on the Pod or in the watch that follows its disappearance;
+a kubelet that has not confirmed it within 60 seconds leaves the run `Unknown`, because its
+container may still run. A Pod not ended 60 s after the wall bound is deleted the same way and ends
+as a `Kill`. The policy is deleted after the Pod, and only once its container is shown stopped.
+
+## A gone Pod
+
+A read that finds a run's Pod gone (404) says nothing of its container by itself. A forced
+deletion, PodGC's after the Pod's node stopped answering or an operator's, removes the Pod without
+its kubelet, and the container may still run on that node; its policy is then the only fence of its
+egress (`story:pod-force-deleted-keeps-its-policy`, review finding J2). The run's task, the open
+sweep, the deferred sweep and an abandoned start therefore apply one rule before they delete a
+policy whose Pod is gone: the API must show the container stopped.
+
+- Evidence is the container's `terminated` state, which only the kubelet writes, in a Pod whose
+  own `spec.restartPolicy` reads `Never`, so the container does not run again; the adapter renders
+  `Never`, and a Pod an admission webhook gave another policy is not evidence. A read of the Pod
+  that showed it is enough.
+- A deletion that leaves the Pod without `spec.nodeName` is evidence too: no node was ever bound,
+  so no kubelet held the Pod and no container of it ran; the API server removes such a Pod at once.
+  A read before the deletion is no such evidence, because the Pod may be bound after it.
+- Otherwise the adapter watches the Pod (`watch=1`, `fieldSelector=metadata.name=<run>`) from the
+  newest `resourceVersion` it read for the run: the Pod's, from the Pod its create stored on, or,
+  for a start whose Pod create went unanswered, the policy's, which `start` creates before the Pod.
+  The API server replays every change since,
+  the deletion last. The kubelet writes the container terminated before it removes a Pod it was
+  asked to delete (observed on kind v1.37.0, 2026-10-28: after deletions with a grace of 1 and of 5
+  seconds, the last two events before `DELETED` and the `DELETED` object itself show the container
+  `terminated`). An event showing the container terminated releases the policy.
+- The policy stays when the adapter read no `resourceVersion`, when the watch answers 410 (the
+  history is gone) or an `ERROR` event, when it shows nothing within 5 seconds, when it is refused
+  (a Role without `watch`), and when the `DELETED` object shows the container not terminated. A
+  `Failed` phase is not evidence: PodGC marks a Pod `Failed` before it force-deletes it. An object
+  with another `uid` than the first one read is another Pod and is ignored.
+- The run's task then reports the run `Unknown`; an unanswered watch is asked again every 2
+  seconds, and until it is answered the run counts against the 128 tracked runs, so these tasks
+  stay bounded. An abandoned start asks once and its failure says the policy stays. The open sweep
+  leaves such a policy and logs it; the deferred sweep stops checking it.
+  A policy kept this way stays until an operator removes it, labelled as every run object is; the
+  next open's sweep reads it again and keeps it while the same holds.
 
 ## Not decided here
 

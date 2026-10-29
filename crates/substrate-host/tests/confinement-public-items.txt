@@ -2,7 +2,7 @@
 # tests/confinement_public_items.rs. Regenerate with
 # SUBSTRATE_BLESS_PUBLIC_ITEMS=1 cargo test -p b10x-substrate-host --test confinement_public_items
 confinement/facts.rs: pub const FAMILY_ORDER: [ContractFamily; 10] = [ContractFamily::ProcessRun, ContractFamily::ProcessWatch, ContractFamily::OutputRead, ContractFamily::Wait, ContractFamily::Workspace, ContractFamily::FilesystemView, ContractFamily::NetworkEgress, ContractFamily::NetworkIngress, ContractFamily::Limits, ContractFamily::Audit];
-confinement/facts.rs: pub const FACT_ORDER: [Fact; 11] = [Fact::DeclaredInsecure, Fact::PathsAreHostPaths, Fact::WholeTreeKill, Fact::LocalPermitted, Fact::IpcSocketAllowlist, Fact::IpcSignalsContained, Fact::SealedPaths, Fact::ExecSubpaths, Fact::PrivateTmpdir, Fact::HostNetwork, Fact::ImageDigestPinned];
+confinement/facts.rs: pub const FACT_ORDER: [Fact; 13] = [Fact::DeclaredInsecure, Fact::PathsAreHostPaths, Fact::WholeTreeKill, Fact::LocalPermitted, Fact::IpcSocketAllowlist, Fact::IpcSignalsContained, Fact::SealedPaths, Fact::ExecSubpaths, Fact::PrivateTmpdir, Fact::HostNetwork, Fact::ImageDigestPinned, Fact::StdinPipe, Fact::OutputLive];
 confinement/facts.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "snake_case")] pub enum InnerAdapter
 confinement/facts.rs: enum InnerAdapter > Local,
 confinement/facts.rs: enum InnerAdapter > Linux,
@@ -29,7 +29,15 @@ confinement/linux.rs: mod imp > pub const DEFAULT_BOUNDS: ProcessBounds = Proces
 confinement/linux.rs: mod imp > pub fn proof(machine: &CapabilitySnapshot) -> AdapterFacts
 confinement/linux.rs: mod imp > pub struct LinuxAdapter
 confinement/linux.rs: mod imp > struct LinuxAdapter > (private fields)
+confinement/linux.rs: mod imp > #[async_trait] impl StdinPipe for HostPipe
 confinement/linux.rs: mod imp > #[async_trait] impl ConfinementAdapter for LinuxAdapter
+confinement/live.rs: pub const MAX_QUEUED_CHUNKS: u32 = 16;
+confinement/live.rs: pub const LIVE_OUTPUT_RETENTION_INVALID: &str = "confinement.live-output-retention-invalid";
+confinement/live.rs: pub const LIVE_OUTPUT_UNREAD: &str = "confinement.live-output-unread";
+confinement/live.rs: #[derive(Debug, Clone, PartialEq, Eq)] #[non_exhaustive] pub enum OutputEvent
+confinement/live.rs: enum OutputEvent > Chunk {stream: PipeStream, offset: u64, bytes: Vec<u8>},
+confinement/live.rs: enum OutputEvent > Bounded {stream: PipeStream},
+confinement/live.rs: enum OutputEvent > Stalled,
 confinement/local.rs: pub const LOCAL_POLICY_ENV: &str = "SUBSTRATE_CONFINEMENT_LOCAL";
 confinement/local.rs: pub const LOCAL_OUTPUT_LIMIT_BYTES: usize = 1_048_576;
 confinement/local.rs: pub const LOCAL_MAX_TRACKED_RUNS: usize = 128;
@@ -65,7 +73,10 @@ confinement/mod.rs: pub use crate::confinement_types::{AdapterName, ContractFami
 confinement/mod.rs: pub use crate::{DeclaredWritableRoot, HostConfig};
 confinement/mod.rs: pub use crate::output_retention::{KeptOutput, OutputRetention, Retention};
 confinement/mod.rs: pub use facts::{AdapterFacts, FACT_ORDER, FAMILY_ORDER, InnerAdapter, ReservedField};
-confinement/mod.rs: pub use profile::{ConfinementProfile, IoBounds, Ipc, Network, ProcessBounds, image_is_pinned};
+confinement/mod.rs: pub use profile::{ConfinementProfile, IoBounds, Ipc, Network, OutputDelivery, ProcessBounds, StdinMode, image_is_pinned};
+confinement/mod.rs: pub use stdin::{MAX_STDIN_BYTES, STDIN_CHUNK_BYTES, run_with_stdin};
+confinement/mod.rs: pub use crate::observation::PipeStream;
+confinement/mod.rs: pub use live::{LIVE_OUTPUT_RETENTION_INVALID, LIVE_OUTPUT_UNREAD, MAX_QUEUED_CHUNKS, OutputEvent};
 confinement/mod.rs: pub use substrate_wire::{ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest, Signal, WritableHostRoot};
 confinement/mod.rs: pub use substrate_wire::WorkspaceAccess;
 confinement/mod.rs: pub const ADAPTER_UNSERVED: &str = "confinement.adapter-unserved";
@@ -162,6 +173,10 @@ confinement/mod.rs: trait ConfinementAdapter > async fn observe(&self, run: &Run
 confinement/mod.rs: trait ConfinementAdapter > async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError>;
 confinement/mod.rs: trait ConfinementAdapter > async fn wait(&self, run: &RunId) -> Result<RunObservation, ConfinementError>;
 confinement/mod.rs: trait ConfinementAdapter > async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError>;
+confinement/mod.rs: trait ConfinementAdapter > async fn write_stdin(&self, _run: &RunId, _bytes: &[u8]) -> Result<(), ConfinementError>
+confinement/mod.rs: trait ConfinementAdapter > async fn close_stdin(&self, _run: &RunId) -> Result<(), ConfinementError>
+confinement/mod.rs: trait ConfinementAdapter > async fn read_output(&self, _run: &RunId, _timeout: Duration) -> Result<Option<OutputEvent>, ConfinementError>
+confinement/mod.rs: trait ConfinementAdapter > fn output_stalled(&self, _run: &RunId) -> bool
 confinement/oci.rs: pub const LABEL: &str = "dev.b10x.substrate.confinement";
 confinement/oci.rs: pub const RUN_LABEL: &str = "dev.b10x.substrate.confinement.run";
 confinement/oci.rs: pub const EMBEDDER_LABEL: &str = "dev.b10x.substrate.confinement.embedder";
@@ -183,6 +198,7 @@ confinement/oci.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub struct RuntimePro
 confinement/oci.rs: struct RuntimeProbe > pub program: PathBuf,
 confinement/oci.rs: struct RuntimeProbe > pub flavor: RuntimeFlavor,
 confinement/oci.rs: struct RuntimeProbe > pub version: String,
+confinement/oci.rs: struct RuntimeProbe > pub client_version: Option<String>,
 confinement/oci.rs: struct RuntimeProbe > pub rootless: bool,
 confinement/oci.rs: struct RuntimeProbe > pub limits: bool,
 confinement/oci.rs: struct RuntimeProbe > pub cpus: u32,
@@ -222,6 +238,7 @@ confinement/pod.rs: struct PodSettings > pub ephemeral_storage_bytes: u64,
 confinement/pod.rs: pub fn proof() -> AdapterFacts
 confinement/pod.rs: pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError>
 confinement/pod.rs: pub fn open_pod_timed(request: PodRequest, timing: PodTiming) -> Result<Arc<PodAdapter>, ConfinementError>
+confinement/pod.rs: impl<T> Drop for AbortOnDrop<T>
 confinement/pod.rs: pub fn check_profile(settings: &PodSettings, profile: &ConfinementProfile) -> Result<(), ConfinementError>
 confinement/pod.rs: pub fn render_manifests(settings: &PodSettings, profile: &ConfinementProfile, command: &Command, run: &str) -> Result<Value, ConfinementError>
 confinement/pod.rs: pub struct PodAdapter
@@ -247,6 +264,8 @@ confinement/profile.rs: struct ConfinementProfile > pub ipc: Ipc,
 confinement/profile.rs: struct ConfinementProfile > pub process_bounds: Option<ProcessBounds>,
 confinement/profile.rs: struct ConfinementProfile > pub io_bounds: Option<IoBounds>,
 confinement/profile.rs: struct ConfinementProfile > pub output_retention: OutputRetention,
+confinement/profile.rs: struct ConfinementProfile > pub stdin: StdinMode,
+confinement/profile.rs: struct ConfinementProfile > pub output_delivery: OutputDelivery,
 confinement/profile.rs: struct ConfinementProfile > pub secret_slots: Vec<SecretSlotRequest>,
 confinement/profile.rs: struct ConfinementProfile > pub audit: Option<AuditSink>,
 confinement/profile.rs: struct ConfinementProfile > pub image: Option<String>,
@@ -255,6 +274,13 @@ confinement/profile.rs: struct ConfinementProfile > pub rate_bounds: Option<serd
 confinement/profile.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub enum Network
 confinement/profile.rs: enum Network > Isolated,
 confinement/profile.rs: enum Network > Egress {apertures: Vec<String>},
+confinement/profile.rs: #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)] #[non_exhaustive] pub enum StdinMode
+confinement/profile.rs: enum StdinMode > Null,
+confinement/profile.rs: enum StdinMode > Piped {limit_bytes: u64},
+confinement/profile.rs: impl StdinMode > pub fn is_piped(self) -> bool
+confinement/profile.rs: #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)] #[non_exhaustive] pub enum OutputDelivery
+confinement/profile.rs: enum OutputDelivery > Recorded,
+confinement/profile.rs: enum OutputDelivery > Live {queued_chunks: u32},
 confinement/profile.rs: #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)] pub struct Ipc
 confinement/profile.rs: struct Ipc > pub socket_allowlist: bool,
 confinement/profile.rs: struct Ipc > pub signals_contained: bool,
@@ -269,6 +295,13 @@ confinement/profile.rs: impl ConfinementProfile > pub fn required_families(&self
 confinement/profile.rs: impl ConfinementProfile > pub fn required_facts(&self) -> Vec<Fact>
 confinement/profile.rs: impl ConfinementProfile > pub fn reason(&self) -> Option<&str>
 confinement/profile.rs: pub fn image_is_pinned(image: &str) -> bool
+confinement/stdin.rs: pub const MAX_STDIN_BYTES: u64 = 16 * 1_024 * 1_024;
+confinement/stdin.rs: pub const STDIN_CHUNK_BYTES: usize = 64 * 1_024;
+confinement/stdin.rs: #[async_trait] impl StdinPipe for ChildPipe
+confinement/stdin.rs: impl Drop for Armed<'_>
+confinement/stdin.rs: impl Drop for StdinWriter
+confinement/stdin.rs: pub async fn run_with_stdin(adapter: &Arc<dyn ConfinementAdapter>, admitted: &AdmittedProfile, command: &Command, input: &[u8]) -> Result<(RunObservation, RunOutput, u64), ConfinementError>
+confinement/stdin.rs: impl Drop for KillOnDrop
 confinement/systemd.rs: pub const SESSION_BUS_ENV: &str = "DBUS_SESSION_BUS_ADDRESS";
 confinement/systemd.rs: pub const SYSTEMD_OUTPUT_LIMIT_BYTES: usize = super::local::LOCAL_OUTPUT_LIMIT_BYTES;
 confinement/systemd.rs: pub const SYSTEMD_MAX_TRACKED_RUNS: usize = 128;
@@ -318,9 +351,11 @@ generated/confinement.rs: enum Fact > #[serde(rename = "image_digest_pinned")] I
 generated/confinement.rs: enum Fact > #[serde(rename = "ipc_signals_contained")] IpcSignalsContained,
 generated/confinement.rs: enum Fact > #[serde(rename = "ipc_socket_allowlist")] IpcSocketAllowlist,
 generated/confinement.rs: enum Fact > #[serde(rename = "local_permitted")] LocalPermitted,
+generated/confinement.rs: enum Fact > #[serde(rename = "output_live")] OutputLive,
 generated/confinement.rs: enum Fact > #[serde(rename = "paths_are_host_paths")] PathsAreHostPaths,
 generated/confinement.rs: enum Fact > #[serde(rename = "private_tmpdir")] PrivateTmpdir,
 generated/confinement.rs: enum Fact > #[serde(rename = "sealed_paths")] SealedPaths,
+generated/confinement.rs: enum Fact > #[serde(rename = "stdin_pipe")] StdinPipe,
 generated/confinement.rs: enum Fact > #[serde(rename = "whole_tree_kill")] WholeTreeKill,
 lib.rs: #[derive(Debug, Clone)] pub struct GitSourceBinding
 lib.rs: struct GitSourceBinding > pub name: String,
@@ -377,6 +412,9 @@ lib.rs: impl DriverError > pub fn not_found() -> Self
 lib.rs: impl DriverError > pub fn unserved(code: &'static str, message: impl Into<String>, address: &str) -> Self
 lib.rs: impl DriverError > pub fn exhausted(code: &'static str, message: impl Into<String>, address: &str) -> Self
 lib.rs: impl DriverError > pub fn failed(code: &'static str, message: impl Into<String>) -> Self
+observation.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum PipeStream
+observation.rs: enum PipeStream > Stdout,
+observation.rs: enum PipeStream > Stderr,
 output_retention.rs: #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)] pub enum Retention
 output_retention.rs: enum Retention > Head,
 output_retention.rs: enum Retention > Tail,

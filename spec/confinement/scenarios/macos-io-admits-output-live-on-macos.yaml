@@ -1,0 +1,45 @@
+# Design 32 (`story:adapter-live-output`), the macos I/O stage: the confined run's output reaches
+# the embedder while it runs, through the same shared drain as `local`. `macos` declares
+# `output_live` once the macos lane proves a confined run's output arrives while it runs.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: macos-io-admits-output-live-on-macos
+summary: "lane macos: macos admits a profile requiring output_live, reported declared_insecure: false."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-10-29T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: macos
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, audit]
+      facts: [paths_are_host_paths, ipc_signals_contained, sealed_paths, exec_subpaths, private_tmpdir, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-10-29T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: macos
+      required_families: [output_read]
+      required_facts: [output_live]
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: macos
+          families: [output_read]
+          facts: [output_live]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: macos
+      facts: [output_live]
+      declared_insecure: false

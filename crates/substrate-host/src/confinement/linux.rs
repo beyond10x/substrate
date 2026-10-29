@@ -19,6 +19,12 @@
 //! | `whole_tree_kill` | `exec.cgroup-kill` |
 //! | `ipc_socket_allowlist` | the floor: every exec installs ADR 0039's seccomp socket filter or does not start |
 //! | `ipc_signals_contained` | the floor with a pid namespace |
+//! | `stdin_pipe`, `output_live` | the floor: the session path's pipes, through bubblewrap |
+//!
+//! A live run's output is the session path's queue (design 32 § 5). `read_output` reads it in
+//! slices of at most 100 ms so that a `signal`, which takes the same receiver lock
+//! the host holds for one read, waits at most one slice; every signal is end-equivalent, since
+//! the host closes the queue, signals and kills the cgroup.
 //!
 //! `network_ingress` is served by no adapter. `paths_are_host_paths`, `sealed_paths`,
 //! `exec_subpaths`, `private_tmpdir` and `host_network` are not proved, and a profile requiring
@@ -95,7 +101,7 @@ pub use imp::proof;
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
@@ -107,10 +113,12 @@ mod imp {
         WritableRoot,
     };
 
+    use super::super::live::{self, Progress};
+    use super::super::stdin::{self, StdinPipe, StdinWriter};
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
-        ConfinementProfile, ContractFamily, Fact, KeptOutput, Network, ProcessBounds,
-        RenderedCommand, RunExit, RunId, RunObservation, RunOutput, RunState,
+        ConfinementProfile, ContractFamily, Fact, KeptOutput, Network, OutputEvent, ProcessBounds,
+        RenderedCommand, RunExit, RunId, RunObservation, RunOutput, RunState, StdinMode,
     };
     use super::LinuxRequest;
     use crate::{DispatchOutcome, Driver as _, DriverError, HostDriver, PLATFORM_UNSERVED};
@@ -125,6 +133,10 @@ mod imp {
 
     /// How often `wait` reads the driver's observation.
     const WAIT_POLL: Duration = Duration::from_millis(20);
+
+    /// The longest one host read of a live run waits: the host's `signal` takes the receiver
+    /// lock that read holds, so a signal waits at most this long for it (design 32 § 3).
+    const READ_SLICE: Duration = Duration::from_millis(100);
 
     pub(super) fn open(
         request: LinuxRequest,
@@ -145,6 +157,8 @@ mod imp {
             capability: machine.facts,
             snapshot: machine.snapshot,
             driver,
+            writers: parking_lot::Mutex::new(HashMap::new()),
+            readers: parking_lot::Mutex::new(HashMap::new()),
         }))
     }
 
@@ -185,6 +199,8 @@ mod imp {
             &[
                 (Fact::WholeTreeKill, facts.exec_cgroup_kill == Some(true)),
                 (Fact::IpcSocketAllowlist, floor),
+                (Fact::StdinPipe, floor),
+                (Fact::OutputLive, floor),
                 (
                     Fact::IpcSignalsContained,
                     floor
@@ -203,9 +219,126 @@ mod imp {
         capability: CapabilityFacts,
         snapshot: String,
         driver: Arc<HostDriver>,
+        /// The writer of each run started with a piped standard input, kept while the driver
+        /// still tracks the run, so a write after its end is `session.input-closed`.
+        writers: parking_lot::Mutex<HashMap<RunId, Arc<StdinWriter>>>,
+        /// Each live run's reader lock and where its reader is, kept while the driver still
+        /// tracks the run (design 32 § 3).
+        readers: parking_lot::Mutex<HashMap<RunId, Arc<tokio::sync::Mutex<Progress>>>>,
+    }
+
+    /// A run's standard input under `linux`: the host driver's pipe, by exec id. The host never
+    /// drops it at the run's end, so the adapter closes it then (design 32 § 2).
+    struct HostPipe {
+        driver: Arc<HostDriver>,
+        id: String,
+    }
+
+    #[async_trait]
+    impl StdinPipe for HostPipe {
+        async fn write(&mut self, bytes: &[u8]) -> Result<(), ConfinementError> {
+            Ok(self.driver.write_pipe_session(&self.id, bytes).await?)
+        }
+
+        async fn close(&mut self) {
+            let _ = self.driver.close_pipe_session_input(&self.id).await;
+        }
+
+        /// Closing is async here: started on the current runtime, where there is one. Where there
+        /// is none, the next write or close closes it, and so does the run's end.
+        fn close_now(&mut self) {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let driver = Arc::clone(&self.driver);
+                let id = self.id.clone();
+                runtime.spawn(async move {
+                    let _ = driver.close_pipe_session_input(&id).await;
+                });
+            }
+        }
     }
 
     impl LinuxAdapter {
+        /// The writer of `run`; for a run without one, `session.not-pipe` while the driver tracks
+        /// it and the driver's own refusal once it does not.
+        fn writer(&self, run: &RunId) -> Result<Arc<StdinWriter>, ConfinementError> {
+            if let Some(writer) = self.writers.lock().get(run) {
+                return Ok(Arc::clone(writer));
+            }
+            self.driver.processes.observe(run.as_str())?;
+            Err(stdin::not_pipe())
+        }
+
+        /// The run's end, observed: its standard input is closed and ended (design 32 § 2).
+        async fn ended(&self, run: &RunId) {
+            let writer = self.writers.lock().get(run).cloned();
+            if let Some(writer) = writer
+                && !writer.ended()
+            {
+                writer.end().await;
+            }
+        }
+
+        /// Forgets the writers of ended runs the driver no longer tracks.
+        fn forget_writers(&self) {
+            self.writers.lock().retain(|run, writer| {
+                !writer.ended() || self.driver.processes.observe(run.as_str()).is_ok()
+            });
+            // A live run's events stay readable until the driver forgets the run.
+            self.readers
+                .lock()
+                .retain(|run, _| self.driver.processes.observe(run.as_str()).is_ok());
+        }
+
+        fn reader(
+            &self,
+            run: &RunId,
+        ) -> Result<Arc<tokio::sync::Mutex<Progress>>, ConfinementError> {
+            if let Some(reader) = self.readers.lock().get(run) {
+                return Ok(Arc::clone(reader));
+            }
+            self.driver.processes.observe(run.as_str())?;
+            Err(live::not_live())
+        }
+
+        /// The next live event under the run's reader lock, reading the host's queue in slices
+        /// of at most [`READ_SLICE`] until the caller's deadline: an elapsed slice is not an
+        /// answer (design 32 § 3).
+        async fn read_live(
+            &self,
+            run: &RunId,
+            timeout: Duration,
+        ) -> Result<Option<OutputEvent>, ConfinementError> {
+            let reader = self.reader(run)?;
+            if timeout.is_zero() {
+                return Err(live::timeout_invalid());
+            }
+            let deadline = tokio::time::Instant::now() + timeout;
+            let mut progress = tokio::time::timeout_at(deadline, reader.lock())
+                .await
+                .map_err(|_| live::read_timeout())?;
+            while !progress.exhausted() {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    return Err(live::read_timeout());
+                }
+                match self
+                    .driver
+                    .read_pipe_session(run.as_str(), left.min(READ_SLICE))
+                    .await
+                {
+                    Ok(Some(frame)) => return Ok(Some(progress.chunk(frame.stream, frame.bytes))),
+                    Ok(None) => progress.exhaust(),
+                    Err(error) if error.code == substrate_wire::SESSION_READ_TIMEOUT => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            let output = self.output(run).await?;
+            Ok(progress.after_queue(
+                live::record_of(&output),
+                self.driver.output_stalled(run.as_str()),
+            ))
+        }
+
         /// The workspace's root name: it must be a directory directly beneath the driver's
         /// workspace root, which is where the driver resolves and pins it.
         fn root_name(&self, workspace: &Path) -> Result<String, ConfinementError> {
@@ -321,13 +454,46 @@ mod imp {
                 ulid::Ulid::generate().to_string().to_ascii_lowercase()
             );
             let retention = admitted.profile().output_retention;
+            let piped = admitted.profile().stdin;
+            let live = admitted
+                .profile()
+                .output_delivery
+                .queued_chunks()
+                .map(|queued| usize::try_from(queued).unwrap_or(usize::MAX));
+            self.forget_writers();
             match self
                 .driver
-                .start_exec_for_adapter(&id, &root_name, &input, retention)
+                .start_exec_for_adapter(&id, &root_name, &input, retention, piped.is_piped(), live)
                 .await
             {
                 DispatchOutcome::Observed(_) => {
-                    let run = RunId::new(id);
+                    let run = RunId::new(id.clone());
+                    if live.is_some() {
+                        self.readers.lock().insert(
+                            run.clone(),
+                            Arc::new(tokio::sync::Mutex::new(Progress::default())),
+                        );
+                    }
+                    if let StdinMode::Piped { limit_bytes } = piped {
+                        let writer = StdinWriter::new(
+                            limit_bytes,
+                            Box::new(HostPipe {
+                                driver: Arc::clone(&self.driver),
+                                id: id.clone(),
+                            }),
+                        );
+                        // The adapter's table owns the writer; the task only reaches it, so
+                        // dropping the adapter drops the writer, which closes the pipe.
+                        let ending = Arc::downgrade(&writer);
+                        self.writers.lock().insert(run.clone(), writer);
+                        let driver = Arc::clone(&self.driver);
+                        tokio::spawn(async move {
+                            driver.processes.wait_ended(&id).await;
+                            if let Some(writer) = ending.upgrade() {
+                                writer.end().await;
+                            }
+                        });
+                    }
                     admitted.audit_start(&run, &command.argv[0]);
                     Ok(run)
                 }
@@ -365,6 +531,7 @@ mod imp {
         capability: &CapabilityFacts,
         profile: &ConfinementProfile,
     ) -> Result<(), ConfinementError> {
+        stdin::check_streams(profile)?;
         super::super::check_workspace_access(profile)?;
         if !profile.workspace_access.is_read_write()
             && capability.exec_workspace_scoped_write != Some(true)
@@ -485,7 +652,11 @@ mod imp {
 
         async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
             let observed = self.driver.observe_exec(run.as_str()).await?;
-            Ok(Self::observation(run, &observed))
+            let observation = Self::observation(run, &observed);
+            if observation.state != RunState::Running {
+                self.ended(run).await;
+            }
+            Ok(observation)
         }
 
         async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
@@ -514,6 +685,7 @@ mod imp {
                 let observation = Self::observation(run, &observed);
                 // The driver bounds every run by its timeout, so this ends.
                 if observation.state != RunState::Running && observed.output_complete {
+                    self.ended(run).await;
                     return Ok(observation);
                 }
                 tokio::time::sleep(WAIT_POLL).await;
@@ -531,6 +703,27 @@ mod imp {
                 )
                 .await?;
             Ok(())
+        }
+
+        async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {
+            self.writer(run)?.write(bytes).await
+        }
+
+        async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {
+            self.writer(run)?.close().await;
+            Ok(())
+        }
+
+        async fn read_output(
+            &self,
+            run: &RunId,
+            timeout: Duration,
+        ) -> Result<Option<OutputEvent>, ConfinementError> {
+            self.read_live(run, timeout).await
+        }
+
+        fn output_stalled(&self, run: &RunId) -> bool {
+            self.readers.lock().contains_key(run) && self.driver.output_stalled(run.as_str())
         }
     }
 

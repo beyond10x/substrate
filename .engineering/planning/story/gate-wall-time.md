@@ -2,9 +2,13 @@
 format: aep.planning-md/3
 id: story:gate-wall-time
 kind: story
-status: draft
+status: implemented
 title: The full gate's wall time falls without dropping a check
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-28T21:27:15Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-10-28T21:27:16Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-28T21:27:17Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 # The full gate's wall time falls without dropping a check
 

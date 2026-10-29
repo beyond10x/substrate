@@ -2,12 +2,15 @@
 format: aep.planning-md/3
 id: story:adapter-live-output
 kind: story
-status: draft
+status: active
 title: A confinement adapter delivers a child's output while it runs
 relations:
 - decomposes: epic:confinement-contract-family
 - depends_on: story:adapter-stdin-pipe
-revision: 5
+revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-28T23:19:35Z", actor: "human:timo", revision: 6}
+- {from: "proposed", to: "active", at: "2026-10-28T23:19:35Z", actor: "human:timo", revision: 7}
 ---
 # A confinement adapter delivers a run's output while it runs
 

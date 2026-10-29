@@ -8,6 +8,10 @@
 //! variable set, an absent runtime **fails** these cases. Without it they are **absent, never
 //! reported as passed** (invariant 3): each prints `ABSENT` and its reason.
 //!
+//! The stdin cases and the scenarios' `stdin_pipe` follow the runtime's own probe: on a runtime
+//! outside the stdin pin each asserts that a piped profile is refused `confinement.fact-unserved`
+//! naming `stdin_pipe`, and prints which branch it took.
+//!
 //! The portable cases need no runtime: a stand-in program answers `info`, and they assert what
 //! `open` reads from it, the named refusals of admission, and the `render` argv.
 
@@ -346,7 +350,10 @@ fn open_reads_rootless_and_proves_image_digest_pinned() {
             "audit"
         ])
     );
-    assert_eq!(facts["facts"], serde_json::json!(["image_digest_pinned"]));
+    assert_eq!(
+        facts["facts"],
+        serde_json::json!(["image_digest_pinned", "output_live"])
+    );
 }
 
 #[test]
@@ -798,15 +805,126 @@ fn ess_confinement_oci_lane_executes_every_authored_oci_scenario() {
         declared,
         "an oci-lane scenario is not an oci-* scenario"
     );
-    let (executed, audited, open_checks) = support::run(&scenarios, |step| {
-        assert_eq!(step.adapter, "oci");
-        Ok(open_lane(&runtime, Vec::new()))
-    });
+    // The scenarios state the stdin pin's runtime. On any other `stdin_pipe` is unproved: each
+    // open proves the declared set without it, and an admission requiring it is its refusal.
+    let pinned = stdin_pinned("ESS confinement oci lane", &runtime);
+    let unproved: &[Fact] = if pinned { &[] } else { &[Fact::StdinPipe] };
+    let requiring_stdin = scenarios
+        .iter()
+        .filter(|(_, scenario)| {
+            scenario["steps"]
+                .as_array()
+                .expect("steps")
+                .iter()
+                .any(|step| {
+                    step["command"] == "substrate.confinement.AdmitProfile"
+                        && step["input"]["required_facts"]["value"]
+                            .as_array()
+                            .expect("required facts")
+                            .contains(&serde_json::json!("stdin_pipe"))
+                })
+        })
+        .count();
+    assert!(requiring_stdin > 0, "no oci scenario admits stdin_pipe");
+    let (executed, audited, open_checks, refused) =
+        support::run_without(&scenarios, unproved, |step| {
+            assert_eq!(step.adapter, "oci");
+            Ok(open_lane(&runtime, Vec::new()))
+        });
     assert_eq!(executed, declared, "an oci scenario did not run");
+    assert_eq!(
+        refused,
+        if pinned { 0 } else { requiring_stdin },
+        "each admission requiring stdin_pipe follows the probe"
+    );
     println!(
         "ESS confinement oci lane: {executed} scenarios executed of {declared} declared, \
-         {audited} refusal audit records asserted, {open_checks} open checks refused, 0 failed"
+         {audited} refusal audit records asserted, {open_checks} open checks refused, \
+         {refused} admissions refused fact-unserved stdin_pipe on an unpinned runtime, 0 failed"
     );
+}
+
+/// Whether the lane's runtime, probed as `open` probes it, is an entry of the stdin pin (design 32
+/// D13), so `oci` proves `stdin_pipe` on it. Prints the probed versions and the branch taken.
+fn stdin_pinned(name: &str, runtime: &Path) -> bool {
+    let probe = oci::probe(&OciRequest {
+        runtime: runtime.to_path_buf(),
+        workspace_root: workspace_root(),
+        writable_roots: Vec::new(),
+    })
+    .unwrap_or_else(|error| panic!("{LANE_ENV}=1 and the runtime does not probe: {error}"));
+    let pinned = oci::proof(&probe).proves(&Fact::StdinPipe);
+    println!(
+        "{name}: runtime {:?} server {} client {:?}: stdin {}",
+        probe.flavor,
+        probe.version,
+        probe.client_version,
+        if pinned { "pinned" } else { "not pinned" }
+    );
+    pinned
+}
+
+/// The branch of a stdin case on the lane's runtime: `true` on the stdin pin, where the opened
+/// adapter proves `stdin_pipe` and the caller's piped assertions apply. Otherwise `piped` is
+/// refused `confinement.fact-unserved` naming `stdin_pipe` (501) and audited, and the same profile
+/// with stdin `Null` still runs `cat` to exit 0 on its end of file with no output; `false`.
+async fn stdin_served(
+    name: &str,
+    runtime: &Path,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    piped: &ConfinementProfile,
+) -> bool {
+    let pinned = stdin_pinned(name, runtime);
+    assert_eq!(
+        adapter.facts().proves(&Fact::StdinPipe),
+        pinned,
+        "{name}: the opened adapter's stdin_pipe follows its probe"
+    );
+    if pinned {
+        return true;
+    }
+    let (sink, records) = recording();
+    let error = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..piped.clone()
+        })
+        .expect_err("a piped profile on an unpinned runtime");
+    assert!(
+        matches!(
+            &error,
+            ConfinementError::FactUnserved {
+                adapter: AdapterName::Oci,
+                fact: Fact::StdinPipe
+            }
+        ),
+        "{name}: {error:?}"
+    );
+    support::assert_refused(&error, "confinement.fact-unserved", 501);
+    let audited = events(&records);
+    assert_eq!(audited.len(), 1, "{name}: {audited:?}");
+    assert_eq!(audited[0]["event"], "profile_refused", "{name}");
+    assert_eq!(audited[0]["fact"], "stdin_pipe", "{name}");
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            stdin: confinement::StdinMode::Null,
+            ..piped.clone()
+        })
+        .expect("the same profile without a piped stdin is admitted");
+    let cat = Command {
+        argv: vec!["/bin/cat".into()],
+        env: BTreeMap::new(),
+    };
+    let run = adapter.start(&admitted, &cat).await.expect("cat starts");
+    let ended = tokio::time::timeout(Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("cat read end of file and ended")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    assert!(output.stdout.is_empty(), "{name}");
+    println!("{name}: piped refused fact-unserved stdin_pipe, unpiped cat ran");
+    false
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1170,6 +1288,49 @@ fn open_removes_a_container_whose_embedder_is_gone() {
     println!("ESS confinement oci orphans: executed");
 }
 
+// T15 of design 32: on the lane's pinned runtime `cat` in the container reads three writes, the
+// bytes `0x10 0x11` (Docker's detach sequence) among them, and the end of file after
+// `close_stdin`: every byte crossed the runtime client.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oci_run_reads_every_byte_of_its_piped_stdin_and_the_end_of_file() {
+    const NAME: &str = "ESS confinement oci stdin";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    let piped = ConfinementProfile {
+        image: Some(image()),
+        workspace: Some(workspace),
+        process_bounds: Some(ProcessBounds {
+            timeout_ms: 60_000,
+            processes: 8,
+            memory_bytes: 64 << 20,
+            cpu_millis: 30_000,
+        }),
+        stdin: confinement::StdinMode::Piped { limit_bytes: 1_024 },
+        ..ConfinementProfile::default()
+    };
+    if !stdin_served(NAME, &runtime, &adapter, &piped).await {
+        return;
+    }
+    support::stdin_echoes_through(
+        &adapter,
+        &piped,
+        &Command {
+            argv: vec!["/bin/cat".into()],
+            env: BTreeMap::new(),
+        },
+        &[b"one\n", b"\x10\x11 two\n", b"three\x10\x11\n"],
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
 // B10: an `oci` run keeps the last bytes under `Tail`.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_oci_run_under_tail_keeps_the_last_bytes() {
@@ -1231,5 +1392,295 @@ async fn an_oci_run_under_tail_keeps_the_last_bytes() {
         None,
     );
     assert!(output.stdout_truncated);
+    println!("{NAME}: executed");
+}
+
+// T16 of design 32: on the lane's pinned runtime a live run's chunks on both streams cross the
+// runtime client, are contiguous, and are exactly the record at its natural end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_oci_run_delivers_its_record_on_a_natural_end() {
+    const NAME: &str = "ESS confinement oci live natural end";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    support::live_natural_end(
+        NAME,
+        &adapter,
+        &ConfinementProfile {
+            image: Some(image()),
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 60_000,
+                processes: 8,
+                memory_bytes: 64 << 20,
+                cpu_millis: 30_000,
+            }),
+            ..ConfinementProfile::default()
+        },
+        &Command {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'out-one\\n'; printf 'err-one\\n' >&2; printf 'out-two\\n'; \
+                 printf 'err-two\\n' >&2"
+                    .into(),
+            ],
+            env: BTreeMap::new(),
+        },
+        b"out-one\nout-two\n",
+        b"err-one\nerr-two\n",
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// ---- adversary pass on `story:adapter-stdin-pipe` ----
+
+/// A piped `oci` profile in `workspace` with a run timeout of `timeout_ms`.
+fn oci_piped(workspace: PathBuf, timeout_ms: u64) -> ConfinementProfile {
+    ConfinementProfile {
+        image: Some(image()),
+        workspace: Some(workspace),
+        process_bounds: Some(ProcessBounds {
+            timeout_ms,
+            processes: 8,
+            memory_bytes: 64 << 20,
+            cpu_millis: 30_000,
+        }),
+        stdin: confinement::StdinMode::Piped {
+            limit_bytes: confinement::MAX_STDIN_BYTES,
+        },
+        ..ConfinementProfile::default()
+    }
+}
+
+// The end of file with no byte before it: `close_stdin` before any write, possibly before the
+// runtime client attached, still ends `cat` in the container; and `run_with_stdin` with an empty
+// input does the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_an_oci_run_whose_stdin_is_closed_before_any_write_reads_end_of_file() {
+    const NAME: &str = "ESS confinement oci adv immediate eof";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    if !stdin_served(
+        NAME,
+        &runtime,
+        &adapter,
+        &oci_piped(workspace.clone(), 60_000),
+    )
+    .await
+    {
+        return;
+    }
+    let admitted = adapter
+        .admit(&oci_piped(workspace, 60_000))
+        .expect("admitted");
+    let cat = Command {
+        argv: vec!["/bin/cat".into()],
+        env: BTreeMap::new(),
+    };
+    let run = adapter.start(&admitted, &cat).await.expect("cat starts");
+    adapter.close_stdin(&run).await.expect("closed");
+    let ended = tokio::time::timeout(Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("cat read end of file and ended")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let (ended, output, accepted) = tokio::time::timeout(
+        Duration::from_secs(30),
+        confinement::run_with_stdin(&adapter, &admitted, &cat, b""),
+    )
+    .await
+    .expect("run_with_stdin returned")
+    .expect("an empty input is no error");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert_eq!(accepted, 0);
+    assert!(output.stdout.is_empty());
+    println!("{NAME}: executed");
+}
+
+// Backpressure through the runtime client: a container that never reads its standard input and
+// never ends cannot hold `run_with_stdin` past the run's timeout (3 s) by more than seconds, and
+// 200 000 bytes through `cat` come back whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_an_oci_container_that_never_reads_stdin_is_bounded_by_the_run_timeout() {
+    const NAME: &str = "ESS confinement oci adv never reads";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    if !stdin_served(
+        NAME,
+        &runtime,
+        &adapter,
+        &oci_piped(workspace.clone(), 3_000),
+    )
+    .await
+    {
+        return;
+    }
+    let admitted = adapter
+        .admit(&oci_piped(workspace.clone(), 3_000))
+        .expect("admitted");
+    let large = vec![b'z'; 4 << 20];
+    let started = Instant::now();
+    let (ended, _, accepted) = tokio::time::timeout(
+        Duration::from_secs(30),
+        confinement::run_with_stdin(
+            &adapter,
+            &admitted,
+            &Command {
+                argv: vec!["/bin/sleep".into(), "60".into()],
+                env: BTreeMap::new(),
+            },
+            &large,
+        ),
+    )
+    .await
+    .expect("run_with_stdin returned within 30 s of a 3 s timeout")
+    .expect("the timeout is an end, not an error");
+    assert_ne!(ended.state, RunState::Running);
+    assert!(accepted < large.len() as u64, "{NAME}: {accepted}");
+    assert!(started.elapsed() >= Duration::from_secs(2), "{NAME}");
+
+    let admitted = adapter
+        .admit(&oci_piped(workspace, 60_000))
+        .expect("admitted");
+    let input: Vec<u8> = (0..200_000_u32)
+        .map(|i| u8::try_from(i % 251).expect("below 251"))
+        .collect();
+    let (ended, output, accepted) = tokio::time::timeout(
+        Duration::from_secs(45),
+        confinement::run_with_stdin(
+            &adapter,
+            &admitted,
+            &Command {
+                argv: vec!["/bin/cat".into()],
+                env: BTreeMap::new(),
+            },
+            &input,
+        ),
+    )
+    .await
+    .expect("returned")
+    .expect("cat ran");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert_eq!(accepted, input.len() as u64);
+    assert_eq!(
+        output.stdout, input,
+        "{NAME}: every byte crossed the client"
+    );
+    println!("{NAME}: executed");
+}
+
+// ---- adversary pass on `story:adapter-live-output` ----
+
+/// An `oci` profile in `workspace` with a run timeout of `timeout_ms`, output recorded only.
+fn oci_recorded(workspace: PathBuf, timeout_ms: u64) -> ConfinementProfile {
+    ConfinementProfile {
+        image: Some(image()),
+        workspace: Some(workspace),
+        process_bounds: Some(ProcessBounds {
+            timeout_ms,
+            processes: 8,
+            memory_bytes: 64 << 20,
+            cpu_millis: 30_000,
+        }),
+        ..ConfinementProfile::default()
+    }
+}
+
+// § 3: `Kill` stops delivery at once; only the chunk queued before it is delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_killed_live_oci_run_delivers_only_the_queued_chunk() {
+    const NAME: &str = "ESS confinement oci adv live kill";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    support::adv_live_kill_delivers_only_the_queued_chunk(
+        NAME,
+        &adapter,
+        &oci_recorded(workspace.clone(), 60_000),
+        &workspace.join("written"),
+        Path::new("/workspace/written"),
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3: a timeout is an imposed end that closes the queue first (`monitor`), not a stall.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_live_oci_run_ended_by_its_timeout_did_not_stall() {
+    const NAME: &str = "ESS confinement oci adv live timeout";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    support::adv_live_timeout_is_not_a_stall(NAME, &adapter, &oci_recorded(workspace, 300)).await;
+    println!("{NAME}: executed");
+}
+
+// § 3 *Backpressure*, which the design runs on `oci` nowhere (T15 is T4 only): a stall ends the
+// container as `signal(Kill)` does, through `kill_retried`. The run's timeout is 60 s, so a stall
+// that killed nothing would leave `yes` running far past this case's 15 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_an_unread_live_oci_run_stalls_and_its_container_ends() {
+    const NAME: &str = "ESS confinement oci adv live stall";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    let admitted = adapter
+        .admit(&support::live(&oci_recorded(workspace, 60_000), 1))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exec yes"))
+        .await
+        .expect("started");
+    let began = Instant::now();
+    tokio::time::timeout(Duration::from_secs(15), adapter.wait(&run))
+        .await
+        .expect("the stall ends the container")
+        .expect("waited");
+    assert!(began.elapsed() >= Duration::from_secs(1), "{NAME}");
+    assert!(adapter.output_stalled(&run), "{NAME}");
+    let events = support::read_events(&adapter, &run).await;
+    let (streams, losses) = support::delivered(&events);
+    assert_eq!(losses, [confinement::OutputEvent::Stalled], "{NAME}");
+    assert!(!streams[0].is_empty(), "{NAME}");
     println!("{NAME}: executed");
 }

@@ -1,0 +1,47 @@
+# Design 32 (`story:adapter-live-output`): `oci` delivers a container's output while it runs from
+# the attached runtime client's two pipes, through the shared drain's live queue. Unlike
+# `stdin_pipe`, `output_live` does not depend on the runtime's flavor and version. Setup: the oci
+# lane's pinned runtime, so the open step also holds `stdin_pipe`.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: oci-admits-output-live-on-oci
+summary: "lane oci: oci admits a profile requiring output_live with an image named by digest, reported declared_insecure: false."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-10-29T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: oci
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [image_digest_pinned, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-10-29T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: oci
+      required_families: [output_read]
+      required_facts: [output_live]
+      image: "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: oci
+          families: [output_read]
+          facts: [output_live]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: oci
+      facts: [output_live]
+      declared_insecure: false

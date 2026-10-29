@@ -1,0 +1,35 @@
+# Model only (design 32, `story:adapter-live-output`). Every declared adapter set but `pod`'s holds
+# `output_live`, and `pod` refuses it in its own lane. This scenario opens an adapter row that holds
+# `linux`'s other facts without `output_live` and checks that a profile requiring it beside
+# `stdin_pipe` is refused by that name, and that the refusal names no other fact the row holds. It
+# runs only against the interpreted reference: no adapter lane selects a `model-*` scenario.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: model-output-live-unserved-on-interpreted
+summary: "lane interpreted: an adapter row without output_live refuses a profile requiring it confinement.fact-unserved naming output_live."
+
+timeline:
+  - at: 2026-10-29T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, stdin_pipe]
+    outcome: opened
+  - at: 2026-10-29T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [output_read]
+      required_facts: [stdin_pipe, output_live]
+    outcome: fact-unserved-output-live
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: linux, fact: output_live}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

@@ -73,7 +73,7 @@ fn open_linux(
 /// The authored `-on-delegated` scenarios of `spec/confinement-suite.json` that open only
 /// `linux`. Pinned, so a scenario lost or renamed out of the lane fails here instead of shrinking
 /// what runs.
-const LINUX_DELEGATED: usize = 9;
+const LINUX_DELEGATED: usize = 11;
 
 #[test]
 fn ess_confinement_delegated_lane_executes_every_authored_linux_scenario() {
@@ -801,4 +801,602 @@ async fn a_linux_run_keeps_each_stream_in_its_own_mode() {
         true,
     )
     .await;
+}
+
+// ---- design 32, T12's stdin rows: a piped standard input under `linux` ----
+
+/// A `linux` profile in `workspace` with a piped standard input of `limit_bytes`, and the output
+/// bound the design's linux cases lower to 4096.
+fn linux_piped(workspace: &Path, limit_bytes: u64) -> ConfinementProfile {
+    ConfinementProfile {
+        workspace: Some(workspace.to_path_buf()),
+        stdin: confinement::StdinMode::Piped { limit_bytes },
+        io_bounds: Some(confinement::IoBounds {
+            output_bytes: LINUX_BOUND as u64,
+        }),
+        ..ConfinementProfile::default()
+    }
+}
+
+/// The gate as the confined child sees it: `go` beneath its `/workspace`.
+fn linux_gate(workspace: &Path) -> support::Gate {
+    support::Gate::seen_as(workspace, Path::new(substrate_wire::EXEC_WORKSPACE_MOUNT))
+}
+
+// T12: T2.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_reads_three_writes_and_close_ends_it() {
+    const NAME: &str = "ESS confinement linux stdin echo";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::stdin_echoes_and_ends_on_close(
+        &adapter,
+        &linux_piped(&workspace, 1_024),
+        &[b"one\n", b"two \x10\x11\n", b"three\n"],
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+/// A gated child that then counts what it reads: T8's and T9's run under `linux`.
+async fn linux_counting_behind(
+    adapter: &Arc<dyn ConfinementAdapter>,
+    workspace: &Path,
+    gate: &support::Gate,
+) -> confinement::RunId {
+    let admitted = adapter
+        .admit(&linux_piped(workspace, confinement::MAX_STDIN_BYTES))
+        .expect("admitted");
+    adapter
+        .start(&admitted, &support::sh(&format!("{}; wc -c", gate.line())))
+        .await
+        .expect("started")
+}
+
+// T12: T8.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_linux_write_closes_stdin_and_the_child_reads_a_prefix_then_eof() {
+    const NAME: &str = "ESS confinement linux stdin cancel";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let gate = linux_gate(&workspace);
+    let run = linux_counting_behind(&adapter, &workspace, &gate).await;
+    let (completed, pending) = support::fill(&adapter, &run).await;
+    pending.abort();
+    assert!(pending.await.is_err(), "the pending write was cancelled");
+    support::assert_refused(
+        &adapter
+            .write_stdin(&run, b"x")
+            .await
+            .expect_err("after a cancellation"),
+        substrate_wire::SESSION_INPUT_CLOSED,
+        422,
+    );
+    adapter.close_stdin(&run).await.expect("close is Ok");
+    gate.open();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("the child read end of file")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    let read: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("wc's count");
+    assert!(
+        (completed..=completed + 65_536).contains(&read),
+        "{NAME}: the child read {read} bytes; the completed writes held {completed}"
+    );
+    println!("{NAME}: executed");
+}
+
+// T12: T9.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_close_waits_for_a_pending_write_until_it_is_cancelled() {
+    const NAME: &str = "ESS confinement linux stdin close waits";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let gate = linux_gate(&workspace);
+    let run = linux_counting_behind(&adapter, &workspace, &gate).await;
+    let (_, pending) = support::fill(&adapter, &run).await;
+    let mut closing = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let run = run.clone();
+        async move { adapter.close_stdin(&run).await }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut closing)
+            .await
+            .is_err(),
+        "{NAME}: close returned while a write was pending"
+    );
+    pending.abort();
+    let _ = pending.await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), closing)
+        .await
+        .expect("close returned once the write was cancelled")
+        .expect("joined")
+        .expect("close is Ok");
+    gate.open();
+    adapter.wait(&run).await.expect("waited");
+    println!("{NAME}: executed");
+}
+
+// T12: T10 (a).
+#[tokio::test(flavor = "multi_thread")]
+async fn after_a_linux_run_ended_a_write_is_input_closed_and_close_is_ok() {
+    const NAME: &str = "ESS confinement linux stdin after the end";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&linux_piped(&workspace, 1_024))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exit 0"))
+        .await
+        .expect("started");
+    adapter.wait(&run).await.expect("waited");
+    support::assert_refused(
+        &adapter
+            .write_stdin(&run, b"x")
+            .await
+            .expect_err("after the end"),
+        substrate_wire::SESSION_INPUT_CLOSED,
+        422,
+    );
+    adapter.close_stdin(&run).await.expect("close is Ok");
+    println!("{NAME}: executed");
+}
+
+// T12: T10 (b).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_write_pending_when_the_child_exits_fails() {
+    const NAME: &str = "ESS confinement linux stdin pending at the end";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let gate = linux_gate(&workspace);
+    let admitted = adapter
+        .admit(&linux_piped(&workspace, confinement::MAX_STDIN_BYTES))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh(&gate.line()))
+        .await
+        .expect("started");
+    let (_, pending) = support::fill(&adapter, &run).await;
+    gate.open();
+    let written = tokio::time::timeout(std::time::Duration::from_secs(10), pending)
+        .await
+        .expect("the pending write returned")
+        .expect("joined");
+    support::assert_refused(
+        &written.expect_err("the child exited"),
+        substrate_wire::SESSION_WRITE_FAILED,
+        500,
+    );
+    adapter.wait(&run).await.expect("waited");
+    println!("{NAME}: executed");
+}
+
+// T12: `Piped` with `Recorded` output never stalls: 64 KiB the embedder never reads is recorded
+// to the bound, and the run ends on its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_piped_linux_run_with_unread_recorded_output_does_not_stall() {
+    const NAME: &str = "ESS confinement linux stdin recorded output";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&linux_piped(&workspace, 1_024))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("head -c 65536 /dev/zero"))
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("the run ended without anyone reading its output")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    assert!(output.stdout_truncated, "{NAME}: 64 KiB is past the bound");
+    println!("{NAME}: executed");
+}
+
+// ---- design 32 § 3, T12's output rows: live output under `linux` ----
+
+/// A `linux` profile in `workspace` whose output is recorded only, with the output bound
+/// lowered to `bound` when one is named.
+fn linux_recorded(workspace: &Path, bound: Option<usize>) -> ConfinementProfile {
+    ConfinementProfile {
+        workspace: Some(workspace.to_path_buf()),
+        io_bounds: bound.map(|bound| confinement::IoBounds {
+            output_bytes: bound as u64,
+        }),
+        ..ConfinementProfile::default()
+    }
+}
+
+// T12: T4.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_linux_run_delivers_its_record_on_a_natural_end() {
+    const NAME: &str = "ESS confinement linux live natural end";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::live_natural_end(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+        &support::sh(
+            "printf 'out-one\\n'; printf 'err-one\\n' >&2; printf 'out-two\\n'; \
+             printf 'err-two\\n' >&2",
+        ),
+        b"out-one\nout-two\n",
+        b"err-one\nerr-two\n",
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T12: T5, at the host's default output bound: a lower one would end the forwarding before the
+// queue filled, and nothing would stall.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_linux_run_never_read_stalls_and_ends() {
+    const NAME: &str = "ESS confinement linux live stall";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::live_stall(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+        &support::sh("exec yes"),
+        1,
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T12: T6.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_linux_run_past_its_bound_names_it_after_the_last_chunk() {
+    const NAME: &str = "ESS confinement linux live bounded";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::live_bounded(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, Some(LINUX_BOUND)),
+        &support::sh(&format!("yes | head -c {}", LINUX_BOUND + 64)),
+        LINUX_BOUND,
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T12: T11.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_linux_run_writing_both_streams_stalls_once() {
+    const NAME: &str = "ESS confinement linux live both streams";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::live_stall(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+        &support::sh("yes >&2 & exec yes"),
+        2,
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T12: T19.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_live_linux_run_delivers_a_prefix_without_a_stall() {
+    const NAME: &str = "ESS confinement linux live kill";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let gate = linux_gate(&workspace);
+    support::live_kill_is_a_prefix(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+        &gate,
+        &workspace.join("written"),
+        &Path::new(substrate_wire::EXEC_WORKSPACE_MOUNT).join("written"),
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T12: T20. A read pending on a silent run does not hold a `Kill` back, and ends with `None`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kill_beside_a_pending_live_linux_read_ends_both() {
+    const NAME: &str = "ESS confinement linux live pending read";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&support::live(&linux_recorded(&workspace, None), 16))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exec sleep 60"))
+        .await
+        .expect("started");
+    let reading = {
+        let adapter = Arc::clone(&adapter);
+        let run = run.clone();
+        tokio::spawn(async move {
+            adapter
+                .read_output(&run, std::time::Duration::from_secs(30))
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !reading.is_finished(),
+        "{NAME}: the read waits on a silent run"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        adapter.signal(&run, substrate_wire::Signal::Kill),
+    )
+    .await
+    .expect("the kill is not held back by the pending read")
+    .expect("killed");
+    let read = tokio::time::timeout(std::time::Duration::from_secs(5), reading)
+        .await
+        .expect("the pending read ends")
+        .expect("joined")
+        .expect("read");
+    assert_eq!(read, None, "{NAME}");
+    adapter.wait(&run).await.expect("waited");
+    assert!(!adapter.output_stalled(&run), "{NAME}");
+    println!("{NAME}: executed");
+}
+
+// ---- adversary pass on `story:adapter-stdin-pipe` ----
+
+/// `linux_piped` with a run timeout of `timeout_ms`.
+fn linux_piped_within(workspace: &Path, limit_bytes: u64, timeout_ms: u64) -> ConfinementProfile {
+    ConfinementProfile {
+        process_bounds: Some(ProcessBounds {
+            timeout_ms,
+            processes: 16,
+            memory_bytes: 128 << 20,
+            cpu_millis: 10_000,
+        }),
+        ..linux_piped(workspace, limit_bytes)
+    }
+}
+
+// T7a under `linux`, which T12 does not list: `run_with_stdin` returns `cat`'s input on stdout,
+// and a child that exits without reading 1 MiB is no error.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_run_with_stdin_on_linux_echoes_and_tolerates_a_child_that_reads_nothing() {
+    const NAME: &str = "ESS confinement linux adv run_with_stdin";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            io_bounds: Some(confinement::IoBounds {
+                output_bytes: 1 << 20,
+            }),
+            ..linux_piped(&workspace, confinement::MAX_STDIN_BYTES)
+        })
+        .expect("admitted");
+    let input: Vec<u8> = (0..200_000_u32)
+        .map(|i| u8::try_from(i % 251).expect("below 251"))
+        .collect();
+    let (ended, output, accepted) =
+        confinement::run_with_stdin(&adapter, &admitted, &support::sh("exec cat"), &input)
+            .await
+            .expect("cat ran");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert_eq!(accepted, input.len() as u64);
+    assert_eq!(output.stdout, input, "{NAME}: every byte crossed the pipe");
+    let large = vec![b'y'; 1 << 20];
+    let (ended, _, accepted) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        confinement::run_with_stdin(&adapter, &admitted, &support::sh("exit 0"), &large),
+    )
+    .await
+    .expect("returned")
+    .expect("a child that reads nothing is no error");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert!(accepted < large.len() as u64, "{NAME}: {accepted}");
+    println!("{NAME}: executed");
+}
+
+// Backpressure: a child that never reads its standard input and never ends cannot hold
+// `run_with_stdin` past the run's timeout (2 s here) by more than a few seconds.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_linux_child_that_never_reads_stdin_is_bounded_by_the_run_timeout() {
+    const NAME: &str = "ESS confinement linux adv never reads";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&linux_piped_within(
+            &workspace,
+            confinement::MAX_STDIN_BYTES,
+            2_000,
+        ))
+        .expect("admitted");
+    let large = vec![b'z'; 1 << 20];
+    let started = std::time::Instant::now();
+    let returned = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        confinement::run_with_stdin(&adapter, &admitted, &support::sh("exec sleep 60"), &large),
+    )
+    .await
+    .expect("run_with_stdin returned within 15 s of a 2 s timeout");
+    let (ended, _, accepted) = returned.expect("the timeout is an end, not an error");
+    assert_ne!(ended.state, RunState::Running);
+    assert!(accepted < large.len() as u64, "{NAME}: {accepted}");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1_500),
+        "{NAME}: ended before its timeout"
+    );
+    println!("{NAME}: executed");
+}
+
+// No descriptor leaks into the child: a piped run holds 0, 1 and 2, and `ls` its own directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_piped_linux_child_holds_only_its_three_standard_descriptors() {
+    const NAME: &str = "ESS confinement linux adv descriptors";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&linux_piped(&workspace, 1_024))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exec ls -l /proc/self/fd"))
+        .await
+        .expect("started");
+    adapter.close_stdin(&run).await.expect("closed");
+    adapter.wait(&run).await.expect("waited");
+    let output = adapter.output(&run).await.expect("output");
+    let listing = String::from_utf8_lossy(&output.stdout).into_owned();
+    let extra: Vec<&str> = listing
+        .lines()
+        .filter_map(|line| line.split_once(" -> "))
+        .filter_map(|(head, target)| {
+            let fd = head.rsplit(' ').next()?;
+            (!["0", "1", "2"].contains(&fd) && !target.starts_with("/proc/")).then_some(fd)
+        })
+        .collect();
+    assert!(
+        extra.is_empty(),
+        "{NAME}: the child holds descriptors {extra:?} beyond 0, 1 and 2:\n{listing}"
+    );
+    assert!(listing.contains(" 0 -> pipe:"), "{NAME}: {listing}");
+    println!("{NAME}: executed");
+}
+
+// ---- adversary pass on `story:adapter-live-output` ----
+
+// § 3: `Kill` stops delivery at once; only the chunk queued before it is delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_killed_live_linux_run_delivers_only_the_queued_chunk() {
+    const NAME: &str = "ESS confinement linux adv live kill";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::adv_live_kill_delivers_only_the_queued_chunk(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+        &workspace.join("written"),
+        &Path::new(substrate_wire::EXEC_WORKSPACE_MOUNT).join("written"),
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3 *One reader at a time*, under the 100 ms slices: two concurrent readers share one sequence.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_two_live_linux_readers_share_one_sequence() {
+    const NAME: &str = "ESS confinement linux adv live two readers";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::adv_live_two_readers_share_one_sequence(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 2 with § 3: `ChildChannel::Pipes` with both stdin and a live sender.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_piped_live_linux_run_echoes_while_running() {
+    const NAME: &str = "ESS confinement linux adv live piped";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::adv_live_echoes_piped_stdin_while_running(
+        NAME,
+        &adapter,
+        &linux_piped(&workspace, 1_024),
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3: a timeout is an imposed end, not a stall.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_live_linux_run_ended_by_its_timeout_did_not_stall() {
+    const NAME: &str = "ESS confinement linux adv live timeout";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::adv_live_timeout_is_not_a_stall(
+        NAME,
+        &adapter,
+        &ConfinementProfile {
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 400,
+                processes: 16,
+                memory_bytes: 128 << 20,
+                cpu_millis: 10_000,
+            }),
+            ..linux_recorded(&workspace, None)
+        },
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3: "Under `linux` and `systemd` around `linux` every signal is imposed ... so `Int` and `Term`
+// are end-equivalent there." A child that traps `TERM` and writes `after` delivers none of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_term_ends_live_linux_delivery_even_for_a_child_that_traps_it() {
+    const NAME: &str = "ESS confinement linux adv live term";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&support::live(&linux_recorded(&workspace, None), 16))
+        .expect("admitted");
+    let script = format!(
+        "trap 'printf after; exit 3' TERM; printf before; touch '{}'; \
+         while :; do sleep 0.05; done",
+        Path::new(substrate_wire::EXEC_WORKSPACE_MOUNT)
+            .join("ready")
+            .display()
+    );
+    let run = adapter
+        .start(&admitted, &support::sh(&script))
+        .await
+        .expect("started");
+    support::appears(&workspace.join("ready")).await;
+    adapter
+        .signal(&run, confinement::Signal::Term)
+        .await
+        .expect("signalled");
+    let events = support::read_events(&adapter, &run).await;
+    adapter.wait(&run).await.expect("waited");
+    let (streams, losses) = support::delivered(&events);
+    assert!(losses.is_empty(), "{NAME}: {losses:?}");
+    assert!(!adapter.output_stalled(&run), "{NAME}");
+    assert_eq!(
+        streams[0], b"before",
+        "{NAME}: delivery stopped at the signal"
+    );
+    println!("{NAME}: executed");
 }

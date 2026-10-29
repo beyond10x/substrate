@@ -193,6 +193,9 @@ struct Fake {
     kubeconfig: PathBuf,
     requests: Arc<Mutex<Vec<String>>>,
     objects: Arc<Mutex<BTreeMap<String, Value>>>,
+    /// Each deleted Pod's last object, by name, which a watch of it from a `resourceVersion`
+    /// replays as its `DELETED` event (`story:pod-force-deleted-keeps-its-policy`).
+    deleted: Arc<Mutex<BTreeMap<String, Value>>>,
     stop: Arc<AtomicBool>,
     _directory: tempfile::TempDir,
 }
@@ -201,6 +204,7 @@ struct Shared {
     behaviour: Behaviour,
     requests: Arc<Mutex<Vec<String>>>,
     objects: Arc<Mutex<BTreeMap<String, Value>>>,
+    deleted: Arc<Mutex<BTreeMap<String, Value>>>,
     blackhole: AtomicBool,
     /// A Pod was created; the next read of a policy by name arms `blackhole`.
     pod_created: AtomicBool,
@@ -229,11 +233,13 @@ impl Fake {
         let address = listener.local_addr().expect("address");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let objects = Arc::new(Mutex::new(BTreeMap::new()));
+        let deleted = Arc::new(Mutex::new(BTreeMap::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Shared {
             behaviour,
             requests: Arc::clone(&requests),
             objects: Arc::clone(&objects),
+            deleted: Arc::clone(&deleted),
             blackhole: AtomicBool::new(false),
             pod_created: AtomicBool::new(false),
             held: Mutex::new(Vec::new()),
@@ -286,6 +292,7 @@ impl Fake {
             kubeconfig,
             requests,
             objects,
+            deleted,
             stop,
             _directory: directory,
         }
@@ -371,6 +378,19 @@ fn serve(
             200,
             r#"{"kind":"PodList","apiVersion":"v1","items":[]}"#.to_owned(),
         )
+    } else if method == "GET" && path == pods && query.starts_with("watch=") {
+        // A watch of one Pod replays its deletion, when the fake deleted it; otherwise it ends
+        // without an event.
+        let name = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("fieldSelector=metadata.name%3D"))
+            .unwrap_or_default();
+        let replay = shared
+            .deleted
+            .lock()
+            .get(name)
+            .map(|object| json!({"type": "DELETED", "object": object}).to_string() + "\n");
+        (200, replay.unwrap_or_default())
     } else if method == "GET" && path == policies {
         if shared.behaviour.refuse_policy_list {
             (
@@ -398,6 +418,7 @@ fn serve(
         let mut object: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         if object["metadata"].is_object() {
             object["metadata"]["creationTimestamp"] = json!(timestamp(Duration::ZERO));
+            object["metadata"]["resourceVersion"] = json!("1");
         }
         let name = object["metadata"]["name"]
             .as_str()
@@ -463,7 +484,13 @@ fn serve(
                     None => (404, r#"{"kind":"Status","code":404}"#.to_owned()),
                 },
                 "DELETE" => match shared.objects.lock().remove(&id) {
-                    Some(object) => (200, object.to_string()),
+                    Some(object) => {
+                        // The kubelet stopped the container, wrote its state, then removed the Pod.
+                        let mut last = object.clone();
+                        last["status"] = pod_status();
+                        shared.deleted.lock().insert(rest.to_owned(), last);
+                        (200, object.to_string())
+                    }
                     None => (404, r#"{"kind":"Status","code":404}"#.to_owned()),
                 },
                 _ => (405, "{}".to_owned()),
@@ -931,7 +958,7 @@ fn policy(name: &str, labels: &[(&str, &str)], age: Duration) -> Value {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
         "metadata": {"name": name, "namespace": NAMESPACE, "labels": {},
-                     "creationTimestamp": timestamp(age)},
+                     "resourceVersion": "1", "creationTimestamp": timestamp(age)},
         "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
     });
     for (label, value) in labels {
@@ -945,6 +972,9 @@ fn policy(name: &str, labels: &[(&str, &str)], age: Duration) -> Value {
 /// adapter's owner label whose run's Pod is gone, and nothing else: not a policy without the owner
 /// label, not one whose Pod exists (here in a terminal phase), and not one younger than the
 /// sweep's 90 s age floor, which may fence a run another adapter is still starting.
+/// `story:pod-force-deleted-keeps-its-policy`: the orphan's Pod is gone and a watch of it replays
+/// its container terminated; the Pod of `substrate-run-forced` was force-deleted with its
+/// container last seen running, and its policy stays.
 #[tokio::test(flavor = "multi_thread")]
 async fn adversary_open_removes_only_an_old_owned_policy_whose_pod_is_gone() {
     let fake = Fake::start(Behaviour::default());
@@ -963,6 +993,10 @@ async fn adversary_open_removes_only_an_old_owned_policy_whose_pod_is_gone() {
         (
             "substrate-run-live",
             policy("substrate-run-live", &owned("substrate-run-live"), old),
+        ),
+        (
+            "substrate-run-forced",
+            policy("substrate-run-forced", &owned("substrate-run-forced"), old),
         ),
         (
             "substrate-run-unowned",
@@ -990,11 +1024,30 @@ async fn adversary_open_removes_only_an_old_owned_policy_whose_pod_is_gone() {
             "pods/substrate-run-live".to_owned(),
             json!({"metadata": {"name": "substrate-run-live"}}),
         );
+        let gone = |name: &str, state: Value| {
+            json!({"metadata": {"name": name, "resourceVersion": "2"},
+                   "spec": {"nodeName": "node-a", "restartPolicy": "Never"},
+                   "status": {"phase": "Failed",
+                              "containerStatuses": [{"name": "run", "state": state}]}})
+        };
+        let mut deleted = fake.deleted.lock();
+        deleted.insert(
+            "substrate-run-orphan".to_owned(),
+            gone(
+                "substrate-run-orphan",
+                json!({"terminated": {"exitCode": 0}}),
+            ),
+        );
+        deleted.insert(
+            "substrate-run-forced".to_owned(),
+            gone("substrate-run-forced", json!({"running": {}})),
+        );
     }
     let _adapter = fake.open();
     assert_eq!(
         fake.objects(),
         [
+            "networkpolicies/substrate-run-forced",
             "networkpolicies/substrate-run-live",
             "networkpolicies/substrate-run-starting",
             "networkpolicies/substrate-run-unowned",
