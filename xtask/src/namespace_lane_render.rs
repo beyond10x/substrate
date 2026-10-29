@@ -74,7 +74,7 @@ pub struct Grant {
 pub const ROLE_RULES: [(&str, &str, &[&str]); 6] = [
     ("", "pods", &["create", "get", "list", "watch", "delete"]),
     ("", "pods/log", &["get"]),
-    ("", "pods/exec", &["create"]),
+    ("", "pods/exec", &["get", "create"]),
     (
         "",
         "persistentvolumeclaims",
