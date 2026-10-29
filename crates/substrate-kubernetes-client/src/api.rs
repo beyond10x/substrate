@@ -614,7 +614,9 @@ impl Api {
                 match self.get(path).await {
                     Ok(None) => return,
                     Ok(Some(object)) => {
-                        seen.note(&object);
+                        if !seen.note(&object) {
+                            return;
+                        }
                     }
                     Err(_) => {}
                 }
@@ -623,17 +625,23 @@ impl Api {
     }
 
     /// One deletion of the object at `path` and one read of it, noted in `seen`; `true` once it is
-    /// gone.
+    /// gone. Once `seen` holds a `uid` the deletion carries it as `preconditions.uid`, and a 409 on
+    /// it or a read of another `uid` is the object read gone: a same-named replacement is never
+    /// deleted.
     async fn remove_once(&self, path: &str, grace_seconds: u64, seen: &mut PodTrace) -> bool {
-        if matches!(self.delete(path, grace_seconds).await, Ok(true)) {
+        let deleted = match seen.uid() {
+            Some(uid) => match self.delete_preconditioned(path, grace_seconds, uid).await {
+                Err(error) if error.status() == Some(409) => return true,
+                deleted => deleted,
+            },
+            None => self.delete(path, grace_seconds).await,
+        };
+        if matches!(deleted, Ok(true)) {
             return true;
         }
         match self.get(path).await {
             Ok(None) => true,
-            Ok(Some(object)) => {
-                seen.note(&object);
-                false
-            }
+            Ok(Some(object)) => !seen.note(&object),
             Err(_) => false,
         }
     }
