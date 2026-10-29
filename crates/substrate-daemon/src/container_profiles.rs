@@ -215,6 +215,110 @@ mod tests {
         }
     }
 
+    /// Adversary: the default rendering is the reviewed policy every container-runtime review
+    /// result records by hash (design 33 § 1, § 8), not merely whatever the file holds today.
+    #[test]
+    fn adversary_the_default_rendering_is_the_reviewed_policy_by_hash() {
+        use sha2::Digest as _;
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(render(&ProfileName::default()))),
+            "e3ff9b10eb633585354cedbcbe1dafb4ec01c4296ea1085677221adca3b6843a"
+        );
+    }
+
+    /// Adversary, a property with a fixed seed: every name the grammar admits renders the policy
+    /// with exactly three self-references and nothing else changed, and no non-default rendering
+    /// keeps a declaration or a peer naming the default profile.
+    #[test]
+    fn adversary_every_admitted_name_changes_exactly_the_three_sites() {
+        const ALPHABET: &[u8] = b"az09-----";
+        const NOISE: &[u8] = b"A_.,/ {}\n";
+        let mut state: u64 = 0x5eed_0033;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+        let mut admitted = 0;
+        for _ in 0..4000 {
+            let length = 1 + usize::try_from(next() % 44).unwrap();
+            let mut suffix = Vec::with_capacity(length);
+            for _ in 0..length {
+                let pick = usize::try_from(next()).unwrap();
+                suffix.push(if pick % 50 == 0 {
+                    NOISE[pick % NOISE.len()]
+                } else {
+                    ALPHABET[pick % ALPHABET.len()]
+                });
+            }
+            let name = format!("{DEFAULT}-{}", String::from_utf8(suffix).unwrap());
+            let Ok(profile) = name.parse::<ProfileName>() else {
+                continue;
+            };
+            admitted += 1;
+            let rendered = String::from_utf8(render(&profile)).unwrap();
+            assert_eq!(rendered.matches(name.as_str()).count(), 3, "{name}");
+            assert_eq!(
+                rendered.len(),
+                POLICY.len() + 3 * (name.len() - DEFAULT.len()),
+                "{name}"
+            );
+            assert_eq!(
+                rendered.replace(name.as_str(), DEFAULT).as_bytes(),
+                POLICY,
+                "{name}"
+            );
+            for stale in [
+                "profile substrate-host-exec-v1 ",
+                "peer=substrate-host-exec-v1,",
+            ] {
+                assert!(!rendered.contains(stale), "{name} keeps {stale:?}");
+            }
+            assert_eq!(rendered.matches("\nprofile ").count(), 1, "{name}");
+            assert_eq!(source_file(&profile), format!("{name}.apparmor"));
+        }
+        assert!(
+            admitted > 200,
+            "the generator admitted only {admitted} names"
+        );
+    }
+
+    /// Adversary: a registry line for a child, a stack, another policy namespace or a longer
+    /// family name is neither the profile loaded nor the profile enforced.
+    #[test]
+    fn adversary_a_registry_line_for_another_profile_never_counts() {
+        let default = ProfileName::default();
+        let lane = lane();
+        for profile in [&default, &lane] {
+            let label = profile.enforced_label();
+            let registry = [
+                format!("docker-default//{label}"),
+                format!("docker-default//&{label}"),
+                format!(":other:{label}"),
+                format!(":other://{label}"),
+                format!("{profile}-x (enforce)"),
+                format!("{profile}x (enforce)"),
+                format!(" {label}"),
+                format!("{profile} (kill)"),
+            ]
+            .join("\n");
+            assert!(
+                !enforced(&registry, profile),
+                "{profile} counted enforced in {registry}"
+            );
+            let others: Vec<&str> = registry
+                .lines()
+                .filter(|line| !line.ends_with(" (kill)"))
+                .collect();
+            assert!(
+                !loaded(&others.join("\n"), profile),
+                "{profile} counted loaded in {others:?}"
+            );
+            assert!(loaded(&registry, profile), "{profile} (kill) is loaded");
+        }
+    }
+
     #[test]
     fn loaded_and_enforced_match_the_exact_name_only() {
         let default = ProfileName::default();

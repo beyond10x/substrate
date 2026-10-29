@@ -457,6 +457,39 @@ mod tests {
         }
     }
 
+    /// Adversary: a label that only ends with, starts with or contains `<name> (enforce)` is
+    /// another profile: a hat of another profile, a stack, a policy namespace or another mode.
+    #[test]
+    fn adversary_a_label_merely_containing_the_enforced_name_is_refused() {
+        let default = ProfileName::default();
+        let lane: ProfileName = "substrate-host-exec-v1-lane-a".parse().unwrap();
+        for profile in [&default, &lane] {
+            let label = profile.enforced_label();
+            for refused in [
+                format!("docker-default//{label}"),
+                format!("unconfined//&{label}"),
+                format!(":other:{label}"),
+                format!(":other://{label}"),
+                format!("{label}//&docker-default (enforce)"),
+                format!("{profile}//null-x (enforce)"),
+                format!("{profile} (kill)"),
+                format!("{profile} (unconfined)"),
+                format!("{profile} (mixed)"),
+                format!("{profile} (ENFORCE)"),
+                format!("{profile}  (enforce)"),
+                format!("{profile}(enforce)"),
+                format!("{label}\0"),
+                format!("{label}\nunconfined"),
+                format!("{profile}-x (enforce)"),
+            ] {
+                assert!(
+                    require_label(&refused, profile).is_err(),
+                    "{refused:?} admitted for {profile}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn refuses_unlimited_parent_and_caller_selected_delegation() {
         let mut limits = BTreeMap::from([
