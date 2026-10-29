@@ -2,7 +2,7 @@
 {{- $execution := .Values.execution.enabled -}}
 {{- $quotas := .Values.execution.projectQuotas.enabled -}}
 {{- $profile := toString .Values.execution.appArmorProfile -}}
-{{- $namedProfile := ne $profile "substrate-host-exec-v1" -}}
+{{- $namedProfile := ne $profile "substrate-host-exec-v2" -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -259,7 +259,7 @@ spec:
               {{- if $namedProfile }}
               localhostProfile: {{ $profile | quote }}
               {{- else }}
-              localhostProfile: substrate-host-exec-v1
+              localhostProfile: substrate-host-exec-v2
               {{- end }}
           {{- else }}
           securityContext:

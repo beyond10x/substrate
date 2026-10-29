@@ -53,6 +53,11 @@ mod tests {
     fn the_profile_defaults_and_a_name_outside_the_family_is_refused() {
         let args = Args::try_parse_from(["profiles", "--hold"]).unwrap();
         assert_eq!(args.apparmor_profile.to_string(), profile_name::DEFAULT);
+        assert_eq!(args.apparmor_profile.to_string(), "substrate-host-exec-v2");
+        let args =
+            Args::try_parse_from(["profiles", "--apparmor-profile", "substrate-host-exec-v1"])
+                .unwrap();
+        assert_eq!(args.apparmor_profile.to_string(), "substrate-host-exec-v1");
         let args = Args::try_parse_from([
             "profiles",
             "--check",

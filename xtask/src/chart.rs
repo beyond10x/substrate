@@ -32,7 +32,7 @@ pub const BOOTSTRAP_CAPABILITIES: [&str; 5] = ["CHOWN", "SETUID", "SETGID", "SET
 const STATE_MOUNT: &str = "/var/lib/b10x-substrate";
 const STATE_PATH: &str = "/var/lib/b10x-substrate/state/state.db";
 const SECCOMP_PROFILE: &str = "b10x-substrate/host-exec-v1-amd64.json";
-const APPARMOR_PROFILE: &str = "substrate-host-exec-v1";
+const APPARMOR_PROFILE: &str = "substrate-host-exec-v2";
 /// How the bootstrap and the installer are told a profile name other than the default (design 33).
 const PROFILE_FLAG: &str = "--apparmor-profile";
 const RELEASE: &str = "lane";
@@ -222,6 +222,19 @@ pub fn accepted_cases() -> Vec<Accepted> {
                 quotas: true,
                 node_profiles: Some(NODE_PROFILES_NAMESPACE.to_owned()),
                 apparmor_profile: "substrate-host-exec-v1-lane-01k8xyz".to_owned(),
+                ..lane.clone()
+            },
+        },
+        Accepted {
+            name: "execution and node profiles under the v1 policy a node already holds",
+            values: json!({
+                "execution": {"enabled": true, "appArmorProfile": "substrate-host-exec-v1"},
+                "nodeProfiles": {"enabled": true, "namespace": NODE_PROFILES_NAMESPACE}
+            }),
+            expect: Expect {
+                execution: true,
+                node_profiles: Some(NODE_PROFILES_NAMESPACE.to_owned()),
+                apparmor_profile: "substrate-host-exec-v1".to_owned(),
                 ..lane.clone()
             },
         },
@@ -2000,7 +2013,7 @@ mod tests {
 
         let mut extra = json!({"capabilities": {"drop": ["ALL"], "add": ["CHOWN", "SETUID", "SETGID", "SETPCAP", "SYS_ADMIN", "NET_ADMIN"]},
             "seccompProfile": {"type": "Localhost", "localhostProfile": "b10x-substrate/host-exec-v1-amd64.json"},
-            "appArmorProfile": {"type": "Localhost", "localhostProfile": "substrate-host-exec-v1"}, "readOnlyRootFilesystem": true});
+            "appArmorProfile": {"type": "Localhost", "localhostProfile": "substrate-host-exec-v2"}, "readOnlyRootFilesystem": true});
         let pod = json!({"containers": [container("daemon", &extra)]});
         assert!(
             pod_posture(&pod, Some(super::APPARMOR_PROFILE), "pod")
@@ -2172,7 +2185,7 @@ mod tests {
         );
         let bootstrap = json!({"capabilities": {"drop": ["ALL"], "add": super::BOOTSTRAP_CAPABILITIES},
             "seccompProfile": {"type": "Localhost", "localhostProfile": "b10x-substrate/host-exec-v1-amd64.json"},
-            "appArmorProfile": {"type": "Localhost", "localhostProfile": "substrate-host-exec-v1"},
+            "appArmorProfile": {"type": "Localhost", "localhostProfile": "substrate-host-exec-v2"},
             "readOnlyRootFilesystem": false});
         let pod = json!({"containers": [container("daemon", &bootstrap)]});
         assert!(
@@ -2359,9 +2372,11 @@ mod tests {
 
     const NAMED: &str = "substrate-host-exec-v1-lane-a";
 
-    /// Design 33 § 6: the value defaults to today's name, and the schema admits only the family.
+    /// Design 33 § 6: the value defaults to the `v2` policy (D180), and the schema admits only the
+    /// `v1` and `v2` families.
     #[test]
     fn the_profile_value_defaults_to_today_and_the_schema_admits_only_its_family() {
+        assert_eq!(super::APPARMOR_PROFILE, "substrate-host-exec-v2");
         assert_eq!(
             defaults()["execution"]["appArmorProfile"],
             json!(super::APPARMOR_PROFILE)
@@ -2369,18 +2384,31 @@ mod tests {
         let validator = jsonschema::validator_for(&schema()).unwrap();
         let lane = merged(&defaults(), &base_values());
         let longest = format!("substrate-host-exec-v1-{}", "a".repeat(40));
-        for name in [super::APPARMOR_PROFILE, NAMED, longest.as_str()] {
+        let longest_v2 = format!("substrate-host-exec-v2-{}", "a".repeat(40));
+        for name in [
+            super::APPARMOR_PROFILE,
+            "substrate-host-exec-v1",
+            NAMED,
+            "substrate-host-exec-v2-lane-a",
+            longest.as_str(),
+            longest_v2.as_str(),
+        ] {
             let values = merged(&lane, &json!({"execution": {"appArmorProfile": name}}));
             assert!(validator.is_valid(&values), "the schema refuses {name}");
         }
         let too_long = format!("{longest}a");
+        let too_long_v2 = format!("{longest_v2}a");
         for name in [
             "unconfined",
-            "substrate-host-exec-v2",
+            "substrate-host-exec-v0",
+            "substrate-host-exec-v3",
+            "substrate-host-exec-v12",
             "substrate-host-exec-v1-",
+            "substrate-host-exec-v2-",
             "substrate-host-exec-v1-A",
             "substrate-host-exec-v1-a\n",
             too_long.as_str(),
+            too_long_v2.as_str(),
         ] {
             let values = merged(&lane, &json!({"execution": {"appArmorProfile": name}}));
             assert!(!validator.is_valid(&values), "the schema admits {name:?}");

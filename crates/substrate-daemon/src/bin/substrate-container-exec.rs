@@ -50,6 +50,16 @@ mod tests {
     fn the_profile_defaults_and_a_stated_one_never_reaches_the_daemon() {
         let args = Args::try_parse_from(["exec", "--", "--socket", "s"]).unwrap();
         assert_eq!(args.apparmor_profile.to_string(), profile_name::DEFAULT);
+        assert_eq!(args.apparmor_profile.to_string(), "substrate-host-exec-v2");
+        let args = Args::try_parse_from([
+            "exec",
+            "--apparmor-profile",
+            "substrate-host-exec-v1",
+            "--",
+            "x",
+        ])
+        .unwrap();
+        assert_eq!(args.apparmor_profile.to_string(), "substrate-host-exec-v1");
         let args = Args::try_parse_from([
             "exec",
             "--project-quotas",
