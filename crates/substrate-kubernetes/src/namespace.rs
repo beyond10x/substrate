@@ -29,8 +29,6 @@ const USER_AGENT: &str = "b10x-substrate-kubernetes";
 /// Items per page of a policy list, and its pages: the bound of § 5.2.
 const POLICY_PAGE_ITEMS: usize = 100;
 const POLICY_PAGES: usize = 64;
-/// The most excess grants a refusal names.
-const NAMED_EXCESS: usize = 8;
 /// What Pod Security admission writes when a Pod violates the `restricted` level.
 const RESTRICTED_VIOLATION: &str = "violates PodSecurity \"restricted:";
 
@@ -44,6 +42,10 @@ pub enum Removal {
     /// The object under the row's name is not ours (§ 4): untouched, counted, and the row is
     /// unchanged.
     Collision,
+    /// The object reads absent, but no create answer is bound to the row and the N9 bound
+    /// (§ 5.1, [`NamespaceDriver::dispatch_bound`]) has not passed since the row was reserved:
+    /// an unanswered create may still be stored. The row stays open: ask again.
+    Unconfirmed,
 }
 
 /// The Kubernetes namespace driver's core: one claimed namespace, its settings, its Lease and the
@@ -190,21 +192,15 @@ impl NamespaceDriver {
                 "the rules review is incomplete: only the rules it shows were checked"
             );
         }
-        if review.excess.is_empty() {
+        if review.excess_total == 0 {
             return Ok(());
         }
-        let shown: Vec<&str> = review
-            .excess
-            .iter()
-            .take(NAMED_EXCESS)
-            .map(String::as_str)
-            .collect();
         Err(refusal(
             RBAC_EXCESS,
             format!(
                 "the credential holds {} grant(s) beyond the driver's Role: {}",
-                review.excess.len(),
-                shown.join(", ")
+                review.excess_total,
+                review.excess.join(", ")
             ),
         ))
     }
@@ -330,36 +326,60 @@ impl NamespaceDriver {
         *lock(&self.renewed) = claim.renewed_at();
     }
 
-    /// What `start_exec` asks immediately before it creates a Pod (§ 6.3): the Lease is held,
-    /// and the namespace's policy set, read again now, is the one the open bound.
+    /// What `start_exec` asks immediately before it creates a Pod (§ 6.3), for a start admitted
+    /// under the snapshot whose `config_generation` is `admitted`: the driver's binding is still
+    /// that one, the namespace's policy set, read again now, is the one it bound, and the Lease
+    /// is held. A re-open over a changed set binds a new generation, so a start admitted under
+    /// the old one is stale even though the driver is open again.
+    ///
+    /// Everything read before the policy `GET` is read again after it: a `GET` that runs long
+    /// cannot outlast the Lease, or a refused re-open, and still pass on a check made before it.
     ///
     /// # Errors
     ///
     /// `exec.capability-stale` (refused, address `capability_snapshot`) for a lost Lease, a
-    /// driver that is not open, or a moved policy set; `kubernetes.api-failed` when the policies
-    /// cannot be read, which proves nothing either way.
-    pub async fn check_binding(&self) -> Result<(), DriverError> {
-        if !self.lease_held() {
-            return Err(stale("the namespace Lease is not held"));
-        }
+    /// driver that is not open, a binding other than the admitted one, or a moved policy set;
+    /// `kubernetes.api-failed` when the policies cannot be read, which proves nothing either way.
+    pub async fn check_binding(&self, admitted: u64) -> Result<(), DriverError> {
         let Some(bound) = self.binding() else {
             return Err(stale("the namespace driver is not open"));
         };
-        match self.read_policies().await {
-            Ok(policies) if policies == bound.policies => Ok(()),
-            Ok(_) => Err(stale(
-                "the namespace's NetworkPolicy set changed since the snapshot",
-            )),
-            Err(PolicyFailure::NotDefaultDeny(message)) => Err(stale(&message)),
-            Err(PolicyFailure::Api(message)) => Err(DriverError::failed(API_FAILED, message)),
+        if bound.config_generation() != admitted {
+            return Err(stale(
+                "the namespace driver was opened again over another binding since the start was \
+                 admitted",
+            ));
         }
+        match self.read_policies().await {
+            Ok(policies) if policies == bound.policies => {}
+            Ok(_) => {
+                return Err(stale(
+                    "the namespace's NetworkPolicy set changed since the snapshot",
+                ));
+            }
+            Err(PolicyFailure::NotDefaultDeny(message)) => return Err(stale(&message)),
+            Err(PolicyFailure::Api(message)) => {
+                return Err(DriverError::failed(API_FAILED, message));
+            }
+        }
+        if self.binding().as_ref() != Some(&bound) {
+            return Err(stale(
+                "the namespace driver's binding changed while the policies were read",
+            ));
+        }
+        if !self.lease_held() {
+            return Err(stale("the namespace Lease is not held"));
+        }
+        Ok(())
     }
 
     /// Deletes the object `row` records under the uid rule (§ 4): only when it is ours, with
     /// `preconditions.uid`, so a same-named replacement is refused by the API server and never
     /// deleted. A Pod is deleted with `grace_seconds`. An object whose create answer was lost is
     /// adopted (its uid bound) before it is deleted. The row is settled once the object reads
-    /// absent.
+    /// absent, except that a row with no bound uid read absent stays open until the N9 bound has
+    /// passed since it was reserved ([`Removal::Unconfirmed`]): until then a create whose answer
+    /// was lost may still land, and must still be found and removed.
     ///
     /// # Errors
     ///
@@ -376,6 +396,9 @@ impl NamespaceDriver {
             .await
             .map_err(|error| api_failed(&error))?
         else {
+            if row.uid.is_none() && !self.past_dispatch_bound(row) {
+                return Ok(Removal::Unconfirmed);
+            }
             self.ledger.settle(&row.name)?;
             return Ok(Removal::Absent);
         };
@@ -418,6 +441,15 @@ impl NamespaceDriver {
         }
         self.ledger.settle(&row.name)?;
         Ok(Removal::Absent)
+    }
+
+    /// Whether the N9 bound has passed since `row` was reserved, on the driver's wall clock: only
+    /// then is an unbound row's absence final, because an unanswered create may be stored until
+    /// it (§ 5.1). A `created_at` after now counts as not passed.
+    fn past_dispatch_bound(&self, row: &BackendRecord) -> bool {
+        (self.clock.wall() - row.created_at)
+            .to_std()
+            .is_ok_and(|elapsed| elapsed > self.dispatch_bound())
     }
 
     fn collection(&self, role: BackendRole) -> String {

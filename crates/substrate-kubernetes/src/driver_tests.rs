@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use substrate_host::{
     BackendKind, BackendLedger, BackendName, BackendRecord, BackendRole, DriverError, UidBinding,
@@ -30,6 +30,9 @@ const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 /// A monotonic clock that moves only when a case advances it.
 struct ManualClock {
     base: Instant,
+    /// The wall time at `base`: taken before any row a case reserves, so a row's `created_at` is
+    /// never after the clock's start.
+    wall_base: DateTime<Utc>,
     offset: Mutex<Duration>,
 }
 
@@ -37,6 +40,7 @@ impl ManualClock {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             base: Instant::now(),
+            wall_base: Utc::now(),
             offset: Mutex::new(Duration::ZERO),
         })
     }
@@ -49,6 +53,11 @@ impl ManualClock {
 impl Clock for ManualClock {
     fn now(&self) -> Instant {
         self.base + *self.offset.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wall(&self) -> DateTime<Utc> {
+        let offset = *self.offset.lock().unwrap_or_else(PoisonError::into_inner);
+        self.wall_base + chrono::Duration::from_std(offset).expect("a case's offset is small")
     }
 }
 
@@ -376,12 +385,20 @@ async fn excess_rules_refuse_startup_before_the_lease_is_touched() {
     unreadable.push(json!({"verbs": ["get"], "resources": ["pods"]}));
     let mut nodes = exact_rules();
     nodes.push(json!({"verbs": ["get"], "apiGroups": [""], "resources": ["nodes"]}));
+    let numbered = |prefix: &str| -> Vec<String> {
+        (0..1_024).map(|index| format!("{prefix}{index}")).collect()
+    };
+    let mut product = exact_rules();
+    product.push(
+        json!({"verbs": numbered("v"), "apiGroups": numbered("g"), "resources": numbered("r")}),
+    );
     for (case, rules) in [
         ("a verb on secrets", secrets),
         ("a wildcard verb", wildcard),
         ("a verb outside the table", extra_verb),
         ("a rule naming no apiGroups", unreadable),
         ("a resource outside the table", nodes),
+        ("a rule stating a billion grants", product),
     ] {
         fake.set_rules(rules);
         let refusal = driver
@@ -390,6 +407,13 @@ async fn excess_rules_refuse_startup_before_the_lease_is_touched() {
             .err()
             .unwrap_or_else(|| panic!("{case}: startup opened"));
         assert_eq!(refusal.code, RBAC_EXCESS, "{case}: {}", refusal.message);
+        if case == "a rule stating a billion grants" {
+            assert!(
+                refusal.message.contains("1073741824 grant(s)") && refusal.message.len() < 4_096,
+                "every grant is counted and only a bounded few are named: {}",
+                refusal.message
+            );
+        }
     }
     assert!(
         !fake
@@ -471,12 +495,16 @@ async fn the_lease_is_held_only_while_the_last_renewal_is_under_twenty_seconds_o
     let clock = ManualClock::new();
     let (driver, _) = driver(&fake, &clock);
     driver.open().await.expect("an absent Lease is created");
+    let admitted = driver.binding().expect("bound").config_generation();
     assert_eq!(
         lease(&fake)["spec"]["holderIdentity"],
         driver.lease_holder()
     );
     assert!(driver.lease_held());
-    driver.check_binding().await.expect("held and unchanged");
+    driver
+        .check_binding(admitted)
+        .await
+        .expect("held and unchanged");
 
     clock.set(Duration::from_secs(10));
     driver.renew().await;
@@ -496,12 +524,12 @@ async fn the_lease_is_held_only_while_the_last_renewal_is_under_twenty_seconds_o
     }
     clock.set(Duration::from_millis(29_999));
     assert!(driver.lease_held(), "19.999 s after the last renewal");
-    driver.check_binding().await.expect("still held");
+    driver.check_binding(admitted).await.expect("still held");
 
     clock.set(Duration::from_secs(30));
     assert!(!driver.lease_held(), "20 s after the last renewal");
     let refusal = driver
-        .check_binding()
+        .check_binding(admitted)
         .await
         .expect_err("a lost Lease is stale");
     assert_eq!(refusal.code, CAPABILITY_STALE, "{}", refusal.message);
@@ -604,7 +632,10 @@ async fn the_binding_moves_with_the_namespace_policy_set() {
     driver.open().await.expect("opens");
     let binding = driver.binding().expect("bound at open");
     assert_ne!(binding.config_generation(), 0);
-    driver.check_binding().await.expect("unchanged");
+    driver
+        .check_binding(binding.config_generation())
+        .await
+        .expect("unchanged");
 
     fake.seed(
         "networkpolicies",
@@ -612,7 +643,7 @@ async fn the_binding_moves_with_the_namespace_policy_set() {
     )
     .expect("an additive allow is stored");
     let refusal = driver
-        .check_binding()
+        .check_binding(binding.config_generation())
         .await
         .expect_err("an added policy is stale");
     assert_eq!(refusal.code, CAPABILITY_STALE, "{}", refusal.message);
@@ -621,7 +652,10 @@ async fn the_binding_moves_with_the_namespace_policy_set() {
     let moved = driver.binding().expect("bound again");
     assert_ne!(moved.digest(), binding.digest());
     assert_ne!(moved.config_generation(), binding.config_generation());
-    driver.check_binding().await.expect("the new binding holds");
+    driver
+        .check_binding(moved.config_generation())
+        .await
+        .expect("the new binding holds");
 }
 
 /// An object carrying the managed-by and deployment labels and the operation annotation.
@@ -829,8 +863,9 @@ fn names_labels_and_bounds_are_derived_from_the_deployment_and_the_id() {
 /// Design 34 § 6.3 and ADR 0047 decision 9: before the Pod create the driver compares the re-read
 /// policy set with the binding of the snapshot the start was **admitted** under. A re-open (what
 /// retaking the Lease runs, § 6.1) over a changed set binds the new set; a start admitted under
-/// the first binding must still be stale. `check_binding` takes no admitted binding, so it can
-/// only compare with the latest open, and this start passes.
+/// the first binding must still be stale. Red at `e67f1878`: `check_binding` took no admitted
+/// binding, so it could only compare with the latest open, and this start passed; it now takes
+/// the admitted `config_generation`.
 #[tokio::test]
 async fn a_start_admitted_before_a_reopen_over_a_changed_policy_set_is_stale() {
     let fake = passing_fake();
@@ -853,7 +888,10 @@ async fn a_start_admitted_before_a_reopen_over_a_changed_policy_set_is_stale() {
     let current = driver.binding().expect("bound again");
     assert_ne!(current.config_generation(), admitted.config_generation());
 
-    let refusal = driver.check_binding().await.expect_err(
+    let refusal = driver
+        .check_binding(admitted.config_generation())
+        .await
+        .expect_err(
         "the Pod create of a start admitted under the first binding must be refused: the policy \
          set it was admitted under is gone",
     );
@@ -897,4 +935,161 @@ async fn an_unbound_row_read_absent_still_removes_an_object_whose_create_lands_l
          removal {first:?}, second {second:?}, row settled at {:?}",
         ledger.row(&name).settled_at
     );
+}
+
+/// Design 34 § 5.1 and N9, the other side of the case above: an unbound row read absent stays
+/// open, and its removal says so, until the N9 bound has passed since the row was reserved; past
+/// it the absence is dispatch absence and the row is settled. A bound row read absent is physical
+/// absence and is settled at once.
+#[tokio::test]
+async fn an_unbound_row_read_absent_is_settled_only_past_the_n9_bound() {
+    let fake = passing_fake();
+    let clock = ManualClock::new();
+    let (driver, ledger) = driver(&fake, &clock);
+    let digest = "e".repeat(64);
+    let bound_name = names::exec_pod(DEPLOYMENT, "ex_bound");
+    ledger.reserve(
+        BackendKind::Exec,
+        "ex_bound",
+        BackendRole::Pod,
+        &bound_name,
+        &digest,
+    );
+    ledger
+        .bind_uid(&bound_name, "00000000-0000-4000-8000-000000000001")
+        .expect("bound");
+    let removal = driver
+        .remove_owned(&ledger.row(&bound_name), 1)
+        .await
+        .expect("answered");
+    assert_eq!(
+        removal,
+        Removal::Absent,
+        "a bound row's absence is physical"
+    );
+    assert!(ledger.row(&bound_name).settled_at.is_some());
+
+    let name = names::exec_pod(DEPLOYMENT, "ex_unbound");
+    ledger.reserve(
+        BackendKind::Exec,
+        "ex_unbound",
+        BackendRole::Pod,
+        &name,
+        &digest,
+    );
+    let bound = driver.dispatch_bound();
+    let short_of_it = bound
+        .checked_sub(Duration::from_secs(1))
+        .expect("the N9 bound is over a second");
+    for at in [Duration::ZERO, short_of_it] {
+        clock.set(at);
+        let removal = driver
+            .remove_owned(&ledger.row(&name), 1)
+            .await
+            .expect("answered");
+        assert_eq!(removal, Removal::Unconfirmed, "at {at:?}");
+        assert_eq!(ledger.row(&name).settled_at, None, "at {at:?}");
+    }
+    clock.set(bound + Duration::from_secs(1));
+    let removal = driver
+        .remove_owned(&ledger.row(&name), 1)
+        .await
+        .expect("answered");
+    assert_eq!(removal, Removal::Absent, "past the N9 bound");
+    assert!(ledger.row(&name).settled_at.is_some());
+}
+
+/// N4: a Lease labelled for another deployment is that deployment's, whatever its holder says.
+/// An empty holder is not an invitation to take it, and a holder naming this deployment does not
+/// make it this deployment's. An unlabelled free Lease is taken and carries this deployment's
+/// labels from then on.
+#[tokio::test]
+async fn a_lease_labelled_for_another_deployment_is_foreign_even_with_an_empty_holder() {
+    let theirs = names::deployment_label("deploy-b");
+    for holder in ["", "deploy-a/cccccccccccccccc"] {
+        let fake = passing_fake();
+        fake.seed(
+            "leases",
+            json!({
+                "metadata": {
+                    "name": LEASE_NAME,
+                    "labels": {MANAGED_BY_LABEL: MANAGED_BY, DEPLOYMENT_LABEL: theirs},
+                },
+                "spec": {"holderIdentity": holder, "leaseDurationSeconds": 30},
+            }),
+        )
+        .expect("the Lease is stored");
+        let before = lease(&fake);
+        let clock = ManualClock::new();
+        let (driver, _) = driver(&fake, &clock);
+        for at in [0, 31] {
+            clock.set(Duration::from_secs(at));
+            let refusal = driver
+                .open()
+                .await
+                .expect_err("a Lease labelled for another deployment refuses");
+            assert_eq!(
+                refusal.code, LEASE_FOREIGN,
+                "holder {holder:?} at {at} s: {}",
+                refusal.message
+            );
+        }
+        assert_eq!(lease(&fake), before, "holder {holder:?}: never written");
+        assert!(!driver.lease_held());
+    }
+
+    let fake = passing_fake();
+    seed_lease(&fake, "");
+    let clock = ManualClock::new();
+    let (driver, _) = driver(&fake, &clock);
+    driver
+        .open()
+        .await
+        .expect("a free unlabelled Lease is taken");
+    let taken = lease(&fake);
+    assert_eq!(taken["spec"]["holderIdentity"], driver.lease_holder());
+    assert_eq!(
+        taken["metadata"]["labels"][DEPLOYMENT_LABEL],
+        names::deployment_label(DEPLOYMENT)
+    );
+    assert_eq!(taken["metadata"]["labels"][MANAGED_BY_LABEL], MANAGED_BY);
+}
+
+/// N6: the Lease is checked after the policy read, so a read that outlasts the Lease cannot pass
+/// on a check made before it. The read is held at the fake while the clock moves past
+/// [`crate::lease::HELD_FOR`].
+#[tokio::test]
+async fn a_lease_lost_while_the_policy_read_is_in_flight_is_stale() {
+    let fake = passing_fake();
+    let clock = ManualClock::new();
+    let (driver, _) = driver(&fake, &clock);
+    driver.open().await.expect("opens");
+    let admitted = driver.binding().expect("bound").config_generation();
+    let list = format!("GET {}", driver.api().policies());
+    fake.fault(Fault::Delay {
+        method: Method::GET,
+        path: driver.api().policies(),
+        by: Duration::from_millis(500),
+    });
+    let sent = || {
+        fake.requests()
+            .iter()
+            .filter(|request| request.starts_with(&list))
+            .count()
+    };
+    let before = sent();
+    let advance = async {
+        for _ in 0..400 {
+            if sent() > before {
+                clock.set(Duration::from_secs(25));
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the policy read was never sent");
+    };
+    let (checked, ()) = tokio::join!(driver.check_binding(admitted), advance);
+    let refusal = checked.expect_err("the Lease lapsed while the policy read was in flight");
+    assert_eq!(refusal.code, CAPABILITY_STALE, "{}", refusal.message);
+    assert!(refusal.message.contains("Lease"), "{}", refusal.message);
 }

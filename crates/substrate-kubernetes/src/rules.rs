@@ -62,14 +62,55 @@ pub const DEFAULT_NON_RESOURCE_RULES: [(&str, &[&str]); 1] = [(
     ],
 )];
 
+/// The most excess grants a review names; the rest are counted, never rendered.
+pub const NAMED_EXCESS: usize = 8;
+/// The longest a named grant is, in characters: a member of a rule is as long as the API server
+/// let it be.
+const NAMED_EXCESS_CHARS: usize = 160;
+
 /// What a review shows beyond the allowed set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Review {
-    /// Every grant beyond [`ROLE_RULES`] and the defaults, as `verb group/resource` or
-    /// `verb url`, or a description of a rule that cannot be read. Empty means none is visible.
+    /// The first [`NAMED_EXCESS`] grants beyond [`ROLE_RULES`] and the defaults, as
+    /// `verb group/resource` or `verb url`, or a description of a rule that cannot be read, each
+    /// at most `NAMED_EXCESS_CHARS` characters.
     pub excess: Vec<String>,
+    /// Every grant beyond the allowed set, counted over the distinct members of each rule, and
+    /// one for each rule that cannot be read. Zero means none is visible.
+    pub excess_total: u64,
     /// The review's own `incomplete`: the API server could not enumerate every rule.
     pub incomplete: bool,
+}
+
+/// The grants a review counts and the few it names. A rule's grants are the product of its
+/// lists, so a rule of a few thousand short strings states billions: they are counted by
+/// arithmetic, and only the named few are ever built.
+#[derive(Default)]
+struct Excess {
+    named: Vec<String>,
+    total: u64,
+}
+
+impl Excess {
+    fn full(&self) -> bool {
+        self.named.len() >= NAMED_EXCESS
+    }
+
+    fn name(&mut self, render: impl FnOnce() -> String) {
+        if !self.full() {
+            let rendered = render();
+            let named = match rendered.char_indices().nth(NAMED_EXCESS_CHARS - 1) {
+                Some((cut, _)) => format!("{}…", &rendered[..cut]),
+                None => rendered,
+            };
+            self.named.push(named);
+        }
+    }
+
+    fn unreadable(&mut self, render: impl FnOnce() -> String) {
+        self.total = self.total.saturating_add(1);
+        self.name(render);
+    }
 }
 
 /// Reads a review's `status` against the allowed set. A wildcard in any position, any verb on
@@ -83,7 +124,7 @@ pub fn review(status: &Value) -> Review {
             allowed.insert((group, resource, verb));
         }
     }
-    let mut excess = Vec::new();
+    let mut excess = Excess::default();
     match status["resourceRules"].as_array() {
         Some(rules) => {
             for rule in rules {
@@ -91,7 +132,7 @@ pub fn review(status: &Value) -> Review {
             }
         }
         None if status["resourceRules"].is_null() => {}
-        None => excess.push("resourceRules is not a list".to_owned()),
+        None => excess.unreadable(|| "resourceRules is not a list".to_owned()),
     }
     match status["nonResourceRules"].as_array() {
         Some(rules) => {
@@ -100,58 +141,99 @@ pub fn review(status: &Value) -> Review {
             }
         }
         None if status["nonResourceRules"].is_null() => {}
-        None => excess.push("nonResourceRules is not a list".to_owned()),
+        None => excess.unreadable(|| "nonResourceRules is not a list".to_owned()),
     }
     Review {
-        excess,
+        excess: excess.named,
+        excess_total: excess.total,
         incomplete: status["incomplete"] == Value::Bool(true),
     }
 }
 
-/// The strings of `rule[member]`, or `None` when it is not a non-empty list of strings.
-fn strings<'a>(rule: &'a Value, member: &str) -> Option<Vec<&'a str>> {
+/// The distinct strings of `rule[member]`, or `None` when it is not a non-empty list of strings.
+fn strings<'a>(rule: &'a Value, member: &str) -> Option<BTreeSet<&'a str>> {
     let list = rule[member].as_array()?;
-    let strings: Option<Vec<&str>> = list.iter().map(Value::as_str).collect();
+    let strings: Option<BTreeSet<&str>> = list.iter().map(Value::as_str).collect();
     strings.filter(|strings| !strings.is_empty())
 }
 
-fn resource_rule(rule: &Value, allowed: &BTreeSet<(&str, &str, &str)>, excess: &mut Vec<String>) {
+fn size(set: &BTreeSet<&str>) -> u64 {
+    u64::try_from(set.len()).unwrap_or(u64::MAX)
+}
+
+fn resource_rule(rule: &Value, allowed: &BTreeSet<(&str, &str, &str)>, excess: &mut Excess) {
     let (Some(verbs), Some(groups), Some(resources)) = (
         strings(rule, "verbs"),
         strings(rule, "apiGroups"),
         strings(rule, "resources"),
     ) else {
-        excess.push(format!("an unreadable resource rule {rule}"));
+        excess.unreadable(|| format!("an unreadable resource rule {rule}"));
         return;
     };
-    for group in &groups {
+    // An allowed triple names no wildcard and no secret, so the rule's held grants are exactly
+    // the allowed triples it covers, and everything else in its product is excess.
+    let held = allowed
+        .iter()
+        .filter(|(group, resource, verb)| {
+            groups.contains(group) && resources.contains(resource) && verbs.contains(verb)
+        })
+        .count();
+    let product = size(&groups)
+        .saturating_mul(size(&resources))
+        .saturating_mul(size(&verbs));
+    excess.total = excess
+        .total
+        .saturating_add(product.saturating_sub(u64::try_from(held).unwrap_or(u64::MAX)));
+    // Each step names a grant or passes a distinct allowed triple, so this walk ends after at
+    // most NAMED_EXCESS plus the allowed set's size steps, whatever the product.
+    'walk: for group in &groups {
         for resource in &resources {
             for verb in &verbs {
+                if excess.full() {
+                    break 'walk;
+                }
                 let wildcard = [*group, *resource, *verb]
                     .iter()
                     .any(|part| part.contains('*'));
                 let secret = *resource == "secrets" || resource.starts_with("secrets/");
                 if wildcard || secret || !allowed.contains(&(*group, *resource, *verb)) {
-                    excess.push(format!("{verb} {group}/{resource}"));
+                    excess.name(|| format!("{verb} {group}/{resource}"));
                 }
             }
         }
     }
 }
 
-fn non_resource_rule(rule: &Value, excess: &mut Vec<String>) {
+fn non_resource_rule(rule: &Value, excess: &mut Excess) {
     let (Some(verbs), Some(urls)) = (strings(rule, "verbs"), strings(rule, "nonResourceURLs"))
     else {
-        excess.push(format!("an unreadable non-resource rule {rule}"));
+        excess.unreadable(|| format!("an unreadable non-resource rule {rule}"));
         return;
     };
-    for verb in &verbs {
+    let held_pair = |verb: &str, url: &str| {
+        DEFAULT_NON_RESOURCE_RULES
+            .iter()
+            .any(|(allowed, urls)| *allowed == verb && urls.contains(&url))
+    };
+    let held = DEFAULT_NON_RESOURCE_RULES
+        .iter()
+        .flat_map(|(verb, urls)| urls.iter().map(move |url| (*verb, *url)))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|(verb, url)| verbs.contains(verb) && urls.contains(url))
+        .count();
+    excess.total = excess.total.saturating_add(
+        size(&verbs)
+            .saturating_mul(size(&urls))
+            .saturating_sub(u64::try_from(held).unwrap_or(u64::MAX)),
+    );
+    'walk: for verb in &verbs {
         for url in &urls {
-            let held = DEFAULT_NON_RESOURCE_RULES
-                .iter()
-                .any(|(allowed, urls)| allowed == verb && urls.contains(url));
-            if !held {
-                excess.push(format!("{verb} {url}"));
+            if excess.full() {
+                break 'walk;
+            }
+            if !held_pair(verb, url) {
+                excess.name(|| format!("{verb} {url}"));
             }
         }
     }
@@ -161,7 +243,7 @@ fn non_resource_rule(rule: &Value, excess: &mut Vec<String>) {
 mod tests {
     use serde_json::json;
 
-    use super::review;
+    use super::{NAMED_EXCESS, review};
 
     #[test]
     fn the_default_non_resource_rules_pass_and_any_other_is_excess() {
@@ -185,5 +267,47 @@ mod tests {
             assert!(!read.excess.is_empty(), "{rule} is excess");
         }
         assert!(!review(&json!({"resourceRules": {}})).excess.is_empty());
+    }
+
+    /// A rule of a few thousand short strings states a product of billions of grants. The review
+    /// counts all of them, names at most [`NAMED_EXCESS`] and still refuses, without building the
+    /// product: one string per grant would be tens of gigabytes.
+    #[test]
+    fn a_rule_whose_product_is_huge_is_counted_named_within_the_bound_and_refused() {
+        let numbered = |prefix: &str, count: usize| -> Vec<String> {
+            (0..count).map(|index| format!("{prefix}{index}")).collect()
+        };
+        let mut groups = numbered("g", 2_048);
+        groups.push(String::new());
+        groups.push(String::new());
+        let mut resources = numbered("r", 2_048);
+        resources.push("pods".to_owned());
+        let mut verbs = numbered("v", 254);
+        verbs.push("get".to_owned());
+        verbs.push("delete".to_owned());
+        let status = json!({
+            "resourceRules": [{"verbs": verbs, "apiGroups": groups, "resources": resources}],
+            "nonResourceRules": [{"verbs": ["get", "get"], "nonResourceURLs": numbered("/u", 4_096)}],
+        });
+
+        let read = review(&status);
+        let resource_product = 2_049_u64 * 2_049 * 256;
+        let held = 2;
+        assert_eq!(read.excess_total, resource_product - held + 4_096);
+        assert_eq!(read.excess.len(), NAMED_EXCESS);
+        assert!(
+            read.excess
+                .iter()
+                .all(|named| named.chars().count() <= super::NAMED_EXCESS_CHARS),
+            "{:?}",
+            read.excess
+        );
+
+        let long = "x".repeat(100_000);
+        let read = review(
+            &json!({"resourceRules": [{"verbs": ["get"], "apiGroups": [long], "resources": ["pods"]}]}),
+        );
+        assert_eq!(read.excess_total, 1);
+        assert!(read.excess[0].chars().count() <= super::NAMED_EXCESS_CHARS);
     }
 }
