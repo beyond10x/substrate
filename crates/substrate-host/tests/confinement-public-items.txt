@@ -394,24 +394,6 @@ lib.rs: struct HostConfig > pub exec_cpu_cores: u32,
 lib.rs: struct HostConfig > pub host_processes: bool,
 lib.rs: struct HostConfig > pub writable_roots: Vec<DeclaredWritableRoot>,
 lib.rs: impl HostConfig > pub fn minimum(workspace_root: impl Into<PathBuf>) -> Self
-lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum DriverErrorClass
-lib.rs: enum DriverErrorClass > Refused,
-lib.rs: enum DriverErrorClass > Conflict,
-lib.rs: enum DriverErrorClass > Unserved,
-lib.rs: enum DriverErrorClass > Exhausted,
-lib.rs: enum DriverErrorClass > Failed,
-lib.rs: enum DriverErrorClass > NotFound,
-lib.rs: #[derive(Debug, Error)] pub struct DriverError
-lib.rs: struct DriverError > pub class: DriverErrorClass,
-lib.rs: struct DriverError > pub code: &'static str,
-lib.rs: struct DriverError > pub message: String,
-lib.rs: struct DriverError > pub address: Option<String>,
-lib.rs: struct DriverError > pub retriable: bool,
-lib.rs: impl DriverError > pub fn refused(code: &'static str, message: impl Into<String>, address: &str) -> Self
-lib.rs: impl DriverError > pub fn not_found() -> Self
-lib.rs: impl DriverError > pub fn unserved(code: &'static str, message: impl Into<String>, address: &str) -> Self
-lib.rs: impl DriverError > pub fn exhausted(code: &'static str, message: impl Into<String>, address: &str) -> Self
-lib.rs: impl DriverError > pub fn failed(code: &'static str, message: impl Into<String>) -> Self
 observation.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum PipeStream
 observation.rs: enum PipeStream > Stdout,
 observation.rs: enum PipeStream > Stderr,
@@ -427,6 +409,24 @@ output_retention.rs: struct KeptOutput > pub retention: Retention,
 output_retention.rs: struct KeptOutput > pub observed_bytes: Option<u64>,
 output_retention.rs: struct KeptOutput > pub head_bytes: u64,
 output_retention.rs: struct KeptOutput > pub tail_bytes: u64,
+substrate-guarded/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum DriverErrorClass
+substrate-guarded/src/lib.rs: enum DriverErrorClass > Refused,
+substrate-guarded/src/lib.rs: enum DriverErrorClass > Conflict,
+substrate-guarded/src/lib.rs: enum DriverErrorClass > Unserved,
+substrate-guarded/src/lib.rs: enum DriverErrorClass > Exhausted,
+substrate-guarded/src/lib.rs: enum DriverErrorClass > Failed,
+substrate-guarded/src/lib.rs: enum DriverErrorClass > NotFound,
+substrate-guarded/src/lib.rs: #[derive(Debug, Error)] pub struct DriverError
+substrate-guarded/src/lib.rs: struct DriverError > pub class: DriverErrorClass,
+substrate-guarded/src/lib.rs: struct DriverError > pub code: &'static str,
+substrate-guarded/src/lib.rs: struct DriverError > pub message: String,
+substrate-guarded/src/lib.rs: struct DriverError > pub address: Option<String>,
+substrate-guarded/src/lib.rs: struct DriverError > pub retriable: bool,
+substrate-guarded/src/lib.rs: impl DriverError > pub fn refused(code: &'static str, message: impl Into<String>, address: &str) -> Self
+substrate-guarded/src/lib.rs: impl DriverError > pub fn not_found() -> Self
+substrate-guarded/src/lib.rs: impl DriverError > pub fn unserved(code: &'static str, message: impl Into<String>, address: &str) -> Self
+substrate-guarded/src/lib.rs: impl DriverError > pub fn exhausted(code: &'static str, message: impl Into<String>, address: &str) -> Self
+substrate-guarded/src/lib.rs: impl DriverError > pub fn failed(code: &'static str, message: impl Into<String>) -> Self
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct WritableHostRoot
 substrate-wire/src/lib.rs: struct WritableHostRoot > pub host: String,
 substrate-wire/src/lib.rs: struct WritableHostRoot > pub mount: String,
