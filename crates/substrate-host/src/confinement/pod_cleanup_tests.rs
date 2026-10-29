@@ -366,6 +366,7 @@ fn answer_run(cluster: &Cluster, method: &str, path: &str) -> (u16, String) {
             200,
             json!({
                 "metadata": {"name": RUN},
+                "spec": {"nodeName": "node-a", "restartPolicy": "Never"},
                 "status": {
                     "phase": "Succeeded",
                     "containerStatuses": [{
@@ -525,6 +526,7 @@ async fn a_run_read_unknown_is_removed_when_the_kubelet_outlasts_two_removal_rou
         run,
         sender,
         Instant::now() + Duration::from_mins(10),
+        PodTrace::default(),
     ));
     let mut observed = phase.clone();
     let unknown = tokio::time::timeout(
@@ -611,6 +613,7 @@ async fn a_run_read_unknown_with_its_removal_pending_counts_against_the_tracking
         Arc::clone(&run),
         sender,
         Instant::now() + Duration::from_mins(10),
+        PodTrace::default(),
     ));
     {
         let mut runs = adapter.runs.lock();
@@ -839,3 +842,6 @@ mod security_pass2;
 
 #[path = "pod_cleanup_force_deleted.rs"]
 mod force_deleted;
+
+#[path = "pod_cleanup_adversary_watch.rs"]
+mod adversary_watch;

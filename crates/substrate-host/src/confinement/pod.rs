@@ -775,7 +775,9 @@ impl Api {
                 }
                 match self.get(path).await {
                     Ok(None) => return,
-                    Ok(Some(object)) => seen.note(&object),
+                    Ok(Some(object)) => {
+                        seen.note(&object);
+                    }
                     Err(_) => {}
                 }
             }
@@ -1105,9 +1107,11 @@ struct PodTrace {
     /// The Pod's `uid`, from the first object read that carries one; an object with another is a
     /// different Pod and is not noted.
     uid: Option<String>,
-    /// An object read showed the container terminated. Only the kubelet writes that state, and the
-    /// container of a Pod with `restartPolicy: Never` does not run again. A Pod's phase is no such
-    /// evidence: the Pod garbage collector marks a Pod `Failed` before it force-deletes it.
+    /// An object read showed the container terminated in a Pod whose own `spec.restartPolicy` is
+    /// `Never`. Only the kubelet writes that state, and the container of such a Pod does not run
+    /// again; a Pod an admission webhook gave another policy may restart it, so its terminated state
+    /// is not noted. A Pod's phase is no such evidence: the Pod garbage collector marks a Pod
+    /// `Failed` before it force-deletes it.
     stopped: bool,
 }
 
@@ -1120,13 +1124,21 @@ impl PodTrace {
         }
     }
 
-    /// Notes one object read of the run's Pod: a whole Pod or its metadata alone.
-    fn note(&mut self, pod: &Value) {
+    /// A trace starting at the run's policy's `resourceVersion`, with the Pod its create stored.
+    fn created(policy: &Value, pod: &Value) -> Self {
+        let mut trace = Self::since(policy["metadata"]["resourceVersion"].as_str());
+        trace.note(pod);
+        trace
+    }
+
+    /// Notes one object read of the run's Pod: a whole Pod or its metadata alone. `false` when the
+    /// object is another Pod than the one first read, which is not noted.
+    fn note(&mut self, pod: &Value) -> bool {
         let uid = pod["metadata"]["uid"].as_str();
         if let (Some(seen), Some(uid)) = (&self.uid, uid)
             && seen != uid
         {
-            return;
+            return false;
         }
         if self.uid.is_none() {
             self.uid = uid.map(str::to_owned);
@@ -1134,10 +1146,21 @@ impl PodTrace {
         if let Some(version) = pod["metadata"]["resourceVersion"].as_str() {
             self.resource_version = Some(version.to_owned());
         }
-        if container(pod)["terminated"].is_object() {
+        if container(pod)["terminated"].is_object()
+            && pod["spec"]["restartPolicy"].as_str() == Some("Never")
+        {
             self.stopped = true;
         }
+        true
     }
+}
+
+/// Whether `pod`, a whole Pod object, was never bound to a node. A binding sets `spec.nodeName`
+/// and nothing unsets it, so the object a deletion leaves without one was never held by a kubelet
+/// and no container of it ever ran. A read before the deletion is no such evidence: the Pod may be
+/// bound after it.
+fn never_bound(pod: &Value) -> bool {
+    pod["spec"].is_object() && pod["spec"]["nodeName"].as_str().is_none_or(str::is_empty)
 }
 
 /// What the API shows of the container of a Pod a read found gone.
@@ -1184,11 +1207,18 @@ fn watch_event(line: &[u8], name: &str, trace: &mut PodTrace) -> Option<PodEnd> 
     {
         return None;
     }
-    trace.note(object);
+    if !trace.note(object) {
+        return None;
+    }
     if trace.stopped {
         return Some(PodEnd::Stopped);
     }
-    (kind == Some("DELETED")).then(|| {
+    if kind != Some("DELETED") {
+        return None;
+    }
+    Some(if never_bound(object) {
+        PodEnd::Stopped
+    } else {
         PodEnd::Unproven("the Pod was deleted with its container not shown terminated".to_owned())
     })
 }
@@ -1198,9 +1228,10 @@ fn watch_event(line: &[u8], name: &str, trace: &mut PodTrace) -> Option<PodEnd> 
 /// after a node stopped answering or an operator's, removes a Pod without its kubelet, so a 404
 /// alone says nothing of the container. The policy may go only when a read showed the container
 /// terminated, or a watch of the Pod from the last `resourceVersion` read replays a terminated
-/// container: the kubelet writes that state before it removes a Pod it was asked to delete. Without a `resourceVersion`
-/// to watch from, on a 410, a watch that shows nothing within [`WATCH_LIMIT`] or a deletion of a
-/// container not shown terminated, the policy stays.
+/// container: the kubelet writes that state before it removes a Pod it was asked to delete. A
+/// deletion that leaves the Pod unbound to any node shows no container ever ran ([`never_bound`]).
+/// Without a `resourceVersion` to watch from, on a 410, a watch that shows nothing within
+/// [`WATCH_LIMIT`] or a deletion of a bound Pod's container not shown terminated, the policy stays.
 async fn pod_end(api: &Api, run: &str, trace: &PodTrace) -> PodEnd {
     if trace.stopped {
         return PodEnd::Stopped;
@@ -1790,7 +1821,8 @@ struct PodRun {
     /// Whether the API has shown the container running or terminated.
     started: AtomicBool,
     stop: Mutex<Option<Stop>>,
-    /// Whether the API has confirmed the run's Pod gone after the adapter's removal.
+    /// Whether the run's task is done with the Pod: the API confirmed it gone after the adapter's
+    /// removal and answered whether its container stopped, so the task asks nothing more of it.
     pod_gone: AtomicBool,
 }
 
@@ -1835,8 +1867,9 @@ impl PodAdapter {
     }
 
     /// Makes room for one more run, forgetting runs that are over oldest first. A run read
-    /// `Unknown` whose Pod's removal the API has not confirmed is not over: its task is still
-    /// removing it, and the tasks never outnumber [`POD_MAX_TRACKED_RUNS`].
+    /// `Unknown` whose Pod's removal the API has not confirmed, or whose container the API has not
+    /// yet answered for, is not over: its task is still asking, and the tasks never outnumber
+    /// [`POD_MAX_TRACKED_RUNS`].
     fn reserve(&self) -> Result<(), ConfinementError> {
         let mut runs = self.runs.lock();
         while runs.len() >= POD_MAX_TRACKED_RUNS {
@@ -1899,10 +1932,16 @@ impl PodAdapter {
             "uid": uid,
             "controller": false,
         }]);
-        if let Err(error) = self.api.create(&self.api.pods(), &pod).await {
-            // An answer lost after the API stored the Pod looks like a refusal.
-            return Err(self.abandon(&name, &error).await);
-        }
+        let stored = match self.api.create(&self.api.pods(), &pod).await {
+            Ok(stored) => stored,
+            Err(error) => {
+                // An answer lost after the API stored the Pod looks like a refusal.
+                let trace = PodTrace::since(created["metadata"]["resourceVersion"].as_str());
+                return Err(self.abandon(&name, &error, trace).await);
+            }
+        };
+        // What a watch of a Pod gone before the run's task first reads it starts from.
+        let trace = PodTrace::created(&created, &stored);
         // Another adapter's open sweep may have removed the policy while the Pod's create was in
         // flight: a run starts only when its policy is read back after its Pod is stored.
         let unfenced = match self.api.get(&policy_path).await {
@@ -1918,7 +1957,7 @@ impl PodAdapter {
             )),
         };
         if let Some(detail) = unfenced {
-            return Err(self.abandon(&name, &detail).await);
+            return Err(self.abandon(&name, &detail, trace).await);
         }
         let id = RunId::new(name);
         let (sender, phase) = watch::channel(Phase::Running);
@@ -1937,26 +1976,41 @@ impl PodAdapter {
             Arc::clone(&run),
             sender,
             Instant::now() + wall + DEADLINE_GRACE,
+            trace,
         ));
         self.runs.lock().push(run);
         admitted.audit_start(&id, &command.argv[0]);
         Ok(id)
     }
 
-    /// A start that fails once its Pod may be stored: deletes the Pod by name and only once it is
-    /// confirmed gone its policy. The failure names the Pod when its removal was not confirmed.
-    async fn abandon(&self, name: &str, error: &str) -> ConfinementError {
+    /// A start that fails once its Pod may be stored: deletes the Pod by name and its policy only
+    /// once the Pod is confirmed gone and the API shows its container stopped ([`pod_end`], from
+    /// `trace`: the policy's `resourceVersion`, and the Pod its create stored when the answer came).
+    /// The failure says when the policy stays.
+    async fn abandon(&self, name: &str, error: &str, mut trace: PodTrace) -> ConfinementError {
         let pod_path = format!("{}/{name}", self.api.pods());
-        if !self.api.remove(&pod_path, KILL_GRACE_SECONDS).await {
+        if !self
+            .api
+            .remove_seen(&pod_path, KILL_GRACE_SECONDS, &mut trace)
+            .await
+        {
             return api_failed(&format!(
                 "{error}; the Pod {name} may have been stored and its removal was not confirmed, \
                  so its NetworkPolicy stays"
             ));
         }
-        self.api
-            .remove(&format!("{}/{name}", self.api.policies()), 0)
-            .await;
-        api_failed(error)
+        match pod_end(&self.api, name, &trace).await {
+            PodEnd::Stopped => {
+                self.api
+                    .remove(&format!("{}/{name}", self.api.policies()), 0)
+                    .await;
+                api_failed(error)
+            }
+            PodEnd::Unproven(why) | PodEnd::Unanswered(why) => api_failed(&format!(
+                "{error}; the Pod {name} is gone but the API does not show its container stopped \
+                 ({why}), so its NetworkPolicy stays"
+            )),
+        }
     }
 }
 
@@ -2100,13 +2154,20 @@ fn ended(pod: &Value, force: bool) -> Option<(RunExit, Option<u64>)> {
 /// Follows one run until the API shows its container ended, or the run is lost, then removes the
 /// Pod and, once the Pod is confirmed gone and the API shows its container stopped
 /// ([`pod_end`]), its policy.
-async fn monitor(api: Arc<Api>, run: Arc<PodRun>, phase: watch::Sender<Phase>, give_up: Instant) {
+/// `trace` holds what `start` read: the policy's `resourceVersion` and the Pod its create stored,
+/// so a Pod gone before the task's first read is still watched.
+async fn monitor(
+    api: Arc<Api>,
+    run: Arc<PodRun>,
+    phase: watch::Sender<Phase>,
+    give_up: Instant,
+    mut trace: PodTrace,
+) {
     let name = run.id.as_str().to_owned();
     let pod_path = format!("{}/{name}", api.pods());
     let policy_path = format!("{}/{name}", api.policies());
     let mut answered = Instant::now();
     let mut terminal_polls = 0_u32;
-    let mut trace = PodTrace::default();
     let outcome = loop {
         tokio::time::sleep(POLL).await;
         let answer = api.get(&pod_path).await;
@@ -2182,18 +2243,19 @@ async fn monitor(api: Arc<Api>, run: Arc<PodRun>, phase: watch::Sender<Phase>, g
     .await
     .unwrap_or(false);
     if removed {
-        run.pod_gone.store(true, Ordering::SeqCst);
         return release(&api, &run, &phase, outcome, &trace, deadline).await;
     }
     seal(&run);
     phase.send_replace(Phase::Unknown);
     // A kubelet may stay away longer than any bound the adapter could pick: the task asks until the
-    // API confirms the Pod gone, for as long as its runtime lives, and only then removes the policy.
-    // Until then the run counts against `POD_MAX_TRACKED_RUNS`, so these tasks stay bounded.
+    // API confirms the Pod gone and answers whether its container stopped, for as long as its
+    // runtime lives, and only then removes the policy. Until then the run counts against
+    // `POD_MAX_TRACKED_RUNS`, so these tasks stay bounded.
     api.remove_until_gone_seen(&pod_path, KILL_GRACE_SECONDS, &mut trace)
         .await;
+    let stopped = settle(&api, &name, &trace).await;
     run.pod_gone.store(true, Ordering::SeqCst);
-    if settle(&api, &name, &trace).await {
+    if stopped {
         api.remove_until_gone(&policy_path, 0).await;
     }
 }
@@ -2216,6 +2278,7 @@ async fn release(
         .await
         .ok();
     if stopped == Some(true) {
+        run.pod_gone.store(true, Ordering::SeqCst);
         let policy_removed = tokio::time::timeout_at(deadline, api.remove(&policy_path, 0))
             .await
             .unwrap_or(false);
@@ -2228,7 +2291,14 @@ async fn release(
     }
     seal(run);
     phase.send_replace(Phase::Unknown);
-    if stopped.is_none() && settle(api, name, trace).await {
+    // A watch the API keeps not answering is asked for as long as the runtime lives; until it is
+    // answered the run counts against `POD_MAX_TRACKED_RUNS`, so these tasks stay bounded.
+    let stopped = match stopped {
+        Some(stopped) => stopped,
+        None => settle(api, name, trace).await,
+    };
+    run.pod_gone.store(true, Ordering::SeqCst);
+    if stopped {
         api.remove_until_gone(&policy_path, 0).await;
     }
 }

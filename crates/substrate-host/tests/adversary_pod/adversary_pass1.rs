@@ -259,6 +259,7 @@ fn adv1_open_reads_policy_age_by_the_server_date_with_any_rfc3339_form() {
                 .unwrap_or_default();
             let deleted = json!({"type": "DELETED", "object": {
                 "metadata": {"name": name, "resourceVersion": "2"},
+                "spec": {"nodeName": "node-a", "restartPolicy": "Never"},
                 "status": {"containerStatuses": [{"name": "run",
                                                   "state": {"terminated": {"exitCode": 0}}}]},
             }});
