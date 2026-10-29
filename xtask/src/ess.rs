@@ -16,7 +16,7 @@ fn run(root: &Path, args: &[&str]) -> Result<()> {
         .args(args)
         .current_dir(root)
         .output()
-        .context("ESS 0.75.0 must be installed; see spec/README.md")?;
+        .context("ESS 0.76.0 must be installed; see spec/README.md")?;
     print!("{}", String::from_utf8_lossy(&result.stdout));
     eprint!("{}", String::from_utf8_lossy(&result.stderr));
     ensure!(result.status.success(), "ESS failed: {}", args.join(" "));

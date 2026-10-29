@@ -20,6 +20,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The specification and CI use ESS 0.76.0 (was 0.75.0); the suites and CLI package regenerate unchanged, and the four generated type files differ only in their generator header, the workspace types also in their schema projection digest (the root name now publishes its length bound).
 - `execution.appArmorProfile` in the chart, and `--apparmor-profile` on
   `substrate-container-profiles` and `substrate-container-exec`, default to
   `substrate-host-exec-v2`. They accept `substrate-host-exec-v1`, `substrate-host-exec-v2` and
