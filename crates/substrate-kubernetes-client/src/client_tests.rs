@@ -950,3 +950,288 @@ async fn every_member_design_28_refuses_is_refused_by_name() {
         "the loader refuses exactly design 28's members"
     );
 }
+
+/// The API refuses a body whose `metadata.namespace` names another namespace than the request's:
+/// 400. The fake stored such an object in its own namespace instead, so a driver that wrote a
+/// stray namespace would pass against the fake and be refused by the API.
+#[tokio::test]
+async fn a_create_whose_body_names_another_namespace_is_refused_400() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let mut stray = pod("stray-namespace");
+    stray["metadata"]["namespace"] = json!("elsewhere");
+
+    let error = api
+        .create(&api.pods(), &stray)
+        .await
+        .expect_err("another namespace");
+    assert_eq!(error.status(), Some(400), "{error}");
+    assert!(fake.object("pods", "stray-namespace").is_none());
+}
+
+/// The API refuses a replacement whose `metadata.name` is not the name in the URL: 400. The fake
+/// stored the replacement under the URL's name and kept the stored name, so the body's name was
+/// dropped without a word.
+#[tokio::test]
+async fn an_update_whose_body_names_another_object_is_refused_400() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let lease = json!({
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
+        "metadata": {"name": "b10x-substrate-driver"},
+        "spec": {"holderIdentity": "deployment-a/one", "leaseDurationSeconds": 30},
+    });
+    let created = api.create(&api.leases(), &lease).await.expect("created");
+    let path = format!("{}/b10x-substrate-driver", api.leases());
+    let mut renamed = created.clone();
+    renamed["metadata"]["name"] = json!("another-lease");
+
+    let error = api.update(&path, &renamed).await.expect_err("another name");
+    assert_eq!(error.status(), Some(400), "{error}");
+    assert!(fake.object("leases", "another-lease").is_none());
+}
+
+/// A paged list is one snapshot: every page is read at the version the first page answered, and
+/// the client watches from that version (`Api::list`, whose first page's version is what a watch
+/// after the list starts from). So no item of the list is newer than the list's version: a newer
+/// item would be delivered again by that watch. The fake answered each page at its own current
+/// version, so an object created while the list paged is an item at a version after the list's.
+#[tokio::test]
+async fn an_item_created_while_a_list_pages_is_not_newer_than_the_list() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    for number in 0..5 {
+        fake.seed("pods", pod(&format!("paged-{number}")))
+            .expect("seeded");
+    }
+    fake.fault(Fault::Delay {
+        method: Method::GET,
+        path: format!("{}?limit=2&continue=", api.pods()),
+        by: std::time::Duration::from_millis(400),
+    });
+    let writer = async {
+        while !fake
+            .requests()
+            .iter()
+            .any(|request| request.contains("continue="))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        fake.seed("pods", pod("paged-z-late")).expect("seeded");
+    };
+
+    let pods = api.pods();
+    let (listed, ()) = tokio::join!(api.list(&pods, "PodList", ListForm::Whole, 2, 5), writer);
+    let listed = listed.expect("the list");
+    let version: u64 = listed
+        .resource_version
+        .expect("the list's version")
+        .parse()
+        .expect("a number");
+    for item in &listed.items {
+        let item_version: u64 = item["metadata"]["resourceVersion"]
+            .as_str()
+            .expect("a version")
+            .parse()
+            .expect("a number");
+        assert!(
+            item_version <= version,
+            "{} is at {item_version} in a list at {version}",
+            item["metadata"]["name"]
+        );
+    }
+}
+
+/// A preconditioned delete whose body the API cannot read is refused; it is never carried out
+/// without its precondition. The fake read a body past its bound as no body at all and deleted the
+/// Pod under a `uid` that was not the Pod's.
+#[tokio::test]
+async fn a_delete_whose_body_is_past_its_bound_does_not_delete_under_another_uid() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    api.create(&api.pods(), &pod("oversized"))
+        .await
+        .expect("created");
+    let path = format!("{}/oversized", api.pods());
+    let options = json!({
+        "apiVersion": "v1",
+        "kind": "DeleteOptions",
+        "preconditions": {"uid": "00000000-0000-4000-8000-ffffffffffff"},
+        "padding": "x".repeat(4 * 1_048_576 + 1),
+    });
+
+    let (status, _) = api
+        .call(
+            Method::DELETE,
+            &path,
+            Some(&options),
+            crate::MAX_API_BODY_BYTES,
+        )
+        .await
+        .expect("answered");
+    assert_ne!(status, 200, "the delete was carried out");
+    assert!(
+        fake.object("pods", "oversized").is_some(),
+        "the Pod was deleted under another uid"
+    );
+}
+
+/// A `Lease` created through the client, and the path that names it.
+async fn lease(api: &Api) -> (Value, String) {
+    let lease = json!({
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
+        "metadata": {"name": "b10x-substrate-driver"},
+        "spec": {"holderIdentity": "deployment-a/one", "leaseDurationSeconds": 30},
+    });
+    let created = api.create(&api.leases(), &lease).await.expect("created");
+    (created, format!("{}/b10x-substrate-driver", api.leases()))
+}
+
+/// A replacement with `dryRun=All` is admitted and answered, and the API stores nothing.
+#[tokio::test]
+async fn a_dry_run_update_is_answered_and_stores_nothing() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let (created, path) = lease(&api).await;
+    let mut renewed = created.clone();
+    renewed["spec"]["holderIdentity"] = json!("deployment-a/two");
+
+    let answered = api
+        .update(&format!("{path}?dryRun=All"), &renewed)
+        .await
+        .expect("admitted");
+    assert_eq!(answered["spec"]["holderIdentity"], "deployment-a/two");
+    let stored = fake
+        .object("leases", "b10x-substrate-driver")
+        .expect("stored");
+    assert_eq!(stored, created, "a dry run changed the stored Lease");
+}
+
+/// `metadata.uid` is immutable: a replacement naming another uid is refused 422 `Invalid` and the
+/// stored object keeps its own, as the API server's update validation does.
+#[tokio::test]
+async fn an_update_naming_another_uid_is_refused_422() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let (created, path) = lease(&api).await;
+    let mut foreign = created.clone();
+    foreign["metadata"]["uid"] = json!("00000000-0000-4000-8000-ffffffffffff");
+    foreign["spec"]["holderIdentity"] = json!("deployment-b/one");
+
+    let error = api.update(&path, &foreign).await.expect_err("another uid");
+    assert_eq!(error.status(), Some(422), "{error}");
+    let stored = fake
+        .object("leases", "b10x-substrate-driver")
+        .expect("stored");
+    assert_eq!(stored, created);
+}
+
+/// A continue token from before a compaction can no longer be answered at its version: the page
+/// is 410 `Expired`, and the client's list answers that status, so its caller lists again.
+#[tokio::test]
+async fn a_list_continued_past_a_compaction_is_expired_410() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    for number in 0..5 {
+        fake.seed("pods", pod(&format!("paged-{number}")))
+            .expect("seeded");
+    }
+    fake.fault(Fault::Delay {
+        method: Method::GET,
+        path: format!("{}?limit=2&continue=", api.pods()),
+        by: std::time::Duration::from_millis(300),
+    });
+    let compactor = async {
+        while !fake
+            .requests()
+            .iter()
+            .any(|request| request.contains("continue="))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        fake.seed("pods", pod("paged-z-late")).expect("seeded");
+        fake.compact();
+    };
+
+    let pods = api.pods();
+    let (listed, ()) = tokio::join!(
+        api.list(&pods, "PodList", ListForm::Metadata, 2, 5),
+        compactor
+    );
+    let error = listed.expect_err("the continued page is expired");
+    assert_eq!(error.status(), Some(410), "{error}");
+}
+
+/// A request without the bearer is refused 401 before anything else, and a fault planned for the
+/// next request is still there for the next authorized one.
+#[tokio::test]
+async fn an_unauthorized_request_does_not_meet_a_planned_fault() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let mut stranger = fake.kubeconfig();
+    stranger["users"][0]["user"]["token"] = json!("another-credential");
+    let stranger = client(&stranger);
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: api.pods(),
+        status: 503,
+        body: json!({"kind": "Status", "code": 503}),
+    });
+
+    let refused = stranger
+        .list(&stranger.pods(), "PodList", ListForm::Metadata, 10, 1)
+        .await
+        .expect_err("no credential");
+    assert_eq!(refused.status(), Some(401), "{refused}");
+    let faulted = api
+        .list(&api.pods(), "PodList", ListForm::Metadata, 10, 1)
+        .await
+        .expect_err("the planned fault");
+    assert_eq!(faulted.status(), Some(503), "{faulted}");
+}
+
+/// The fake reads equality selectors alone (`key=value`, `key==value`). Any other requirement is
+/// refused 400, never read as an equality on another key: `a!=b` matched nothing as `a!` = `b`.
+#[tokio::test]
+async fn a_label_selector_the_fake_cannot_read_is_refused_400() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    fake.seed("pods", pod("selected")).expect("seeded");
+
+    for selector in [
+        "b10x-substrate/test!=client",
+        "!b10x-substrate/test",
+        "b10x-substrate/test",
+        "b10x-substrate/test in (client)",
+        "b10x-substrate/test=a=b",
+    ] {
+        let query: String = url::form_urlencoded::byte_serialize(selector.as_bytes()).collect();
+        let error = api
+            .list(
+                &format!("{}?labelSelector={query}", api.pods()),
+                "PodList",
+                ListForm::Metadata,
+                10,
+                1,
+            )
+            .await
+            .expect_err(selector);
+        assert_eq!(error.status(), Some(400), "{selector}: {error}");
+    }
+    for selector in ["b10x-substrate/test=client", "b10x-substrate/test==client"] {
+        let query: String = url::form_urlencoded::byte_serialize(selector.as_bytes()).collect();
+        let listed = api
+            .list(
+                &format!("{}?labelSelector={query}", api.pods()),
+                "PodList",
+                ListForm::Metadata,
+                10,
+                1,
+            )
+            .await
+            .expect(selector);
+        assert_eq!(listed.items.len(), 1, "{selector}");
+    }
+}

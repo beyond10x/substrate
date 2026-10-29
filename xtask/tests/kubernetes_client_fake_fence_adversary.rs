@@ -29,11 +29,17 @@ fn repo() -> PathBuf {
         .to_path_buf()
 }
 
-/// The workspace manifest and every member's manifest and README, copied.
+/// The workspace manifest, its lock file, its vendored `[patch]` sources (linked), and every
+/// member's manifest and README, copied, with an
+/// empty file where each member has a library or binary root: Cargo resolves the copy as it
+/// resolves the repository (the fence reads the resolved graph) and reads no source.
 fn copy_manifests() -> tempfile::TempDir {
     let scratch = tempfile::tempdir().expect("scratch workspace");
     let root_text = std::fs::read_to_string(repo().join("Cargo.toml")).expect("root manifest");
     std::fs::write(scratch.path().join("Cargo.toml"), &root_text).expect("root manifest");
+    std::fs::copy(repo().join("Cargo.lock"), scratch.path().join("Cargo.lock")).expect("lock file");
+    std::os::unix::fs::symlink(repo().join("vendor"), scratch.path().join("vendor"))
+        .expect("the vendored patches");
     let root: toml::Value = toml::from_str(&root_text).expect("root manifest parses");
     for member in root["workspace"]["members"]
         .as_array()
@@ -47,6 +53,20 @@ fn copy_manifests() -> tempfile::TempDir {
             let from = repo().join(member).join(file);
             if from.is_file() {
                 std::fs::copy(&from, to.join(file)).expect("member file");
+            }
+        }
+        let bins = std::fs::read_dir(repo().join(member).join("src/bin"))
+            .into_iter()
+            .flatten()
+            .map(|entry| format!("src/bin/{}", entry.expect("a bin").file_name().display()));
+        for target in ["src/lib.rs".to_owned(), "src/main.rs".to_owned()]
+            .into_iter()
+            .chain(bins)
+        {
+            if repo().join(member).join(&target).is_file() {
+                let to = to.join(&target);
+                std::fs::create_dir_all(to.parent().expect("a directory")).expect("member src");
+                std::fs::write(to, "").expect("member target");
             }
         }
     }
@@ -148,4 +168,108 @@ fn a_feature_forwarding_fake_through_an_inherited_renamed_edge_is_refused() {
         )
     });
     assert_refused(scratch.path(), "[features] testing = [\"k8s/fake\"]");
+}
+
+/// A manifest that enables `fake` on its own runtime edge, for the path-dependency cases below.
+const SHIM: &str = "[package]\nname = \"shim\"\nversion = \"0.15.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nsubstrate-kubernetes-client = { package = \"b10x-substrate-kubernetes-client\", path = \"../crates/substrate-kubernetes-client\", version = \"=0.15.0\", features = [\"fake\"] }\n";
+
+/// A package at `directory` with `manifest` and an empty library root: Cargo refuses a package
+/// with no target, so a shim without one would be refused by Cargo, not by the fence.
+fn write_shim(directory: &Path, manifest: &str) {
+    std::fs::create_dir_all(directory.join("src")).expect("shim directory");
+    std::fs::write(directory.join("Cargo.toml"), manifest).expect("shim manifest");
+    std::fs::write(directory.join("src/lib.rs"), "").expect("shim library");
+}
+
+/// The host's runtime dependencies gain `dependency`, a path dependency written as `entry`.
+fn add_host_dependency(root: &Path, entry: &str) {
+    edit(root, HOST, |text| {
+        text.replacen("[dependencies]\n", &format!("[dependencies]\n{entry}\n"), 1)
+    });
+}
+
+/// Cargo adds a path dependency that resides in the workspace directory to the workspace, so a
+/// manifest beneath the root that no `members` entry lists is still a workspace member. The fence
+/// reads only the listed members, so a runtime shim that enables `fake` on its own edge is never
+/// read, and the host's runtime edge to the shim reaches the fake.
+#[test]
+fn a_fake_edge_in_an_unlisted_path_member_is_refused() {
+    let scratch = copy_manifests();
+    write_shim(&scratch.path().join("shim"), SHIM);
+    add_host_dependency(scratch.path(), "shim = { path = \"../../shim\" }");
+    assert_refused(
+        scratch.path(),
+        "crates/substrate-host -> shim (an unlisted path member) -> fake",
+    );
+}
+
+/// A path dependency outside the workspace directory is not a member at all. The fence never reads
+/// its manifest, so its runtime edge to the fake passes unexamined.
+///
+/// The shim names the copy's client, which is the repository's own client in the copy. Naming the
+/// checkout's client instead puts a second package of that name and version in the graph, which
+/// Cargo refuses to lock ("package collision in the lockfile"): Cargo, not the fence, refused it.
+#[test]
+fn a_fake_edge_in_a_path_manifest_outside_the_root_is_refused() {
+    let scratch = copy_manifests();
+    let outside = tempfile::tempdir().expect("outside directory");
+    write_shim(
+        outside.path(),
+        &SHIM.replace(
+            "../crates/substrate-kubernetes-client",
+            &scratch
+                .path()
+                .join("crates/substrate-kubernetes-client")
+                .display()
+                .to_string(),
+        ),
+    );
+    add_host_dependency(
+        scratch.path(),
+        &format!("shim = {{ path = \"{}\" }}", outside.path().display()),
+    );
+    assert_refused(
+        scratch.path(),
+        "crates/substrate-host -> shim (a path manifest outside the root) -> fake",
+    );
+}
+
+/// Why a `fake` dev-dependency edge in a member with a binary target is refused.
+const BINARY_FENCE: &str = "the fake feature of b10x-substrate-kubernetes-client is refused on every edge of a member with a binary target";
+
+/// The client as a dev-dependency with `fake`, for the member at `relative`.
+fn add_fake_dev_dependency(root: &Path, relative: &str) {
+    edit(root, relative, |text| {
+        text.replacen(
+            "[dev-dependencies]\n",
+            "[dev-dependencies]\nsubstrate-kubernetes-client = { package = \"b10x-substrate-kubernetes-client\", path = \"../substrate-kubernetes-client\", version = \"=0.15.0\", features = [\"fake\"] }\n",
+            1,
+        )
+    });
+}
+
+/// `cargo test` unifies a dev-dependency's features into the member's binary, and the tests that
+/// spawn `CARGO_BIN_EXE_*` run that binary: a `fake` dev edge in the daemon builds the daemon the
+/// tests drive with the in-process API server in it (design 34 § 10.1, decision D4 of the review).
+#[test]
+fn a_fake_dev_edge_in_a_member_with_a_binary_target_is_refused() {
+    let scratch = copy_manifests();
+    add_fake_dev_dependency(scratch.path(), "crates/substrate-daemon/Cargo.toml");
+    let output = check_packages(scratch.path());
+    let text = shown(&output);
+    assert!(
+        !output.status.success()
+            && text.contains(BINARY_FENCE)
+            && text.contains("b10x-substrate-daemon"),
+        "a fake dev edge in the daemon passes:\n{text}"
+    );
+}
+
+/// A library member's tests may use the fake: the edge is the one § 10.1 makes legal.
+#[test]
+fn a_fake_dev_edge_in_a_library_member_passes() {
+    let scratch = copy_manifests();
+    add_fake_dev_dependency(scratch.path(), HOST);
+    let output = check_packages(scratch.path());
+    assert!(output.status.success(), "{}", shown(&output));
 }
