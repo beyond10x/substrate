@@ -211,12 +211,33 @@ fn mcp_image_is_stdio_only_and_its_exact_binary_is_smoke_tested() {
 
 #[test]
 fn release_compiles_both_runtime_binaries_once() {
+    let builder = DOCKERFILE
+        .split_once(" AS builder\n")
+        .expect("the shared builder stage")
+        .1
+        .split_once("\nFROM ")
+        .expect("a stage after the builder")
+        .0;
+    assert_eq!(builder.matches("cargo build --locked --release").count(), 1);
+    assert!(builder.contains("-p b10x-substrate-daemon --bin substrate-daemon"));
+    assert!(builder.contains("-p b10x-substrate-mcp --bin substrate-mcp"));
+    let executor = DOCKERFILE
+        .split_once(" AS executor-builder\n")
+        .expect("the executor's own musl stage")
+        .1
+        .split_once("\nFROM ")
+        .expect("a stage after the executor builder")
+        .0;
     assert_eq!(
-        DOCKERFILE.matches("cargo build --locked --release").count(),
+        executor.matches("cargo build --locked --release").count(),
         1
     );
-    assert!(DOCKERFILE.contains("-p b10x-substrate-daemon --bin substrate-daemon"));
-    assert!(DOCKERFILE.contains("-p b10x-substrate-mcp --bin substrate-mcp"));
+    assert!(executor.contains("--target x86_64-unknown-linux-musl -p b10x-substrate-executor"));
+    assert!(!executor.contains("b10x-substrate-daemon"));
+    assert_eq!(
+        DOCKERFILE.matches("cargo build --locked --release").count(),
+        2
+    );
     assert!(DOCKERFILE.contains(" AS daemon\n"));
     assert!(DOCKERFILE.contains(" AS mcp\n"));
     position("--target daemon");
