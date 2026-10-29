@@ -251,7 +251,18 @@ stays with its ordinal. Delete the claims yourself to destroy the ledgers.
 
 ## Kubernetes namespace driver
 
-`--driver kubernetes` runs workspaces and execs as objects in one namespace. It is in development.
+`--driver kubernetes` serves workspaces as objects in one namespace. It is a development profile,
+unreleased until 0.16.0.
+
+What it does not do yet:
+
+- **Exec is not served.** The probe proves neither the four Linux confinement facts nor
+  `confinement.no-egress`, so every exec start is refused `exec.sandbox-unavailable`.
+- **Exec on a cluster is unverified.** On kind a Pod under the default-deny policy still reached
+  the API server, so no enforced egress denial was observed and `confinement.no-egress` stays
+  absent.
+- **Shared clean-room conformance follows in the next release.** The namespace lane reports that
+  step absent.
 
 ```bash
 substrate-daemon --driver kubernetes --kubernetes-config driver.json \
@@ -266,8 +277,46 @@ The daemon reads that one file. It never reads an ambient kubeconfig or an in-cl
 | Driver settings | its context extension `b10x-substrate/namespace-driver` |
 | Images | `executor_image` and `exec_image`, by digest |
 | Network | `default_deny_policy`, your NetworkPolicy |
+| Egress probe | `egress_probe_address`, an `ip:port` outside the cluster |
+| Workspace size | `workspace_size_bytes`, 1 MiB to 1 TiB, on `storage_class` |
+| Node limits | `pod_pids_limit` and `container_log_max_bytes`, as the kubelet holds them |
 
-Host flags such as `--workspaces` are refused with this driver.
+Host flags such as `--workspaces` are refused with this driver (`config.driver-conflict`). An
+unknown extension member is refused.
+
+The release publishes the executor image `ghcr.io/beyond10x/b10x-substrate-executor:<version>`.
+Name it by digest as `executor_image`.
+
+### What it creates
+
+| Object | Name | For |
+|---|---|---|
+| Lease | `b10x-substrate-driver` | the namespace claim, renewed every 10 s |
+| PersistentVolumeClaim | `sbx-ws-<h>` | one workspace |
+| keeper Pod | `sbx-ws-<h>-keeper` | every file route, through the executor over `pods/exec` |
+| exec Pod | `sbx-ex-<h>` | one exec, once an exec is admitted |
+
+Every object carries the deployment's labels, and every delete names the uid the create answered.
+The driver never modifies or deletes an object of another deployment, or one it has no record of.
+
+### The Role
+
+Bind the driver's credential to one namespaced Role with exactly these rules:
+
+| Resource | Verbs |
+|---|---|
+| `pods` | `create`, `get`, `list`, `watch`, `delete` |
+| `pods/log` | `get` |
+| `pods/exec` | `get`, `create` |
+| `persistentvolumeclaims` | `create`, `get`, `list`, `delete` |
+| `networkpolicies` | `get`, `list` |
+| `leases` (`coordination.k8s.io`) | `create`, `get`, `update` |
+
+The API server authorizes the exec WebSocket as `get`, so `pods/exec` needs both verbs. A
+credential that visibly holds more than this and the rules every authenticated subject holds, a
+wildcard or any verb on `secrets` is refused at startup (`kubernetes.rbac-excess`).
+
+### Startup, probe and readiness
 
 | Event | Result |
 |---|---|
@@ -277,14 +326,31 @@ Host flags such as `--workspaces` are refused with this driver.
 | A probe fails or lapses | those facts absent again |
 
 The log names each failure's code. The cluster check repeats every 10 s; a failed probe after 60 s.
+It refuses a Lease another instance holds, a policy that is not default-deny, a namespace that
+admits a `privileged` Pod, and an executor that fails its handshake.
 
-The probe never proves the four Linux confinement facts. Each exec start is therefore refused
-`exec.sandbox-unavailable`.
+The probe creates a claim, a keeper and a Pod, then deletes them. It proves
+`workspace.guarded-io`, `workspace.openat2-beneath`, `workspace.atomic-replace` and
+`exec.argv-only`, each from its own observation.
 
 Readiness reads one snapshot, taken after the first probe, or when the cluster check fails for a
 reason a retry cannot clear (RBAC, NetworkPolicy, Pod Security). A held Lease or an unanswering API
 is retried and keeps the daemon unready until then. A fact named by `--ops-require-fact` and
 absent from the snapshot keeps the daemon unready until it restarts.
+
+### What it answers
+
+| Request | Answer |
+|---|---|
+| a create the namespace's ResourceQuota refuses | `workspace.capacity` or `exec.capacity` (429) |
+| `workspace.adopt` | `workspace.adopt-unserved` (501), before any name is looked up |
+| a workspace storage quota | `workspace.storage-quota-unserved` (501) |
+| a workspace source other than empty | `workspace.source-unserved` (501) |
+| any exec start | `exec.sandbox-unavailable` (501) |
+
+A lost Lease makes every fact absent. After a restart, a workspace whose claim is found and whose
+keeper answers its handshake is ready again, and an exec still running reads `unknown` and its Pod
+is deleted.
 
 ## Rules that do not change by posture
 

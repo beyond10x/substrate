@@ -47,12 +47,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   probe never proves the four Linux confinement facts or `confinement.no-egress`, so every exec
   start on this driver is refused `exec.sandbox-unavailable` in this release. The deployment guide
   has its section.
+  - **Limits.** The driver is a development profile. Exec on a cluster is unverified: on the kind
+    lane a Pod under the default-deny policy still reached the API server (design 34 § 10.3 O3), so
+    no enforced egress denial was observed and `confinement.no-egress` stays absent. Shared
+    clean-room conformance follows in the next release: the namespace lane reports its step 4
+    absent until `story:remote-clean-room-conformance` lands. Only empty workspaces are served; a
+    storage quota is `workspace.storage-quota-unserved` and any other source
+    `workspace.source-unserved`, both 501.
 - `cargo xtask namespace-lane check` holds the namespace lane's rendered objects to their goldens
   and its Role to ADR 0047 decision 3, run by the new `namespace-lane.yml` workflow;
   `cargo xtask namespace-lane observe` runs design 34 § 10.3's observations on a kind cluster of its
   own on a workstation and prints the `Namespace-lane:` record a release requires.
+- `cargo xtask chart-lane cluster --node-profiles --image <ref> --node-image <ref>` runs the four
+  execution-enabled scenarios the hosted chart lane reports absent, on a one-worker kind cluster
+  built from `fixtures/chart-lab/Dockerfile` on a host whose kernel enables AppArmor, and prints
+  `Chart-lane: <sha> <scenario-count> <RFC 3339 UTC>` only when every scenario passed at a clean,
+  unmoved `HEAD` with an image carrying that revision. A release that publishes the chart now
+  refuses a tag without that record for the tagged commit, counted from `SCENARIOS` in
+  `xtask/src/chart_cluster.rs`.
 
 ### Changed
+
+- `/metrics` on the operational listener holds at most 582 samples (was 579): the refusal counter
+  gains the three codes of bundle `0.25.0`. The 471 samples without it are unchanged.
 
 - The specification and CI use ESS 0.76.0 (was 0.75.0); the suites and CLI package regenerate unchanged, and the four generated type files differ only in their generator header, the workspace types also in their schema projection digest (the root name now publishes its length bound).
 - `execution.appArmorProfile` in the chart, and `--apparmor-profile` on

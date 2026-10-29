@@ -252,3 +252,7 @@ cluster configuration names. The adapter speaks to the API server itself; it run
   read `pods/log` and watch `pods`. Open is refused `confinement.adapter-unserved` without a configuration, with an
   unusable one, when the cluster does not answer, or without log access.
 - **Choose it when** the run belongs on a cluster rather than a host, and needs no host path.
+
+The `pod` adapter confines one run for an embedder in its own process. It is not the
+[Kubernetes namespace driver](../guides/deployment.md#kubernetes-namespace-driver), which serves
+the daemon's wire from one namespace and shares only the API client with this adapter.

@@ -72,19 +72,17 @@ entry will stay omitted whatever the limit. The Rust SDK's `Workspace::tree_with
 refuses because of such an entry; `workspace.path-escape` stays the answer for a path that escapes
 the workspace.
 
-Release `0.7.3` advertises `substrate-wire/0.16.0` in `x-b10x-contract` and its inner
+Release `0.15.0` advertises `substrate-wire/0.24.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest because it identifies the distribution package rather
 than the inner contract manifest.
 
-The current release is `0.7.3` with development bundle `0.16.0`. That bundle adds the
-closed Git source request and two Git observation routes. Earlier additions now served include
-PTY sessions, metrics, hard storage quotas, scoped workspace write authority and hosted admission.
-The session routes moved to `/v1/sessions` in bundle `0.15.0`; no `/v1/pipe-sessions`
-compatibility alias is served.
+Current source advertises `0.25.0`, which adds no route; [bundle history](#bundle-history) lists
+what each bundle added. The session routes moved to `/v1/sessions` in bundle `0.15.0`; no
+`/v1/pipe-sessions` compatibility alias is served.
 
 Frozen compatibility declarations and route/schema details are available in the
-[0.16.0 bundle](https://github.com/beyond10x/substrate/tree/0.7.3/contracts/substrate-wire/0.16.0).
+[0.24.0 bundle](https://github.com/beyond10x/substrate/tree/0.15.0/contracts/substrate-wire/0.24.0).
 See [system model and derivation](../concepts/model.md) for which artifacts are generated and
 [status](../status.md) for release maturity.
 
@@ -163,6 +161,11 @@ inline capsule on a driver without `exec.inline-capsule` is `exec.inline-capsule
 signal outside the published `exec.signals` is `exec.signal-unserved`, and an adopt on a driver
 that adopts no directory is `workspace.adopt-unserved`. The host daemon's answers are unchanged:
 it still reports `driver: host`, publishes none of the new fact and raises none of the new codes.
+
+The [Kubernetes namespace driver](../guides/deployment.md#kubernetes-namespace-driver) reports
+`driver: kubernetes` and answers every adopt `workspace.adopt-unserved`. Its probe proves neither
+the four Linux confinement facts nor `confinement.no-egress`, so it refuses every exec start
+`exec.sandbox-unavailable`, and the two exec codes are not reached yet.
 
 ### `0.24.0`
 
