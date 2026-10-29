@@ -301,3 +301,27 @@ async fn a_protocol_failure_across_a_restart_is_not_whole_output() {
         "a recovered exec whose log is a protocol failure reports its empty output as whole"
     );
 }
+
+/// The same class as the protocol failure: a running exec killed across a restart reads no log,
+/// so the recorded `output_complete` must not survive into its answer.
+#[tokio::test]
+async fn a_killed_exec_across_a_restart_is_not_whole_output() {
+    let mut rig = rig().await;
+    let id = "exec_restart_killed_output";
+    let started = rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    restart(&mut rig).await;
+
+    let recovered = rig
+        .driver
+        .recover_exec(&recorded_unknown(&started))
+        .await
+        .expect("reconciled");
+    assert_eq!(recovered.resource.state, ExecState::Unknown);
+    assert!(recovered.stdout.is_empty());
+    assert!(
+        !recovered.output_complete,
+        "a killed exec whose log was never read reports its empty output as whole"
+    );
+}
