@@ -27,7 +27,7 @@ use crate::delegation::DelegatedContextPolicy;
 
 use super::events::{EventStreamLimits, EventStreamPolicy, EventWakeups};
 use super::metrics::MetricsStreamPolicy;
-use super::operations::{driver_detail, linux_lease_clock, stored_exec};
+use super::operations::{driver_detail, linux_lease_clock, observation_from_stored, stored_exec};
 use super::sessions::{PendingContainments, PipeAttachmentLimits, PipeSessionPolicy};
 use super::{
     LEASE_CLEANUP_BATCH, MAINTENANCE_DRIVER_TIMEOUT, PROVISIONAL_RECOVERY_BATCH,
@@ -612,9 +612,11 @@ impl App {
             let _workspace_guard = self
                 .lock_workspace(&candidate.scope, &candidate.stored.resource.workspace)
                 .await;
-            match run_maintenance_driver(self.driver.observe_exec(&candidate.stored.resource.id))
-                .await
-            {
+            // The driver is asked with the exec as recorded: one that kept nothing across the
+            // restart answers from it and its backend ledger (design 34 § 5); the host driver
+            // answers exactly as `observe_exec` does.
+            let previous = observation_from_stored(candidate.stored.clone());
+            match run_maintenance_driver(self.driver.recover_exec(&previous)).await {
                 Ok(observation) => {
                     if candidate.operation_state == OperationState::Terminal {
                         let _ = self

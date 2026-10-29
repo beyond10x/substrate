@@ -260,15 +260,25 @@ fn driver_as(
     deployment: &str,
 ) -> (NamespaceDriver, Arc<MemoryLedger>) {
     let ledger = Arc::new(MemoryLedger::default());
+    let driver = driver_over(fake, clock, &ledger, deployment);
+    (driver, ledger)
+}
+
+/// A driver over `ledger`: what a new process opens over the state an earlier one left.
+pub(crate) fn driver_over(
+    fake: &FakeCluster,
+    clock: &Arc<ManualClock>,
+    ledger: &Arc<MemoryLedger>,
+    deployment: &str,
+) -> NamespaceDriver {
     let bytes = kubeconfig_with(fake, Some(extension()));
-    let driver = NamespaceDriver::parse_with_clock(
+    NamespaceDriver::parse_with_clock(
         &bytes,
         deployment,
-        Arc::clone(&ledger) as Arc<dyn BackendLedger>,
+        Arc::clone(ledger) as Arc<dyn BackendLedger>,
         Arc::clone(clock) as Arc<dyn Clock>,
     )
-    .expect("the configuration loads");
-    (driver, ledger)
+    .expect("the configuration loads")
 }
 
 fn lease(fake: &FakeCluster) -> Value {

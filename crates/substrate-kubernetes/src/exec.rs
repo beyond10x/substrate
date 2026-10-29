@@ -429,6 +429,121 @@ impl NamespaceDriver {
         }
     }
 
+    /// Restart reconciliation of one exec (design 34 § 5, the exec start row's restart column;
+    /// § 5.1): `previous` is the exec as the daemon recorded it. An exec this process tracks is
+    /// observed as usual. Any other is decided by its `pod` row and the Pod under its name, and
+    /// only while the driver is open and holds the Lease (§ 6.1 step 6), so a process that has
+    /// not claimed the namespace deletes nothing:
+    ///
+    /// - ours and its container shown `terminated`: its end, read as [`Self::exec_observe`]
+    ///   reads one (the log only under the bound uid, the exit from the API, the Pod deleted);
+    /// - ours and anything else, a Pod already being deleted included: deleted with grace 1 s
+    ///   under its uid, and the exec stays `unknown` with no exit (N8 A);
+    /// - a create whose answer was lost is first adopted by its operation annotation;
+    /// - absent with a bound uid: physical absence, `NotFound`, the row settled;
+    /// - absent with no uid bound: `NotFound`, the row settled, once the N9 bound has passed on
+    ///   the driver's wall clock since the row was reserved; before that a retriable failure,
+    ///   because the create may still land.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` as above; `kubernetes.api-failed` (retriable) without the Lease, before the
+    /// bound, for an object under the name that is not ours, or for an answer that proves
+    /// nothing. Nothing is committed on an error, so the next round asks again.
+    pub async fn exec_recover(
+        &self,
+        previous: &ExecObservation,
+    ) -> Result<ExecObservation, DriverError> {
+        let id = previous.resource.id.as_str();
+        if lock(&self.execs().tracked).contains_key(id) {
+            return self.exec_observe(id).await;
+        }
+        if !self.opened() || !self.lease_held() {
+            return Err(DriverError::failed(
+                API_FAILED,
+                "the namespace driver does not hold its Lease; reconciliation waits for it",
+            ));
+        }
+        let name = names::exec_pod(self.deployment(), id);
+        let Some(row) = self
+            .ledger()
+            .recorded(BackendKind::Exec, id)?
+            .into_iter()
+            .find(|row| {
+                row.role == BackendRole::Pod && row.name == name && row.settled_at.is_none()
+            })
+        else {
+            return Err(DriverError::not_found());
+        };
+        let path = format!("{}/{name}", self.api().pods());
+        let Some(pod) = self
+            .api()
+            .get(&path)
+            .await
+            .map_err(|error| api_failed(&error))?
+        else {
+            if row.uid.is_none() && !self.past_dispatch_bound(&row) {
+                return Err(DriverError::failed(
+                    API_FAILED,
+                    "the exec Pod reads absent, but its create was never answered and may \
+                     still land within the dispatch bound",
+                ));
+            }
+            self.ledger().settle(&name)?;
+            return Err(DriverError::not_found());
+        };
+        let uid = match ownership(&pod, Some(&row), self.deployment_label()) {
+            Ownership::Collision(reason) => return Err(self.held_by_another(&reason)),
+            Ownership::Ours { uid, adopt: false } => uid,
+            Ownership::Ours { uid, adopt: true } => match self.ledger().bind_uid(&name, &uid)? {
+                UidBinding::Bound => uid,
+                other => {
+                    return Err(
+                        self.held_by_another(&format!("{name:?} could not be adopted: {other:?}"))
+                    );
+                }
+            },
+        };
+        let mut trace = PodTrace::since(pod["metadata"]["resourceVersion"].as_str());
+        trace.note(&pod);
+        let output_bytes = run_output_bytes(&pod);
+        let ended = shows_end(&pod) && pod["metadata"]["deletionTimestamp"].is_null();
+        lock(&self.execs().tracked).insert(
+            id.to_owned(),
+            Tracked {
+                observation: previous.clone(),
+                pod: name.clone(),
+                uid: uid.clone(),
+                trace,
+                terminated: None,
+                output_bytes: output_bytes.unwrap_or_default(),
+                signal: None,
+                output_failure: None,
+            },
+        );
+        let recovered = match output_bytes {
+            Some(_) if ended => self.finish(id, &pod, true).await,
+            _ => match self.deliver(&name, &uid, KILL_GRACE_SECONDS).await {
+                Ok(()) => Ok(self.end(id, ExecState::Unknown, None, Output::Unknown)),
+                Err(error) => Err(error),
+            },
+        };
+        if recovered.is_err() {
+            lock(&self.execs().tracked).remove(id);
+        }
+        recovered
+    }
+
+    /// § 4: an object under an exec Pod's name that is not ours is counted, never modified, and
+    /// the exec stays as it is recorded.
+    fn held_by_another(&self, reason: &str) -> DriverError {
+        self.collision(reason);
+        DriverError::failed(
+            API_FAILED,
+            format!("the exec Pod's name is held by an object that is not ours: {reason}"),
+        )
+    }
+
     fn note(&self, id: &str, pod: &Value) {
         if let Some(tracked) = lock(&self.execs().tracked).get_mut(id)
             && tracked.trace.note(pod)
@@ -1266,6 +1381,26 @@ fn api_exit(code: Option<i64>, record: Option<&ExitRecord>) -> Option<ExecExit> 
         code: Some(code),
         signal: None,
     })
+}
+
+/// The output bound of the run spec the Pod's `run` container carries (§ 7.3), which a restarted
+/// process reads its log against: `None` for a Pod whose command is not the executor's run.
+fn run_output_bytes(pod: &Value) -> Option<u64> {
+    let command = pod["spec"]["containers"]
+        .as_array()?
+        .iter()
+        .find(|container| container["name"] == RUN_CONTAINER)?["command"]
+        .as_array()?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<&str>>>()?;
+    let executor = format!("{}/substrate-executor", pod::EXECUTOR_MOUNT);
+    match command.as_slice() {
+        [path, "run", parts @ ..] if *path == executor => RunSpec::decode_parts(parts)
+            .ok()
+            .map(|spec| spec.output_bytes),
+        _ => None,
+    }
 }
 
 /// A terminal observation needs the container `terminated` in a Pod with `restartPolicy:

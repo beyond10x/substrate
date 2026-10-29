@@ -487,7 +487,7 @@ impl NamespaceDriver {
     /// Whether the N9 bound has passed since `row` was reserved, on the driver's wall clock: only
     /// then is an unbound row's absence final, because an unanswered create may be stored until
     /// it (§ 5.1). A `created_at` after now counts as not passed.
-    fn past_dispatch_bound(&self, row: &BackendRecord) -> bool {
+    pub(crate) fn past_dispatch_bound(&self, row: &BackendRecord) -> bool {
         (self.clock.wall() - row.created_at)
             .to_std()
             .is_ok_and(|elapsed| elapsed > self.dispatch_bound())
@@ -500,7 +500,7 @@ impl NamespaceDriver {
         }
     }
 
-    fn collision(&self, reason: &str) -> Removal {
+    pub(crate) fn collision(&self, reason: &str) -> Removal {
         self.collisions.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
             reason,

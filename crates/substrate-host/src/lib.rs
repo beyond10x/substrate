@@ -844,6 +844,20 @@ pub trait Driver: Send + Sync {
 
     async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError>;
 
+    /// Restart reconciliation's question about an exec the daemon recorded `unknown`: `previous`
+    /// is the exec as the daemon recorded it, which a driver that kept nothing across the restart
+    /// needs to answer with the exec's own identity, request and applied record (as
+    /// `observe_workspace` takes the recorded workspace). `NotFound` means what it means from
+    /// `observe_exec`.
+    ///
+    /// A driver that keeps nothing across a restart answers exactly as `observe_exec` does.
+    async fn recover_exec(
+        &self,
+        previous: &ExecObservation,
+    ) -> Result<ExecObservation, DriverError> {
+        self.observe_exec(&previous.resource.id).await
+    }
+
     async fn output(&self, id: &str, query: &ExecOutputQuery) -> Result<OutputSlice, DriverError>;
 
     async fn signal(
