@@ -1012,3 +1012,57 @@ async fn a_waiting_start_answers_the_end() {
     };
     assert_eq!(ended.resource.state, ExecState::Exited);
 }
+
+/// Security review, design 34 U9 (§ 4 uid rule, § 7.3 *Reading output*): `pods/log` addresses a
+/// Pod by name only. Once our Pod ended, was deleted and a same-named Pod took the name, the end
+/// is taken from our uid-proven terminated object, but the log read by name is the replacement's.
+/// The exec's output must never be bytes the replacement wrote: a log read is evidence about our
+/// run only while the name is shown to hold our uid.
+#[tokio::test]
+async fn output_is_never_read_from_a_same_named_replacement() {
+    let rig = rig().await;
+    let id = "exec_relog";
+    rig.started(id, &input(&["/bin/true"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    let running = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(running.resource.state, ExecState::Running);
+
+    let ours = [applied_line(67_108_864, 500), exit_line(0)].concat();
+    rig.terminated(&name, 0, ours.as_bytes()).await;
+    let mut replacement = rig.pod(&name).expect("present");
+    rig.admin
+        .delete(&format!("{}/{name}", rig.admin.pods()), 0)
+        .await
+        .expect("an operator deletes the ended Pod");
+    for member in ["uid", "resourceVersion", "creationTimestamp"] {
+        replacement["metadata"]
+            .as_object_mut()
+            .expect("metadata")
+            .remove(member);
+    }
+    replacement["status"] = json!({});
+    rig.fake.seed("pods", replacement).expect("replaced");
+    let forged = [
+        applied_line(67_108_864, 500),
+        frame(&Frame::Output {
+            stream: substrate_executor::frame::Stream::Stdout,
+            bytes: b"written by the replacement".to_vec(),
+        }),
+        exit_line(0),
+    ]
+    .concat();
+    rig.fake.set_log(&name, forged.as_bytes());
+
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        ended.resource.exit.as_ref().and_then(|exit| exit.code),
+        Some(0),
+        "the end is our uid-proven one"
+    );
+    assert!(
+        ended.stdout.is_empty(),
+        "the exec reported the replacement's log as its stdout: {:?}",
+        String::from_utf8_lossy(&ended.stdout)
+    );
+}
