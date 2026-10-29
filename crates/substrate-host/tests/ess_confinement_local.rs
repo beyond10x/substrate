@@ -1475,3 +1475,96 @@ async fn adv_local_a_write_queued_behind_a_cancelled_one_sends_nothing() {
 fn libc_sigkill() -> i32 {
     confinement::Signal::Kill.number()
 }
+
+// ---- adversary pass on `story:adapter-live-output` ----
+
+// § 3: `Kill` stops delivery at once; only the chunk queued before it is delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_local_live_kill_delivers_only_the_queued_chunk() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let marker = workspace.path().join("written");
+    support::adv_live_kill_delivers_only_the_queued_chunk(
+        "local adv kill",
+        &local(),
+        &recorded(workspace.path()),
+        &marker,
+        &marker,
+    )
+    .await;
+}
+
+// The trait: `None` once both streams ended, for a child that closes them and keeps running.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_local_live_child_that_closes_its_streams_ends_with_none() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::adv_live_streams_closed_by_a_running_child_end_with_none(
+        "local adv streams closed",
+        &local(),
+        &recorded(workspace.path()),
+    )
+    .await;
+}
+
+// § 3 *One reader at a time*: two concurrent readers share one sequence.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_local_live_two_readers_share_one_sequence() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::adv_live_two_readers_share_one_sequence(
+        "local adv two readers",
+        &local(),
+        &recorded(workspace.path()),
+    )
+    .await;
+}
+
+// § 2 with § 3: a piped standard input and live output on one run.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_local_live_echoes_piped_stdin_while_running() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::adv_live_echoes_piped_stdin_while_running(
+        "local adv piped live",
+        &local(),
+        &piped(workspace.path(), 1_024),
+    )
+    .await;
+}
+
+// § 3 *Ordering and loss*: a stream that ends exactly at its bound lost nothing, so no `Bounded`;
+// one byte more is `Bounded`, on stderr as on stdout.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_local_live_exactly_the_bound_is_not_bounded_and_stderr_is_named() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let bound = confinement::local::LOCAL_OUTPUT_LIMIT_BYTES;
+    let admitted = adapter
+        .admit(&support::live(&recorded(workspace.path()), 16))
+        .expect("admitted");
+    let run = adapter
+        .start(
+            &admitted,
+            &support::sh(&format!(
+                "yes | head -c {bound}; yes e | head -c {} >&2",
+                bound + 1
+            )),
+        )
+        .await
+        .expect("started");
+    let events = support::read_events(&adapter, &run).await;
+    let ended = adapter.wait(&run).await.expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    let (streams, losses) = support::delivered(&events);
+    assert_eq!(
+        losses,
+        [confinement::OutputEvent::Bounded {
+            stream: confinement::PipeStream::Stderr
+        }],
+        "stdout ended at its bound and lost nothing; stderr lost one byte"
+    );
+    assert!(!output.stdout_truncated);
+    assert!(output.stderr_truncated);
+    assert_eq!(streams[0].len(), bound);
+    assert_eq!(streams[1].len(), bound);
+    assert_eq!(output.stdout, streams[0]);
+    assert_eq!(output.stderr, streams[1]);
+}

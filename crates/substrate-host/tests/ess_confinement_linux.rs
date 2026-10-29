@@ -1285,3 +1285,118 @@ async fn adv_a_piped_linux_child_holds_only_its_three_standard_descriptors() {
     assert!(listing.contains(" 0 -> pipe:"), "{NAME}: {listing}");
     println!("{NAME}: executed");
 }
+
+// ---- adversary pass on `story:adapter-live-output` ----
+
+// § 3: `Kill` stops delivery at once; only the chunk queued before it is delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_killed_live_linux_run_delivers_only_the_queued_chunk() {
+    const NAME: &str = "ESS confinement linux adv live kill";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::adv_live_kill_delivers_only_the_queued_chunk(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+        &workspace.join("written"),
+        &Path::new(substrate_wire::EXEC_WORKSPACE_MOUNT).join("written"),
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3 *One reader at a time*, under the 100 ms slices: two concurrent readers share one sequence.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_two_live_linux_readers_share_one_sequence() {
+    const NAME: &str = "ESS confinement linux adv live two readers";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::adv_live_two_readers_share_one_sequence(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 2 with § 3: `ChildChannel::Pipes` with both stdin and a live sender.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_piped_live_linux_run_echoes_while_running() {
+    const NAME: &str = "ESS confinement linux adv live piped";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::adv_live_echoes_piped_stdin_while_running(
+        NAME,
+        &adapter,
+        &linux_piped(&workspace, 1_024),
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3: a timeout is an imposed end, not a stall.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_live_linux_run_ended_by_its_timeout_did_not_stall() {
+    const NAME: &str = "ESS confinement linux adv live timeout";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::adv_live_timeout_is_not_a_stall(
+        NAME,
+        &adapter,
+        &ConfinementProfile {
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 400,
+                processes: 16,
+                memory_bytes: 128 << 20,
+                cpu_millis: 10_000,
+            }),
+            ..linux_recorded(&workspace, None)
+        },
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3: "Under `linux` and `systemd` around `linux` every signal is imposed ... so `Int` and `Term`
+// are end-equivalent there." A child that traps `TERM` and writes `after` delivers none of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_term_ends_live_linux_delivery_even_for_a_child_that_traps_it() {
+    const NAME: &str = "ESS confinement linux adv live term";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&support::live(&linux_recorded(&workspace, None), 16))
+        .expect("admitted");
+    let script = format!(
+        "trap 'printf after; exit 3' TERM; printf before; touch '{}'; \
+         while :; do sleep 0.05; done",
+        Path::new(substrate_wire::EXEC_WORKSPACE_MOUNT)
+            .join("ready")
+            .display()
+    );
+    let run = adapter
+        .start(&admitted, &support::sh(&script))
+        .await
+        .expect("started");
+    support::appears(&workspace.join("ready")).await;
+    adapter
+        .signal(&run, confinement::Signal::Term)
+        .await
+        .expect("signalled");
+    let events = support::read_events(&adapter, &run).await;
+    adapter.wait(&run).await.expect("waited");
+    let (streams, losses) = support::delivered(&events);
+    assert!(losses.is_empty(), "{NAME}: {losses:?}");
+    assert!(!adapter.output_stalled(&run), "{NAME}");
+    assert_eq!(
+        streams[0], b"before",
+        "{NAME}: delivery stopped at the signal"
+    );
+    println!("{NAME}: executed");
+}
