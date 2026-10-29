@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-10-29
+
 ### Added
 
 - The host execution AppArmor profile `substrate-host-exec-v2`
@@ -114,6 +116,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `exec.*` fact for a reason unrelated to the host. It now tries a fresh private directory under
   `TMPDIR`, then `XDG_RUNTIME_DIR`, then binds through `/proc/self/fd`; when none fits, the log
   names each path's length and the limit.
+- The `pod` confinement adapter's Pod removal never deletes a same-named replacement. Once it has
+  read the Pod's uid, every delete carries that uid as a precondition, and a 409 or a read showing
+  another uid ends the removal as the original Pod gone, without deleting the other object.
 
 ## [0.15.0] — 2026-10-29
 
