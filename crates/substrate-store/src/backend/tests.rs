@@ -304,7 +304,7 @@ fn a_settled_row_is_closed_and_binds_nothing() {
     assert_eq!(keeper.settled_at, Some(first));
     assert_eq!(keeper.uid, None);
     let unsettled = store
-        .unsettled_backend_objects(DEPLOYMENT, 16)
+        .unsettled_backend_objects(DEPLOYMENT, None, 16)
         .expect("unsettled");
     assert_eq!(
         unsettled
@@ -351,7 +351,7 @@ fn probe_rows_are_listed_unsettled_oldest_first_within_the_limit_and_deployment(
         )
         .expect("probe c");
     let listed = store
-        .unsettled_backend_objects(DEPLOYMENT, 2)
+        .unsettled_backend_objects(DEPLOYMENT, None, 2)
         .expect("unsettled");
     assert_eq!(
         listed
@@ -397,4 +397,53 @@ fn an_earlier_store_gains_the_table_and_rows_survive_a_restart() {
         .expect("rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].uid.as_deref(), Some("uid-a"));
+}
+
+/// More unsettled rows than one page: the cursor reaches every row once, in order, including
+/// rows that share a `created_at`, and a settled row is skipped.
+#[test]
+fn the_unsettled_cursor_reaches_rows_past_the_first_page() {
+    const PAGE: usize = 256;
+    const ROWS: usize = 300;
+    let store = Store::open(":memory:").expect("store");
+    let base = accepted_at();
+    for index in 0..ROWS {
+        let created_at = base + chrono::Duration::seconds(i64::try_from(index / 2).expect("i64"));
+        store
+            .reserve_backend_probe(
+                DEPLOYMENT,
+                &format!("nonce-{index:03}"),
+                created_at,
+                &names(
+                    "k",
+                    &[(BackendObjectRole::Pod, &format!("sbx-pr-{index:03}-pod"))],
+                ),
+            )
+            .expect("probe row");
+    }
+    assert!(
+        store
+            .settle_backend_object(DEPLOYMENT, "sbx-pr-005-pod", base)
+            .expect("settle")
+    );
+    let mut seen = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = store
+            .unsettled_backend_objects(DEPLOYMENT, after.as_deref(), PAGE)
+            .expect("page");
+        assert!(page.len() <= PAGE);
+        let last = page.len() < PAGE;
+        after = page.last().map(|row| row.name.clone());
+        seen.extend(page.into_iter().map(|row| row.name));
+        if last {
+            break;
+        }
+        assert!(seen.len() <= ROWS, "the cursor did not advance");
+    }
+    let expected: Vec<String> = (0..ROWS)
+        .filter(|index| *index != 5)
+        .map(|index| format!("sbx-pr-{index:03}-pod"))
+        .collect();
+    assert_eq!(seen, expected);
 }

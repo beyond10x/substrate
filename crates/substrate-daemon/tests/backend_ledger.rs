@@ -9,6 +9,7 @@
 //! (§ 5.1).
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Extension;
 use axum::body::{Body, to_bytes};
@@ -53,6 +54,14 @@ struct Fixture {
     names: bool,
     /// For each start, how many backend rows the exec already had when the driver was called.
     rows_at_dispatch: Mutex<Vec<usize>>,
+    /// The dispatch bound the fixture states, changed between maintenance rounds.
+    bound: Mutex<Option<Duration>>,
+}
+
+impl Fixture {
+    fn state_bound(&self, bound: Option<Duration>) {
+        *self.bound.lock().expect("fixture lock") = bound;
+    }
 }
 
 #[async_trait::async_trait]
@@ -83,6 +92,10 @@ impl Driver for Fixture {
 
     fn workspace_root_identity(&self, id: &str) -> Result<String, DriverError> {
         self.host.workspace_root_identity(id)
+    }
+
+    fn dispatch_bound(&self) -> Option<Duration> {
+        *self.bound.lock().expect("fixture lock")
     }
 
     fn backend_names(&self, kind: BackendKind, id: &str) -> Vec<BackendName> {
@@ -254,6 +267,7 @@ impl Harness {
             store: Arc::clone(&store),
             names,
             rows_at_dispatch: Mutex::new(Vec::new()),
+            bound: Mutex::new(None),
         });
         let app = App::new(Arc::clone(&store), driver.clone(), DEPLOYMENT);
         (
@@ -447,10 +461,12 @@ async fn without_backend_names_restart_absence_stays_unknown_as_before() {
     assert_eq!(harness.physically_absent(&exec), Some(true));
 }
 
-/// A named Pod is durable before dispatch; after a restart its `NotFound`, with no uid ever bound,
+/// A named Pod is durable before dispatch. Its `NotFound`, with no uid ever bound, is not dispatch
+/// absence while the driver's dispatch bound has not passed since the row was reserved: the exec
+/// stays `unknown`, unmarked, and is asked about again. Once the bound has passed, the same answer
 /// is dispatch absence: the start fails and the exec row is gone.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unbound_pod_row_reads_restart_absence_as_dispatch_absence() {
+async fn an_unbound_pod_row_is_dispatch_absence_only_past_the_dispatch_bound() {
     let (harness, driver) = Harness::fixture(true);
     let (status, created) = harness.create_workspace("01JBACKENDNAMECREATE0001").await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
@@ -486,7 +502,23 @@ async fn an_unbound_pod_row_reads_restart_absence_as_dispatch_absence() {
     let exec = exec_id(&harness, "01JBACKENDNAMEEXEC000001");
     assert_eq!(harness.ledger_rows(), 3);
 
-    let restarted = harness.restart(driver);
+    // Before the bound, in process and after a restart alike.
+    driver.state_bound(Some(Duration::from_hours(1)));
+    harness.app.sweep_expired().await;
+    let restarted = harness.restart(driver.clone());
+    restarted.sweep_expired().await;
+    let record = harness.operation("01JBACKENDNAMEEXEC000001");
+    assert_eq!(record.state, OperationState::Unknown);
+    assert_eq!(harness.physically_absent(&exec), Some(false));
+    let pod = harness
+        .store
+        .backend_objects(DEPLOYMENT, BackendObjectKind::Exec, &exec)
+        .expect("pod row");
+    assert_eq!(pod.len(), 1);
+    assert_eq!((pod[0].uid.as_deref(), pod[0].settled_at), (None, None));
+
+    // Past the bound.
+    driver.state_bound(Some(Duration::ZERO));
     restarted.sweep_expired().await;
     let record = harness.operation("01JBACKENDNAMEEXEC000001");
     assert_eq!(record.state, OperationState::Terminal);
@@ -502,6 +534,28 @@ async fn an_unbound_pod_row_reads_restart_absence_as_dispatch_absence() {
             .expect("exec read")
             .is_none()
     );
+}
+
+/// A driver that states no dispatch bound never has absence read as dispatch absence, however old
+/// its unbound row: the exec keeps today's physical-absence reading.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_dispatch_bound_an_unbound_pod_row_is_never_dispatch_absence() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDNOBOUNDCREATE1").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    let (status, started) = harness
+        .start_exec("01JBACKENDNOBOUNDEXEC001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    let exec = exec_id(&harness, "01JBACKENDNOBOUNDEXEC001");
+    assert_eq!(driver.dispatch_bound(), None);
+
+    let restarted = harness.restart(driver);
+    restarted.sweep_expired().await;
+    let record = harness.operation("01JBACKENDNOBOUNDEXEC001");
+    assert_eq!(record.state, OperationState::Unknown);
+    assert_eq!(harness.physically_absent(&exec), Some(true));
 }
 
 /// A Pod row whose uid was bound is the object that was stored: its `NotFound` after a restart is
@@ -538,6 +592,8 @@ async fn a_bound_pod_row_reads_restart_absence_as_physical_absence() {
         }
     );
 
+    // Even past the dispatch bound, a bound uid is physical absence.
+    driver.state_bound(Some(Duration::ZERO));
     let restarted = harness.restart(driver);
     restarted.sweep_expired().await;
     let record = harness.operation("01JBACKENDBINDEXEC000001");

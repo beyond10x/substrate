@@ -98,10 +98,12 @@ pub trait BackendLedger: Send + Sync {
     /// Returns a failure when the store cannot be written or a name is already reserved.
     fn reserve_probe(&self, nonce: &str, names: &[BackendName]) -> Result<(), DriverError>;
 
-    /// The oldest rows that are not settled, at most one bounded page.
+    /// The oldest rows that are not settled, at most one bounded page. `after` is the name of the
+    /// last row of the previous page, so a caller reaches every row page by page; `None` starts
+    /// at the oldest. A page shorter than the bound is the last.
     ///
     /// # Errors
     ///
     /// Returns a failure when the store cannot be read.
-    fn unsettled(&self) -> Result<Vec<BackendRecord>, DriverError>;
+    fn unsettled(&self, after: Option<&str>) -> Result<Vec<BackendRecord>, DriverError>;
 }

@@ -116,12 +116,12 @@ const PORT_ITEMS: &[(&str, &str)] = &[
     (
         "BackendKind",
         "the parameter of Driver::backend_names and BackendLedger::recorded \
-         (crates/substrate-host/src/lib.rs:526, crates/substrate-host/src/backend.rs:17, :78)",
+         (crates/substrate-host/src/lib.rs:527, crates/substrate-host/src/backend.rs:17, :78)",
     ),
     (
         "BackendName",
         "returned by Driver::backend_names and the parameter of BackendLedger::reserve_probe \
-         (crates/substrate-host/src/lib.rs:526, crates/substrate-host/src/backend.rs:33, :99)",
+         (crates/substrate-host/src/lib.rs:527, crates/substrate-host/src/backend.rs:33, :99)",
     ),
     (
         "BackendRole",
@@ -131,7 +131,7 @@ const PORT_ITEMS: &[(&str, &str)] = &[
     (
         "BackendRecord",
         "returned by BackendLedger::recorded and BackendLedger::unsettled \
-         (crates/substrate-host/src/backend.rs:40, :78, :106)",
+         (crates/substrate-host/src/backend.rs:40, :78, :108)",
     ),
     (
         "UidBinding",

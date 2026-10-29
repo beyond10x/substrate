@@ -13,8 +13,8 @@ use substrate_host::{
 #[cfg(test)]
 use substrate_store::NewOperation;
 use substrate_store::{
-    BackendObjectKind, BackendObjectRole, CommitEffectSink, ExecWrite, ExpiredLease, LeaseClock,
-    LeaseResource, Scope, Store, StoreError, WorkspaceAdmission,
+    BackendObject, BackendObjectKind, BackendObjectRole, CommitEffectSink, ExecWrite, ExpiredLease,
+    LeaseClock, LeaseResource, Scope, Store, StoreError, WorkspaceAdmission,
 };
 use substrate_wire::{
     ExecSignalInput, ExecState, OperationState, WorkspaceAbsence, WorkspaceKind, WorkspaceOrigin,
@@ -69,6 +69,40 @@ fn workspace_stripe(domain: &WorkspaceLockDomain, workspace: &str) -> usize {
     let mut hasher = DefaultHasher::new();
     workspace.hash(&mut hasher);
     usize::try_from(hasher.finish()).unwrap_or(usize::MAX) % domain.stripes.len()
+}
+
+/// How design 34 § 5.1 reads an exec the driver reports not found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecAbsence {
+    /// An unbound `pod` row inside the driver's dispatch bound: ask again next round.
+    Undecided,
+    /// An unbound `pod` row past the bound: the create never landed.
+    Dispatch,
+    /// No unbound `pod` row, no bound, or a terminal operation: physical absence.
+    Physical,
+}
+
+fn exec_absence(
+    rows: &[BackendObject],
+    bound: Option<std::time::Duration>,
+    now: DateTime<Utc>,
+    open: bool,
+) -> ExecAbsence {
+    let unbound = rows.iter().find(|row| {
+        row.role == BackendObjectRole::Pod && row.uid.is_none() && row.settled_at.is_none()
+    });
+    match (unbound, bound) {
+        (Some(row), Some(bound)) if open => {
+            let past = chrono::Duration::from_std(bound)
+                .is_ok_and(|bound| now.signed_duration_since(row.created_at) >= bound);
+            if past {
+                ExecAbsence::Dispatch
+            } else {
+                ExecAbsence::Undecided
+            }
+        }
+        _ => ExecAbsence::Physical,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -528,6 +562,7 @@ impl App {
                         .await;
                 }
                 Err(error) if error.class == DriverErrorClass::NotFound => {
+                    // Reads no backend ledger row or dispatch bound yet; design 34 U8 adds both.
                     let (status, mut detail) = driver_detail(Some(&candidate.operation), &error);
                     detail.retriable = false;
                     let _ = self
@@ -598,10 +633,12 @@ impl App {
                 }
                 Err(error) if error.class == DriverErrorClass::NotFound => {
                     // Design 34 § 5.1: an exec whose `pod` row holds no bound uid never had its
-                    // create answered, and a driver that names such a row answers `NotFound` only
-                    // once the object can no longer be stored. That is dispatch absence: the
-                    // operation fails with no resource. A driver that names nothing (the host
-                    // driver) has no row, and its answer is read exactly as before.
+                    // create answered. Its absence is dispatch absence (the operation fails with
+                    // no resource) only once the driver's dispatch bound has passed since the row
+                    // was reserved, checked here against the daemon's own clock. Before that the
+                    // exec stays `unknown`, unmarked, and is asked about again next round. A
+                    // driver that states no bound, or names nothing (the host driver), keeps the
+                    // physical-absence reading below, exactly as before.
                     let Ok(rows) = self
                         .store_io(|| {
                             self.store.backend_objects(
@@ -614,12 +651,16 @@ impl App {
                     else {
                         continue;
                     };
-                    let never_stored = rows.iter().any(|row| {
-                        row.role == BackendObjectRole::Pod
-                            && row.uid.is_none()
-                            && row.settled_at.is_none()
-                    });
-                    if never_stored && candidate.operation_state != OperationState::Terminal {
+                    let absence = exec_absence(
+                        &rows,
+                        self.driver.dispatch_bound(),
+                        self.authority.now(),
+                        candidate.operation_state != OperationState::Terminal,
+                    );
+                    if absence == ExecAbsence::Undecided {
+                        continue;
+                    }
+                    if absence == ExecAbsence::Dispatch {
                         let (status, mut detail) =
                             driver_detail(Some(&candidate.operation), &error);
                         detail.retriable = false;

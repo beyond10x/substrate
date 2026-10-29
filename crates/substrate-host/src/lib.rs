@@ -521,12 +521,20 @@ pub trait Driver: Send + Sync {
     /// operation's `accepted` state. A driver that creates nothing outside its host names none,
     /// and nothing is written.
     ///
-    /// An exec whose `pod` row has no uid bound is the one case the daemon reads as dispatch
-    /// absence when [`Driver::observe_exec`] answers `NotFound` after a restart (§ 5.1). A driver
-    /// that names such a row answers `NotFound` for it only once it has proved the object can no
-    /// longer be stored, past its dispatch bound.
+    /// An exec whose `pod` row has no uid bound is the one case the daemon may read as dispatch
+    /// absence when [`Driver::observe_exec`] answers `NotFound` (§ 5.1), and only once
+    /// [`Driver::dispatch_bound`] has passed since the row was reserved.
     fn backend_names(&self, _kind: BackendKind, _id: &str) -> Vec<BackendName> {
         Vec::new()
+    }
+
+    /// How long after a name is reserved a create can still store its object (design 34 § 5.1,
+    /// the N9 bound). The daemon reads `NotFound` for an unbound `pod` row as dispatch absence
+    /// only once this much time has passed since the row's `created_at`; before that it keeps the
+    /// exec `unknown` and asks again next round. `None`, the default, means absence is never read
+    /// as dispatch absence.
+    fn dispatch_bound(&self) -> Option<std::time::Duration> {
+        None
     }
 
     async fn create_workspace(
