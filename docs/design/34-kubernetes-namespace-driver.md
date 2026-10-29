@@ -137,7 +137,8 @@ create answered is committed as the backend identity". The store has no column f
 
 `<h>` is the first 26 characters of lowercase RFC 4648 base32 (no padding) of SHA-256 over
 `"substrate-kubernetes-name\0" ‖ u32be(len) ‖ deployment ‖ u32be(len) ‖ resource id`. That is
-130 bits, and `sbx-ws-<h>-keeper` is 39 characters, within a DNS-1123 label. Probe objects are
+130 bits, and `sbx-ws-<h>-keeper` is 40 characters (`keeper_pod`, `crates/substrate-kubernetes/src/names.rs`),
+within a DNS-1123 label. Probe objects are
 `sbx-pr-<nonce>-{pvc,keeper,pod}`, with a 16-character base32 nonce.
 
 | key | value |
@@ -164,11 +165,11 @@ client crate.
 |---|---|---|---|---|
 | workspace create | op `accepted`; workspace `creating`; rows `pvc`, `keeper` | POST PVC; bind; POST keeper (ownerReference to the PVC uid, `controller: false`); bind; `pods/exec` handshake (§ 7.2) | `ready` within the create bound (60 s), else `OutcomeUnknown` and the provisional loop completes it | PVC and keeper ours and the handshake passes: `ready`. PVC ours, keeper row unbound and absent: still `unknown`; past the N9 bound the operation is `failed`, the PVC is deleted with its uid precondition, and nothing is created again |
 | file write, delete, replace, edit, patch | op `accepted` | one `pods/exec` call | the observed version | an unanswered call is followed by one `stat` call: if the content digest equals the request's, that observation is returned; otherwise `Failed` `kubernetes.executor-unanswered` (retriable). Nothing is resent |
-| exec start | op `accepted`; exec row; row `pod`; admitted snapshot | Lease check and binding re-read (§ 6.3); POST Pod; bind | running observation | Pod ours and container shown `terminated`: read the log, commit the exit, delete the Pod. Ours and running: delete (grace 1 s), stay `unknown` (N8 A). Unbound and absent past the N9 bound: `failed` with no resource (§ 5.1) |
-| signal | the signal intent | `DELETE` with grace 5 s (`term`) or 1 s (`kill`) and `preconditions.uid` | the end, once shown stopped | an intent without a shown end is re-delivered as the same delete; the exec stays `unknown` until shown |
+| exec start | op `accepted`; exec row; row `pod`; admitted snapshot | Lease check and binding re-read (§ 6.3); POST Pod; bind | running observation | Pod ours, container shown `terminated` and no `deletionTimestamp`: read the log, commit the exit, delete the Pod. Ours and anything else, a finished Pod already being deleted included: delete (grace 1 s), stay `unknown` with no exit (N8 A; `exec_recover`, `crates/substrate-kubernetes/src/exec.rs`). Unbound and absent past the N9 bound: `failed` with no resource (§ 5.1) |
+| signal | the signal intent | `DELETE` with grace 5 s (`term`) or 1 s (`kill`) and `preconditions.uid` | the end, once shown stopped | the intent is held in the driver's memory (`Tracked.signal`) and does not survive a restart: the running Pod is deleted with grace 1 s by the exec start row's rule, and the exec stays `unknown`. Within one process, `exec_garbage_round` re-delivers an intent without a shown end as the same delete; no daemon task calls it yet (§ 15) |
 | workspace destroy | `destroying` (design 03 V1 decision 8) | delete every exec Pod of the workspace; delete the keeper; confirm stopped; delete the PVC | `destroyed` once each reads absent; `WorkspaceDestroyProgress::Pending` until then | resumed by `reconcile_destroying_workspaces` |
 | probe objects | rows `probe` via `reserve_probe` | create, observe, delete (§ 6.2) | settled when absent | every unsettled probe row is deleted under the uid rule before a new probe starts |
-| garbage | — | each maintenance round deletes ours-and-present objects of rows whose resource is terminal, retired or destroyed | settled when absent | the same |
+| garbage | — | each maintenance round deletes ours-and-present objects of rows whose resource is terminal, retired or destroyed; for exec Pods that round is `exec_garbage_round`, which no daemon task calls yet (§ 15) | settled when absent | the same |
 
 ### 5.1 Dispatch absence, told apart from physical absence
 
@@ -178,8 +179,10 @@ keeps `unknown`). Under N9 an exec whose Pod was **never stored** ends `failed`.
 row with no uid bound, absence past the bound is dispatch absence (`complete_dispatch_absence` with
 kind `exec`). A bound uid means physical absence, as today. The host driver writes no rows, so its
 behaviour is unchanged. The N9 bound is acceptance + 30 s client timeout +
-`api_request_timeout_seconds`, read from the API server's `Date` header against the row's
-`created_at`.
+`api_request_timeout_seconds` (`dispatch_bound`), read against the row's `created_at` on the
+wall clock the daemon stamps `created_at` with (`Clock::wall`, `crates/substrate-kubernetes/src/lease.rs`;
+`past_dispatch_bound`, `crates/substrate-kubernetes/src/namespace.rs`), not on the API server's
+`Date` header. A `created_at` after now counts as not passed.
 
 ### 5.2 Watching
 
@@ -187,15 +190,19 @@ After reconciliation the driver lists its Pods (label `managed-by` and deploymen
 per page, 4 MiB per page, at most 64 pages) and watches from the list's `resourceVersion`. A 410, an
 `ERROR` event or a dropped stream relists and re-reads every non-terminal exec by name. A terminal
 observation needs the container `terminated` in a Pod with `restartPolicy: Never` and the bound uid.
-Absence, a `Failed` phase and a watch gap never count as termination.
+Absence, a `Failed` phase and a watch gap never count as termination. One such round is
+`exec_watch_round` (`crates/substrate-kubernetes/src/exec.rs`). No daemon task runs it yet, so an
+exec's end is read when the exec is observed (§ 15).
 
 ## 6. Startup, the probe and the facts
 
 ### 6.1 Open sequence
 
-Each step's failure leaves the driver unopened. The daemon serves its listeners with every driver
-fact absent, and `/readyz` (ADR 0045) reports the reason code. These codes are log and readiness
-reasons, not wire refusals.
+A failure of step 1 stops the daemon with its code (`open_namespace_driver`,
+`crates/substrate-daemon/src/runtime.rs`). Steps 2 to 7 run, and run again, in the driver's own
+task (`NamespaceDriver::serve`, `crates/substrate-kubernetes/src/namespace/probe.rs`). A failure
+there leaves the driver unopened: the daemon serves its listeners with every driver fact absent,
+and the reason code is logged. These codes are log reasons, not wire refusals.
 
 1. Load the kubeconfig and extension: `kubernetes.config-invalid`.
 2. `SelfSubjectRulesReview` for the namespace. It is not a stored object, so it creates no
@@ -219,6 +226,15 @@ reasons, not wire refusals.
 
 A lost Lease while serving makes every fact absent and refuses a start `exec.capability-stale` (422)
 until the Lease is retaken (decision 2). Reconciliation pauses. Retaking it runs steps 4 to 7 again.
+
+`/readyz` reads the startup snapshot (ADR 0045 D5 A): the capability snapshot the operational
+listener takes when it starts (`Operations::with_store_probe`,
+`crates/substrate-daemon/src/app/health.rs`). A failed open leaves the driver facts absent from it,
+so a fact named with `--ops-require-fact` keeps `/readyz` not ready (D185). The listener starts
+as the driver task does, before the open sequence's probe can have run, so a fact the driver
+publishes only once open is absent from that snapshot after a successful open too; the
+deployment guide names no probed fact for `--ops-require-fact` (`website/docs/guides/deployment.md`).
+A live re-probe stays deferred (ADR 0045 D5 B).
 
 ### 6.2 The probe
 
@@ -323,7 +339,12 @@ base64url-encoded and split into parts of at most 96 KiB (Linux refuses one argu
 1. Read `memory.max` and `cpu.max` from `/sys/fs/cgroup`, and `pids.max` (see O6, § 14 Q2). Write
    the `applied` record. A value that differs from the spec means the argv is **not** started: the
    executor writes `{"refused":"limits-unapplied"}` and exits 125. The driver records the exec
-   `unknown`, counts it, and fabricates no exit.
+   `unknown`, counts it, and fabricates no exit. One case reports an exit the log does not
+   confirm: when the Pod was shown `terminated` under its bound uid but its name is not shown
+   holding that uid around the log read, the output is unknown and the exit is the API's
+   `terminated.exitCode` (`LogRead::NotOurs` in `finish`, `crates/substrate-kubernetes/src/exec.rs`;
+   `output_is_never_read_from_a_same_named_replacement` in `exec_tests.rs`). A limits-unapplied
+   refusal whose Pod name was replaced that way therefore reads as exit 125.
 2. Spawn the argv in a new process group with stdout and stderr as two pipes, and stdin `/dev/null`.
 3. Drain both pipes continuously, so the child never blocks on output. Each chunk of at most
    6144 bytes becomes one log line `b10x1 o <base64>` or `b10x1 e <base64>`. Lines stay below the
@@ -375,7 +396,7 @@ The wire refusals, in the daemon's existing check order. Everything here except 
 | a non-empty workspace source | `workspace.source-unserved` (501) | driver, as `HostDriver::create_workspace` answers |
 | Git v2 routes | `workspace.git-unserved` (501) | trait defaults |
 | a workspace storage quota | `workspace.storage-quota-unserved` (501) | driver (§ 6.2) |
-| a create the namespace's ResourceQuota refuses | `workspace.capacity`, `exec.capacity` (429, `exhausted`) | driver: a 403 whose Status message starts with `exceeded quota:` (O7); any other 403 is `Failed` `kubernetes.api-failed` |
+| a create the namespace's ResourceQuota refuses | `workspace.capacity`, `exec.capacity` (429, `exhausted`) | driver: a 403 Status with reason `Forbidden` whose message contains `is forbidden: exceeded quota: ` (`EXCEEDED_QUOTA`, `crates/substrate-kubernetes/src/namespace/workspace.rs`; D184, O7); any other 403 is `Failed` `kubernetes.api-failed` |
 | `workspace.adopt` | `workspace.adopt-unserved` (501), **new** (§ 14 Q3 A) | driver |
 
 Failures (500, class `failed`) carry codes as the host driver's `exec.spawn-failed` does:
@@ -409,8 +430,9 @@ successor-bundle section confirms whether the error schema constrains failure co
 - pods, PVCs, NetworkPolicies, Leases: create, get, list (paged, metadata), watch (chunked, with
   410 for an expired version and `ERROR` events), delete with `gracePeriodSeconds` and
   `preconditions.uid` (409 on mismatch), `dryRun=All`, and a switchable Pod Security admission;
-- `SelfSubjectRulesReview` answering configured rules; ResourceQuota as a counted 403
-  `exceeded quota:`;
+- `SelfSubjectRulesReview` answering configured rules; a ResourceQuota refusal as a fault-plan
+  answer carrying the 403 Status O7 recorded (`quota_refusal` in
+  `crates/substrate-kubernetes/src/namespace/workspace_tests.rs`, D184);
 - `pods/log` with `limitBytes`, and `pods/exec` over WebSocket v5, which runs the **real**
   `substrate-executor fs` against a temporary directory as `/workspace`;
 - a fake kubelet the test steps: bind a node, run the exec container by spawning the real
@@ -428,33 +450,44 @@ the lane's.
 
 ### 10.2 The kind lane (N11 A)
 
-**Workflow `.github/workflows/namespace-lane.yml`.** It runs on pull requests touching
-`crates/substrate-kubernetes*/**`, `crates/substrate-executor/**`, `crates/substrate-guarded/**`,
-`crates/substrate-wire/**`, `crates/substrate-daemon/**`, `Dockerfile`, `Cargo.lock`,
-`rust-toolchain.toml`, `xtask/src/namespace_lane*.rs` or the workflow itself; on pushes to `main`;
-and on dispatch. `contents: read` only.
+The lane has two parts (D182, `decision-blocker:namespace-lane-runs-on-a-workstation`). A kind
+cluster job does not fit the CI budget, so the static checks run in CI and the cluster part runs on
+a workstation and reaches the release as a recorded line (§ 10.4).
 
-| job | what runs | where |
+**Workflow `.github/workflows/namespace-lane.yml`** runs the `static` job only. It runs on pull
+requests touching `crates/substrate-kubernetes*/**`, `crates/substrate-executor/**`,
+`crates/substrate-guarded/**`, `crates/substrate-wire/**`, `crates/substrate-daemon/**`,
+`Dockerfile`, `Cargo.lock`, `rust-toolchain.toml`, `xtask/Cargo.toml`, `xtask/src/main.rs`,
+`xtask/src/namespace_lane*.rs`, `xtask/tests/golden/namespace-lane/**`, ADR 0047 or the workflow
+itself; on pushes to `main`; and on dispatch. `contents: read` only.
+
+| part | what runs | where |
 |---|---|---|
-| `static` | `cargo xtask namespace-lane check`: renders keeper, exec and probe objects from fixed inputs against goldens; asserts that the Role the lane installs equals decision 3's table, that no rendered kind is cluster-scoped, and that every object carries the four keys of § 4 | runner, seconds |
-| `cluster` | pinned kind with one control-plane and one worker node (`podPidsLimit: 1024`, `containerLogMaxSize: 10Mi`); a pinned `registry:2` by digest as kind's local registry; the `executor` image built and pushed, so it has a manifest digest; the exec image is the busybox digest the pod lane pins; then `cargo xtask namespace-lane run --admin-kubeconfig $RUNNER_TEMP/admin.json` | runner and kind |
+| `static` job | `cargo xtask namespace-lane check`: renders keeper, exec and probe objects from fixed inputs against goldens; asserts that the Role the lane installs equals decision 3's table, that no rendered kind is cluster-scoped, and that every object carries the four keys of § 4 | runner, seconds |
+| cluster part | `cargo xtask namespace-lane observe`: pinned kind (`KIND_NODE_IMAGE`, `xtask/src/namespace_lane.rs`) with one control-plane and one worker node (`podPidsLimit: 1024`, `containerLogMaxSize: 10Mi`); a pinned `registry:2` by digest (`REGISTRY_IMAGE`) as kind's local registry; the exec image is the busybox digest the pod lane pins | a workstation and kind |
 
-`namespace-lane run` is Rust and uses the extracted client, never `kubectl`. It reads only the file
-it is given, never `KUBECONFIG` or `~/.kube`, and refuses a kubeconfig whose server is not
-`https://127.0.0.1:<port>`, kind's loopback endpoint. In order, it:
+`namespace-lane observe` is Rust and uses the extracted client, never `kubectl`. It creates its own
+cluster `substrate-namespace-lane-<id>`, or takes one such cluster's JSON admin kubeconfig with
+`--admin-kubeconfig <file>`. It never reads `KUBECONFIG` or `~/.kube`, and refuses a kubeconfig
+whose server is not `https://127.0.0.1:<port>`, kind's loopback endpoint. It prints
+`Namespace-lane: <sha> <observation-count> <RFC 3339 UTC>` only when every observation that
+`OBSERVATIONS` declares ran, held or not, what the run created was removed, no signal arrived, and
+`HEAD` was clean and did not move (`decision`, `xtask/src/namespace_lane.rs`). In order, it:
 
 1. **provisions as admin:** the namespace labelled `pod-security.kubernetes.io/enforce: restricted`;
    the ServiceAccount, decision 3's Role and its binding; the default-deny policy; a ResourceQuota
    (`count/persistentvolumeclaims: 4`, `pods: 8`); a 1 h token in the driver's kubeconfig. It records
    the cluster-scoped inventory;
-2. **observes O1 to O10 (§ 10.3)** with the admin and driver credentials, and writes each result into
-   the job summary;
+2. **observes § 10.3's observations** that `OBSERVATIONS` declares, with the admin and driver
+   credentials, and prints each result as held, not held or not run;
 3. starts the daemon on the runner, `--driver kubernetes`, over TLS with the lane's in-process
    Identity stub, as the chart lane does;
 4. runs the [design 31](31-remote-clean-room-conformance-runner.md) runner, built with `-p`, with
    `--restart-hook` killing (`KILL`) and restarting the daemon the verb supervises. Core groups must
    pass. Exec, events and restart must pass where their facts hold. Sessions, resources and retention
-   must be `absent` with `fact-absent`;
+   must be `absent` with `fact-absent`. **Absent until `story:remote-clean-room-conformance`
+   lands:** that runner does not exist yet (the story is proposed, and D186 schedules it for the
+   first wave after this one), so the verb's inventory names step 4 as absent, never as passed;
 5. runs `crates/substrate-daemon/tests/runtime_vectors.rs` with `SUBSTRATE_VECTORS_KUBERNETES_CONFIG`.
    This is a third lane beside portable and delegated: cases selected by facts, absent cases not
    counted, the executed count pinned as `NAMESPACE_CASES`;
@@ -463,14 +496,19 @@ it is given, never `KUBECONFIG` or `~/.kube`, and refuses a kubeconfig whose ser
    dependent fact is absent and its refusal named; an admitted `privileged` dry run refuses startup (a
    second namespace without the label); a running exec across a restart reads `unknown` and its Pod is
    gone; a force-deleted Pod is not reported ended before its container is shown stopped; a quota
-   exhaustion is `workspace.capacity` and `exec.capacity`;
+   exhaustion, a 403 Status with reason `Forbidden` whose message contains `is forbidden: exceeded
+   quota: `, is `workspace.capacity` and `exec.capacity`, and any other 403 stays
+   `kubernetes.api-failed` (D184). The golden is the message O7 recorded:
+   `quota_refusal` in `crates/substrate-kubernetes/src/namespace/workspace_tests.rs` and
+   `a_quota_refusal_is_exec_capacity_and_any_other_403_is_api_failed` in
+   `crates/substrate-kubernetes/src/exec_tests.rs`;
 7. destroys everything through the daemon, then requires as admin: no object labelled
    `app.kubernetes.io/managed-by: b10x-substrate` in the namespace, and a cluster-scoped inventory
    equal to step 1's.
 
-Fallback C (a `Namespace-lane:` tag record) applies only to a case the hosted runner cannot execute,
-named in the verb's inventory. None is expected. The first run's duration is measured on its pull
-request and recorded in the story. Each case runs once, with no repetition (AGENTS.md § *The gate*).
+D182 takes fallback C (a `Namespace-lane:` tag record) for the whole cluster part, not only for a
+case a hosted runner cannot execute. The first full run's duration is recorded in the story. Each
+case runs once, with no repetition (AGENTS.md § *The gate*).
 
 ### 10.3 The lane's first observations
 
@@ -485,20 +523,59 @@ and the client before any driver code relies on them. O5 to O10 are what this de
 | O4 | two Pods on one node mount one `ReadWriteOnce` claim of the `standard` class | exec facts are absent on that class (N3), and the lane fails until a class that allows it is used |
 | O5 | `openat2` with `RESOLVE_BENEATH` is allowed by containerd's `RuntimeDefault` seccomp profile | the workspace facts are absent and every file route refuses; the executor gains no fallback |
 | O6 | what `pids.max` reads inside a container under `podPidsLimit: 1024` | § 14 Q2 |
-| O7 | a create over the ResourceQuota answers 403 with a Status message starting `exceeded quota:` | capacity is unrecognisable and stays `kubernetes.api-failed` |
+| O7 | a create over the ResourceQuota answers 403 with reason `Forbidden` and a Status message containing `is forbidden: exceeded quota: ` (D184) | capacity is unrecognisable and stays `kubernetes.api-failed` |
 | O8 | the rules review of the driver's ServiceAccount is decision 3's table plus the fixed default set | the pinned default set is corrected from the observation |
 | O9 | base64 frame lines of 8202 bytes round-trip through `pods/log` byte-exactly, both streams interleaved | the chunk size halves |
 | O10 | `pods/exec` accepts `v5.channel.k8s.io` and its close channel on v1.37 | `v4.channel.k8s.io`, with stdin closed by the request frame's own length |
 | O11 | an exec Pod under `podPidsLimit` spawns processes until `fork` fails; the lane records the count reached against `pod_pids_limit`, and the count does not exceed it (§ 14 Q2) | the stated bound does not hold: the driver ships no `limits` fact, and the result goes to the coordinating session before anything else |
 
+**The first run.** `Namespace-lane: 425ab9c2709b54bc46c234b4646913d8f12f27a2 8 2026-10-29T05:19:33Z`
+on `kindest/node:v1.37.0`, recorded in the slice story's *Lane observations*, ran O1 to O4, O6 to
+O8 and O10:
+
+- **O1 did not hold.** 60 s after the background deletion the Pod still ran and the claim waited on
+  `pvc-protection`. The driver's own Pods-first order is the only cleanup, and the backstop is
+  dropped from the claim.
+- **O2 held.** The `restricted` namespace answered 403 `violates PodSecurity "restricted:latest"`;
+  the unlabelled one answered 201 and stored nothing.
+- **O3 did not hold.** The API connection succeeded; DNS and the outside address timed out.
+  `confinement.no-egress` stays absent (`capability_snapshot`,
+  `crates/substrate-kubernetes/src/namespace/probe.rs`), and exec cases are absent until the lane
+  installs a pinned enforcing plugin.
+- **O4 held.**
+- **O6 held:** `pids.max=76860`, `memory.max=33554432`, `cpu.max=10000 100000`. `pids.max` does not
+  show `podPidsLimit` 1024, so § 14 Q2 A applies and O11 is its proof.
+- **O7 did not hold as written.** The message starts `persistentvolumeclaims "…" is forbidden:
+  exceeded quota: …`, so a quota refusal is recognised inside the `Forbidden` message (D184, the
+  O7 row above and § 10.2 step 6).
+- **O8 held** once the lane's pinned default set gained `get`, `list` and `watch` on
+  `clustertrustbundles` and four issuer-discovery URLs (`DEFAULT_RESOURCE_RULES` and
+  `DEFAULT_NON_RESOURCE_URLS`, `xtask/src/namespace_lane_observe.rs`).
+- **O10:** `v5.channel.k8s.io` works, but the driver's exec was refused 403 `cannot get resource
+  "pods/exec"`, because the API server authorizes the exec WebSocket as `get`. The operator approved
+  `get` beside `create` on `pods/exec` in ADR 0047's addendum of 2026-10-29.
+
 ### 10.4 Release
 
 `ghcr.io/beyond10x/b10x-substrate-executor:<version>` from the `executor` target, keyless-signed,
 verified and anonymously read back before anything is announced (ADR 0006's pattern, with
-`GITHUB_TOKEN` and no secret). `release.yml` refuses a tag whose commit has no successful
-`namespace-lane.yml`, as it does for `gate.yml` (ADR 0046 K9 B); that lane asserts O11, so the
-process bound is observed once per release on the real kubelet path. `xtask/tests/release_workflow.rs`
-gains both refusals. AGENTS.md § *Releases* names the image and the condition.
+`GITHUB_TOKEN` and no secret). `release.yml` holds two namespace-lane conditions:
+
+- **The static checks.** It refuses a tag whose commit has no successful `namespace-lane.yml`
+  run, read from the Actions API as it reads `gate.yml`'s (ADR 0046 K9 B; step *Require a green
+  namespace-lane run for this commit*).
+- **The cluster part (D182).** It refuses a tag without one `Namespace-lane:` record naming the
+  tagged commit, whose observation count is the length of `OBSERVATIONS` in
+  `xtask/src/namespace_lane.rs` at that commit and whose time is an RFC 3339 UTC instant, under
+  the one-line, three-field and calendar rules of `Chart-lane:` (step *Require a recorded
+  namespace-lane run for this commit*). The record is carried by the annotated tag's message, or
+  by the `namespace_evidence` input of a protected-`main` recovery dispatch.
+
+The process bound is observed once per release only when `OBSERVATIONS` at the tagged commit
+includes O11. At this amendment it declares O1 to O4, O6 to O8 and O10, so it does not yet, and the
+driver publishes no `limits` fact: no design 30 family is in `0.25.0` (§ 11).
+`xtask/tests/release_workflow.rs` holds the refusals of both steps. AGENTS.md § *Releases* names
+the image and both conditions.
 
 ## 11. Wire: one successor bundle
 
@@ -556,6 +633,12 @@ holds each literal to its wire constant for `0.25.0` and every later bundle:
 - one vector per table row answers exactly that row;
 - a vector machine whose `driver` is `kubernetes` states none of the four Linux facts;
 - `compatibility.json` names each change.
+
+The facts `exec.inline-capsule` and `exec.signals` have no wire constant: the wire crate names
+them only as serde renames on `CapabilityFacts`. The checker therefore holds them as its own
+literals, `INLINE_CAPSULE_FACT` and `SIGNALS_FACT` in `xtask/src/bundle/namespace_driver.rs`. A
+`substrate_wire` constant for each would bind them as `CONFINEMENT_NO_EGRESS_FACT` binds its fact;
+none is added in this wave.
 
 **`ADVERTISED_CONTRACT_BUNDLE` moves** to `substrate-wire/0.25.0`, with the SHA-256 of its inner
 `bundle.json`. The daemon and SDK move with it. So do `release.yml`'s `BUNDLE_VERSION`, the
@@ -636,7 +719,8 @@ tests named are the unit's own, each run once.
 
 - **U13 namespace lane run.** Steps 3 to 7 of § 10.2, O5 and O9, the `NAMESPACE_CASES` lane in
   `runtime_vectors.rs`, the cleanup assertions; STATUS.md, CHANGELOG.md and AGENTS.md § *The gate*.
-  Tests: the lane itself on its pull request, with the first run's duration recorded.
+  Tests: the lane itself, run on a workstation at the integration head (D182), with the first full
+  run's duration recorded.
 
 ## 13. Decisions taken here
 
@@ -718,3 +802,30 @@ Everything ADR 0047 leaves out (§ *What this does not decide*), plus: chart pac
 in-cluster hosting of the daemon (N1 B), image pull credentials (images must be pullable by the
 nodes without a Pod secret), and a keeper lost while serving. In the first slice that case fails
 every file route with `kubernetes.api-failed`, and the keeper is never recreated.
+
+In-cluster configuration is not wired: the daemon reads only the file `--kubernetes-config` names,
+with no ambient kubeconfig, no environment and no in-cluster service account
+(`DriverSelection::Kubernetes`, `crates/substrate-daemon/src/runtime.rs`).
+
+Two rounds of § 5 exist but no daemon task runs them on a timer: the watch round of § 5.2
+(`exec_watch_round`) and the exec garbage and signal round (`exec_garbage_round`), both in
+`crates/substrate-kubernetes/src/exec.rs`. Until one does, an exec's end is read when the exec is
+observed; an ended exec's Pod is deleted when its end is read, while a deletion that failed and the
+settling of its row wait for the garbage round; and a signal intent is held only in the driver's
+memory, so it does not survive a restart (§ 5, the signal row).
+
+## Amendments of 2026-10-29
+
+- § 4: the keeper name `sbx-ws-<h>-keeper` is 40 characters, not 39.
+- § 5: a finished Pod already being deleted at restart reads `unknown`, not its exit; a signal intent does not survive a restart; no daemon task runs the garbage round yet.
+- § 5.1: the N9 bound is read on the daemon's wall clock against `created_at`, not on the API server's `Date` header.
+- § 5.2: no daemon task runs the watch round yet.
+- § 6.1: step 1's failure stops the daemon; `/readyz` reads the startup snapshot (ADR 0045 D5 A, D185); a live re-probe stays deferred (D5 B).
+- § 7.3: a replaced Pod name reports the API's exit with unknown output, so a lost limits-unapplied refusal reads as exit 125.
+- § 8, § 10.1, § 10.2 step 6, § 10.3 O7: a quota refusal is a 403 `Forbidden` whose message contains `is forbidden: exceeded quota: ` (D184).
+- § 10.2: the static checks stay in `namespace-lane.yml`, and the cluster part runs on a workstation as `cargo xtask namespace-lane observe` (D182); step 4 is absent until `story:remote-clean-room-conformance` lands (D186).
+- § 10.3: the first run's observations: O2, O4, O6 and O8 held; O1 and O3 did not; O7 became D184; O10 became ADR 0047's addendum of 2026-10-29.
+- § 10.4: the release refuses a tag without a successful `namespace-lane.yml` run and without a `Namespace-lane:` record for the tagged commit (D182).
+- § 11: the `exec.inline-capsule` and `exec.signals` fact names are checker literals, with no wire constant.
+- § 12 U13: the lane runs on a workstation (D182).
+- § 15: in-cluster configuration is not wired, and the watch and garbage rounds run on no timer.
