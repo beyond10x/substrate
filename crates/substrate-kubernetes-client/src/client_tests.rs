@@ -673,3 +673,162 @@ async fn a_delete_whose_body_is_past_its_bound_does_not_delete_under_another_uid
         "the Pod was deleted under another uid"
     );
 }
+
+/// A `Lease` created through the client, and the path that names it.
+async fn lease(api: &Api) -> (Value, String) {
+    let lease = json!({
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
+        "metadata": {"name": "b10x-substrate-driver"},
+        "spec": {"holderIdentity": "deployment-a/one", "leaseDurationSeconds": 30},
+    });
+    let created = api.create(&api.leases(), &lease).await.expect("created");
+    (created, format!("{}/b10x-substrate-driver", api.leases()))
+}
+
+/// A replacement with `dryRun=All` is admitted and answered, and the API stores nothing.
+#[tokio::test]
+async fn a_dry_run_update_is_answered_and_stores_nothing() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let (created, path) = lease(&api).await;
+    let mut renewed = created.clone();
+    renewed["spec"]["holderIdentity"] = json!("deployment-a/two");
+
+    let answered = api
+        .update(&format!("{path}?dryRun=All"), &renewed)
+        .await
+        .expect("admitted");
+    assert_eq!(answered["spec"]["holderIdentity"], "deployment-a/two");
+    let stored = fake
+        .object("leases", "b10x-substrate-driver")
+        .expect("stored");
+    assert_eq!(stored, created, "a dry run changed the stored Lease");
+}
+
+/// `metadata.uid` is immutable: a replacement naming another uid is refused 422 `Invalid` and the
+/// stored object keeps its own, as the API server's update validation does.
+#[tokio::test]
+async fn an_update_naming_another_uid_is_refused_422() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let (created, path) = lease(&api).await;
+    let mut foreign = created.clone();
+    foreign["metadata"]["uid"] = json!("00000000-0000-4000-8000-ffffffffffff");
+    foreign["spec"]["holderIdentity"] = json!("deployment-b/one");
+
+    let error = api.update(&path, &foreign).await.expect_err("another uid");
+    assert_eq!(error.status(), Some(422), "{error}");
+    let stored = fake
+        .object("leases", "b10x-substrate-driver")
+        .expect("stored");
+    assert_eq!(stored, created);
+}
+
+/// A continue token from before a compaction can no longer be answered at its version: the page
+/// is 410 `Expired`, and the client's list answers that status, so its caller lists again.
+#[tokio::test]
+async fn a_list_continued_past_a_compaction_is_expired_410() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    for number in 0..5 {
+        fake.seed("pods", pod(&format!("paged-{number}")))
+            .expect("seeded");
+    }
+    fake.fault(Fault::Delay {
+        method: Method::GET,
+        path: format!("{}?limit=2&continue=", api.pods()),
+        by: std::time::Duration::from_millis(300),
+    });
+    let compactor = async {
+        while !fake
+            .requests()
+            .iter()
+            .any(|request| request.contains("continue="))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        fake.seed("pods", pod("paged-z-late")).expect("seeded");
+        fake.compact();
+    };
+
+    let pods = api.pods();
+    let (listed, ()) = tokio::join!(
+        api.list(&pods, "PodList", ListForm::Metadata, 2, 5),
+        compactor
+    );
+    let error = listed.expect_err("the continued page is expired");
+    assert_eq!(error.status(), Some(410), "{error}");
+}
+
+/// A request without the bearer is refused 401 before anything else, and a fault planned for the
+/// next request is still there for the next authorized one.
+#[tokio::test]
+async fn an_unauthorized_request_does_not_meet_a_planned_fault() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let mut stranger = fake.kubeconfig();
+    stranger["users"][0]["user"]["token"] = json!("another-credential");
+    let stranger = client(&stranger);
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: api.pods(),
+        status: 503,
+        body: json!({"kind": "Status", "code": 503}),
+    });
+
+    let refused = stranger
+        .list(&stranger.pods(), "PodList", ListForm::Metadata, 10, 1)
+        .await
+        .expect_err("no credential");
+    assert_eq!(refused.status(), Some(401), "{refused}");
+    let faulted = api
+        .list(&api.pods(), "PodList", ListForm::Metadata, 10, 1)
+        .await
+        .expect_err("the planned fault");
+    assert_eq!(faulted.status(), Some(503), "{faulted}");
+}
+
+/// The fake reads equality selectors alone (`key=value`, `key==value`). Any other requirement is
+/// refused 400, never read as an equality on another key: `a!=b` matched nothing as `a!` = `b`.
+#[tokio::test]
+async fn a_label_selector_the_fake_cannot_read_is_refused_400() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    fake.seed("pods", pod("selected")).expect("seeded");
+
+    for selector in [
+        "b10x-substrate/test!=client",
+        "!b10x-substrate/test",
+        "b10x-substrate/test",
+        "b10x-substrate/test in (client)",
+        "b10x-substrate/test=a=b",
+    ] {
+        let query: String = url::form_urlencoded::byte_serialize(selector.as_bytes()).collect();
+        let error = api
+            .list(
+                &format!("{}?labelSelector={query}", api.pods()),
+                "PodList",
+                ListForm::Metadata,
+                10,
+                1,
+            )
+            .await
+            .expect_err(selector);
+        assert_eq!(error.status(), Some(400), "{selector}: {error}");
+    }
+    for selector in ["b10x-substrate/test=client", "b10x-substrate/test==client"] {
+        let query: String = url::form_urlencoded::byte_serialize(selector.as_bytes()).collect();
+        let listed = api
+            .list(
+                &format!("{}?labelSelector={query}", api.pods()),
+                "PodList",
+                ListForm::Metadata,
+                10,
+                1,
+            )
+            .await
+            .expect(selector);
+        assert_eq!(listed.items.len(), 1, "{selector}");
+    }
+}

@@ -192,6 +192,9 @@ struct Store {
     objects: BTreeMap<&'static str, BTreeMap<String, Value>>,
     history: Vec<Stored>,
     compacted: u64,
+    /// What a paged list's later pages read: a resource's objects at the version its first page
+    /// answered, until [`FakeCluster::compact`] passes that version.
+    snapshots: BTreeMap<(&'static str, u64), BTreeMap<String, Value>>,
     faults: Vec<Fault>,
     requests: Vec<String>,
     rules: Vec<Value>,
@@ -373,11 +376,15 @@ impl FakeCluster {
     }
 
     /// Forgets the history up to now: a watch from any older `resourceVersion` answers an `ERROR`
-    /// event with code 410.
+    /// event with code 410, and a list continued from an older page answers 410.
     pub fn compact(&self) {
         let mut store = self.store();
-        store.compacted = store.version;
+        let compacted = store.version;
+        store.compacted = compacted;
         store.history.clear();
+        store
+            .snapshots
+            .retain(|(_, version), _| *version >= compacted);
     }
 
     /// The `resourceRules` every `SelfSubjectRulesReview` answers.
@@ -476,15 +483,7 @@ impl Shared {
             .uri()
             .path_and_query()
             .map_or_else(|| request.uri().path().to_owned(), ToString::to_string);
-        let fault = {
-            let mut store = self.lock();
-            store.requests.push(format!("{method} {target}"));
-            let planned = store
-                .faults
-                .iter()
-                .position(|fault| fault.matches(&method, &target));
-            planned.map(|index| store.faults.remove(index))
-        };
+        self.lock().requests.push(format!("{method} {target}"));
         let authorized = request
             .headers()
             .get(header::AUTHORIZATION)
@@ -492,6 +491,14 @@ impl Shared {
         if !authorized {
             return Ok(status(&Refusal::new(401, "Unauthorized", "Unauthorized")));
         }
+        let fault = {
+            let mut store = self.lock();
+            let planned = store
+                .faults
+                .iter()
+                .position(|fault| fault.matches(&method, &target));
+            planned.map(|index| store.faults.remove(index))
+        };
         let drop = match fault {
             Some(Fault::Answer { status, body, .. }) => return Ok(answer(status, &body)),
             Some(Fault::DropAnswer { .. }) => true,
@@ -572,10 +579,10 @@ impl Shared {
                 .ok_or_else(|| not_found(target.resource, &name)),
             (&Method::PUT, Some(name), None) => {
                 let object = read_json(request).await?;
-                Ok(answer(200, &self.update(&target, &name, object)?))
+                Ok(answer(200, &self.update(&target, &name, object, dry_run)?))
             }
             (&Method::DELETE, Some(name), None) => {
-                let options = read_json(request).await.unwrap_or(Value::Null);
+                let options = read_optional_json(request).await?;
                 Ok(answer(
                     200,
                     &self.delete(&target, &name, &options, dry_run)?,
@@ -637,6 +644,7 @@ impl Shared {
         mut object: Value,
         dry_run: bool,
     ) -> Result<Value, Refusal> {
+        self.same_namespace(&object)?;
         let Some(name) = object["metadata"]["name"]
             .as_str()
             .filter(|name| !name.is_empty())
@@ -680,7 +688,45 @@ impl Shared {
         Ok(object)
     }
 
-    fn update(&self, target: &Target, name: &str, mut object: Value) -> Result<Value, Refusal> {
+    /// A body naming another namespace than the request's is refused 400, as the API's handler
+    /// does before anything is stored.
+    fn same_namespace(&self, object: &Value) -> Result<(), Refusal> {
+        match object["metadata"]["namespace"].as_str() {
+            Some(namespace) if !namespace.is_empty() && namespace != self.namespace => {
+                Err(Refusal::new(
+                    400,
+                    "BadRequest",
+                    "the namespace of the provided object does not match the namespace sent on \
+                     the request",
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// A replacement: refused 400 for a body naming another object or namespace, 409 for a stale
+    /// `resourceVersion` and 422 for another `metadata.uid`, which is immutable; under `dryRun=All`
+    /// answered and not stored.
+    fn update(
+        &self,
+        target: &Target,
+        name: &str,
+        mut object: Value,
+        dry_run: bool,
+    ) -> Result<Value, Refusal> {
+        if let Some(named) = object["metadata"]["name"].as_str()
+            && !named.is_empty()
+            && named != name
+        {
+            return Err(Refusal::new(
+                400,
+                "BadRequest",
+                format!(
+                    "the name of the object ({named}) does not match the name on the URL ({name})"
+                ),
+            ));
+        }
+        self.same_namespace(&object)?;
         let mut store = self.lock();
         let store = &mut *store;
         let stored = store
@@ -699,11 +745,25 @@ impl Shared {
                 ),
             ));
         }
+        let held = &stored["metadata"]["uid"];
+        if let Some(uid) = object["metadata"]["uid"].as_str()
+            && !uid.is_empty()
+            && Some(uid) != held.as_str()
+        {
+            return Err(Refusal::new(
+                422,
+                "Invalid",
+                format!("metadata.uid: Invalid value: \"{uid}\": field is immutable"),
+            ));
+        }
         for member in ["uid", "creationTimestamp", "namespace", "name"] {
             object["metadata"][member] = stored["metadata"][member].clone();
         }
         object["kind"] = json!(target.kind);
         object["apiVersion"] = json!(target.api_version);
+        if dry_run {
+            return Ok(object);
+        }
         store.version += 1;
         object["metadata"]["resourceVersion"] = json!(store.version.to_string());
         store
@@ -784,6 +844,9 @@ impl Shared {
         let _ = self.events.send(stored);
     }
 
+    /// A list, paged as the API pages one: every page is read at the version the first page
+    /// answered (the continue token carries it), and a token whose version
+    /// [`FakeCluster::compact`] passed answers 410 `Expired`.
     fn list(
         &self,
         target: &Target,
@@ -797,20 +860,40 @@ impl Shared {
         let limit = first("limit")
             .and_then(|limit| limit.parse::<usize>().ok())
             .filter(|limit| *limit > 0);
-        let after = first("continue");
-        let store = self.lock();
-        let mut items: Vec<&Value> = store
-            .objects
-            .get(target.resource)
-            .map(|objects| {
-                objects
-                    .iter()
-                    .filter(|(name, _)| after.as_ref().is_none_or(|after| *name > after))
-                    .map(|(_, object)| object)
-                    .filter(|object| selector.matches(object))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let none = BTreeMap::new();
+        let mut store = self.lock();
+        let (version, after) = match first("continue") {
+            None => (store.version, None),
+            Some(token) => {
+                let (version, after) = token
+                    .split_once('/')
+                    .and_then(|(version, after)| Some((version.parse::<u64>().ok()?, after)))
+                    .ok_or_else(|| Refusal::new(400, "BadRequest", "continue key is not valid"))?;
+                (version, Some(after.to_owned()))
+            }
+        };
+        let objects = if after.is_some() {
+            store
+                .snapshots
+                .get(&(target.resource, version))
+                .filter(|_| version >= store.compacted)
+                .ok_or_else(|| {
+                    Refusal::new(
+                        410,
+                        "Expired",
+                        "The provided continue parameter is too old to display a consistent list \
+                         result. You can start a new list without the continue parameter.",
+                    )
+                })?
+        } else {
+            store.objects.get(target.resource).unwrap_or(&none)
+        };
+        let mut items: Vec<&Value> = objects
+            .iter()
+            .filter(|(name, _)| after.as_ref().is_none_or(|after| *name > after))
+            .map(|(_, object)| object)
+            .filter(|object| selector.matches(object))
+            .collect();
         let mut next = None;
         if let Some(limit) = limit
             && items.len() > limit
@@ -819,8 +902,9 @@ impl Shared {
             next = items
                 .last()
                 .and_then(|object| object["metadata"]["name"].as_str())
-                .map(str::to_owned);
+                .map(|name| format!("{version}/{name}"));
         }
+        let snapshot = (after.is_none() && next.is_some()).then(|| objects.clone());
         let items: Vec<Value> = items
             .into_iter()
             .map(|object| {
@@ -835,7 +919,10 @@ impl Shared {
                 }
             })
             .collect();
-        let mut list_metadata = json!({"resourceVersion": store.version.to_string()});
+        if let Some(snapshot) = snapshot {
+            store.snapshots.insert((target.resource, version), snapshot);
+        }
+        let mut list_metadata = json!({"resourceVersion": version.to_string()});
         if let Some(next) = next {
             list_metadata["continue"] = json!(next);
         }
@@ -906,11 +993,7 @@ impl Shared {
                 Bytes::from(line)
             };
             let Ok(replay) = replay else {
-                let expired = json!({"type": "ERROR", "object": {
-                    "kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
-                    "message": "too old resource version", "reason": "Expired", "code": 410,
-                }});
-                let _ = sender.send(line(&expired)).await;
+                let _ = sender.send(line(&expired())).await;
                 return;
             };
             for event in &replay {
@@ -921,11 +1004,17 @@ impl Shared {
             let deadline = tokio::time::Instant::now() + timeout;
             loop {
                 let stored = tokio::select! {
-                    stored = updates.recv() => stored,
+                    stored = next_change(&mut updates) => stored,
                     () = tokio::time::sleep_until(deadline) => return,
                 };
-                let Ok(stored) = stored else {
-                    return;
+                let stored = match stored {
+                    Ok(stored) => stored,
+                    Err(last) => {
+                        if let Some(last) = last {
+                            let _ = sender.send(line(&last)).await;
+                        }
+                        return;
+                    }
                 };
                 if stored.resource != resource || !selector.matches(&stored.object) {
                     continue;
@@ -1034,6 +1123,27 @@ impl Shared {
     }
 }
 
+/// The `ERROR` event a watch ends with when it cannot deliver every change after its version.
+fn expired() -> Value {
+    json!({"type": "ERROR", "object": {
+        "kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
+        "message": "too old resource version", "reason": "Expired", "code": 410,
+    }})
+}
+
+/// The next change for a watch; at the channel's end, the watch's last event, if it has one. A
+/// watch that fell behind the channel has lost changes it cannot replay, so it ends 410.
+async fn next_change(
+    updates: &mut tokio::sync::broadcast::Receiver<Stored>,
+) -> Result<Stored, Option<Value>> {
+    use tokio::sync::broadcast::error::RecvError;
+    match updates.recv().await {
+        Ok(stored) => Ok(stored),
+        Err(RecvError::Lagged(_)) => Err(Some(expired())),
+        Err(RecvError::Closed) => Err(None),
+    }
+}
+
 /// The server side of one upgraded `pods/exec`: reads stdin until the client closes it, runs the
 /// installed handler off the runtime, and answers both streams and the final `Status`.
 async fn answer_exec(
@@ -1112,15 +1222,24 @@ struct Selector {
 }
 
 impl Selector {
+    /// Reads `key=value` and `key==value` terms alone. Every other requirement (`!=`, `in`,
+    /// `notin`, existence) is refused 400: the fake does not serve it, and reading it as an
+    /// equality on another key would answer a list the API never would.
     fn parse(labels: Option<&str>, fields: Option<&str>) -> Result<Self, Refusal> {
+        let key_char = |c: char| c.is_ascii_alphanumeric() || "-_./".contains(c);
+        let value_char = |c: char| c.is_ascii_alphanumeric() || "-_.".contains(c);
         let pairs = |text: &str| -> Result<Vec<(String, String)>, Refusal> {
             text.split(',')
                 .filter(|term| !term.is_empty())
                 .map(|term| {
-                    term.split_once('=')
-                        .map(|(key, value)| {
-                            (key.to_owned(), value.trim_start_matches('=').to_owned())
+                    term.split_once("==")
+                        .or_else(|| term.split_once('='))
+                        .filter(|(key, value)| {
+                            !key.is_empty()
+                                && key.chars().all(key_char)
+                                && value.chars().all(value_char)
                         })
+                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
                         .ok_or_else(|| {
                             Refusal::new(400, "BadRequest", format!("unread selector {term:?}"))
                         })
@@ -1173,13 +1292,28 @@ impl hyper::body::Body for ChannelBody {
 }
 
 async fn read_json(request: Request<Incoming>) -> Result<Value, Refusal> {
-    let bytes = Limited::new(request.into_body(), MAX_REQUEST_BYTES)
+    let bytes = read_body(request).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| Refusal::new(400, "BadRequest", "the body is not JSON"))
+}
+
+/// A body that may be absent (a `DELETE`'s options): `null` for none, otherwise JSON. A body past
+/// its bound or not JSON is refused; it is never read as no options at all.
+async fn read_optional_json(request: Request<Incoming>) -> Result<Value, Refusal> {
+    let bytes = read_body(request).await?;
+    if bytes.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|_| Refusal::new(400, "BadRequest", "the body is not JSON"))
+}
+
+async fn read_body(request: Request<Incoming>) -> Result<Bytes, Refusal> {
+    Ok(Limited::new(request.into_body(), MAX_REQUEST_BYTES)
         .collect()
         .await
         .map_err(|_| Refusal::new(413, "RequestEntityTooLarge", "the body is past its bound"))?
-        .to_bytes();
-    serde_json::from_slice(&bytes)
-        .map_err(|_| Refusal::new(400, "BadRequest", "the body is not JSON"))
+        .to_bytes())
 }
 
 fn not_found(resource: &str, name: &str) -> Refusal {
@@ -1211,4 +1345,44 @@ fn status(refusal: &Refusal) -> Response<Body> {
             "code": refusal.code,
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{Stored, next_change};
+
+    /// A watch whose reader fell behind the event channel cannot deliver what it missed: it ends
+    /// with an `ERROR` event of code 410, so the client lists again, rather than ending as a watch
+    /// whose timeout came does.
+    #[tokio::test]
+    async fn a_watch_that_fell_behind_its_channel_ends_with_410() {
+        let (events, mut updates) = tokio::sync::broadcast::channel(1);
+        for version in 1..=2 {
+            let change = Stored {
+                version,
+                resource: "pods",
+                kind: "ADDED",
+                object: json!({}),
+            };
+            events.send(change).expect("a receiver");
+        }
+
+        let last = next_change(&mut updates)
+            .await
+            .expect_err("the reader fell behind")
+            .expect("a last event");
+        assert_eq!(last["type"], "ERROR");
+        assert_eq!(last["object"]["code"], 410);
+        assert_eq!(last["object"]["reason"], "Expired");
+
+        let (events, mut updates) = tokio::sync::broadcast::channel::<Stored>(1);
+        drop(events);
+        assert_eq!(
+            next_change(&mut updates).await.err(),
+            Some(None),
+            "a closed channel ends the watch with no event"
+        );
+    }
 }

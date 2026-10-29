@@ -37,14 +37,16 @@ pub fn check(root: &Path) -> Result<Report> {
     }
 }
 
-/// [`check`] plus the executor's dependency-tree rule, which needs the real workspace and its
-/// lock file: what `cargo xtask check-packages` runs.
+/// [`check`] plus the rules that read the graph Cargo resolves, which need the real workspace and
+/// its lock file: the executor's dependency-tree rule, and the `fake` fence over every package
+/// Cargo resolves ([`check_fake_graph`]). What `cargo xtask check-packages` runs.
 pub fn check_with_executor_tree(root: &Path) -> Result<Report> {
     let (summary, mut failures) = check(root)?.into_parts();
     failures.extend(check_executor_tree(root)?);
+    failures.extend(check_fake_graph(root)?);
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{summary}; the executor's normal dependency tree names none of {}",
+            "{summary}; the executor's normal dependency tree names none of {}; the resolved graph enables the client's fake feature on no normal or build edge and in no member with a binary target",
             EXECUTOR_REFUSED.join(", ")
         )))
     } else {
@@ -124,6 +126,167 @@ fn refused_executor_tree_lines(tree: &str) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// The node `cargo tree -e features` prints for the client's `fake` feature.
+const FAKE_NODE: &str = "b10x-substrate-kubernetes-client feature \"fake\"";
+
+/// Why a member with a binary target may not reach the client's `fake` feature on any edge.
+const BINARY_FAKE_FENCE: &str = "the fake feature of b10x-substrate-kubernetes-client is refused on every edge of a member with a binary target: cargo test unifies a dev-dependency's features into the binary its CARGO_BIN_EXE tests run (design 34 § 10.1)";
+
+/// The arguments that print a dependency tree with feature nodes, one node per line after its
+/// depth, for every target platform.
+const FEATURE_TREE: [&str; 8] = [
+    "--target", "all", "--prefix", "depth", "--format", "{p}", "-e", "features",
+];
+
+/// The `fake` fence asserted on its effect, over the graph Cargo resolves rather than over the
+/// manifests `workspace.members` lists, so a path member no entry lists, a path manifest outside
+/// the root and a `[patch]` target are read as Cargo reads them:
+///
+/// - with every member selected and dev-dependencies left out, no normal or build edge enables
+///   `fake`;
+/// - in each member with a binary target, selected alone with its dev-dependencies, no edge
+///   enables `fake`.
+///
+/// The graph is resolved without `--locked`, so a manifest the lock file does not describe yet is
+/// still read; [`check_executor_tree`] is the rule that refuses a stale lock file. The workspace
+/// tree runs first and alone, so the member trees, which run side by side, find the lock file
+/// already current and none of them writes it.
+fn check_fake_graph(root: &Path) -> Result<Vec<String>> {
+    let mut failures = Vec::new();
+    let mut workspace = vec!["tree", "--workspace", "-e", "normal,build"];
+    workspace.extend(FEATURE_TREE);
+    match cargo_stdout(root, &workspace)? {
+        Ok(tree) if tree.contains(&format!("{KUBERNETES_CLIENT} v")) => {
+            failures.extend(fake_paths(&tree).into_iter().map(|path| {
+                format!("the resolved graph enables fake on a normal or build edge: {path}; {FAKE_FENCE}")
+            }));
+        }
+        Ok(_) => failures.push(format!(
+            "the resolved graph holds no {KUBERNETES_CLIENT}, so the fake fence checked nothing"
+        )),
+        Err(failure) => failures.push(failure),
+    }
+    let members = match binary_members(root)? {
+        Ok(members) => members,
+        Err(failure) => {
+            failures.push(failure);
+            return Ok(failures);
+        }
+    };
+    let trees = std::thread::scope(|scope| {
+        let running: Vec<_> = members
+            .iter()
+            .map(|member| {
+                scope.spawn(move || {
+                    let mut alone = vec!["tree", "-p", member, "-e", "normal,build,dev"];
+                    alone.extend(FEATURE_TREE);
+                    cargo_stdout(root, &alone)
+                })
+            })
+            .collect();
+        running
+            .into_iter()
+            .map(|tree| {
+                tree.join()
+                    .unwrap_or_else(|_| anyhow::bail!("cargo tree panicked"))
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
+    for (member, tree) in members.iter().zip(trees) {
+        match tree {
+            Ok(tree) if tree.starts_with(&format!("0{member} v")) => {
+                failures.extend(
+                    fake_paths(&tree)
+                        .into_iter()
+                        .map(|path| format!("{member}: {path}; {BINARY_FAKE_FENCE}")),
+                );
+            }
+            Ok(_) => failures.push(format!(
+                "{member}: cargo tree did not start at the member, so the fake fence checked nothing"
+            )),
+            Err(failure) => failures.push(failure),
+        }
+    }
+    Ok(failures)
+}
+
+/// The workspace members, as Cargo discovers them, that have a binary target.
+fn binary_members(root: &Path) -> Result<Result<Vec<String>, String>> {
+    let text = match cargo_stdout(root, &["metadata", "--no-deps", "--format-version", "1"])? {
+        Ok(text) => text,
+        Err(failure) => return Ok(Err(failure)),
+    };
+    let metadata: serde_json::Value =
+        serde_json::from_str(&text).context("cargo metadata wrote no JSON")?;
+    let listed = |value: &serde_json::Value| -> Vec<serde_json::Value> {
+        value.as_array().cloned().unwrap_or_default()
+    };
+    let members: BTreeSet<String> = listed(&metadata["workspace_members"])
+        .iter()
+        .filter_map(|id| id.as_str().map(str::to_owned))
+        .collect();
+    Ok(Ok(listed(&metadata["packages"])
+        .iter()
+        .filter(|package| {
+            package["id"]
+                .as_str()
+                .is_some_and(|id| members.contains(id))
+        })
+        .filter(|package| {
+            listed(&package["targets"])
+                .iter()
+                .any(|target| listed(&target["kind"]).iter().any(|kind| kind == "bin"))
+        })
+        .filter_map(|package| package["name"].as_str().map(str::to_owned))
+        .collect()))
+}
+
+/// Runs `cargo <args>` in `root`: its standard output, or the refusal that says the rule checked
+/// nothing because Cargo failed.
+fn cargo_stdout(root: &Path, args: &[&str]) -> Result<Result<String, String>> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let output = std::process::Command::new(cargo)
+        .current_dir(root)
+        .args(args)
+        .output()
+        .with_context(|| format!("running cargo {}", args.join(" ")))?;
+    if !output.status.success() {
+        return Ok(Err(format!(
+            "cargo {} failed, so the fake fence checked nothing: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(Ok(
+        String::from_utf8(output.stdout).context("cargo wrote non-UTF-8")?
+    ))
+}
+
+/// Each path from a root to the client's `fake` feature node in a depth-prefixed `cargo tree -e
+/// features` text, as the packages on it joined by ` -> `.
+fn fake_paths(tree: &str) -> BTreeSet<String> {
+    let mut stack: Vec<&str> = Vec::new();
+    let mut paths = BTreeSet::new();
+    for line in tree.lines() {
+        let node = line.trim_start_matches(|c: char| c.is_ascii_digit());
+        let Ok(depth) = line[..line.len() - node.len()].parse::<usize>() else {
+            continue;
+        };
+        stack.truncate(depth);
+        if node.starts_with(FAKE_NODE) {
+            let mut path: Vec<&str> = stack
+                .iter()
+                .filter(|node| !node.contains(" feature \""))
+                .filter_map(|node| node.split_whitespace().next())
+                .collect();
+            path.push(FAKE_NODE);
+            paths.insert(path.join(" -> "));
+        }
+        stack.push(node);
+    }
+    paths
 }
 
 /// AGENTS.md invariant 1 — **Substrate is Flux-free**: no Flux crate in any dependency kind
@@ -743,6 +906,22 @@ mod tests {
                 ]
             );
         }
+    }
+
+    /// The fence over the resolved graph names each path to the `fake` node and nothing else: a
+    /// `default` feature of the client, a deduplicated repeat and a package of a similar name are
+    /// not the node.
+    #[test]
+    fn fake_paths_names_each_path_to_the_fake_node_and_only_those() {
+        const TREE: &str = "0b10x-substrate-host v0.15.0 (/w/crates/substrate-host)\n1shim feature \"default\"\n2shim v0.15.0 (/w/shim)\n3b10x-substrate-kubernetes-client feature \"default\"\n4b10x-substrate-kubernetes-client v0.15.0 (/w/crates/substrate-kubernetes-client)\n3b10x-substrate-kubernetes-client feature \"fake\"\n4b10x-substrate-kubernetes-client v0.15.0 (/w/crates/substrate-kubernetes-client) (*)\n1serde feature \"default\"\n2serde v1.0.229\n0b10x-substrate-daemon v0.15.0 (/w/crates/substrate-daemon)\n1b10x-substrate-kubernetes-client feature \"fake\" (*)\n1b10x-substrate-kubernetes-client-extra feature \"fake\"\n";
+        assert_eq!(
+            super::fake_paths(TREE).into_iter().collect::<Vec<_>>(),
+            [
+                "b10x-substrate-daemon -> b10x-substrate-kubernetes-client feature \"fake\"",
+                "b10x-substrate-host -> shim -> b10x-substrate-kubernetes-client feature \"fake\"",
+            ]
+        );
+        assert!(super::fake_paths(&TREE.replace("\"fake\"", "\"default\"")).is_empty());
     }
 
     #[test]
