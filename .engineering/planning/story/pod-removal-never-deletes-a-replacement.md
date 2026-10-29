@@ -6,7 +6,7 @@ status: active
 title: A Pod removal never deletes a same-named replacement
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-29T08:57:33Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-29T08:57:33Z", actor: "human:timo", revision: 3}
@@ -48,3 +48,22 @@ Design 28 (accepted) and the uid rule of design 34 § 4. No contract change.
 
 Implemented within `wave/k8s-namespace-1` (operator, 2026-10-29: validated and confirmed adversary
 findings get a story and are implemented within the current wave). Fix unit S.
+
+## Changed adversary assertion (D188)
+
+Fix unit S (`0935f0f9`) changed the return-value check of the adversary case
+`a_removal_that_has_read_a_pods_uid_does_not_delete_a_same_named_replacement`
+(`crates/substrate-kubernetes-client/src/client_tests.rs`). The coordinating session accepted it as
+D188 on 2026-10-29. The wave's pull request body shows both versions side by side, so the change is
+visible to review:
+
+| before (adversary, `26e077a8`) | after (fix unit S, `0935f0f9`) |
+|---|---|
+| `assert!(!removed, "the removal reported gone a Pod it did not delete");` | `assert!(removed, "a name holding another uid is the Pod read gone (story:pod-removal-never-deletes-a-replacement)");` |
+| none | `assert_eq!(seen.uid(), Some(first_uid.as_str()), "the removal took the replacement as its own Pod");` |
+
+- The acceptance above says a name now holding another uid counts as the original Pod gone. The Pod
+  adapter's `monitor()` waits for the removal to end, and `true` sends the end to the original uid.
+- The check that the replacement is not deleted is unchanged.
+- The follow-up `story:preconditioned-delete-409-is-not-a-uid-mismatch` covers a 409 caused by
+  something other than a uid mismatch.

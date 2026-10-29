@@ -13,7 +13,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use base64::Engine as _;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use substrate_executor::frame::{ExitRecord, Refusal};
 use substrate_executor::spec::RunSpec;
@@ -55,6 +55,9 @@ const GARBAGE_PAGES: usize = 64;
 /// scheduling, image pulls and the API's request timeout.
 const WAIT_POLL: Duration = Duration::from_millis(200);
 const WAIT_SLACK: Duration = Duration::from_mins(1);
+/// How long past its wall bound a Pod not shown ended is left before the driver deletes it
+/// (design 28): `activeDeadlineSeconds` is the kubelet's, and a Pod it never started never ends.
+const WALL_BOUND_GRACE: Duration = Duration::from_mins(1);
 
 /// The exec state one driver keeps.
 #[derive(Debug, Default)]
@@ -82,6 +85,10 @@ struct Tracked {
     signal: Option<Signal>,
     /// Why the output cannot be served: code and message.
     output_failure: Option<(&'static str, String)>,
+    /// When, on the driver's wall clock, a Pod not shown ended is deleted: the wall bound plus
+    /// [`WALL_BOUND_GRACE`] past the start (design 28, design 34 § 9). A recovered exec is ended
+    /// where it is recovered and carries none.
+    wall_deletion_at: Option<DateTime<Utc>>,
 }
 
 /// How a gone Pod's container ended, as the watch shows it.
@@ -147,6 +154,10 @@ impl NamespaceDriver {
         let mut trace = PodTrace::since(created["metadata"]["resourceVersion"].as_str());
         trace.note(&created);
         let observation = running(id, input, &row.name);
+        let wall_deletion_at =
+            chrono::Duration::from_std(Duration::from_secs(deadline_seconds) + WALL_BOUND_GRACE)
+                .ok()
+                .and_then(|after| self.wall_now().checked_add_signed(after));
         lock(&self.execs().tracked).insert(
             id.to_owned(),
             Tracked {
@@ -158,6 +169,7 @@ impl NamespaceDriver {
                 output_bytes,
                 signal: None,
                 output_failure: None,
+                wall_deletion_at,
             },
         );
         if !input.wait {
@@ -264,7 +276,8 @@ impl NamespaceDriver {
     }
 
     /// The workspace's PVC uid and its keeper's node: an exec Pod is owned by the one and pinned
-    /// to the other (§ 7.3). Both rows must be bound, and the keeper must read as the bound one.
+    /// to the other (§ 7.3). Both rows must be bound, and the PVC and the keeper must each read as
+    /// the bound one (§ 4 uid rule): the Pod mounts the claim by name.
     async fn placement(
         &self,
         workspace: &str,
@@ -285,6 +298,15 @@ impl NamespaceDriver {
         let (claim, claim_uid) = bound(BackendRole::Pvc).ok_or_else(|| unplaced("no bound PVC"))?;
         if claim != root_name {
             return Err(unplaced("the PVC is not the workspace's root"));
+        }
+        let held_claim = self
+            .api()
+            .get(&format!("{}/{claim}", self.api().claims()))
+            .await
+            .map_err(|error| api_failed(&error))?
+            .ok_or_else(|| unplaced("the PVC is absent"))?;
+        if uid_of(&held_claim) != Some(claim_uid.as_str()) {
+            return Err(unplaced("the PVC is not the bound one"));
         }
         let (keeper, keeper_uid) =
             bound(BackendRole::Keeper).ok_or_else(|| unplaced("no bound keeper"))?;
@@ -415,6 +437,8 @@ impl NamespaceDriver {
                 self.note(id, &pod);
                 if shows_end(&pod) {
                     self.finish(id, &pod, true).await
+                } else if self.past_wall_bound(&tracked) {
+                    self.delete_past_wall_bound(id, &tracked).await
                 } else {
                     let mut current = tracked.observation;
                     current.resource.observed_at = Utc::now();
@@ -426,6 +450,54 @@ impl NamespaceDriver {
                 self.gone(id).await
             }
             None => self.gone(id).await,
+        }
+    }
+
+    /// Whether the exec's Pod, not shown ended, is due its wall-bound deletion on the driver's
+    /// wall clock and that deletion is not already the exec's signal intent.
+    fn past_wall_bound(&self, tracked: &Tracked) -> bool {
+        tracked.signal != Some(Signal::Kill)
+            && tracked
+                .wall_deletion_at
+                .is_some_and(|at| self.wall_now() >= at)
+    }
+
+    /// Design 28 and design 34 § 9: a Pod not ended 60 s after its wall bound is deleted as
+    /// `signal: Kill` deletes one, under the bound uid, and the intent is kept so the exec ends as
+    /// that signal once the Pod is shown gone and the garbage round delivers it again until then.
+    /// A Pod another uid holds under the name is never deleted: the precondition refuses it.
+    async fn delete_past_wall_bound(
+        &self,
+        id: &str,
+        tracked: &Tracked,
+    ) -> Result<ExecObservation, DriverError> {
+        tracing::warn!(
+            pod = tracked.pod,
+            "an exec Pod passed its wall bound and is deleted"
+        );
+        if let Some(entry) = lock(&self.execs().tracked).get_mut(id) {
+            entry.signal = Some(Signal::Kill);
+        }
+        self.deliver(&tracked.pod, &tracked.uid, KILL_GRACE_SECONDS)
+            .await?;
+        let path = format!("{}/{}", self.api().pods(), tracked.pod);
+        match self
+            .api()
+            .get(&path)
+            .await
+            .map_err(|error| api_failed(&error))?
+        {
+            Some(pod) if uid_of(&pod) == Some(tracked.uid.as_str()) => {
+                self.note(id, &pod);
+                if shows_end(&pod) {
+                    self.finish(id, &pod, true).await
+                } else {
+                    let mut current = tracked.observation.clone();
+                    current.resource.observed_at = Utc::now();
+                    Ok(current)
+                }
+            }
+            Some(_) | None => self.gone(id).await,
         }
     }
 
@@ -519,6 +591,7 @@ impl NamespaceDriver {
                 output_bytes: output_bytes.unwrap_or_default(),
                 signal: None,
                 output_failure: None,
+                wall_deletion_at: None,
             },
         );
         let recovered = match output_bytes {

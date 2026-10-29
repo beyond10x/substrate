@@ -1,9 +1,9 @@
 //! The capability probe and the snapshot it backs (design 34 § 6.2, § 6.3, § 12 U10).
 //!
 //! One probe creates a PVC, a keeper and one exec Pod under rows reserved by nonce, observes what
-//! it can, and removes the three under the uid rule. It proves `workspace.guarded-io`,
-//! `workspace.openat2-beneath` and `workspace.atomic-replace` from the keeper's `fs check`, as the
-//! host derives the three from its own `openat2` proof, and `exec.argv-only` from the probe Pod's
+//! it can, and removes the three under the uid rule. It proves `workspace.openat2-beneath`,
+//! `workspace.guarded-io` and `workspace.atomic-replace` from the keeper's `fs check`, each from
+//! its own answer ([`WorkspaceProofs::from_check`]), and `exec.argv-only` from the probe Pod's
 //! `probe-child` reading back the argv the driver sent, byte for byte.
 //!
 //! What it never publishes: `exec.namespaces`, `exec.cgroup-limits`, `exec.cgroup-kill` and
@@ -64,8 +64,31 @@ pub(crate) struct Probed {
     lease_epoch: u64,
     at: DateTime<Utc>,
     valid_until: DateTime<Utc>,
-    guarded_io: bool,
+    workspace: WorkspaceProofs,
     argv_only: bool,
+}
+
+/// The workspace facts the keeper's `fs check` proved (design 34 § 6.2), each from its own answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WorkspaceProofs {
+    openat2_beneath: bool,
+    guarded_io: bool,
+    atomic_replace: bool,
+}
+
+impl WorkspaceProofs {
+    /// `workspace.openat2-beneath` from `openat2_beneath`; `workspace.guarded-io` only when
+    /// `symlink_escape_refused` holds as well; `workspace.atomic-replace` from `atomic_replace`
+    /// alone. An answer that lacks a key, or states anything but `true`, proves nothing for it.
+    fn from_check(answer: &Value) -> Self {
+        let proved = |key: &str| answer[key] == Value::Bool(true);
+        let openat2_beneath = proved("openat2_beneath");
+        Self {
+            openat2_beneath,
+            guarded_io: openat2_beneath && proved("symlink_escape_refused"),
+            atomic_replace: proved("atomic_replace"),
+        }
+    }
 }
 
 /// The last proof and when the next probe is due; `None` is due now. `lease_epoch` moves on
@@ -79,7 +102,7 @@ pub(crate) struct ProbeState {
 
 /// What one run observed.
 struct Observation {
-    guarded_io: bool,
+    workspace: WorkspaceProofs,
     argv_only: bool,
 }
 
@@ -142,7 +165,7 @@ impl NamespaceDriver {
                     lease_epoch,
                     at: now,
                     valid_until: now + interval + VALIDITY_SLACK,
-                    guarded_io: observation.guarded_io,
+                    workspace: observation.workspace,
                     argv_only: observation.argv_only,
                 });
                 state.next_at = Some(now + interval);
@@ -262,7 +285,10 @@ impl NamespaceDriver {
         let serving = opened.is_some();
         let now = self.clock.wall();
         let proved = opened.filter(|proved| now < proved.valid_until);
-        let guarded = proved.as_ref().is_some_and(|proved| proved.guarded_io);
+        let workspace = proved
+            .as_ref()
+            .map_or_else(WorkspaceProofs::default, |proved| proved.workspace);
+        let guarded = workspace.guarded_io;
         let argv_only = proved.as_ref().is_some_and(|proved| proved.argv_only);
         let output_limit = pod::output_limit_bytes(self.config.container_log_max_bytes);
         let facts = CapabilityFacts {
@@ -276,8 +302,8 @@ impl NamespaceDriver {
             events_stream_bounds: Some(StreamBoundsFacts::events()),
             snapshot_provenance_events: Some(substrate_wire::MAX_SNAPSHOT_PROVENANCE_EVENTS),
             workspace_guarded_io: guarded.then_some(true),
-            workspace_openat2_beneath: guarded.then_some(true),
-            workspace_atomic_replace: guarded.then_some(true),
+            workspace_openat2_beneath: workspace.openat2_beneath.then_some(true),
+            workspace_atomic_replace: workspace.atomic_replace.then_some(true),
             workspace_max_current: serving.then_some(self.config.max_current_workspaces),
             workspace_max_file_bytes: guarded.then_some(MAX_FILE_BYTES),
             workspace_read_limit_bytes: guarded.then_some(MAX_IO_BYTES),
@@ -357,18 +383,18 @@ impl NamespaceDriver {
         self.await_handshake(&keeper.name)
             .await
             .map_err(|error| refusal(EXECUTOR_HANDSHAKE_FAILED, error.message))?;
-        let guarded_io = match self
+        let workspace = match self
             .keeper_call(&keeper.name, &Request::Check {}, &[])
             .await
         {
-            Ok((answer, _)) => answer["openat2_beneath"] == Value::Bool(true),
+            Ok((answer, _)) => WorkspaceProofs::from_check(&answer),
             Err(CallFailure::Unanswered(why)) => {
                 tracing::warn!(why, "the probe keeper's check went unanswered");
-                false
+                WorkspaceProofs::default()
             }
             Err(CallFailure::Failed(error)) => {
                 tracing::warn!(code = error.code, "the probe keeper's check failed");
-                false
+                WorkspaceProofs::default()
             }
         };
         sent.push(pod.name.clone());
@@ -383,7 +409,7 @@ impl NamespaceDriver {
             }
         };
         Ok(Observation {
-            guarded_io,
+            workspace,
             argv_only,
         })
     }

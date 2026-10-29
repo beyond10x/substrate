@@ -1260,3 +1260,105 @@ async fn a_label_selector_the_fake_cannot_read_is_refused_400() {
         assert_eq!(listed.items.len(), 1, "{selector}");
     }
 }
+
+/// A removal whose trace has read a Pod's `uid` deletes only that Pod. Design 28 § *A gone Pod*
+/// says an object with another `uid` than the first one read is another Pod and is ignored. The
+/// removal deletes by name alone (design 28 § *A run* says "deletes the Pod by name" for a start
+/// that fails), so a
+/// same-named replacement created after the read is deleted and the removal reports the Pod gone.
+/// Whether the delete must carry the trace's uid as `preconditions.uid` is the design decision this
+/// case asks for; until it is taken the case stays red.
+#[tokio::test]
+async fn a_removal_that_has_read_a_pods_uid_does_not_delete_a_same_named_replacement() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    api.pacing = crate::Pacing {
+        poll: std::time::Duration::from_millis(1),
+        remove_attempts: 3,
+        notice: std::time::Duration::from_millis(1),
+    };
+    let path = format!("{}/swapped", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("swapped"))
+        .await
+        .expect("created");
+    let first_uid = first["metadata"]["uid"].as_str().expect("a uid").to_owned();
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    assert_eq!(
+        api.delete_preconditioned(&path, 1, &first_uid).await,
+        Ok(false)
+    );
+    let replacement = api
+        .create(&api.pods(), &pod("swapped"))
+        .await
+        .expect("replacement created");
+    let replacement_uid = replacement["metadata"]["uid"]
+        .as_str()
+        .expect("a uid")
+        .to_owned();
+    assert_ne!(first_uid, replacement_uid);
+
+    let removed = api.remove_seen(&path, 1, &mut seen).await;
+
+    let kept = fake.object("pods", "swapped");
+    assert_eq!(
+        kept.as_ref()
+            .map(|object| object["metadata"]["uid"].clone()),
+        Some(json!(replacement_uid)),
+        "the removal deleted a same-named Pod whose uid it had not read (removed: {removed})"
+    );
+    assert!(
+        removed,
+        "a name holding another uid is the Pod read gone (story:pod-removal-never-deletes-a-replacement)"
+    );
+    assert_eq!(
+        seen.uid(),
+        Some(first_uid.as_str()),
+        "the removal took the replacement as its own Pod"
+    );
+}
+
+/// The unbounded removal holds the same rule: once its trace has a Pod's `uid`, a same-named
+/// replacement is the Pod gone, and it ends without deleting the replacement.
+#[tokio::test]
+async fn an_unbounded_removal_that_has_read_a_pods_uid_ends_at_a_same_named_replacement() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    api.pacing = crate::Pacing {
+        poll: std::time::Duration::from_millis(1),
+        remove_attempts: 3,
+        notice: std::time::Duration::from_millis(1),
+    };
+    let path = format!("{}/replaced", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("replaced"))
+        .await
+        .expect("created");
+    let first_uid = first["metadata"]["uid"].as_str().expect("a uid").to_owned();
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    assert_eq!(
+        api.delete_preconditioned(&path, 1, &first_uid).await,
+        Ok(false)
+    );
+    let replacement = api
+        .create(&api.pods(), &pod("replaced"))
+        .await
+        .expect("replacement created");
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        api.remove_until_gone_seen(&path, 1, &mut seen),
+    )
+    .await
+    .expect("the removal ends at a replacement");
+
+    assert_eq!(
+        fake.object("pods", "replaced")
+            .map(|object| object["metadata"]["uid"].clone()),
+        Some(replacement["metadata"]["uid"].clone()),
+        "the unbounded removal deleted a same-named replacement"
+    );
+    assert_eq!(seen.uid(), Some(first_uid.as_str()));
+}
