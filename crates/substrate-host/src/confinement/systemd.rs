@@ -1331,7 +1331,9 @@ mod imp {
             };
             let id = RunId::new(format!("systemd-{name}"));
             let writer = stdin::child_writer(admitted.profile().stdin, child.stdin.take());
-            let ending = writer.clone();
+            // The run record owns the writer; the reaper only reaches it, so dropping the adapter
+            // drops the pipe and the child reads end of file.
+            let ending = writer.as_ref().map(Arc::downgrade);
             let captured = Arc::new(Mutex::new(Captured::new(
                 admitted.profile().output_retention,
                 output_limit,
@@ -1382,7 +1384,7 @@ mod imp {
                 }
                 let drained = drain_tree(&tree, deadline).await && closed;
                 // The run's end, for its standard input too (design 32 § 2).
-                if let Some(writer) = ending {
+                if let Some(writer) = ending.as_ref().and_then(std::sync::Weak::upgrade) {
                     writer.end().await;
                 }
                 let _ = phase.send(match ended {

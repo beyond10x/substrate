@@ -203,6 +203,19 @@ impl Drop for Armed<'_> {
     }
 }
 
+/// Dropped, the writer closes its pipe: once nothing can write to or close the run's standard
+/// input, the child reads end of file. A pipe whose descriptor the adapter does not hold, such as
+/// the host driver's, would otherwise stay open.
+impl Drop for StdinWriter {
+    fn drop(&mut self) {
+        let state = self.state.get_mut();
+        if !state.closed {
+            state.pipe.close_now();
+            state.closed = true;
+        }
+    }
+}
+
 impl StdinWriter {
     pub(crate) fn new(limit: u64, pipe: Box<dyn StdinPipe>) -> Arc<Self> {
         Arc::new(Self {
@@ -576,6 +589,18 @@ mod tests {
             422,
         );
         assert_eq!(*probe.written.lock(), b"one");
+    }
+
+    // Dropping the writer closes its pipe, whatever the pipe: once nothing can write to or close
+    // the run's standard input, the child reads end of file.
+    #[tokio::test]
+    async fn dropping_the_writer_closes_its_pipe() {
+        let probe = Probe::open();
+        let writer = probe.writer(100);
+        writer.write(b"one").await.expect("written");
+        assert!(!probe.closed.load(Ordering::Acquire), "open while held");
+        drop(writer);
+        assert!(probe.closed.load(Ordering::Acquire), "closed once dropped");
     }
 
     // § 2 *Cancellation closes*: a write dropped while pending poisons the writer and closes the

@@ -1,6 +1,6 @@
 # Design 32 (`story:adapter-stdin-pipe`, D13): `oci` pipes the runtime client's standard input into
-# the container, and declares `stdin_pipe` only for a runtime flavor and version pair in
-# `OCI_STDIN_PINNED`. Setup: the oci lane's pinned runtime, which is such a pair.
+# the container, and declares `stdin_pipe` only for a runtime flavor, server version and client
+# version in `OCI_STDIN_PINNED`. Setup: the oci lane's pinned runtime, which is such an entry.
 type: ess-scenario/5
 domain: substrate.confinement
 scenario: oci-admits-stdin-pipe-on-oci

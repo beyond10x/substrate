@@ -1353,3 +1353,125 @@ async fn local_live_reads_refuse_a_recorded_run_and_a_zero_timeout() {
     );
     adapter.wait(&run).await.expect("waited");
 }
+
+// ---- adversary pass on `story:adapter-stdin-pipe` ----
+
+// Dropping the writer closes stdin: once the embedder dropped the adapter, nothing can write to
+// or close the run's standard input, so the pipe must close and a `cat` waiting on it must read
+// end of file and exit. `local` has no timeout, so a pipe kept open here is kept open for the
+// embedder's whole lifetime.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_local_dropping_the_adapter_closes_a_piped_stdin() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let pid_file = workspace.path().join("pid");
+    let admitted = adapter
+        .admit(&piped(workspace.path(), 1_024))
+        .expect("admitted");
+    adapter
+        .start(
+            &admitted,
+            &support::sh(&format!("echo $$ > '{}'; exec cat", pid_file.display())),
+        )
+        .await
+        .expect("cat starts");
+    let pid = read_when_written(&pid_file, std::time::Duration::from_secs(10)).await;
+    let _cleanup = KillOnDrop(pid.clone());
+    drop(admitted);
+    drop(adapter);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while process_exists(&pid) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "cat {pid} still waits on its standard input 3 s after the adapter was dropped: \
+             nothing can write to or close the pipe, and nothing closed it"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+// `Kill` with a pending write ends both: the write returns `session.write-failed` and the run
+// ends, each within seconds.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_local_kill_with_a_pending_write_ends_the_write_and_the_run() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let gate = support::Gate::new(workspace.path());
+    let admitted = adapter
+        .admit(&piped(workspace.path(), confinement::MAX_STDIN_BYTES))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh(&gate.line()))
+        .await
+        .expect("started");
+    let (_, pending) = support::fill(&adapter, &run).await;
+    adapter
+        .signal(&run, confinement::Signal::Kill)
+        .await
+        .expect("killed");
+    let written = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+        .await
+        .expect("the pending write returned after Kill")
+        .expect("joined");
+    support::assert_refused(
+        &written.expect_err("the run was killed"),
+        substrate_wire::SESSION_WRITE_FAILED,
+        500,
+    );
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), adapter.wait(&run))
+        .await
+        .expect("the run ended after Kill")
+        .expect("waited");
+    assert_eq!(
+        ended.exit.as_ref().and_then(|exit| exit.signal),
+        Some(libc_sigkill())
+    );
+}
+
+// One writer across tasks: a second write queued behind a pending one, when the pending one is
+// cancelled, is `session.input-closed` and sends nothing; the child reads a prefix of the
+// completed and cancelled writes, then end of file.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_local_a_write_queued_behind_a_cancelled_one_sends_nothing() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let gate = support::Gate::new(workspace.path());
+    let run = counting_behind(&adapter, workspace.path(), &gate).await;
+    let (completed, pending) = support::fill(&adapter, &run).await;
+    let queued = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let run = run.clone();
+        async move {
+            adapter
+                .write_stdin(&run, &vec![b'q'; confinement::STDIN_CHUNK_BYTES])
+                .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    pending.abort();
+    let _ = pending.await;
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(3), queued)
+        .await
+        .expect("the queued write returned")
+        .expect("joined");
+    support::assert_refused(
+        &queued.expect_err("queued behind a cancelled write"),
+        substrate_wire::SESSION_INPUT_CLOSED,
+        422,
+    );
+    gate.open();
+    adapter.wait(&run).await.expect("waited");
+    let output = adapter.output(&run).await.expect("output");
+    let read: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("wc's count");
+    assert!(
+        (completed..=completed + 65_536).contains(&read),
+        "the child read {read} bytes; the completed writes held {completed}"
+    );
+}
+
+fn libc_sigkill() -> i32 {
+    confinement::Signal::Kill.number()
+}

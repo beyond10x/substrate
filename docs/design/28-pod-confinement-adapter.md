@@ -222,15 +222,20 @@ A read that finds a run's Pod gone (404) says nothing of its container by itself
 deletion, PodGC's after the Pod's node stopped answering or an operator's, removes the Pod without
 its kubelet, and the container may still run on that node; its policy is then the only fence of its
 egress (`story:pod-force-deleted-keeps-its-policy`, review finding J2). The run's task, the open
-sweep and the deferred sweep therefore apply one rule before they delete a policy whose Pod is gone:
-the API must show the container stopped.
+sweep, the deferred sweep and an abandoned start therefore apply one rule before they delete a
+policy whose Pod is gone: the API must show the container stopped.
 
-- Evidence is the container's `terminated` state, which only the kubelet writes; a Pod has
-  `restartPolicy: Never`, so a terminated container does not run again. A read of the Pod that
-  showed it is enough.
+- Evidence is the container's `terminated` state, which only the kubelet writes, in a Pod whose
+  own `spec.restartPolicy` reads `Never`, so the container does not run again; the adapter renders
+  `Never`, and a Pod an admission webhook gave another policy is not evidence. A read of the Pod
+  that showed it is enough.
+- A deletion that leaves the Pod without `spec.nodeName` is evidence too: no node was ever bound,
+  so no kubelet held the Pod and no container of it ran; the API server removes such a Pod at once.
+  A read before the deletion is no such evidence, because the Pod may be bound after it.
 - Otherwise the adapter watches the Pod (`watch=1`, `fieldSelector=metadata.name=<run>`) from the
-  newest `resourceVersion` it read for the run, the Pod's or, before any Pod object was read, the
-  policy's, which `start` creates before the Pod. The API server replays every change since,
+  newest `resourceVersion` it read for the run: the Pod's, from the Pod its create stored on, or,
+  for a start whose Pod create went unanswered, the policy's, which `start` creates before the Pod.
+  The API server replays every change since,
   the deletion last. The kubelet writes the container terminated before it removes a Pod it was
   asked to delete (observed on kind v1.37.0, 2026-10-28: after deletions with a grace of 1 and of 5
   seconds, the last two events before `DELETED` and the `DELETED` object itself show the container
@@ -241,7 +246,9 @@ the API must show the container stopped.
   `Failed` phase is not evidence: PodGC marks a Pod `Failed` before it force-deletes it. An object
   with another `uid` than the first one read is another Pod and is ignored.
 - The run's task then reports the run `Unknown`; an unanswered watch is asked again every 2
-  seconds. The open sweep leaves such a policy and logs it; the deferred sweep stops checking it.
+  seconds, and until it is answered the run counts against the 128 tracked runs, so these tasks
+  stay bounded. An abandoned start asks once and its failure says the policy stays. The open sweep
+  leaves such a policy and logs it; the deferred sweep stops checking it.
   A policy kept this way stays until an operator removes it, labelled as every run object is; the
   next open's sweep reads it again and keeps it while the same holds.
 
