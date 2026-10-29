@@ -47,7 +47,7 @@ fn term_to_the_executor_reaches_the_childs_whole_process_group() {
     )
     .expect("cpu");
     let spec = RunSpec {
-        argv: ["/bin/sh", "-c", "sleep 30 & printf %s $!; wait"]
+        argv: ["/bin/sh", "-c", "sleep 30 & printf '%-6144s' $!; wait"]
             .iter()
             .map(|&part| part.to_owned())
             .collect(),
@@ -68,7 +68,7 @@ fn term_to_the_executor_reaches_the_childs_whole_process_group() {
             Frame::Output {
                 stream: Stream::Stdout,
                 bytes,
-            } => String::from_utf8(bytes).ok()?.parse().ok(),
+            } => String::from_utf8(bytes).ok()?.trim_end().parse().ok(),
             _ => None,
         });
         if let Some(pid) = printed {

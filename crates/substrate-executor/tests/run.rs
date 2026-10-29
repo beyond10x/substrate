@@ -278,6 +278,60 @@ fn a_signalled_child_is_recorded_by_signal_and_exits_128_plus_it() {
     );
 }
 
+/// A frame writer that blocks every output frame while `held` is set, as a container stdout the
+/// runtime does not read blocks.
+struct Held {
+    held: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl std::io::Write for Held {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.starts_with(b"b10x1 o") || bytes.starts_with(b"b10x1 e") {
+            while self.held.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_blocked_frame_writer_holds_the_child_on_its_pipes_instead_of_queueing_its_output() {
+    let cgroup = applied_cgroup();
+    let scratch = tempfile::tempdir().expect("scratch");
+    let marker = scratch.path().join("wrote-everything");
+    let script = format!(
+        "head -c 4000000 /dev/zero; : > {}",
+        marker.to_str().expect("UTF-8 path")
+    );
+    let spec = spec(
+        &["/bin/sh", "-c", &script],
+        &[("PATH", "/usr/bin:/bin")],
+        65536,
+    );
+    let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut writer = Held {
+        held: std::sync::Arc::clone(&held),
+    };
+    let root = cgroup.path().to_path_buf();
+    let runner = std::thread::spawn(move || run(&spec, &root, &mut writer).expect("run"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let finished_while_held = marker.exists();
+    held.store(false, std::sync::atomic::Ordering::SeqCst);
+    let code = runner.join().expect("runner");
+    assert!(
+        !finished_while_held,
+        "the child wrote all 4 MB while no frame could be written: its output was queued in the \
+         executor's memory instead of holding it on its pipes"
+    );
+    assert_eq!(code, 0);
+    assert!(marker.exists(), "the child finished once frames flowed");
+}
+
 #[test]
 fn a_program_that_cannot_start_is_recorded_and_exits_127() {
     let cgroup = applied_cgroup();

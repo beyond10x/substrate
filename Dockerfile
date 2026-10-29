@@ -111,6 +111,7 @@ RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,s
     SUBSTRATE_EXECUTOR_SOURCE="$SOURCE_SHA" cargo build --locked --release \
       --target x86_64-unknown-linux-musl -p b10x-substrate-executor --bin substrate-executor && \
     install -D /src/target/x86_64-unknown-linux-musl/release/substrate-executor /out/substrate-executor
+RUN readelf -lW /out/substrate-executor > /phdrs && grep -q '^Program Headers:' /phdrs && ! grep -q INTERP /phdrs
 
 FROM scratch AS executor
 ARG SOURCE_SHA=unknown

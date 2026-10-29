@@ -279,7 +279,7 @@ children and exits on `TERM`. It mounts the PVC at `/workspace`. It is rendered 
 (§ 7.3) without the init container. The daemon calls `pods/exec` on container `keeper` with
 `command=/substrate-executor&command=fs`, `stdin`, `stdout`, `stderr`, and `v5.channel.k8s.io`.
 
-- **Request (stdin, then close channel 255):** `u32be` header length (≤ 64 KiB), a closed JSON
+- **Request (stdin, then close channel 255):** `u32be` header length (≤ 16 MiB), a closed JSON
   header `{"op": "read"|"write"|"delete"|"read-v2"|"tree-v2"|"replace-v2"|"edit-v2"|"patch-v2"|"stat"|"check", ...}`
   with the wire crate's own query and input types, then `u64be` content length (≤
   `workspace.max-file-bytes`) and the content.
@@ -287,8 +287,14 @@ children and exits on `TERM`. It mounts the PVC at `/workspace`. It is rendered 
   {"class","code","message","address","retriable"}}`. The error is the `DriverError` the guarded code
   returned. Its `code` maps back to the `&'static str` through a closed table built from the
   constants the guarded crate uses. An unknown code is `Failed` `kubernetes.executor-protocol`.
-- **Bounds:** one call per operation, 30 s, response ≤ header 64 KiB + `workspace.read-limit-bytes`.
+- **Bounds:** one call per operation, 30 s, response ≤ header 16 MiB + `workspace.read-limit-bytes`.
   Channel 3's status must be `Success`. Anything else is `Failed`. stderr is drained and discarded.
+- **Why the header bound is 16 MiB, not 64 KiB:** the header carries the wire crate's own types,
+  and `FileReplaceInput` holds the whole new file inline as base64, `FileEditInput` holds two
+  texts, and a read answer holds its slice inline. 16 MiB holds a file at the wire's
+  `MAX_FILE_BYTES` inline even with every byte JSON-escaped twice, plus the other members. It is a
+  backstop beneath the driver's lower configured limits, and a read allocates only as bytes
+  arrive, so the bound costs no memory up front.
 - No shell performs file I/O (story acceptance). The guarded root is `/workspace`, the PVC itself.
 
 ### 7.3 Exec Pods and stream tagging (N10 A)
