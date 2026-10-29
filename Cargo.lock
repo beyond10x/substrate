@@ -263,6 +263,7 @@ dependencies = [
  "async-trait",
  "axum",
  "b10x-substrate-host",
+ "b10x-substrate-kubernetes",
  "b10x-substrate-store",
  "b10x-substrate-wire",
  "base64 0.23.1",

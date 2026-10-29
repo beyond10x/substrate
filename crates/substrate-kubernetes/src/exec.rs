@@ -91,7 +91,7 @@ enum Gone {
     Unanswered(String),
 }
 
-enum LogRead {
+pub(crate) enum LogRead {
     Read(Vec<u8>),
     Overlong,
     Gone,
@@ -587,7 +587,7 @@ impl NamespaceDriver {
         Ok(ended)
     }
 
-    async fn read_log(&self, pod: &str, budget: u64) -> LogRead {
+    pub(crate) async fn read_log(&self, pod: &str, budget: u64) -> LogRead {
         let limit = usize::try_from(budget).unwrap_or(usize::MAX);
         let mut last = String::new();
         for attempt in 0..LOG_ATTEMPTS {
@@ -1195,12 +1195,12 @@ fn api_exit(code: Option<i64>, record: Option<&ExitRecord>) -> Option<ExecExit> 
 
 /// A terminal observation needs the container `terminated` in a Pod with `restartPolicy:
 /// Never` (§ 5.2); the caller has checked the uid.
-fn shows_end(pod: &Value) -> bool {
+pub(crate) fn shows_end(pod: &Value) -> bool {
     container_state(pod, RUN_CONTAINER)["terminated"].is_object()
         && pod["spec"]["restartPolicy"] == "Never"
 }
 
-fn uid_of(object: &Value) -> Option<&str> {
+pub(crate) fn uid_of(object: &Value) -> Option<&str> {
     object["metadata"]["uid"].as_str()
 }
 

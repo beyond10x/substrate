@@ -17,7 +17,7 @@ pub use backend_ledger::{StoreBackendLedger, UNSETTLED_PAGE, operation_digest};
 pub use delegation::{ContextRefusal, DelegatedContextPolicy, TrustedKey, VerifiedContext};
 pub use hosted::HostedIdentityConfig;
 pub use runtime::{
-    DaemonConfig, DelegatedContextKey, EgressAperture, GitSourceConfig, OpsListenerConfig,
-    SecretSlot, TcpDaemonConfig, WritableRootConfig, serve,
+    DaemonConfig, DelegatedContextKey, DriverSelection, EgressAperture, GitSourceConfig,
+    OpsListenerConfig, SecretSlot, TcpDaemonConfig, WritableRootConfig, serve,
 };
 pub use tls::TlsDaemonConfig;

@@ -148,7 +148,13 @@ impl BackendLedger for MemoryLedger {
         }))
     }
 
-    fn reserve_probe(&self, _nonce: &str, _names: &[BackendName]) -> Result<(), DriverError> {
+    /// As the store reserves them: one row per name, keyed by the nonce, whose operation digest
+    /// is the nonce's.
+    fn reserve_probe(&self, nonce: &str, names: &[BackendName]) -> Result<(), DriverError> {
+        let digest = crate::policy::hex(&<sha2::Sha256 as sha2::Digest>::digest(nonce.as_bytes()));
+        for name in names {
+            self.reserve(BackendKind::Probe, nonce, name.role, &name.name, &digest);
+        }
         Ok(())
     }
 
@@ -161,6 +167,19 @@ impl BackendLedger for MemoryLedger {
             .filter(|row| row.settled_at.is_none() && after.is_none_or(|after| *row.name > *after))
             .cloned()
             .collect())
+    }
+}
+
+impl MemoryLedger {
+    /// Every row of `kind`, settled or not.
+    pub(crate) fn rows_of(&self, kind: BackendKind) -> Vec<BackendRecord> {
+        self.rows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|row| row.kind == kind)
+            .cloned()
+            .collect()
     }
 }
 

@@ -108,6 +108,29 @@ fn argv_reaches_the_child_byte_for_byte_without_a_shell() {
     );
 }
 
+/// Design 34 § 6.2: the probe Pod's argv, run by the executor as the Pod's PID 1 runs it, reads
+/// back from `probe-child` as exactly the report the driver computes from the argv it sent.
+#[test]
+fn the_probe_child_under_run_reports_the_probe_argv_byte_for_byte() {
+    let cgroup = applied_cgroup();
+    let mut argv = vec![
+        env!("CARGO_BIN_EXE_substrate-executor"),
+        substrate_executor::probe::PROBE_CHILD,
+    ];
+    argv.extend(substrate_executor::probe::PROBE_ARGUMENTS);
+    let ran = run_in(&spec(&argv, &[], 4096), cgroup.path());
+    assert_eq!(ran.code, 0);
+    assert_eq!(
+        String::from_utf8(ran.stream(Stream::Stdout)).expect("utf-8"),
+        substrate_executor::probe::report(&argv)
+    );
+    assert!(ran.stream(Stream::Stderr).is_empty());
+    assert_eq!(
+        ran.controls().last(),
+        Some(&&Control::Exit(ExitRecord::Code(0)))
+    );
+}
+
 #[test]
 fn the_child_environment_is_exactly_the_spec() {
     // The test process carries cargo's whole environment; none of it may reach the child.

@@ -60,7 +60,7 @@ const POD_PAGE_ITEMS: usize = 100;
 const POD_PAGES: usize = 64;
 
 /// What one create of a recorded object came to.
-enum Created {
+pub(super) enum Created {
     /// The object is stored and its uid is bound to its row.
     Bound(String),
     /// The API answered a refusal: nothing was stored.
@@ -369,7 +369,7 @@ impl NamespaceDriver {
     }
 
     /// Every unsettled row, by name, read page by page.
-    fn unsettled_by_name(&self) -> Result<BTreeMap<String, BackendRecord>, DriverError> {
+    pub(super) fn unsettled_by_name(&self) -> Result<BTreeMap<String, BackendRecord>, DriverError> {
         let mut rows = BTreeMap::new();
         let mut after: Option<String> = None;
         loop {
@@ -390,7 +390,7 @@ impl NamespaceDriver {
     /// Creates the object `row` records in `collection` and binds its uid. A lost answer is read
     /// once by name and adopted when the operation annotation proves it ours (§ 4); nothing is
     /// sent again.
-    async fn create_recorded(
+    pub(super) async fn create_recorded(
         &self,
         row: &BackendRecord,
         collection: &str,
@@ -491,7 +491,7 @@ impl NamespaceDriver {
 
     /// Runs the handshake until it passes, an executor of another release answers, or
     /// [`CREATE_BOUND`] passes on the driver's monotonic clock.
-    async fn await_handshake(&self, keeper: &str) -> Result<(), DriverError> {
+    pub(super) async fn await_handshake(&self, keeper: &str) -> Result<(), DriverError> {
         let started = self.clock.now();
         loop {
             match self.handshake(keeper).await {
@@ -554,15 +554,12 @@ impl NamespaceDriver {
         self.api.claims()
     }
 
-    fn metadata(&self, id: &str, row: &BackendRecord) -> Value {
+    /// The metadata of the object `row` records for a resource of `kind` whose resource label is
+    /// `value`: the workspace's resource hash, or a probe's nonce.
+    fn metadata(&self, kind: BackendKind, value: &str, row: &BackendRecord) -> Value {
         json!({
             "name": row.name,
-            "labels": names::labels(
-                &self.deployment,
-                BackendKind::Workspace,
-                &names::resource_hash(&self.deployment, id),
-                row.role,
-            ),
+            "labels": names::labels(&self.deployment, kind, value, row.role),
             "annotations": {
                 OPERATION_ANNOTATION: names::operation_annotation(&row.operation_digest),
             },
@@ -571,10 +568,21 @@ impl NamespaceDriver {
 
     /// The workspace's PVC: the operator's class and size, written once by one node.
     pub(crate) fn render_pvc(&self, id: &str, row: &BackendRecord) -> Value {
+        let hash = names::resource_hash(&self.deployment, id);
+        self.render_pvc_as(BackendKind::Workspace, &hash, row)
+    }
+
+    /// A PVC as [`NamespaceDriver::render_pvc`] renders one, labelled for `kind` and `value`.
+    pub(super) fn render_pvc_as(
+        &self,
+        kind: BackendKind,
+        value: &str,
+        row: &BackendRecord,
+    ) -> Value {
         json!({
             "apiVersion": "v1",
             "kind": "PersistentVolumeClaim",
-            "metadata": self.metadata(id, row),
+            "metadata": self.metadata(kind, value, row),
             "spec": {
                 "accessModes": ["ReadWriteOnce"],
                 "storageClassName": self.config.storage_class,
@@ -596,7 +604,21 @@ impl NamespaceDriver {
         pvc: &str,
         pvc_uid: &str,
     ) -> Value {
-        let mut metadata = self.metadata(id, row);
+        let hash = names::resource_hash(&self.deployment, id);
+        self.render_keeper_as(BackendKind::Workspace, &hash, row, pvc, pvc_uid)
+    }
+
+    /// A keeper as [`NamespaceDriver::render_keeper`] renders one, labelled for `kind` and
+    /// `value`.
+    pub(super) fn render_keeper_as(
+        &self,
+        kind: BackendKind,
+        value: &str,
+        row: &BackendRecord,
+        pvc: &str,
+        pvc_uid: &str,
+    ) -> Value {
+        let mut metadata = self.metadata(kind, value, row);
         metadata["ownerReferences"] = json!([{
             "apiVersion": "v1",
             "kind": "PersistentVolumeClaim",

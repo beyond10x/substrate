@@ -452,6 +452,9 @@ impl Drop for SocketCleanup {
 pub struct DaemonConfig {
     pub socket: PathBuf,
     pub state: PathBuf,
+    /// The driver this daemon opens. [`DriverSelection::Host`] unless configured otherwise.
+    pub driver: DriverSelection,
+    /// The host driver's workspace root. Empty, and never read, with [`DriverSelection::Kubernetes`].
     pub workspaces: PathBuf,
     pub deployment: String,
     pub allow_uids: Vec<u32>,
@@ -507,6 +510,18 @@ pub struct DaemonConfig {
     pub hosted_identity: Option<HostedIdentityConfig>,
     /// The operational listener (ADR 0045): liveness, readiness and metrics, off when `None`.
     pub ops: Option<OpsListenerConfig>,
+}
+
+/// Which driver one daemon opens (design 34 § 3): configuration, never a request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DriverSelection {
+    /// The host driver over `workspaces`, as every daemon before design 34.
+    #[default]
+    Host,
+    /// The namespace driver, read from design 28's self-contained JSON kubeconfig and its
+    /// `b10x-substrate/namespace-driver` extension at `config`. Nothing else is read: no ambient
+    /// kubeconfig, no environment and no in-cluster account.
+    Kubernetes { config: PathBuf },
 }
 
 /// The operational listener: plaintext, unauthenticated, `GET /livez`, `/readyz` and `/metrics`
@@ -604,6 +619,7 @@ impl DaemonConfig {
         Self {
             socket: socket.into(),
             state: state.into(),
+            driver: DriverSelection::Host,
             workspaces: workspaces.into(),
             deployment: deployment.into(),
             allow_uids,
@@ -666,30 +682,13 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         bail!("event retention must be nonzero");
     }
     check_ops_listener(&config)?;
-    check_secret_slots(&config.secret_slots)?;
-    let git_sources = config
-        .git_sources
-        .iter()
-        .map(|source| {
-            substrate_host::GitSourceBinding::new(
-                source.name.clone(),
-                &source.base_url,
-                config.ca_bundle.clone(),
-            )
-            .map_err(|_| anyhow!("workspace.git-source-invalid: Git source binding refused"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    // Resolved once, here, and pinned for the process's lifetime: the sandbox gets no resolver, so
-    // a name that only resolves later resolves nowhere at all (ADR 0013).
-    let egress_apertures = resolve_egress_apertures(&config.egress_apertures)?;
-    check_writable_roots(
-        &config.writable_roots,
-        &config.workspaces,
-        state_directory(&config.state)?,
-        nix::unistd::Uid::effective().as_raw(),
-    )?;
-    check_writable_roots_clear_of(&config.writable_roots, &protected_host_paths(&config))?;
-    check_ca_bundle(config.ca_bundle.as_deref())?;
+    let host = match &config.driver {
+        DriverSelection::Host => Some(check_host_declarations(&config)?),
+        DriverSelection::Kubernetes { .. } => {
+            check_kubernetes_selection(&config)?;
+            None
+        }
+    };
     // Resolved before any listener exists: a trust anchor that only becomes usable later would let
     // the daemon serve mutations it could not attribute (ADR 0011).
     let delegated_context = resolve_delegated_context(
@@ -719,54 +718,17 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     );
     std::fs::set_permissions(&config.state, std::fs::Permissions::from_mode(0o600))
         .context("restrict durable state database")?;
-    let mut host_config = HostConfig::minimum(&config.workspaces);
-    host_config.config_generation = configuration_generation(&config);
-    host_config.cgroup_root = config.cgroup_root;
-    host_config.project_quota_ids = config.project_quota_ids;
-    host_config.exec_cpu_cores = config.exec_cpu_cores;
-    host_config.git_sources = git_sources;
-    host_config.bubblewrap = config.bubblewrap;
-    host_config.event_retention = config.event_retention;
-    host_config.secret_slots = config
-        .secret_slots
-        .into_iter()
-        .map(|slot| substrate_host::SecretSlot {
-            name: slot.name,
-            path: slot.path,
-        })
-        .collect();
-    host_config.egress_apertures = egress_apertures;
-    host_config.writable_roots = config
-        .writable_roots
-        .into_iter()
-        .map(|root| substrate_host::DeclaredWritableRoot {
-            name: root.name,
-            path: root.path,
-        })
-        .collect();
-    host_config.aperture_root = aperture_state_root(&config.state);
-    host_config.ca_bundle = config.ca_bundle;
-    // ADR 0036 S2: host processes are served only by a daemon whose one listener is the personal
-    // Unix socket, and only once the driver proved the delegated cgroup root usable for process
-    // cgroups. Any other daemon opens no driver and publishes no `process.host`; every start it
-    // receives is a named refusal, and nothing degrades into a weaker profile.
-    let unix_only = config.tcp.is_none() && config.tls.is_none();
-    let host_processes = if unix_only {
-        match substrate_host::host_process::HostProcessSupervisor::open(
-            host_config.cgroup_root.as_deref(),
-            &process_state_root(&config.state),
-        ) {
-            Ok(supervisor) => Some(supervisor as Arc<dyn substrate_host::ProcessSupervisor>),
-            Err(error) => {
-                info!(code = error.code, "host processes are not served");
-                None
-            }
-        }
+    let (driver, host_processes, namespace) = if let Some(declared) = host {
+        let opened = open_host_driver(&config, declared)?;
+        (opened.driver, opened.processes, None)
     } else {
-        None
+        let namespace = open_namespace_driver(&config, &store)?;
+        (
+            Arc::clone(&namespace) as Arc<dyn substrate_host::Driver>,
+            None,
+            Some(namespace),
+        )
     };
-    host_config.host_processes = host_processes.is_some();
-    let driver = HostDriver::open(host_config).context("open host driver")?;
     let mut app = App::with_delegated_context(
         store,
         driver,
@@ -793,6 +755,9 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     configured.host_process_logs = host_process_logs;
     app.sweep_expired().await;
     let maintenance = MaintenanceTasks::start(&app);
+    // Design 34 § 6.1: steps 2 to 7 run, and run again, in the driver's own task; until they
+    // succeed every driver fact is absent and the daemon still serves.
+    let _driver_task = DriverTask(namespace.map(|namespace| tokio::spawn(namespace.serve())));
     let _ops_listener = start_ops_listener(&app, &maintenance, config.ops.as_ref()).await?;
     if let Some(tcp) = config.tcp.as_ref() {
         let result = serve_tcp(Arc::clone(&app), tcp).await;
@@ -901,6 +866,168 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         .map_err(|error| anyhow!("driver shutdown refused: {}: {}", error.code, error.message))?;
     drop(socket_cleanup);
     Ok(())
+}
+
+/// The namespace driver's Lease and probe task, aborted when serving ends on any path.
+struct DriverTask(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for DriverTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
+    }
+}
+
+/// What the host driver's startup checks resolved, carried to [`open_host_driver`].
+struct HostDeclarations {
+    git_sources: Vec<substrate_host::GitSourceBinding>,
+    egress_apertures: Vec<substrate_host::EgressAperture>,
+}
+
+/// The host driver and, on a Unix-socket-only daemon that proved it, the host-process supervisor.
+struct OpenedHost {
+    driver: Arc<dyn substrate_host::Driver>,
+    processes: Option<Arc<dyn substrate_host::ProcessSupervisor>>,
+}
+
+/// Every startup rule the host driver's own declarations must satisfy, in the order they have
+/// always been checked.
+fn check_host_declarations(config: &DaemonConfig) -> anyhow::Result<HostDeclarations> {
+    check_secret_slots(&config.secret_slots)?;
+    let git_sources = config
+        .git_sources
+        .iter()
+        .map(|source| {
+            substrate_host::GitSourceBinding::new(
+                source.name.clone(),
+                &source.base_url,
+                config.ca_bundle.clone(),
+            )
+            .map_err(|_| anyhow!("workspace.git-source-invalid: Git source binding refused"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Resolved once, here, and pinned for the process's lifetime: the sandbox gets no resolver, so
+    // a name that only resolves later resolves nowhere at all (ADR 0013).
+    let egress_apertures = resolve_egress_apertures(&config.egress_apertures)?;
+    check_writable_roots(
+        &config.writable_roots,
+        &config.workspaces,
+        state_directory(&config.state)?,
+        nix::unistd::Uid::effective().as_raw(),
+    )?;
+    check_writable_roots_clear_of(&config.writable_roots, &protected_host_paths(config))?;
+    check_ca_bundle(config.ca_bundle.as_deref())?;
+    Ok(HostDeclarations {
+        git_sources,
+        egress_apertures,
+    })
+}
+
+/// Design 34 § 3: beside `--driver kubernetes` a host-only declaration is refused by name, never
+/// set aside. `main` refuses the same flags in `clap`; this holds a caller that builds the
+/// configuration itself to the same rule. The bubblewrap path and the CPU ceiling carry defaults
+/// a value cannot be told apart from, so only `clap` sees those two.
+fn check_kubernetes_selection(config: &DaemonConfig) -> anyhow::Result<()> {
+    let declared = [
+        ("workspaces", !config.workspaces.as_os_str().is_empty()),
+        ("cgroup_root", config.cgroup_root.is_some()),
+        ("project_quota_ids", config.project_quota_ids.is_some()),
+        ("git_sources", !config.git_sources.is_empty()),
+        ("secret_slots", !config.secret_slots.is_empty()),
+        ("egress_apertures", !config.egress_apertures.is_empty()),
+        ("writable_roots", !config.writable_roots.is_empty()),
+        ("ca_bundle", config.ca_bundle.is_some()),
+    ];
+    if let Some((field, _)) = declared.into_iter().find(|(_, declared)| *declared) {
+        bail!(
+            "config.driver-conflict: {field} is a host driver setting, and the kubernetes driver \
+             reads none"
+        );
+    }
+    Ok(())
+}
+
+/// Opens the host driver over the checked declarations, with host processes when this daemon's
+/// one listener is the personal Unix socket.
+fn open_host_driver(
+    config: &DaemonConfig,
+    declared: HostDeclarations,
+) -> anyhow::Result<OpenedHost> {
+    let mut host_config = HostConfig::minimum(&config.workspaces);
+    host_config.config_generation = configuration_generation(config);
+    host_config.cgroup_root.clone_from(&config.cgroup_root);
+    host_config.project_quota_ids = config.project_quota_ids;
+    host_config.exec_cpu_cores = config.exec_cpu_cores;
+    host_config.git_sources = declared.git_sources;
+    host_config.bubblewrap.clone_from(&config.bubblewrap);
+    host_config.event_retention = config.event_retention;
+    host_config.secret_slots = config
+        .secret_slots
+        .iter()
+        .map(|slot| substrate_host::SecretSlot {
+            name: slot.name.clone(),
+            path: slot.path.clone(),
+        })
+        .collect();
+    host_config.egress_apertures = declared.egress_apertures;
+    host_config.writable_roots = config
+        .writable_roots
+        .iter()
+        .map(|root| substrate_host::DeclaredWritableRoot {
+            name: root.name.clone(),
+            path: root.path.clone(),
+        })
+        .collect();
+    host_config.aperture_root = aperture_state_root(&config.state);
+    host_config.ca_bundle.clone_from(&config.ca_bundle);
+    // ADR 0036 S2: host processes are served only by a daemon whose one listener is the personal
+    // Unix socket, and only once the driver proved the delegated cgroup root usable for process
+    // cgroups. Any other daemon opens no driver and publishes no `process.host`; every start it
+    // receives is a named refusal, and nothing degrades into a weaker profile.
+    let unix_only = config.tcp.is_none() && config.tls.is_none();
+    let host_processes = if unix_only {
+        match substrate_host::host_process::HostProcessSupervisor::open(
+            host_config.cgroup_root.as_deref(),
+            &process_state_root(&config.state),
+        ) {
+            Ok(supervisor) => Some(supervisor as Arc<dyn substrate_host::ProcessSupervisor>),
+            Err(error) => {
+                info!(code = error.code, "host processes are not served");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    host_config.host_processes = host_processes.is_some();
+    let driver = HostDriver::open(host_config).context("open host driver")?;
+    Ok(OpenedHost {
+        driver,
+        processes: host_processes,
+    })
+}
+
+/// Design 34 § 6.1 step 1: loads the namespace driver from the one configuration file the
+/// operator named, over the store's backend ledger. A file that does not load stops the daemon
+/// with its reason code; whether the cluster opens the driver is the driver task's to find out.
+/// The configuration names no subject: the daemon's subject stays the peer's credentials.
+fn open_namespace_driver(
+    config: &DaemonConfig,
+    store: &Arc<Store>,
+) -> anyhow::Result<Arc<substrate_kubernetes::NamespaceDriver>> {
+    let DriverSelection::Kubernetes { config: path } = &config.driver else {
+        bail!("config.driver-conflict: the namespace driver was opened for the host selection");
+    };
+    let ledger = Arc::new(crate::StoreBackendLedger::new(
+        Arc::clone(store),
+        config.deployment.clone(),
+        Arc::new(SystemAuthority),
+    ));
+    let driver = substrate_kubernetes::NamespaceDriver::load(path, &config.deployment, ledger)
+        .map_err(|refused| anyhow!("{}: {}", refused.code, refused.message))?
+        .with_event_retention(config.event_retention);
+    Ok(Arc::new(driver))
 }
 
 /// Every rule a declared slot must satisfy before the daemon will serve at all.

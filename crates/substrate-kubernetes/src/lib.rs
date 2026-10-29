@@ -13,7 +13,8 @@
 //! - [`policy`]: the default-deny check and the policy-set digest (step 4, § 14 Q1 B);
 //! - [`Binding`]: the backend identity bound into the snapshot and re-read before a Pod create
 //!   (§ 6.3);
-//! - [`NamespaceDriver`]: the open sequence, steps 1 to 5, each refusing before the next.
+//! - [`NamespaceDriver`]: the open sequence, steps 1 to 5, each refusing before the next, and
+//!   step 7, the probe and the snapshot it backs (U10), served by [`NamespaceDriver::serve`].
 //!
 //! The reason codes below are log and readiness reasons (§ 6.1), not wire refusals: the driver's
 //! wire refusals arrive with the successor bundle (§ 11, § 14 Q3). The driver creates no
@@ -59,6 +60,8 @@ pub const LEASE_HELD: &str = "kubernetes.lease-held";
 pub const POLICY_NOT_DEFAULT_DENY: &str = "kubernetes.policy-not-default-deny";
 /// Step 5: a privileged Pod is admitted, so the namespace does not enforce `restricted`.
 pub const POD_SECURITY_UNENFORCED: &str = "kubernetes.pod-security-unenforced";
+/// Step 7: the probe keeper's executor did not pass the handshake (§ 6.1).
+pub const EXECUTOR_HANDSHAKE_FAILED: &str = "kubernetes.executor-handshake-failed";
 /// The cluster API answered nothing a step can read (§ 8's failure code).
 pub const API_FAILED: &str = "kubernetes.api-failed";
 /// A start whose binding moved, or whose Lease is lost (§ 6.3, § 8).
@@ -82,15 +85,15 @@ impl std::fmt::Display for StartupRefusal {
 
 impl std::error::Error for StartupRefusal {}
 
-/// The driver port (design 34 § 1). The workspace and file routes are design 34 U8's and the
-/// exec routes U9's; the capability probe belongs to U10, and until it lands the snapshot
-/// answers what an unproved capability answers: every driver fact absent.
+/// The driver port (design 34 § 1). The workspace and file routes are design 34 U8's, the exec
+/// routes U9's, and the snapshot U10's: what the probe proved, under the binding and the Lease it
+/// was proved under, and every other driver fact absent.
 #[async_trait::async_trait]
 impl substrate_host::Driver for NamespaceDriver {
     // --- the snapshot (U10) and the exec routes (U9) -------------------------------------
 
     fn machine(&self) -> substrate_wire::CapabilitySnapshot {
-        let snapshot = self.unprobed_snapshot();
+        let snapshot = self.capability_snapshot();
         self.publish_exec_snapshot(&snapshot.snapshot, snapshot.config_generation);
         snapshot
     }
@@ -182,6 +185,11 @@ impl substrate_host::Driver for NamespaceDriver {
         root_name: &str,
         previous: &substrate_wire::Workspace,
     ) -> Result<substrate_wire::Workspace, substrate_host::DriverError> {
+        // `workspace.adopt` asks to observe an operator's directory as a workspace: this driver
+        // adopts none (§ 14 Q3 A), and says so before it looks at any name.
+        if previous.origin == substrate_wire::WorkspaceOrigin::Adopted {
+            return Err(adopt_unserved());
+        }
         self.check_root(id, root_name)?;
         self.workspace_observe(id, root_name, previous).await
     }
@@ -284,38 +292,17 @@ impl substrate_host::Driver for NamespaceDriver {
     }
 }
 
-impl NamespaceDriver {
-    /// The snapshot before the probe (U10) has proved anything: the daemon's own ledger bounds
-    /// and every driver fact absent, never an optimistic one (invariant 3).
-    fn unprobed_snapshot(&self) -> substrate_wire::CapabilitySnapshot {
-        use sha2::Digest as _;
-        let facts: substrate_wire::CapabilityFacts = serde_json::from_value(serde_json::json!({
-            "operation.ledger-subject-max-rows": substrate_wire::OPERATION_LEDGER_SUBJECT_MAX_ROWS,
-            "operation.ledger-subject-max-bytes":
-                substrate_wire::OPERATION_LEDGER_SUBJECT_MAX_BYTES,
-            "operation.ledger-global-max-rows": substrate_wire::OPERATION_LEDGER_GLOBAL_MAX_ROWS,
-            "operation.ledger-global-max-bytes": substrate_wire::OPERATION_LEDGER_GLOBAL_MAX_BYTES,
-        }))
-        .expect("the ledger bounds are the only facts a snapshot requires");
-        let config_generation = self
-            .binding()
-            .map_or(0, |binding| binding.config_generation());
-        let driver_version = env!("CARGO_PKG_VERSION");
-        let material = serde_json::to_vec(&serde_json::json!({
-            "driver": substrate_wire::HostDriverKind::Kubernetes,
-            "driver_version": driver_version,
-            "config_generation": config_generation,
-            "facts": facts,
-        }))
-        .expect("snapshot material serializes");
-        substrate_wire::CapabilitySnapshot {
-            snapshot: format!("sha256:{}", policy::hex(&sha2::Sha256::digest(material))),
-            driver: substrate_wire::HostDriverKind::Kubernetes,
-            driver_version: driver_version.to_owned(),
-            config_generation,
-            probed_at: chrono::Utc::now(),
-            valid_until: None,
-            facts,
-        }
+/// `workspace.adopt-unserved` (501), as the wire crate states it: no address, never retriable.
+fn adopt_unserved() -> substrate_host::DriverError {
+    let refusal = substrate_wire::DRIVER_UNSERVED_REFUSALS
+        .iter()
+        .find(|refusal| refusal.code == substrate_wire::WORKSPACE_ADOPT_UNSERVED)
+        .expect("the wire crate states the adopt refusal");
+    substrate_host::DriverError {
+        class: substrate_host::DriverErrorClass::Unserved,
+        code: refusal.code,
+        message: refusal.message.to_owned(),
+        address: refusal.address.map(str::to_owned),
+        retriable: false,
     }
 }

@@ -46,6 +46,7 @@ serde_urlencoded.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 substrate-host = { package = "b10x-substrate-host", path = "../substrate-host", version = "=0.15.0" }
+substrate-kubernetes = { package = "b10x-substrate-kubernetes", path = "../substrate-kubernetes", version = "=0.15.0" }
 substrate-store = { package = "b10x-substrate-store", path = "../substrate-store", version = "=0.15.0" }
 substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.15.0" }
 thiserror.workspace = true

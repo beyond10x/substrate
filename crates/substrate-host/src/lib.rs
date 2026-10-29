@@ -95,6 +95,8 @@ pub use host_process::{
 };
 // The port's error and listing types, declared beside guarded I/O and re-exported so every
 // existing `substrate_host::` path to them compiles unchanged.
+#[cfg(target_os = "linux")]
+pub use probe::probe_lease_clock;
 pub use substrate_guarded::{DriverError, DriverErrorClass, Listed};
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::HostDriver;

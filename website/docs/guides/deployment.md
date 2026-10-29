@@ -249,6 +249,40 @@ Not verified: whether production nodes mount `noatime`.
 A pod reads its certificate only when it starts, so a rotation needs the restart. Each ledger claim
 stays with its ordinal. Delete the claims yourself to destroy the ledgers.
 
+## Kubernetes namespace driver
+
+`--driver kubernetes` runs workspaces and execs as objects in one namespace. It is in development.
+
+```bash
+substrate-daemon --driver kubernetes --kubernetes-config driver.json \
+  --deployment <id> --state <file> --socket <path> --allow-uid <uid>
+```
+
+The daemon reads that one file. It never reads an ambient kubeconfig or an in-cluster account.
+
+| Setting | Where |
+|---|---|
+| Cluster, namespace, credentials | the file, a self-contained JSON kubeconfig |
+| Driver settings | its context extension `b10x-substrate/namespace-driver` |
+| Images | `executor_image` and `exec_image`, by digest |
+| Network | `default_deny_policy`, your NetworkPolicy |
+
+Host flags such as `--workspaces` are refused with this driver.
+
+| Event | Result |
+|---|---|
+| The file does not load | the daemon stops: `kubernetes.config-invalid` |
+| The cluster check fails | it serves; driver facts absent |
+| The probe passes | probed facts published |
+| A probe fails or lapses | those facts absent again |
+
+The log names each failure's code. The cluster check repeats every 10 s; a failed probe after 60 s.
+
+The probe never proves the four Linux confinement facts. Each exec start is therefore refused
+`exec.sandbox-unavailable`.
+
+Readiness reads the startup snapshot. List no probed fact in `--ops-require-fact`.
+
 ## Rules that do not change by posture
 
 - Never bind a reachable unauthenticated control listener.

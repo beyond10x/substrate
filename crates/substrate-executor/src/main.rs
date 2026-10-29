@@ -21,9 +21,10 @@ fn main() -> ExitCode {
         ["fs"] => fs(),
         ["install", target] => install(target),
         ["run", parts @ ..] if !parts.is_empty() => run(parts),
+        [substrate_executor::probe::PROBE_CHILD, ..] => probe_child(),
         _ => {
             eprintln!(
-                "usage: substrate-executor version | keeper | fs | install <path> | run <spec part>..."
+                "usage: substrate-executor version | keeper | fs | install <path> | run <spec part>... | probe-child <argument>..."
             );
             ExitCode::from(2)
         }
@@ -34,6 +35,24 @@ fn main() -> ExitCode {
 fn main() -> ExitCode {
     eprintln!("substrate-executor runs only on Linux");
     ExitCode::from(2)
+}
+
+/// The probe Pod's child (design 34 § 6.2): writes the argv it received, `argv[0]` included, as
+/// one JSON line. An argument that is not UTF-8 is written lossily, so it can never read back as
+/// the argv the driver sent.
+#[cfg(target_os = "linux")]
+fn probe_child() -> ExitCode {
+    use std::io::Write as _;
+
+    let argv: Vec<String> = std::env::args_os()
+        .map(|part| part.to_string_lossy().into_owned())
+        .collect();
+    let line = substrate_executor::probe::report(&argv);
+    let mut out = std::io::stdout().lock();
+    match out.write_all(line.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) => ExitCode::FAILURE,
+    }
 }
 
 /// One file operation from stdin, answered on stdout. Exit 0 means the request was answered,
