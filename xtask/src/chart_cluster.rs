@@ -24,17 +24,20 @@
 //! `apparmor_parser`) and given the host's securityfs. It refuses, naming the prerequisite and
 //! every scenario that therefore did not run, an image whose revision label is not `HEAD`, a recipe
 //! not built on `--node-image`, and a worker without `AppArmor`, without the parser, already
-//! holding `substrate-host-exec-v1` in the shared kernel, or without a cgroup v2 hierarchy carrying
-//! `cpu`, `memory` and `pids`. It installs the chart with one pod, `execution.enabled` and
-//! `nodeProfiles.enabled` in `privileged` namespaces and runs the four:
+//! holding this run's own profile name in the shared kernel, or without a cgroup v2 hierarchy
+//! carrying `cpu`, `memory` and `pids`. Each run names its profile
+//! `substrate-host-exec-v1-lane-<ulid>`, fresh and lowercased (design 33 § 7), so it never loads,
+//! selects or removes a profile it does not own, the default `substrate-host-exec-v1` included. It
+//! installs the chart with one pod, `execution.enabled`, `execution.appArmorProfile` set to that
+//! name and `nodeProfiles.enabled` in `privileged` namespaces and runs the four:
 //!
 //! 1. the bootstrap dropped to uid 65532 with no capability, and a confined exec runs through it;
 //! 2. the daemon runs under seccomp with the Localhost profile the node holds byte for byte;
-//! 3. the daemon and its init run under the enforced `substrate-host-exec-v1` `AppArmor` profile;
+//! 3. the daemon and its init run under the run's own enforced `AppArmor` profile;
 //! 4. the 0400 key is owned by 65532 and the daemon, holding no capability, serves TLS with it.
 //!
-//! It then uninstalls the release and removes the profile its own run loaded through the node,
-//! which holds the source, so the next run starts from the same kernel. It prints
+//! It then uninstalls the release and removes the profile its own run loaded, by its name, through
+//! the node, which holds the source, so the next run starts from the same kernel. It prints
 //! `Chart-lane: <sha> <count> <instant>` only when every declared scenario passed, the profile was
 //! removed, `HEAD` did not move and the checkout was clean before and after the run.
 
@@ -84,6 +87,7 @@ const REVISION_LABEL: &str = "org.opencontainers.image.revision";
 const TRAILER: &str = "Chart-lane";
 /// This file, relative to the workspace root: the release step counts its `SCENARIOS`.
 const SOURCE: &str = "xtask/src/chart_cluster.rs";
+/// The chart's default host execution profile; every name the lane chooses extends it.
 const APPARMOR_PROFILE: &str = "substrate-host-exec-v1";
 const SECCOMP_PROFILE: &str = "b10x-substrate/host-exec-v1-amd64.json";
 const SECCOMP_SOURCE: &str = "deploy/seccomp/host-exec-v1-amd64.json";
@@ -327,25 +331,50 @@ fn lab_image(root: &Path) -> String {
     format!("{LAB_REPOSITORY}:{}", hex::encode(&digest[..8]))
 }
 
+/// This run's own profile name, `substrate-host-exec-v1-lane-<ulid>` with a fresh lowercased ULID
+/// (design 33 § 7): a 31-character suffix of `[a-z0-9-]`, within the chart's grammar, and a name
+/// no other workload and no other run of the lane holds.
+fn lane_profile() -> String {
+    format!(
+        "{APPARMOR_PROFILE}-lane-{}",
+        ulid::Ulid::generate().to_string().to_ascii_lowercase()
+    )
+}
+
 /// What removes the lane's own profile from the kernel, run on the node: the parser reading the
-/// exact source the installer wrote under the chart's default `nodeProfiles.kubeletRoot`.
-fn removal_argv() -> [String; 3] {
+/// exact source the installer wrote for `profile` under the chart's default
+/// `nodeProfiles.kubeletRoot`. It names no other profile.
+fn removal_argv(profile: &str) -> [String; 3] {
     [
         "/sbin/apparmor_parser".to_owned(),
         "--remove".to_owned(),
-        format!("/var/lib/kubelet/seccomp/b10x-substrate/{APPARMOR_PROFILE}.apparmor"),
+        format!("/var/lib/kubelet/seccomp/b10x-substrate/{profile}.apparmor"),
     ]
 }
 
-/// The profile is loaded before the lane loaded it: the installer would refuse it on a fresh node,
-/// and the lane removes only what its own run loaded.
-fn loaded_refusal(worker: &str) -> String {
+/// Whether the shared kernel's `listing` lets this run load `profile`: refused only when that
+/// exact name is already loaded, by something this run did not start. Any other profile, the
+/// default `substrate-host-exec-v1` included, is not the lane's and decides nothing.
+fn own_profile_verdict(
+    listing: &str,
+    profile: &str,
+    worker: &str,
+) -> std::result::Result<(), String> {
+    if profile_loaded(listing, profile) {
+        Err(loaded_refusal(worker, profile))
+    } else {
+        Ok(())
+    }
+}
+
+/// This run's own name is loaded before the run loaded it: the installer would refuse it on a
+/// fresh node, and the lane removes only what its own run loaded, so it leaves it alone.
+fn loaded_refusal(worker: &str, profile: &str) -> String {
     format!(
-        "{APPARMOR_PROFILE} is already loaded in the host kernel kind node {worker} shares, and the \
-         node-profile installer refuses a loaded profile whose source its fresh node does not hold; \
-         this run did not load it, so it does not remove it. As root, after checking nothing on \
-         this host still runs under it: sudo sh -c 'printf %s {APPARMOR_PROFILE} > \
-         /sys/kernel/security/apparmor/.remove'"
+        "this run's own AppArmor profile name {profile} is already loaded in the host kernel kind \
+         node {worker} shares, by something this run did not start, and the node-profile \
+         installer refuses a loaded profile whose source its fresh node does not hold; this run \
+         did not load it, so it neither selects nor removes it"
     )
 }
 
@@ -368,13 +397,13 @@ fn kind_config(node_profiles: bool) -> String {
 
 /// The lane's values with execution and the node-profile `DaemonSet` enabled, the installer in a
 /// `privileged` namespace of its own (the chart refuses the release's namespace), and one daemon
-/// pod for the one worker.
-fn execution_values(values: &Value) -> Value {
+/// pod for the one worker, selecting this run's own `profile` (design 33 § 6).
+fn execution_values(values: &Value, profile: &str) -> Value {
     chart::merged(
         values,
         &json!({
             "replicas": LOCAL_REPLICAS,
-            "execution": {"enabled": true},
+            "execution": {"enabled": true, "appArmorProfile": profile},
             "nodeProfiles": {"enabled": true, "namespace": NODE_PROFILES_NAMESPACE}
         }),
     )
@@ -426,6 +455,8 @@ struct Lane<'a> {
     args: &'a Args,
     kubeconfig: PathBuf,
     work: PathBuf,
+    /// The `AppArmor` profile this run installs and selects: its own lane name in local mode.
+    profile: String,
 }
 
 impl Lane<'_> {
@@ -609,7 +640,18 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         args,
         kubeconfig,
         work: work.path().to_path_buf(),
+        profile: if args.node_profiles {
+            lane_profile()
+        } else {
+            APPARMOR_PROFILE.to_owned()
+        },
     };
+    if args.node_profiles {
+        println!(
+            "chart lane cluster: this run's own AppArmor profile is {}",
+            lane.profile
+        );
+    }
 
     let workers = lane.kubectl(&[
         "get",
@@ -708,15 +750,15 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                 }
             }
         }
-        // The prerequisites refused a profile loaded before the run, so a loaded one is this
-        // run's own: remove it while its node, which holds the source, still exists.
+        // The prerequisites refused this run's own name loaded before the run, so a loaded one
+        // is this run's: remove it, and only it, while its node, which holds the source, exists.
         for worker in &names {
             if let Err(error) = remove_own_profile(&lane, worker) {
+                let profile = &lane.profile;
                 failures.push(format!(
-                    "removing this run's {APPARMOR_PROFILE} through {worker}: {error:#}; it stays \
-                     loaded in the host kernel, and the next run refuses until root clears it: \
-                     sudo sh -c 'printf %s {APPARMOR_PROFILE} > \
-                     /sys/kernel/security/apparmor/.remove'"
+                    "removing this run's {profile} through {worker}: {error:#}; it stays loaded \
+                     in the host kernel until the host reboots or root removes it by name: sudo \
+                     sh -c 'printf %s {profile} > /sys/kernel/security/apparmor/.remove'"
                 ));
             }
         }
@@ -945,17 +987,18 @@ fn remove_own_profile(lane: &Lane<'_>, worker: &str) -> Result<()> {
             &["cat", "/sys/kernel/security/apparmor/profiles"],
         )
     };
-    if !profile_loaded(&listing(lane)?, APPARMOR_PROFILE) {
+    let profile = &lane.profile;
+    if !profile_loaded(&listing(lane)?, profile) {
         return Ok(());
     }
-    let argv = removal_argv();
+    let argv = removal_argv(profile);
     on_node(lane, worker, &argv.each_ref().map(String::as_str))?;
     ensure!(
-        !profile_loaded(&listing(lane)?, APPARMOR_PROFILE),
-        "{APPARMOR_PROFILE} is still loaded after {}",
+        !profile_loaded(&listing(lane)?, profile),
+        "{profile} is still loaded after {}",
         argv.join(" ")
     );
-    println!("chart lane cluster: removed this run's {APPARMOR_PROFILE} from the host kernel");
+    println!("chart lane cluster: removed this run's {profile} from the host kernel");
     Ok(())
 }
 
@@ -1008,7 +1051,7 @@ fn node_prerequisites(lane: &Lane<'_>, workers: &[&str]) -> std::result::Result<
             ));
         }
         // Every kind node shares the host kernel; the installer refuses a loaded profile whose
-        // exact source its own node does not hold.
+        // exact source its own node does not hold. Only this run's own name is the lane's.
         let loaded = on_node(
             lane,
             worker,
@@ -1017,9 +1060,7 @@ fn node_prerequisites(lane: &Lane<'_>, workers: &[&str]) -> std::result::Result<
         .map_err(|error| {
             format!("the AppArmor profile listing is not readable in kind node {worker}: {error:#}")
         })?;
-        if profile_loaded(&loaded, APPARMOR_PROFILE) {
-            return Err(loaded_refusal(worker));
-        }
+        own_profile_verdict(&loaded, &lane.profile, worker)?;
         let filesystem = on_node(lane, worker, &["stat", "-fc", "%T", "/sys/fs/cgroup"]);
         let controllers = on_node(lane, worker, &["cat", "/sys/fs/cgroup/cgroup.controllers"]);
         let delegated = filesystem
@@ -1088,7 +1129,7 @@ fn execution(
         LOCAL_REPLICAS,
     )?;
     fixtures(lane, PRIVILEGED_NAMESPACE, &material)?;
-    let values = execution_values(values);
+    let values = execution_values(values, &lane.profile);
     let values_file = lane.work.join("execution-values.json");
     fs::write(&values_file, serde_json::to_vec_pretty(&values)?)?;
     let installed = lane.helm(&[
@@ -1472,16 +1513,17 @@ fn localhost_apparmor(lane: &Lane<'_>, pods: &[DaemonProcess]) -> Result<Outcome
         "{ready} node-profile pods are ready, not {}",
         pods.len()
     );
-    let enforced = format!("{APPARMOR_PROFILE} (enforce)");
+    let profile = lane.profile.as_str();
+    let enforced = format!("{profile} (enforce)");
     for pod in pods {
         let declared = &pod.container["securityContext"]["appArmorProfile"];
         ensure!(
-            *declared == json!({"type": "Localhost", "localhostProfile": APPARMOR_PROFILE}),
+            *declared == json!({"type": "Localhost", "localhostProfile": profile}),
             "{} declares AppArmor {declared}",
             pod.name()
         );
         ensure!(
-            pod.runtime["process"]["apparmorProfile"] == APPARMOR_PROFILE,
+            pod.runtime["process"]["apparmorProfile"] == profile,
             "{} runs under AppArmor {}",
             pod.name(),
             pod.runtime["process"]["apparmorProfile"]
@@ -2591,10 +2633,73 @@ mod tests {
         assert!(!control_plane.contains("extraMounts"), "{local}");
     }
 
+    /// The chart's own grammar for `execution.appArmorProfile`, from its closed schema.
+    fn chart_profile_pattern() -> fancy_regex::Regex {
+        let schema: Value =
+            serde_json::from_str(&repository_file("deploy/helm/substrate/values.schema.json"))
+                .expect("values.schema.json");
+        let pattern = schema["properties"]["execution"]["properties"]["appArmorProfile"]["pattern"]
+            .as_str()
+            .expect("the chart's appArmorProfile pattern");
+        fancy_regex::Regex::new(pattern).expect("the pattern compiles")
+    }
+
+    #[test]
+    fn every_run_names_a_profile_of_its_own_within_the_charts_grammar() {
+        let pattern = chart_profile_pattern();
+        let one = lane_profile();
+        let other = lane_profile();
+        assert_ne!(one, other, "two runs share a profile name");
+        for name in [&one, &other] {
+            let suffix = name
+                .strip_prefix(&format!("{APPARMOR_PROFILE}-"))
+                .expect("the default name extended by a suffix");
+            assert!(suffix.starts_with("lane-"), "{name}");
+            assert!((1..=40).contains(&suffix.len()), "{name}");
+            assert!(
+                suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
+                "{name}"
+            );
+            assert!(pattern.is_match(name).expect("matches"), "{name}");
+            assert_ne!(name.as_str(), APPARMOR_PROFILE);
+        }
+        // The pattern is the chart's grammar, not a pattern that admits anything.
+        for refused in [
+            "unconfined",
+            "substrate-host-exec-v2",
+            "substrate-host-exec-v1-",
+            "substrate-host-exec-v1-LANE",
+        ] {
+            assert!(!pattern.is_match(refused).expect("matches"), "{refused}");
+        }
+    }
+
+    #[test]
+    fn only_the_runs_own_name_loaded_by_someone_else_refuses_the_run() {
+        let own = "substrate-host-exec-v1-lane-01k8xyz";
+        // Another workload's default profile, a sibling run's lane profile and an unrelated one
+        // are not the lane's and decide nothing.
+        let others = "docker-default (enforce)\nsubstrate-host-exec-v1 (enforce)\n\
+                      substrate-host-exec-v1-lane-01k8abc (enforce)\n";
+        assert_eq!(own_profile_verdict(others, own, "worker"), Ok(()));
+        assert_eq!(own_profile_verdict("", own, "worker"), Ok(()));
+        for mode in ["enforce", "complain"] {
+            let listing = format!("{others}{own} ({mode})\n");
+            let error = own_profile_verdict(&listing, own, "worker").unwrap_err();
+            assert!(error.contains(own), "{error}");
+            assert!(error.contains("neither selects nor removes it"), "{error}");
+            assert!(!error.contains("substrate-host-exec-v1 "), "{error}");
+        }
+    }
+
     #[test]
     fn local_values_enable_execution_and_the_node_profiles_in_the_privileged_namespace() {
-        let values = execution_values(&json!({"execution": {"enabled": false}}));
+        let own = "substrate-host-exec-v1-lane-01k8xyz";
+        let values = execution_values(&json!({"execution": {"enabled": false}}), own);
         assert_eq!(values["execution"]["enabled"], true);
+        assert_eq!(values["execution"]["appArmorProfile"], own);
         assert_eq!(values["nodeProfiles"]["enabled"], true);
         // The chart refuses a node-profile installer in the release's own namespace.
         assert_eq!(values["nodeProfiles"]["namespace"], NODE_PROFILES_NAMESPACE);
@@ -2671,34 +2776,35 @@ mod tests {
                 .contains("printf \"%s/seccomp/b10x-substrate\" .Values.nodeProfiles.kubeletRoot"),
             "the installer's host directory moved"
         );
+        // The installer's source file is `<name>.apparmor` (design 33 § 4).
         let installer = repository_file("crates/substrate-daemon/src/container_profiles.rs");
-        let file = installer
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("const APPARMOR: &str = \"")?
-                    .strip_suffix("\";")
-            })
-            .expect("the installer's AppArmor file name");
+        assert!(
+            installer.contains("format!(\"{name}.apparmor\")"),
+            "the installer's AppArmor file name moved"
+        );
+        let own = lane_profile();
+        let argv = removal_argv(&own);
         assert_eq!(
-            removal_argv(),
+            argv,
             [
                 "/sbin/apparmor_parser".to_owned(),
                 "--remove".to_owned(),
-                format!("{kubelet_root}/seccomp/b10x-substrate/{file}"),
+                format!("{kubelet_root}/seccomp/b10x-substrate/{own}.apparmor"),
             ]
+        );
+        // The removal names the run's own file and no other profile, the default included.
+        assert!(
+            !argv[2].ends_with(&format!("/{APPARMOR_PROFILE}.apparmor")),
+            "{argv:?}"
         );
     }
 
     #[test]
-    fn a_profile_the_lane_did_not_load_is_refused_with_the_root_command_that_clears_it() {
-        let message = refusal(&loaded_refusal("substrate-chart-lane-worker"));
-        assert!(message.contains(APPARMOR_PROFILE), "{message}");
-        assert!(
-            message.contains(
-                "sudo sh -c 'printf %s substrate-host-exec-v1 > /sys/kernel/security/apparmor/.remove'"
-            ),
-            "{message}"
-        );
+    fn the_runs_own_name_already_loaded_is_refused_naming_every_scenario() {
+        let own = "substrate-host-exec-v1-lane-01k8xyz";
+        let message = refusal(&loaded_refusal("substrate-chart-lane-worker", own));
+        assert!(message.contains(own), "{message}");
+        assert!(!message.contains(".remove"), "{message}");
         for name in SCENARIOS {
             assert!(message.contains(name), "{name}: {message}");
         }

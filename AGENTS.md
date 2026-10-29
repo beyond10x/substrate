@@ -239,7 +239,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.24.0` in one invocation |
 | `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-four |
 | `chart-lane static [--helm <path>]` | a rendering of `deploy/helm/substrate` that breaks ADR 0046 (a second Service selecting the pods, a Service certificate name, an unretained ledger claim, a token, a capability, host namespace or host path the profile does not grant, an open NetworkPolicy rule), or a privilege, cgroup, mount, quota, transport or egress posture the chart renders instead of refusing | no — `chart-lane.yml` |
-| `chart-lane cluster --image <ref> --node-image <ref>` | creates and deletes its own kind cluster, then refuses a pod that is not ready on its own pool node, a certificate that verifies under the Service name, a ledger that does not survive a rolling restart, an undeclared egress that arrives, an execution pod `baseline` admits, or an uninstall that leaves more than the ledger claims; a scenario it cannot prove is reported absent. `--node-profiles` (K9 C, a workstation) runs one worker built from `fixtures/chart-lab/Dockerfile` and also refuses an image whose `org.opencontainers.image.revision` is not `HEAD`, a recipe not built on `--node-image`, and a worker without `AppArmor`, without `/sbin/apparmor_parser`, already holding `substrate-host-exec-v1` in the shared kernel, or without a cgroup v2 `cpu`/`memory`/`pids` hierarchy, naming every scenario that did not run; it installs the execution-enabled chart with the node profiles, runs the four execution scenarios, removes the profile its run loaded, and prints `Chart-lane:` only when every scenario in `SCENARIOS` passed and the removal succeeded at an unmoved, clean `HEAD` | no — `chart-lane.yml`; `--node-profiles` by hand before a release |
+| `chart-lane cluster --image <ref> --node-image <ref>` | creates and deletes its own kind cluster, then refuses a pod that is not ready on its own pool node, a certificate that verifies under the Service name, a ledger that does not survive a rolling restart, an undeclared egress that arrives, an execution pod `baseline` admits, or an uninstall that leaves more than the ledger claims; a scenario it cannot prove is reported absent. `--node-profiles` (K9 C, a workstation) runs one worker built from `fixtures/chart-lab/Dockerfile` and also refuses an image whose `org.opencontainers.image.revision` is not `HEAD`, a recipe not built on `--node-image`, and a worker without `AppArmor`, without `/sbin/apparmor_parser`, already holding the run's own profile name in the shared kernel, or without a cgroup v2 `cpu`/`memory`/`pids` hierarchy, naming every scenario that did not run; it names its profile `substrate-host-exec-v1-lane-<ulid>`, fresh per run (design 33 § 7), installs the execution-enabled chart with the node profiles under that `execution.appArmorProfile`, runs the four execution scenarios, removes only that profile, and prints `Chart-lane:` only when every scenario in `SCENARIOS` passed and the removal succeeded at an unmoved, clean `HEAD` | no — `chart-lane.yml`; `--node-profiles` by hand before a release |
 | `package-chart --version <v> --image-digest <d> --out <dir>` | produces the released chart, a byte-for-byte reproducible archive, with its version set and its default image pinned to the daemon digest | no — `release.yml` |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
@@ -580,18 +580,24 @@ node's own Debian snapshot, its boot unit masked so the node never loads its dis
 profiles. The image is tagged `b10x-substrate-chart-lab:<key>` per checkout and never pushed. The
 cluster has one worker, because every kind node shares the host kernel and a second node's
 installer would find the first one's profile loaded without its own source. The worker gets the
-host's securityfs; the chart is installed with one pod, `execution.enabled` and
-`nodeProfiles.enabled` in `privileged` namespaces, and the verb runs every scenario in the literal
+host's securityfs. Each run names its own AppArmor profile `substrate-host-exec-v1-lane-<ulid>`,
+a fresh lowercased ULID
+([design 33](docs/design/33-host-profile-name-parameter.md) § 7),
+so it never loads, selects or removes a profile it does not own; a `substrate-host-exec-v1` another
+workload holds in the shared kernel does not stop it. The chart is installed with one pod,
+`execution.enabled`, that name as `execution.appArmorProfile` and `nodeProfiles.enabled` in
+`privileged` namespaces, and the verb runs every scenario in the literal
 `SCENARIOS` array of [`xtask/src/chart_cluster.rs`](xtask/src/chart_cluster.rs): exactly the four
 the hosted lane reports absent, namely the bootstrap's drop to uid 65532 with a confined exec
-through it, the Localhost seccomp profile, the enforced `substrate-host-exec-v1` AppArmor label,
+through it, the Localhost seccomp profile, the run's own enforced AppArmor label,
 and the 0400 key served after the drop. The six hosted scenarios stay the hosted lane's. A missing
 prerequisite is a refusal that names it and every scenario that did not run, and prints no record;
-`substrate-host-exec-v1` already loaded in the kernel is one, because the installer refuses a
-loaded profile whose source its fresh node does not hold, and the refusal names the root command
-that clears it. After the scenarios the verb uninstalls the release, waits until none of its pods
-remain, and removes the profile its own run loaded with `apparmor_parser --remove` on the node,
-which holds the source; a failed removal is no record. The installer itself is unchanged.
+the run's own name already loaded in the kernel is one, because the installer refuses a loaded
+profile whose source its fresh node does not hold and the run did not load it. After the scenarios
+the verb uninstalls the release, waits until none of its pods remain, and removes its own profile,
+by name, with `apparmor_parser --remove` on the node, which holds the source; a failed removal is
+no record and names the profile left loaded. A run that dies before teardown leaves only its own
+uniquely named profile loaded, which blocks no later run.
 `release.yml` refuses to publish without the line, refuses a record naming any other commit,
 refuses a count other than the number of entries in that array at the tagged commit (one quoted
 name per line, matching its declared length), and applies the same calendar, one-line and
