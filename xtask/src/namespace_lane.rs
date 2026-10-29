@@ -25,9 +25,14 @@
 //! cluster that is not `kind-substrate-namespace-lane-<id>`; and before any write, a cluster whose
 //! API lists no node `substrate-namespace-lane-<id>-control-plane`.
 //!
+//! After the observations it runs § 10.2 steps 3 to 7 (`xtask/src/namespace_lane_run.rs`): the
+//! shipped daemon with `--driver kubernetes`, the vectors' namespace lane, the driver-specific
+//! cases of ADR 0047 decision 13 and the cleanup assertions, each case once.
+//!
 //! It prints `Namespace-lane: <sha> <observation-count> <RFC 3339 UTC>` only when every declared
-//! observation ran (held or not), what the run created was removed, no signal arrived, `HEAD` did
-//! not move and the checkout was clean before and after.
+//! observation ran (held or not), every case of steps 3 to 7 passed or is declared absent with its
+//! reason, what the run created was removed, no signal arrived, `HEAD` did not move and the
+//! checkout was clean before and after. The count stays the number of observations.
 
 use std::fs;
 use std::io::Write as _;
@@ -35,7 +40,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Args as ClapArgs, Subcommand};
@@ -45,6 +50,7 @@ use crate::chart_cluster::{INTERRUPTED, output};
 use crate::lane_record::{git_text, record_line};
 use crate::namespace_lane_observe::{self as observe, Outcome};
 use crate::namespace_lane_render::{self as render, CLUSTER_SCOPED_ADMIN_KINDS, DRIVER_KINDS};
+use crate::namespace_lane_run as run;
 use crate::report::Report;
 
 /// The goldens `check` compares against, relative to the workspace root.
@@ -104,6 +110,11 @@ pub struct ObserveArgs {
     /// `KUBECONFIG`.
     #[arg(long)]
     admin_kubeconfig: Option<PathBuf>,
+    /// The executor image, by digest, that steps 3 to 7 name; required with `--admin-kubeconfig`,
+    /// which starts no registry. Without it the run builds the Dockerfile's `executor` target from
+    /// this checkout and pushes it to its own registry.
+    #[arg(long)]
+    executor_image: Option<String>,
 }
 
 /// `cargo xtask namespace-lane <verb>`.
@@ -615,7 +626,7 @@ pub fn driver_config(admin: &Value, token: &str, namespace: &str) -> Value {
 }
 
 /// Writes `config` owner-only.
-fn write_private(path: &Path, config: &Value) -> Result<()> {
+pub(crate) fn write_private(path: &Path, config: &Value) -> Result<()> {
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -834,7 +845,18 @@ pub fn decision(
     Decision::Record(OBSERVATIONS.len())
 }
 
+/// `observations`' decision, withheld when steps 3 to 7 left a `step_fault`: a case that failed,
+/// did not run, or was declared absent and reported otherwise.
+pub fn with_steps(observations: Decision, step_fault: Option<String>) -> Decision {
+    match (observations, step_fault) {
+        (observations, None) => observations,
+        (Decision::Failed(reason), Some(fault)) => Decision::Failed(format!("{reason}; {fault}")),
+        (_, Some(fault)) => Decision::Failed(fault),
+    }
+}
+
 /// The run, and whether it printed the record line.
+#[allow(clippy::too_many_lines)] // The lane in its fixed order: cluster, registry, images, provisioning, observations, steps 3 to 7, removal.
 fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<(ExitCode, bool)> {
     let root = crate::repo::root()?;
     let sha = git_text(&root, &["rev-parse", "HEAD"])?;
@@ -873,16 +895,36 @@ fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<(ExitCode, bool)
         docker_kubeconfig = kind_kubeconfig;
     }
 
-    let gateway = observe::kind_gateway(&args.docker, &docker_kubeconfig, stop)?;
     let admin = client(&admin_path)?;
+    let executor_image = match (&args.executor_image, &registry) {
+        (Some(given), _) => given.clone(),
+        (None, Some(_)) => push_executor(args, &root, &image, &sha, &docker_kubeconfig, stop)?,
+        (None, None) => bail!(
+            "--admin-kubeconfig needs --executor-image: the run starts no registry to push the \
+             executor to"
+        ),
+    };
+    let gateway = observe::kind_gateway(&args.docker, &docker_kubeconfig, stop)?;
+    let settings = run::Settings {
+        executor_image,
+        exec_image: image.clone(),
+        egress_probe_address: format!("{gateway}:9"),
+    };
+    println!("namespace lane: building the shipped daemon for steps 3 to 7");
+    let daemon = run::build_daemon(&root, stop)?;
     let driver_path = work.path().join("driver.json");
+    let lane_driver_path = work.path().join("driver-lane.json");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     if let Some(lane_id) = &lane_id {
         runtime.block_on(verify_lane_nodes(&admin, lane_id))?;
     }
-    let (outcomes, mut removal_failures) = runtime.block_on(async {
+    println!("namespace lane: the cases of steps 3 to 7:");
+    for name in run::cases() {
+        println!("namespace lane:   {name}");
+    }
+    let (outcomes, steps, mut removal_failures) = runtime.block_on(async {
         let lane = observe::Lane {
             admin: &admin,
             namespace: &namespace,
@@ -895,42 +937,117 @@ fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<(ExitCode, bool)
         let provisioned = lane
             .provision(|token| {
                 let admin_config: Value = serde_json::from_slice(&fs::read(&admin_path)?)?;
-                write_private(
-                    &driver_path,
-                    &driver_config(&admin_config, token, &namespace),
-                )?;
+                let driver = driver_config(&admin_config, token, &namespace);
+                write_private(&driver_path, &driver)?;
+                write_private(&lane_driver_path, &run::with_extension(driver, &settings))?;
                 client(&driver_path)
             })
             .await;
-        let outcomes = match provisioned {
-            Ok(driver) => lane.observe_all(&driver).await,
-            Err(error) => OBSERVATIONS
-                .iter()
-                .map(|name| {
-                    (
-                        (*name).to_owned(),
-                        Err(format!("provisioning failed: {error:#}")),
-                    )
-                })
-                .collect(),
+        let (outcomes, steps) = match provisioned {
+            Ok(driver) => {
+                let inventory = run::inventory(&admin).await;
+                let outcomes = lane.observe_all(&driver).await;
+                let steps = match (inventory, fs::read(&admin_path)) {
+                    (Ok(inventory), Ok(admin_config)) => {
+                        let started = Instant::now();
+                        let admin_config: Value =
+                            serde_json::from_slice(&admin_config).unwrap_or(Value::Null);
+                        let steps = run::Steps {
+                            root: &root,
+                            work: work.path(),
+                            admin: &admin,
+                            driver_config: &lane_driver_path,
+                            admin_config: &admin_config,
+                            settings: &settings,
+                            namespace: &namespace,
+                            unlabelled: &unlabelled,
+                            inventory: &inventory,
+                            stop,
+                        }
+                        .run(&daemon)
+                        .await;
+                        println!(
+                            "namespace lane: steps 3 to 7 took {} s",
+                            started.elapsed().as_secs()
+                        );
+                        run::verdict(&steps)
+                    }
+                    (Err(error), _) => Some(format!("the inventory was not read: {error:#}")),
+                    (_, Err(error)) => Some(format!("the admin kubeconfig was not read: {error}")),
+                };
+                (outcomes, steps)
+            }
+            Err(error) => (
+                OBSERVATIONS
+                    .iter()
+                    .map(|name| {
+                        (
+                            (*name).to_owned(),
+                            Err(format!("provisioning failed: {error:#}")),
+                        )
+                    })
+                    .collect(),
+                Some(format!("provisioning failed: {error:#}")),
+            ),
         };
         let removal_failures = if cluster.is_none() {
             lane.remove_namespaces().await
         } else {
             Vec::new()
         };
-        (outcomes, removal_failures)
+        (outcomes, steps, removal_failures)
     });
     removal_failures.extend(registry.as_mut().and_then(Registry::remove));
     removal_failures.extend(cluster.as_mut().and_then(Cluster::remove));
     finish(
         &root,
         &outcomes,
+        steps,
         &sha,
         clean_before,
         &removal_failures,
         stop,
     )
+}
+
+/// Builds the executor image (Dockerfile target `executor`) from this checkout and pushes it to
+/// the run's registry, beside `exec_image`; the pushed reference by digest.
+fn push_executor(
+    args: &ObserveArgs,
+    root: &Path,
+    exec_image: &str,
+    sha: &str,
+    kubeconfig: &Path,
+    stop: &AtomicBool,
+) -> Result<String> {
+    let host = exec_image
+        .split_once('/')
+        .map(|(host, _)| host)
+        .ok_or_else(|| anyhow!("{exec_image} names no registry"))?;
+    let tag = format!("{host}/substrate-executor:lane");
+    println!("namespace lane: building the executor image {tag} from {sha}");
+    output(
+        tool(&args.docker, kubeconfig)
+            .current_dir(root)
+            .args(["build", "--target", "executor", "--build-arg"])
+            .arg(format!("SOURCE_SHA={sha}"))
+            .args(["--tag", &tag, "."]),
+        stop,
+    )?;
+    let pushed = output(tool(&args.docker, kubeconfig).args(["push", &tag]), stop)?;
+    let digest =
+        pushed_digest(&pushed).ok_or_else(|| anyhow!("docker push named no digest: {pushed}"))?;
+    Ok(format!("{host}/substrate-executor@{digest}"))
+}
+
+/// The `sha256:<hex>` digest `docker push` reports.
+pub fn pushed_digest(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let digest = line.split("digest: ").nth(1)?.split_whitespace().next()?;
+        let hex = digest.strip_prefix("sha256:")?;
+        (hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| digest.to_owned())
+    })
 }
 
 /// The run's summary, one line per observation, then the record line or why there is none; and
@@ -939,6 +1056,7 @@ fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<(ExitCode, bool)
 fn finish(
     root: &Path,
     outcomes: &[(String, Result<Outcome, String>)],
+    steps: Option<String>,
     sha: &str,
     clean_before: bool,
     removal_failures: &[String],
@@ -955,14 +1073,17 @@ fn finish(
     }
     let head_after = git_text(root, &["rev-parse", "HEAD"])?;
     let clean_after = git_text(root, &["status", "--porcelain"])?.is_empty();
-    match decision(
-        outcomes,
-        sha,
-        &head_after,
-        clean_before,
-        clean_after,
-        stop.load(Ordering::SeqCst),
-        removal_failures,
+    match with_steps(
+        decision(
+            outcomes,
+            sha,
+            &head_after,
+            clean_before,
+            clean_after,
+            stop.load(Ordering::SeqCst),
+            removal_failures,
+        ),
+        steps,
     ) {
         Decision::Record(count) => {
             println!("{}", record_line(TRAILER, sha, count, SystemTime::now()));
@@ -1353,6 +1474,38 @@ mod tests {
             decision(&failed, "a", "a", true, true, false, &[]),
             Decision::Failed(_)
         ));
+    }
+
+    #[test]
+    fn the_pushed_executor_is_named_by_the_digest_docker_push_reports() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let output = format!("lane: digest: {digest} size: 528\n");
+        assert_eq!(pushed_digest(&output), Some(digest));
+        assert_eq!(pushed_digest("lane: digest: sha256:abc size: 1"), None);
+        assert_eq!(pushed_digest("pushed"), None);
+    }
+
+    #[test]
+    fn a_step_case_that_did_not_pass_or_was_not_declared_absent_withholds_the_record() {
+        assert_eq!(with_steps(Decision::Record(8), None), Decision::Record(8));
+        let Decision::Failed(reason) = with_steps(
+            Decision::Record(8),
+            Some("S4 clean-room runner is declared absent and must be reported so".to_owned()),
+        ) else {
+            panic!("a run whose step 4 was reported passed printed a record");
+        };
+        assert!(reason.contains("S4"), "{reason}");
+        assert!(matches!(
+            with_steps(
+                Decision::NoRecord("HEAD moved".to_owned()),
+                Some("S5 failed".to_owned())
+            ),
+            Decision::Failed(_)
+        ));
+        assert_eq!(
+            with_steps(Decision::NoRecord("HEAD moved".to_owned()), None),
+            Decision::NoRecord("HEAD moved".to_owned())
+        );
     }
 
     #[test]

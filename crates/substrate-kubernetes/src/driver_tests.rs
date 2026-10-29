@@ -1139,3 +1139,22 @@ async fn a_lease_lost_while_the_policy_read_is_in_flight_is_stale() {
     assert_eq!(refusal.code, CAPABILITY_STALE, "{}", refusal.message);
     assert!(refusal.message.contains("Lease"), "{}", refusal.message);
 }
+
+#[tokio::test]
+async fn the_default_grants_a_v1_37_cluster_shows_open_without_excess() {
+    let fake = passing_fake();
+    let mut rules = exact_rules();
+    rules.push(json!({
+        "verbs": ["get", "list", "watch"],
+        "apiGroups": ["certificates.k8s.io"],
+        "resources": ["clustertrustbundles"],
+    }));
+    fake.set_rules(rules);
+    let clock = ManualClock::new();
+    let (driver, _) = driver(&fake, &clock);
+    driver
+        .open()
+        .await
+        .expect("the grants the lane observed on v1.37 are the cluster's own defaults");
+    assert!(driver.opened());
+}

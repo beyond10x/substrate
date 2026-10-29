@@ -679,6 +679,38 @@ impl Daemon {
             wrapped.append(&mut command);
             command = wrapped;
         }
+        Self::spawn(command, socket, workspaces).await
+    }
+
+    /// The shipped daemon with `--driver kubernetes` and the driver's kubeconfig at `config`: no
+    /// host flag, because each conflicts with that driver (design 34 § 3), and the deployment the
+    /// namespace lane names.
+    async fn start_kubernetes(root: &Path, config: &Path) -> Self {
+        let socket = unix_socket::socket_path(root, "substrate.sock");
+        let command = vec![
+            daemon_binary().display().to_string(),
+            "--driver".to_owned(),
+            "kubernetes".to_owned(),
+            "--kubernetes-config".to_owned(),
+            config.display().to_string(),
+            "--socket".to_owned(),
+            socket.display().to_string(),
+            "--state".to_owned(),
+            root.join("state.db").display().to_string(),
+            "--deployment".to_owned(),
+            NAMESPACE_DEPLOYMENT.to_owned(),
+            "--allow-uid".to_owned(),
+            nix::unistd::getuid().as_raw().to_string(),
+        ];
+        Self::spawn(command, socket, root.join("workspaces")).await
+    }
+
+    /// Starts `command` and waits for its socket.
+    async fn spawn(
+        command: Vec<String>,
+        socket: unix_socket::SocketPath,
+        workspaces: PathBuf,
+    ) -> Self {
         let mut child = Command::new(&command[0])
             .args(&command[1..])
             .stdin(Stdio::null())
@@ -7299,6 +7331,230 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
         "runtime clean-room: the complete HTTP inventory, startup refusal, \
          and dual-daemon refusal passed ({lane} lane)"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The namespace lane (design 34 § 10.2 step 5)
+// ---------------------------------------------------------------------------------------------
+
+/// Selects the namespace lane: the driver's JSON kubeconfig for a namespace `cargo xtask
+/// namespace-lane observe` provisioned, carrying the driver's extension.
+const KUBERNETES_CONFIG_VARIABLE: &str = "SUBSTRATE_VECTORS_KUBERNETES_CONFIG";
+/// The deployment the namespace lane's daemon claims its namespace for; the lane releases the
+/// claim after this case, because the driver's Role cannot delete its own Lease.
+const NAMESPACE_DEPLOYMENT: &str = "dep_namespace_vectors";
+/// How long the driver may take from start to a probed snapshot: Lease, policy, dry run, a PVC
+/// bound by first consumer, a keeper and a probe Pod, each image pulled once.
+const NAMESPACE_SERVING: Duration = Duration::from_mins(4);
+/// The cases the namespace lane executes, selected by the facts the driver publishes. Its exec
+/// cases are absent, never counted: no exec is admitted while `confinement.no-egress` is absent,
+/// which it is on every cluster this lane has run on (design 34 § 10.3 O3).
+const NAMESPACE_CASES: usize = 56;
+
+/// The shipped daemon over the Kubernetes namespace driver, through its Unix socket: the same
+/// wire the other lanes assert, against a cluster. Unset, the lane is absent: nothing runs and
+/// nothing is counted or reported passed (invariant 3).
+#[tokio::test(flavor = "multi_thread")]
+async fn namespace_lane_drives_the_shipped_daemon_over_the_kubernetes_driver() {
+    let Some(config) = std::env::var_os(KUBERNETES_CONFIG_VARIABLE).map(PathBuf::from) else {
+        println!(
+            "runtime clean-room: namespace lane absent: {KUBERNETES_CONFIG_VARIABLE} is unset; \
+             no case ran"
+        );
+        return;
+    };
+    let temporary = TempDir::with_prefix("substrate-namespace-").expect("lane directory");
+    let root = temporary.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private lane directory");
+    let daemon = Daemon::start_kubernetes(root, &config).await;
+    let executed = check_namespace_journey(&daemon).await;
+    daemon.close().await;
+    assert_eq!(executed, NAMESPACE_CASES, "namespace lane case inventory");
+    println!("runtime clean-room: namespace lane executed {executed} cases");
+}
+
+/// The namespace lane's journey: a probed snapshot, the workspace and file routes, the promoted
+/// route inventory, and an exec refused by name while confinement is unproven.
+#[allow(clippy::too_many_lines)] // One journey, in the order its workspace lives.
+async fn check_namespace_journey(daemon: &Daemon) -> usize {
+    let mut executed = 0;
+    let deadline = Instant::now() + NAMESPACE_SERVING;
+    let machine = loop {
+        let (status, machine) = daemon
+            .call("GET", "/v1/machine", "req_namespace_machine", None)
+            .await;
+        assert_eq!(status, 200, "{machine}");
+        if machine["result"]["facts"]["workspace.guarded-io"] == true {
+            break machine;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the namespace driver published no probed snapshot within {NAMESPACE_SERVING:?}: \
+             {machine}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    assert_eq!(machine["result"]["driver"], "kubernetes", "{machine}");
+    let facts = &machine["result"]["facts"];
+    assert!(
+        facts["confinement.no-egress"].is_null(),
+        "confinement.no-egress published without an observed probe: {machine}"
+    );
+    let snapshot = text(&machine["result"]["snapshot"]);
+    executed += 1;
+
+    let operation = "01JNAMESPACELANECREATE01";
+    let create_input = json!({ "source": "empty", "labels": { "runner": "namespace" } });
+    let (status, created) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            "req_namespace_create",
+            Some(&mutation(operation, &create_input)),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let workspace = text(&created["result"]["id"]);
+    assert!(workspace.starts_with("ws_"), "{created}");
+    executed += 1;
+
+    executed += check_promoted_route_inventory(daemon, &workspace, false).await;
+
+    let (status, replay) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            "req_namespace_replay",
+            Some(&mutation(operation, &create_input)),
+        )
+        .await;
+    assert_eq!(status, 201, "{replay}");
+    assert_eq!(replay["result"]["id"], workspace);
+    executed += 1;
+
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/workspaces",
+                "req_namespace_conflict",
+                Some(&mutation(
+                    operation,
+                    &json!({ "source": "empty", "labels": { "changed": "yes" } }),
+                )),
+            )
+            .await,
+        409,
+        "operation.request-conflict",
+    );
+    executed += 1;
+
+    let (status, observed) = daemon
+        .call(
+            "GET",
+            &format!("/v1/workspaces/{workspace}"),
+            "req_namespace_get",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{observed}");
+    assert_eq!(observed["result"]["state"], "ready", "{observed}");
+    executed += 1;
+
+    let file_path = format!("/v1/workspaces/{workspace}/files/main.txt");
+    let (status, written) = daemon
+        .call(
+            "PUT",
+            &file_path,
+            "req_namespace_write",
+            Some(&mutation(
+                "01JNAMESPACELANEWRITE001",
+                &json!({ "content": { "encoding": "base64", "data": "aGVsbG8=" } }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{written}");
+    assert_eq!(written["result"]["atomic_replacement"], true, "{written}");
+    assert_eq!(
+        written["result"]["sha256"],
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+    executed += 1;
+
+    let deep_path = ["d"; 65].join("/");
+    expect_error(
+        &daemon
+            .call(
+                "DELETE",
+                &format!("/v1/workspaces/{workspace}/files/{deep_path}"),
+                "req_namespace_path_depth",
+                Some(&mutation("01JNAMESPACELANEDEPTH001", &json!({}))),
+            )
+            .await,
+        422,
+        "workspace.path-depth",
+    );
+    executed += 1;
+
+    let (status, read) = daemon
+        .call(
+            "GET",
+            &format!("{file_path}?mode=file&offset=0&limit_bytes=5"),
+            "req_namespace_read",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["result"]["content"]["data"], "aGVsbG8=", "{read}");
+    assert_eq!(read["result"]["eof"], true, "{read}");
+    executed += 1;
+
+    executed += check_path_escape(daemon, &workspace, WorkspaceOrigin::Created).await;
+
+    // Selected by the facts: without `confinement.no-egress` every start is refused by name
+    // before a Pod exists.
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_namespace_exec",
+                Some(&mutation(
+                    "01JNAMESPACELANEEXEC0001",
+                    &ExecInput::new(&workspace, &snapshot, &["/bin/true"], false).build(),
+                )),
+            )
+            .await,
+        501,
+        "exec.sandbox-unavailable",
+    );
+    executed += 1;
+
+    let (status, deleted) = daemon
+        .call(
+            "DELETE",
+            &file_path,
+            "req_namespace_file_delete",
+            Some(&mutation("01JNAMESPACELANEDELETE01", &json!({}))),
+        )
+        .await;
+    assert_eq!(status, 200, "{deleted}");
+    assert_eq!(deleted["result"]["absent"], true, "{deleted}");
+    executed += 1;
+
+    let (status, destroyed) = daemon
+        .call(
+            "DELETE",
+            &format!("/v1/workspaces/{workspace}"),
+            "req_namespace_destroy",
+            Some(&mutation("01JNAMESPACELANEDESTROY1", &json!({}))),
+        )
+        .await;
+    assert_eq!(status, 200, "{destroyed}");
+    assert_eq!(destroyed["result"]["absent"], true, "{destroyed}");
+    executed += 1;
+    executed
 }
 
 // ---------------------------------------------------------------------------------------------
