@@ -366,14 +366,18 @@ dependencies = [
 name = "b10x-substrate-kubernetes"
 version = "0.15.0"
 dependencies = [
+ "async-trait",
+ "b10x-substrate-executor",
  "b10x-substrate-host",
  "b10x-substrate-kubernetes-client",
  "b10x-substrate-wire",
  "base64 0.23.1",
  "chrono",
  "getrandom 0.4.3",
+ "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tracing",
 ]
