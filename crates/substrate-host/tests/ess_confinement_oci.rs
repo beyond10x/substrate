@@ -1451,3 +1451,97 @@ async fn adv_an_oci_container_that_never_reads_stdin_is_bounded_by_the_run_timeo
     );
     println!("{NAME}: executed");
 }
+
+// ---- adversary pass on `story:adapter-live-output` ----
+
+/// An `oci` profile in `workspace` with a run timeout of `timeout_ms`, output recorded only.
+fn oci_recorded(workspace: PathBuf, timeout_ms: u64) -> ConfinementProfile {
+    ConfinementProfile {
+        image: Some(image()),
+        workspace: Some(workspace),
+        process_bounds: Some(ProcessBounds {
+            timeout_ms,
+            processes: 8,
+            memory_bytes: 64 << 20,
+            cpu_millis: 30_000,
+        }),
+        ..ConfinementProfile::default()
+    }
+}
+
+// § 3: `Kill` stops delivery at once; only the chunk queued before it is delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_killed_live_oci_run_delivers_only_the_queued_chunk() {
+    const NAME: &str = "ESS confinement oci adv live kill";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    support::adv_live_kill_delivers_only_the_queued_chunk(
+        NAME,
+        &adapter,
+        &oci_recorded(workspace.clone(), 60_000),
+        &workspace.join("written"),
+        Path::new("/workspace/written"),
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3: a timeout is an imposed end that closes the queue first (`monitor`), not a stall.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_live_oci_run_ended_by_its_timeout_did_not_stall() {
+    const NAME: &str = "ESS confinement oci adv live timeout";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    support::adv_live_timeout_is_not_a_stall(NAME, &adapter, &oci_recorded(workspace, 300)).await;
+    println!("{NAME}: executed");
+}
+
+// § 3 *Backpressure*, which the design runs on `oci` nowhere (T15 is T4 only): a stall ends the
+// container as `signal(Kill)` does, through `kill_retried`. The run's timeout is 60 s, so a stall
+// that killed nothing would leave `yes` running far past this case's 15 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_an_unread_live_oci_run_stalls_and_its_container_ends() {
+    const NAME: &str = "ESS confinement oci adv live stall";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    let admitted = adapter
+        .admit(&support::live(&oci_recorded(workspace, 60_000), 1))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exec yes"))
+        .await
+        .expect("started");
+    let began = Instant::now();
+    tokio::time::timeout(Duration::from_secs(15), adapter.wait(&run))
+        .await
+        .expect("the stall ends the container")
+        .expect("waited");
+    assert!(began.elapsed() >= Duration::from_secs(1), "{NAME}");
+    assert!(adapter.output_stalled(&run), "{NAME}");
+    let events = support::read_events(&adapter, &run).await;
+    let (streams, losses) = support::delivered(&events);
+    assert_eq!(losses, [confinement::OutputEvent::Stalled], "{NAME}");
+    assert!(!streams[0].is_empty(), "{NAME}");
+    println!("{NAME}: executed");
+}

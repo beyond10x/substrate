@@ -963,3 +963,82 @@ async fn a_live_systemd_linux_run_never_read_stalls_and_ends() {
     drop(adapter);
     println!("{NAME}: executed");
 }
+
+// ---- adversary pass on `story:adapter-live-output` ----
+
+// § 3: around `local`, a timeout is an imposed end that closes the queue first, not a stall
+// (`SystemdLocal::watch` closes it before `kill_tree`).
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_live_systemd_local_run_ended_by_its_timeout_did_not_stall() {
+    const NAME: &str = "ESS confinement systemd local adv live timeout";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::adv_live_timeout_is_not_a_stall(
+        NAME,
+        &adapter,
+        &ConfinementProfile {
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 400,
+                processes: 8,
+                memory_bytes: 64 << 20,
+                cpu_millis: 30_000,
+            }),
+            ..local_recorded(workspace.path())
+        },
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3: around `local`, `Kill` stops delivery at once; only the queued chunk is delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_killed_live_systemd_local_run_delivers_only_the_queued_chunk() {
+    const NAME: &str = "ESS confinement systemd local adv live kill";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let marker = workspace.path().join("written");
+    support::adv_live_kill_delivers_only_the_queued_chunk(
+        NAME,
+        &adapter,
+        &local_recorded(workspace.path()),
+        &marker,
+        &marker,
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// § 3: around `linux`, `Kill` through the wrapper stops delivery at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_killed_live_systemd_linux_run_delivers_only_the_queued_chunk() {
+    const NAME: &str = "ESS confinement systemd linux adv live kill";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_scoped");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    support::adv_live_kill_delivers_only_the_queued_chunk(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace),
+        &workspace.join("written"),
+        &Path::new(substrate_wire::EXEC_WORKSPACE_MOUNT).join("written"),
+    )
+    .await;
+    drop(adapter);
+    println!("{NAME}: executed");
+}
