@@ -72,17 +72,17 @@ entry will stay omitted whatever the limit. The Rust SDK's `Workspace::tree_with
 refuses because of such an entry; `workspace.path-escape` stays the answer for a path that escapes
 the workspace.
 
-Release `0.15.0` advertises `substrate-wire/0.24.0` in `x-b10x-contract` and its inner
+Release `0.16.1` advertises `substrate-wire/0.25.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest because it identifies the distribution package rather
 than the inner contract manifest.
 
-Current source advertises `0.25.0`, which adds no route; [bundle history](#bundle-history) lists
+Bundle `0.25.0` adds no route; [bundle history](#bundle-history) lists
 what each bundle added. The session routes moved to `/v1/sessions` in bundle `0.15.0`; no
 `/v1/pipe-sessions` compatibility alias is served.
 
 Frozen compatibility declarations and route/schema details are available in the
-[0.24.0 bundle](https://github.com/beyond10x/substrate/tree/0.15.0/contracts/substrate-wire/0.24.0).
+[0.25.0 bundle](https://github.com/beyond10x/substrate/tree/0.16.1/contracts/substrate-wire/0.25.0).
 See [system model and derivation](../concepts/model.md) for which artifacts are generated and
 [status](../status.md) for release maturity.
 
@@ -147,13 +147,13 @@ Read [operations and observations](../concepts/operations.md) for retry semantic
 
 ## Bundle history
 
-Earlier bundle directories remain immutable. This source contract promotion is not a new signed
+Earlier bundle directories remain immutable. A source contract promotion is not by itself a signed
 daemon release; consumers must pin and test the matching SDK/daemon revision. The SDK refuses an
 older daemon's contract before issuing mutations.
 
 ### `0.25.0`
 
-Development source now advertises `substrate-wire/0.25.0`. It adds no route. A capability
+Release `0.16.1` advertises `substrate-wire/0.25.0`. It adds no route. A capability
 snapshot's `driver` may now be `kubernetes` as well as `host`, and a driver may publish the
 optional fact `confinement.no-egress` when a mechanism it verified keeps a workload off the
 network. Three refusals are new, each `501` with class `unserved` and nothing dispatched: an

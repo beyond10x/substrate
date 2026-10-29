@@ -51,7 +51,7 @@ the capability needed to enforce them.
 ## What it deliberately leaves out
 
 Substrate is not a scheduler, agent loop, policy engine, identity provider, credential broker, or
-public ingress product. The current implementation governs one Linux host. Higher layers decide
+public ingress product. One daemon governs one Linux host, or one Kubernetes namespace in development. Higher layers decide
 why work should happen and where it should be placed.
 
 ## Choose a path

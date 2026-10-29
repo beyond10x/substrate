@@ -20,7 +20,7 @@ process and runs the command inside it.
 From release 0.14.0, each release carries the command line and `SHA256SUMS`:
 
 ```bash
-version=0.15.0
+version=0.16.1
 asset="b10x-substrate-$version-x86_64-unknown-linux-gnu.tar.gz"
 base="https://github.com/beyond10x/substrate/releases/download/$version"
 curl -fLO "$base/$asset" -fLO "$base/SHA256SUMS"

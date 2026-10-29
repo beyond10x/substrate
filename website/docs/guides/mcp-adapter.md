@@ -5,7 +5,7 @@ description: Start one disposable daemon and let Codex or another local MCP harn
 
 # Give a harness a disposable Substrate
 
-Current development source includes `substrate-mcp`, a local stdio adapter for testing Substrate
+Each release includes `substrate-mcp`, a local stdio adapter for testing Substrate
 from Codex and other MCP clients. It starts one fresh private daemon, exposes a deliberately closed
 set of workspace and execution tools, and removes the resources it owns when the client disconnects.
 

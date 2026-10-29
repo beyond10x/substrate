@@ -219,7 +219,7 @@ jobs:
               print
               exit
             }
-          ' Cargo.toml)
+          ')
           if [ "$manifest_version" != "$TAG" ]; then
             echo "refused: tag ${TAG} disagrees with Cargo.toml [workspace.package] version ${manifest_version}." >&2
             exit 1

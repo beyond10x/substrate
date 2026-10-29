@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.16.1] — 2026-10-29
 
+Published by [release run 40949928365](https://github.com/beyond10x/substrate/actions/runs/40949928365)
+(attempt 2) for tag `0.16.1` at commit `f2fd606b88a0b778970e8babe9a96eb600cd57b2`. All four images,
+the chart and the binaries' `SHA256SUMS` were keyless-signed and verified against
+`release.yml@refs/tags/0.16.1` by the release workflow, and each digest resolved anonymously:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.16.1` at `sha256:ab798921666cbbbcdbcc36da132b106dfcd7ee03bb7b0b5adcf7edbddc61ae88`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.25.0` at `sha256:6f31a62628ae3e084134f4fe47900eaf2fc1932ced61c54ca9498f39b9c7e322`, first published by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.16.1` at `sha256:77342f97515579f1c5b12c9aa4b6429d9e23d0dd9fbce97932ac34cb6346959d`, development-only.
+- Executor image: `ghcr.io/beyond10x/b10x-substrate-executor:0.16.1` at `sha256:e3ed53485640dc759760dd47eb08ec0eb9eea895aa8bcd630f60e5087ab6729e`, first published by this release.
+- Chart: `oci://ghcr.io/beyond10x/charts/b10x-substrate` `0.16.1` at `sha256:23b9f96f5fbfb5f3c4091f32f6d7c0da52a657fbcb185a25c5d2a7d7883f03a0`.
+- Binaries: `substrate-daemon-0.16.1-x86_64-unknown-linux-gnu.tar.gz` and `b10x-substrate-0.16.1-x86_64-unknown-linux-gnu.tar.gz`, listed in `SHA256SUMS` (`sha256:a5b3170fad432678b1da5f451145dc834d09e64b8c4d59ff6a16c3ba27aa49fc`) and signed in `SHA256SUMS.sigstore.json`.
+- The tag records `Confinement-lane:` 182, `Quota-lane:` 7, `Chart-lane:` 4 and `Namespace-lane:` 8, each at `f2fd606b`.
+
 Tag `0.16.0` points at commit `541cf55eb3efa7977aad6721f697668d1f029c28` and was not published.
 `release.yml` releases only a commit whose `gate.yml` run concluded `success`, and `main`'s gate on
 that commit ([run 40911403183](https://github.com/beyond10x/substrate/actions/runs/40911403183))
@@ -145,6 +158,17 @@ namespace lane reports its step 4 absent until `story:remote-clean-room-conforma
   another uid ends the removal as the original Pod gone, without deleting the other object.
 
 ## [0.15.0] — 2026-10-29
+
+Published by the protected-`main` recovery dispatch [release run 40813559560](https://github.com/beyond10x/substrate/actions/runs/40813559560)
+for tag `0.15.0` at commit `07396286008969512a8ce66a25a5f1e228bd27af`, after the tag-push run failed.
+All three images, the chart and the binaries' `SHA256SUMS` were keyless-signed and verified against
+`release.yml@refs/heads/main` by the release workflow, and each digest resolved anonymously:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.15.0` at `sha256:9bc33712eba8e359f08effba22162eef2c7b5f78e39bf4c8ebd66fea6ba139ba`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.24.0` at `sha256:3623da7d342a2d6ce4623fa4b7b1910a7c47ca9a33b4056295cb2ab758f8be53`, first published by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.15.0` at `sha256:7b1b0bf9aa5400a9643c33e66cb39fee7ddc1783491827e23cd892889c486555`, development-only.
+- Chart: `oci://ghcr.io/beyond10x/charts/b10x-substrate` `0.15.0` at `sha256:dd1d06e105bdd99fa1b628d8b1f7796a05f894002b39899fca14fdf772c8e2b1`.
+- Binaries: `substrate-daemon-0.15.0-x86_64-unknown-linux-gnu.tar.gz` and `b10x-substrate-0.15.0-x86_64-unknown-linux-gnu.tar.gz`, listed in `SHA256SUMS` (`sha256:d19863a2c0f67e8def08243ac1d4d297f4de209650778b918d759d7077452aa2`) and signed in `SHA256SUMS.sigstore.json`.
 
 ### Added
 

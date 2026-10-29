@@ -135,7 +135,9 @@ The four readiness checks:
 
 - `store`: one read-only statement returns within 1 second.
 - `schema`: that statement reads the schema version this binary expects. The daemon refuses to
-  start on a database a newer binary stamped, and leaves its stamp unchanged.
+  start on a database a newer binary stamped, and leaves its stamp unchanged. From 0.16.1 a store
+  is stamped schema version 2 when it opens, which 0.15.x and earlier refuse: back up the state
+  directory before upgrading if you may roll back.
 - `maintenance`: each maintenance task completed a round in the last 5 seconds.
 - `driver`: the startup capability snapshot publishes every `--ops-require-fact <fact>`. The flag is
   repeatable (or `SUBSTRATE_OPS_REQUIRE_FACT`, comma-separated). Startup refuses a name that is not
@@ -252,7 +254,7 @@ stays with its ordinal. Delete the claims yourself to destroy the ledgers.
 ## Kubernetes namespace driver
 
 `--driver kubernetes` serves workspaces as objects in one namespace. It is a development profile,
-unreleased until 0.16.1.
+first released in 0.16.1.
 
 What it does not do yet:
 
@@ -262,7 +264,7 @@ What it does not do yet:
   the API server, so no enforced egress denial was observed and `confinement.no-egress` stays
   absent.
 - **Shared clean-room conformance follows in the next release.** The namespace lane reports that
-  step absent.
+  step absent until `story:remote-clean-room-conformance` lands.
 
 ```bash
 substrate-daemon --driver kubernetes --kubernetes-config driver.json \
