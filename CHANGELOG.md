@@ -32,6 +32,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   nothing, so a loaded `v1` stays loaded.
 - `cargo xtask chart-lane cluster --node-profiles` names its profile
   `substrate-host-exec-v2-lane-<ulid>`.
+- **Upgrade: the state store upgrade is one-way.** Opening a store adds the `backend_objects`
+  table (design 34) and stamps it schema version 2. Substrate `0.15.x` and earlier refuse a
+  store stamped 2 at open with `NewerSchema` and do not start on it. If you may roll back, back
+  up the state directory before upgrading.
 
 ## [0.15.0] — 2026-10-29
 

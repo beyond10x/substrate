@@ -334,10 +334,14 @@ impl Store {
         Ok(())
     }
 
-    /// At most `limit` rows of the deployment that are not settled, oldest first.
+    /// At most `limit` rows of the deployment that are not settled, oldest first, in
+    /// `(created_at, name)` order. `after` names the last row of the previous page; the page
+    /// starts past that row's position, read from its stored `created_at` (rows are never
+    /// deleted, only settled, so the position stays). A name no row holds yields no rows.
     pub fn unsettled_backend_objects(
         &self,
         deployment: &str,
+        after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<BackendObject>, StoreError> {
         let limit = to_i64(u64::try_from(limit).map_err(|_| StoreError::IntegerRange)?)?;
@@ -345,10 +349,14 @@ impl Store {
         let mut statement = connection.prepare(&format!(
             "SELECT {BACKEND_OBJECT_COLUMNS} FROM backend_objects
              WHERE deployment = ?1 AND settled_at IS NULL
+               AND (?3 IS NULL OR (created_at, name) > (
+                   (SELECT created_at FROM backend_objects WHERE deployment = ?1 AND name = ?3),
+                   ?3
+               ))
              ORDER BY created_at, name LIMIT ?2"
         ))?;
         let rows = statement
-            .query_map(params![deployment, limit], backend_object)?
+            .query_map(params![deployment, limit, after], backend_object)?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter().map(decode).collect()
     }

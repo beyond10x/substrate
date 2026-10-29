@@ -190,9 +190,9 @@ impl BackendLedger for StoreBackendLedger {
             .map_err(|error| ledger_failure(&error))
     }
 
-    fn unsettled(&self) -> Result<Vec<BackendRecord>, DriverError> {
+    fn unsettled(&self, after: Option<&str>) -> Result<Vec<BackendRecord>, DriverError> {
         self.store
-            .unsettled_backend_objects(&self.deployment, UNSETTLED_PAGE)
+            .unsettled_backend_objects(&self.deployment, after, UNSETTLED_PAGE)
             .map(|rows| rows.into_iter().map(port_record).collect())
             .map_err(|error| ledger_failure(&error))
     }
