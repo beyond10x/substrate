@@ -6,6 +6,7 @@ members = [
     "crates/substrate-executor",
     "crates/substrate-host",
     "crates/substrate-kubernetes-client",
+    "crates/substrate-kubernetes",
     "crates/substrate-daemon",
     "crates/substrate-contract-check",
     "crates/b10x-substrate-sdk",

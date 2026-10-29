@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result};
 
 use crate::report::Report;
 
-const SOURCE_PACKAGES: [(&str, &str); 9] = [
+const SOURCE_PACKAGES: [(&str, &str); 10] = [
     ("crates/substrate-wire", "b10x-substrate-wire"),
     ("crates/substrate-store", "b10x-substrate-store"),
     ("crates/substrate-guarded", "b10x-substrate-guarded"),
@@ -17,6 +17,7 @@ const SOURCE_PACKAGES: [(&str, &str); 9] = [
         "crates/substrate-kubernetes-client",
         "b10x-substrate-kubernetes-client",
     ),
+    ("crates/substrate-kubernetes", "b10x-substrate-kubernetes"),
     ("crates/substrate-daemon", "b10x-substrate-daemon"),
     ("crates/b10x-substrate-sdk", "b10x-substrate-sdk"),
     ("crates/b10x-substrate-cli", "b10x-substrate-cli"),

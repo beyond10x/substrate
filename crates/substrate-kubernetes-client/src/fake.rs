@@ -8,7 +8,10 @@
 //! [`FakeCluster::compact`]), and delete with `gracePeriodSeconds` and `preconditions.uid` (409 on
 //! a mismatch); `SelfSubjectRulesReview` answering [`FakeCluster::set_rules`]; `pods/log` with
 //! `limitBytes`; and `pods/exec` over WebSocket `v5.channel.k8s.io`, answered by the
-//! [`ExecHandler`] a test installs. Every request needs the fake's bearer token.
+//! [`ExecHandler`] a test installs. Every request needs the fake's bearer token. Pod Security
+//! admission is switchable ([`FakeCluster::enforce_restricted`]): off, as in a namespace without
+//! the `pod-security.kubernetes.io/enforce` label, every Pod is admitted; on, a Pod with a
+//! `privileged` container is refused 403, with or without `dryRun=All`.
 //!
 //! What it does not do yet, and where that lands: no kubelet (a Pod is never bound or run, and a
 //! deletion removes it at once) and no executor behind `pods/exec`; the namespace driver's slices
@@ -199,6 +202,7 @@ struct Store {
     requests: Vec<String>,
     rules: Vec<Value>,
     logs: BTreeMap<String, Vec<u8>>,
+    restricted: bool,
 }
 
 /// One stored change, as a watch replays it.
@@ -395,6 +399,15 @@ impl FakeCluster {
     /// The log `pods/log` answers for the Pod `pod`.
     pub fn set_log(&self, pod: &str, log: &[u8]) {
         self.store().logs.insert(pod.to_owned(), log.to_vec());
+    }
+
+    /// Whether Pod Security admission enforces `restricted` from now on. Off, the default, admits
+    /// every Pod; on, a Pod any of whose containers or init containers sets
+    /// `securityContext.privileged: true` is refused 403 `Forbidden` with the message the API
+    /// server's admission writes, before anything is stored and also under `dryRun=All`. Only the
+    /// `privileged` field is checked: the fake does not evaluate the rest of the profile.
+    pub fn enforce_restricted(&self, on: bool) {
+        self.store().restricted = on;
     }
 
     /// What answers `pods/exec` from now on. Without one, a call is answered a `Failure` status.
@@ -656,6 +669,20 @@ impl Shared {
                 "metadata.name: Required value",
             ));
         };
+        if resource == "pods"
+            && store.restricted
+            && let Some(container) = privileged_container(&object)
+        {
+            return Err(Refusal::new(
+                403,
+                "Forbidden",
+                format!(
+                    "pods \"{name}\" is forbidden: violates PodSecurity \"restricted:latest\": \
+                     privileged (container \"{container}\" must not set \
+                     securityContext.privileged=true)"
+                ),
+            ));
+        }
         if store
             .objects
             .get(resource)
@@ -1295,6 +1322,17 @@ async fn read_json(request: Request<Incoming>) -> Result<Value, Refusal> {
     let bytes = read_body(request).await?;
     serde_json::from_slice(&bytes)
         .map_err(|_| Refusal::new(400, "BadRequest", "the body is not JSON"))
+}
+
+/// The name of the first container or init container of the Pod `object` that sets
+/// `securityContext.privileged: true`.
+fn privileged_container(object: &Value) -> Option<String> {
+    ["initContainers", "containers"]
+        .iter()
+        .filter_map(|list| object["spec"][list].as_array())
+        .flatten()
+        .find(|container| container["securityContext"]["privileged"] == Value::Bool(true))
+        .map(|container| container["name"].as_str().unwrap_or_default().to_owned())
 }
 
 /// A body that may be absent (a `DELETE`'s options): `null` for none, otherwise JSON. A body past
