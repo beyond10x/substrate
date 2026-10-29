@@ -4,8 +4,6 @@ id: story:test-socket-paths-fit-sun-len
 kind: story
 status: draft
 title: Test socket paths fit SUN_LEN under any TMPDIR
-relations:
-- decomposes: epic:host-run-gates
 revision: 1
 ---
 # Story: test socket paths fit SUN_LEN under any TMPDIR

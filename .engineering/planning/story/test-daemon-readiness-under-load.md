@@ -4,8 +4,6 @@ id: story:test-daemon-readiness-under-load
 kind: story
 status: draft
 title: A test daemon's readiness deadline holds on a loaded machine
-relations:
-- decomposes: epic:host-run-gates
 revision: 1
 ---
 # Story: a test daemon's readiness deadline holds on a loaded machine
