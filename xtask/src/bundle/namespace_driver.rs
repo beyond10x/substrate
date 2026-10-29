@@ -22,6 +22,13 @@ const LINUX_FACTS: [&str; 4] = [
     "exec.no-egress",
 ];
 
+/// The fact whose presence serves an inline capsule; `exec.inline-capsule-unserved` answers its
+/// absence. The wire crate names it only as the serde rename on `CapabilityFacts`.
+const INLINE_CAPSULE_FACT: &str = "exec.inline-capsule";
+
+/// The published signal set; `exec.signal-unserved` answers a signal outside it.
+const SIGNALS_FACT: &str = "exec.signals";
+
 /// The first bundle that publishes design 34 § 11; every later one keeps it.
 const FIRST: (u64, u64, u64) = (0, 25, 0);
 
@@ -227,12 +234,70 @@ fn check_refusal_vector(
                 refusal.code
             ));
         }
+        check_answering_machines(path, &vector, refusal, failures);
     }
     if found != 1 {
         failures.push(format!(
             "vectors: {} must be answered by exactly one vector, found {found}",
             refusal.code
         ));
+    }
+}
+
+/// The machine a refusal vector sets up is the driver the row describes: at least one, every one
+/// `kubernetes` (the host driver publishes none of the three codes and its answers do not change),
+/// and each without what would make the request served. A row added to
+/// `DRIVER_UNSERVED_REFUSALS` without a condition here is reported rather than passed.
+fn check_answering_machines(
+    path: &str,
+    vector: &Value,
+    refusal: &wire::UnservedRefusal,
+    failures: &mut Vec<String>,
+) {
+    let code = refusal.code;
+    let kubernetes = serde_json::to_value(wire::HostDriverKind::Kubernetes).unwrap_or(Value::Null);
+    let machines: Vec<&Value> = vector
+        .get("setup")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|step| step.get("kind") == Some(&json!("machine")))
+        .map(|step| step.get("state").unwrap_or(&Value::Null))
+        .collect();
+    if machines.is_empty() {
+        failures.push(format!("{path}: {code} sets up no machine to answer it"));
+    }
+    let signal = vector.pointer("/action/request/body/input/signal");
+    for machine in machines {
+        let driver = machine.get("driver").unwrap_or(&Value::Null);
+        if driver != &kubernetes {
+            failures.push(format!(
+                "{path}: {code} is answered by a {} machine; only {kubernetes} answers it",
+                driver.as_str().unwrap_or("driverless")
+            ));
+        }
+        let facts = machine.get("facts");
+        let fact = |name: &str| facts.and_then(|facts| facts.get(name));
+        if code == wire::EXEC_INLINE_CAPSULE_UNSERVED {
+            if fact(INLINE_CAPSULE_FACT).is_some() {
+                failures.push(format!(
+                    "{path}: {code} is answered by a machine that publishes {INLINE_CAPSULE_FACT}"
+                ));
+            }
+        } else if code == wire::EXEC_SIGNAL_UNSERVED {
+            let published = fact(SIGNALS_FACT)
+                .and_then(Value::as_array)
+                .is_some_and(|signals| signal.is_some_and(|signal| signals.contains(signal)));
+            if signal.is_none() || published {
+                failures.push(format!(
+                    "{path}: {code} is answered for a signal the machine publishes in {SIGNALS_FACT}"
+                ));
+            }
+        } else if code != wire::WORKSPACE_ADOPT_UNSERVED {
+            failures.push(format!(
+                "{path}: {code} has no machine condition in this check; state what serves it"
+            ));
+        }
     }
 }
 
@@ -456,6 +521,83 @@ mod tests {
             }
         });
         assert_reported(&failures_of(&tree), "states the Linux fact exec.no-egress");
+    }
+
+    fn machines_of(vector: &mut serde_json::Value) -> Vec<&mut serde_json::Value> {
+        vector["setup"]
+            .as_array_mut()
+            .expect("setup")
+            .iter_mut()
+            .filter(|step| step["kind"] == "machine")
+            .map(|step| &mut step["state"])
+            .collect()
+    }
+
+    /// "The host driver publishes none of them": a host machine answering any of the three rows
+    /// contradicts the row, whichever vector carries it.
+    #[test]
+    fn a_host_machine_answering_any_refusal_is_refused() {
+        for (path, code) in [
+            (CAPSULE, "exec.inline-capsule-unserved"),
+            (SIGNAL, "exec.signal-unserved"),
+            (ADOPT, "workspace.adopt-unserved"),
+        ] {
+            let tree = edited(path, |vector| {
+                for state in machines_of(vector) {
+                    state["driver"] = "host".into();
+                }
+            });
+            assert_reported(
+                &failures_of(&tree),
+                &format!("{code} is answered by a host machine"),
+            );
+        }
+    }
+
+    /// A refusal vector with no machine states nothing about the driver that answers it, so the
+    /// row's condition on that driver goes unchecked.
+    #[test]
+    fn a_refusal_vector_without_a_machine_is_refused() {
+        let tree = edited(ADOPT, |vector| {
+            vector["setup"]
+                .as_array_mut()
+                .expect("setup")
+                .retain(|step| step["kind"] != "machine");
+        });
+        assert_reported(
+            &failures_of(&tree),
+            "workspace.adopt-unserved sets up no machine",
+        );
+    }
+
+    #[test]
+    fn a_signal_refusal_for_a_published_signal_is_refused() {
+        let tree = edited(SIGNAL, |vector| {
+            let signal = vector["action"]["request"]["body"]["input"]["signal"].clone();
+            for state in machines_of(vector) {
+                state["facts"]["exec.signals"]
+                    .as_array_mut()
+                    .expect("exec.signals")
+                    .push(signal.clone());
+            }
+        });
+        assert_reported(
+            &failures_of(&tree),
+            "exec.signal-unserved is answered for a signal the machine publishes",
+        );
+    }
+
+    #[test]
+    fn a_capsule_refusal_on_a_machine_with_the_inline_capsule_fact_is_refused() {
+        let tree = edited(CAPSULE, |vector| {
+            for state in machines_of(vector) {
+                state["facts"]["exec.inline-capsule"] = serde_json::json!({});
+            }
+        });
+        assert_reported(
+            &failures_of(&tree),
+            "exec.inline-capsule-unserved is answered by a machine that publishes exec.inline-capsule",
+        );
     }
 
     #[test]
