@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: decision-blocker:driver-role-needs-pods-exec-get
 kind: decision-blocker
-status: open
+status: cleared
 title: The driver's Role lacks get on pods/exec (ADR 0047 decision 3); operator decides
 relations:
 - blocks: story:kubernetes-namespace-workspace-and-exec-slice
-revision: 1
+revision: 2
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-29T07:23:15Z", actor: "human:timo", revision: 2}
 ---
 # Decision blocker: the driver's Role lacks `get` on `pods/exec` (ADR 0047 decision 3)
 

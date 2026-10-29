@@ -401,7 +401,7 @@ size, and the executor truncates and marks output past it, as the host driver do
 ## Addendum, 2026-10-29: `get` on `pods/exec`
 
 Decision 3's row for `pods/exec` grants `get` beside `create`. No other row changes
-(`decision-blocker:driver-role-needs-pods-exec-get`).
+(`decision-blocker:driver-role-needs-pods-exec-get`). The operator approved it on 2026-10-29.
 
 **Observation.** The namespace lane's recorded run (`Namespace-lane:
 425ab9c2709b54bc46c234b4646913d8f12f27a2 8 2026-10-29T05:19:33Z`, `kindest/node:v1.37.0`),
