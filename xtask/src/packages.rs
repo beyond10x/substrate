@@ -69,13 +69,16 @@ const EXECUTOR_REFUSED: [&str; 6] = [
     "gix",
 ];
 
-/// Runs `cargo tree --locked -p b10x-substrate-executor -e normal` in `root` and refuses each line
-/// that names a fenced package.
+/// Runs `cargo tree --locked -p b10x-substrate-executor -e normal --target all` in `root` and
+/// refuses each line that names a fenced package. Every target, not the host's alone: the executor
+/// ships as an `x86_64-unknown-linux-musl` build, so a musl-only edge is as linked as any other.
 fn check_executor_tree(root: &Path) -> Result<Vec<String>> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let output = std::process::Command::new(cargo)
         .current_dir(root)
-        .args(["tree", "--locked", "-p", EXECUTOR, "-e", "normal"])
+        .args([
+            "tree", "--locked", "-p", EXECUTOR, "-e", "normal", "--target", "all",
+        ])
         .output()
         .context("running cargo tree for the executor")?;
     if !output.status.success() {

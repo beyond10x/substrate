@@ -7,8 +7,8 @@
 //! entries the wire cannot name (ADR 0043), or `{"error": {...}}`, the guarded code's
 //! `DriverError`. A response carries no content.
 //!
-//! **The header bound.** Design 34 § 7.2 states 64 KiB, which no header that carries the wire
-//! crate's own types can keep: `FileReplaceInput` holds the whole new file inline as base64, a
+//! **The header bound.** Design 34 § 7.2 states 16 MiB, because 64 KiB, its first figure, is a
+//! bound no header that carries the wire crate's own types can keep: `FileReplaceInput` holds the whole new file inline as base64, a
 //! `FileEditInput` holds two texts, and a read answer holds its slice inline. The bound is
 //! therefore [`MAX_HEADER_BYTES`], which holds a [`MAX_CONTENT_BYTES`] file inline even when
 //! every byte is JSON-escaped twice, plus the request's other members.

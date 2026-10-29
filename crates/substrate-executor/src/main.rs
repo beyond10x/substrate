@@ -86,6 +86,9 @@ fn install(target: &str) -> ExitCode {
 fn run(parts: &[&str]) -> ExitCode {
     use substrate_executor::frame::{Control, Frame, Refusal};
 
+    // A blocked TERM is queued even to a PID 1 without a handler; `forward_term` unblocks it with
+    // the handler in place, and `run` forwards one that came before the child's group was known.
+    substrate_executor::run::block_term();
     // Kubelet's `KUBERNETES_*` variables and the image's own `PATH` are in this environment; none
     // of it may reach the child, not even through the program lookup.
     for (name, _) in std::env::vars_os() {
@@ -101,7 +104,11 @@ fn run(parts: &[&str]) -> ExitCode {
         return ExitCode::from(2);
     };
     substrate_executor::run::forward_term();
-    match substrate_executor::run::run(&spec, std::path::Path::new("/sys/fs/cgroup"), &mut out) {
+    match substrate_executor::run::run_as_init(
+        &spec,
+        std::path::Path::new("/sys/fs/cgroup"),
+        &mut out,
+    ) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(_) => ExitCode::FAILURE,
     }
