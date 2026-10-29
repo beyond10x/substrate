@@ -514,12 +514,19 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
     if !config.bubblewrap.is_file() || !socat.is_file() {
         return false;
     }
-    let Ok(sentinel) = tempfile::tempdir() else {
-        return false;
-    };
-    let socket = sentinel.path().join("host.sock");
-    let Ok(_listener) = std::os::unix::net::UnixListener::bind(&socket) else {
-        return false;
+    // The sentinel's path is measured against `sun_path` before it binds, in a private directory
+    // that fits whatever `TMPDIR` is (`crate::private_socket`). A socket that cannot be placed
+    // still withholds the floor, and the reason is logged with the length and the limit, so a
+    // daemon refusing every exec says why instead of looking like a host without confinement.
+    let sentinel = match crate::private_socket::bind_private("host.sock") {
+        Ok(sentinel) => sentinel,
+        Err(reason) => {
+            tracing::warn!(
+                %reason,
+                "confinement floor withheld: the probe's sentinel socket could not be bound"
+            );
+            return false;
+        }
     };
     // One sandbox per family the profile refuses, and the floor needs **both**. The Unix one is
     // what this probe has always measured; the vsock one is review finding 7's, and it is here
@@ -541,7 +548,7 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
             };
             let Ok(output) = bubblewrap_probe_command(
                 &config.bubblewrap,
-                sentinel.path(),
+                sentinel.directory(),
                 seccomp.as_raw_fd(),
                 target,
             )
