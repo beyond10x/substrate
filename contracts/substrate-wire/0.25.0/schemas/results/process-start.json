@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.25.0:result:process-start",
+  "$ref": "../resource.json#/$defs/process",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "process-start operation result"
+}

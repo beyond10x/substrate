@@ -1,0 +1,24 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "client_visible_changes": [
+    "0.25.0 adds no route and preserves the 45 routes of 0.24.0 (ADR 0047 decision 12, design 34 section 11).",
+    "The capability snapshot's driver admits kubernetes beside host (ADR 0047 N7): a daemon whose driver serves one claimed Kubernetes namespace answers kubernetes, and a host daemon still answers host. A client that validates a snapshot against predecessor 0.24.0, or matches driver exhaustively, rejects a namespace daemon's snapshot until it moves to 0.25.0. driver is provenance; a client chooses by facts, never by driver.",
+    "One optional fact is new: confinement.no-egress, true when a connection from inside a run was observed to fail (ADR 0047 N5). It is published only from that observation, never from configuration, and is absent otherwise, never false. The Linux facts exec.namespaces, exec.cgroup-limits, exec.cgroup-kill and exec.no-egress keep their bytes and meanings; a kubernetes machine publishes none of them.",
+    "Three refusals are new, each unserved, 501 and not retriable, each with a vector: exec.inline-capsule-unserved (address capsule) for an exec start with an inline capsule on a driver without the exec.inline-capsule fact; exec.signal-unserved (address signal) for a signal outside the driver's published exec.signals; workspace.adopt-unserved (no address) for workspace.adopt on a driver that adopts no operator directory. A host daemon publishes every signal and exec.inline-capsule and serves adoption, so its answers do not change.",
+    "The vector schema's machine setup gains a third shape for such a driver: it requires confinement.no-egress and admits none of exec.namespaces, exec.cgroup-limits, exec.cgroup-kill, exec.no-egress or exec.inline-capsule. The three new vectors use it."
+  ],
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.25.0"
+}

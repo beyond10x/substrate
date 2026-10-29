@@ -205,6 +205,8 @@ other half.
     | scoped `workspace_access` | `exec.workspace-scoped-write-unserved` (501) | existing |
     | `measurements` | `exec.metrics-unserved` (501) | existing |
     | an inline capsule | `exec.inline-capsule-unserved` (501) | **new** |
+    | a signal outside the published `exec.signals` (`INT`) | `exec.signal-unserved` (501) | **new** (amendment of 2026-10-29: design 34 § 14 Q3 A) |
+    | `workspace.adopt` | `workspace.adopt-unserved` (501) | **new** (amendment of 2026-10-29: design 34 § 14 Q3 A) |
     | a raw-pipe or PTY session | `session.unserved`, `session.pty-unserved` (501) | existing |
     | the `process.*` family | `process.host-unserved` (501) | existing |
     | a Git or bundle workspace source | `workspace.git-unserved`, `workspace.source-unserved` (501) | existing |
@@ -212,9 +214,12 @@ other half.
     | a create refused by the namespace's ResourceQuota | `workspace.capacity`, `exec.capacity` (429, `exhausted`) | existing |
     | a member naming a Pod field | `request.schema-invalid` (422) | existing |
 
-    The order is the daemon's existing check order. The new code, the widened `driver` (N7) and the
+    The order is the daemon's existing check order. The new codes, the widened `driver` (N7) and the
     neutral facts (N6) arrive in a successor bundle with a vector each, cut by
-    `cargo xtask render-bundle`, its check added to `scripts/gate.sh` in the same change.
+    `cargo xtask render-bundle`, its check added to `scripts/gate.sh` in the same change. That
+    bundle is `0.25.0`, whose contents design 34 § 11 states. It carries the three new codes, the
+    widened `driver` and `confinement.no-egress`. Design 30's neutral families arrive in design 30's
+    own bundle.
 13. **Conformance, on a disposable kind cluster with its own kubeconfig only** (N11). The cluster is
     created by the lane with `kind create cluster --kubeconfig <lane file>`, as the `pod-lane` job
     does. The driver's credential is a namespaced ServiceAccount bound to exactly decision 3's Role,
@@ -364,7 +369,8 @@ size, and the executor truncates and marks output past it, as the host driver do
   dependencies stand: the node-bound profile, remote clean-room conformance and the driver-port
   story.
 - **Wire.** One successor bundle: `driver` widened (N7), `confinement.no-egress` (N5),
-  `exec.inline-capsule-unserved`, each with a vector. No route changes. Earlier bundles keep their
+  `exec.inline-capsule-unserved`, `exec.signal-unserved` and `workspace.adopt-unserved` (`0.25.0`,
+  design 34 § 11), each with a vector. No route changes. Earlier bundles keep their
   bytes.
 - **New surfaces.** The driver crate (N12), the executor binary and image (N4), the lane (N11) with
   a Rust runner (an `xtask` verb), and the release preflight for the new image and lane. AGENTS.md

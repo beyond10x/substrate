@@ -153,9 +153,20 @@ Earlier bundle directories remain immutable. This source contract promotion is n
 daemon release; consumers must pin and test the matching SDK/daemon revision. The SDK refuses an
 older daemon's contract before issuing mutations.
 
+### `0.25.0`
+
+Development source now advertises `substrate-wire/0.25.0`. It adds no route. A capability
+snapshot's `driver` may now be `kubernetes` as well as `host`, and a driver may publish the
+optional fact `confinement.no-egress` when a mechanism it verified keeps a workload off the
+network. Three refusals are new, each `501` with class `unserved` and nothing dispatched: an
+inline capsule on a driver without `exec.inline-capsule` is `exec.inline-capsule-unserved`, a
+signal outside the published `exec.signals` is `exec.signal-unserved`, and an adopt on a driver
+that adopts no directory is `workspace.adopt-unserved`. The host daemon's answers are unchanged:
+it still reports `driver: host`, publishes none of the new fact and raises none of the new codes.
+
 ### `0.24.0`
 
-Development source now advertises `substrate-wire/0.24.0`. It adds one route, the per-process
+`0.24.0` added one route, the per-process
 event stream of ADR 0036 S12: `GET /v1/processes/{process_id}/events`, a WebSocket under the
 `process` scope. Its frames interleave the record's `process.*` events and its output lines in one
 order, report a `gap` for log bytes the bound discarded, and end with exactly one `ended` item
