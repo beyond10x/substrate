@@ -97,11 +97,23 @@ pub enum Fault {
         /// The JSON body it answers.
         body: Value,
     },
+    /// The fake waits `by` before it acts on the request and answers: an API server whose
+    /// response head is late.
+    Delay {
+        /// The request's method.
+        method: Method,
+        /// The prefix of its path and query.
+        path: String,
+        /// How long it waits.
+        by: Duration,
+    },
 }
 
 impl Fault {
     fn matches(&self, request_method: &Method, target: &str) -> bool {
-        let (Self::DropAnswer { method, path } | Self::Answer { method, path, .. }) = self;
+        let (Self::DropAnswer { method, path }
+        | Self::Answer { method, path, .. }
+        | Self::Delay { method, path, .. }) = self;
         method == request_method && target.starts_with(path.as_str())
     }
 }
@@ -483,6 +495,10 @@ impl Shared {
         let drop = match fault {
             Some(Fault::Answer { status, body, .. }) => return Ok(answer(status, &body)),
             Some(Fault::DropAnswer { .. }) => true,
+            Some(Fault::Delay { by, .. }) => {
+                tokio::time::sleep(by).await;
+                false
+            }
             None => false,
         };
         let answered = self.route(request, &method).await;

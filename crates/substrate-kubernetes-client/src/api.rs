@@ -224,10 +224,11 @@ impl Api {
         )
     }
 
-    /// The API's own `Status.message` in `body`, bounded and cleared of the bearer token, or
-    /// nothing.
+    /// The API's own `Status.message` in `body`, cleared of the bearer token and then bounded, or
+    /// nothing. Clearing comes first: a bound that split the token would leave a prefix no
+    /// longer equal to it, which the clearing could not find.
     pub fn status_message(&self, body: &[u8]) -> String {
-        self.redact(&status_message(body))
+        bounded(&self.redact(&status_message(body)))
     }
 
     /// `text` with every occurrence of the bearer token replaced, so an API server that echoes the
@@ -725,12 +726,17 @@ impl Api {
     ///
     /// [`WatchError::Expired`] for a 410: the history after that version is gone and the caller
     /// lists again; [`WatchError::Refused`] for 401 or 403; [`WatchError::Status`] for any other
-    /// status but 200; [`WatchError::Unanswered`] when no answer came.
+    /// status but 200; [`WatchError::Unanswered`] when no answer came, or when its head did not
+    /// come within [`Api::timeout`], the bound every other request has. The stream after the head
+    /// is bounded by the caller and by the `timeoutSeconds` in `path`.
     pub async fn watch(&self, path: &str) -> Result<Watch, WatchError> {
-        let (response, driver) = self
-            .send(Method::GET, path, None, JSON)
-            .await
-            .map_err(WatchError::Unanswered)?;
+        let (response, driver) =
+            tokio::time::timeout(self.timeout, self.send(Method::GET, path, None, JSON))
+                .await
+                .map_err(|_| {
+                    WatchError::Unanswered("the cluster API did not answer in time".to_owned())
+                })?
+                .map_err(WatchError::Unanswered)?;
         let driver = AbortOnDrop(driver);
         match response.status().as_u16() {
             200 => {}
@@ -880,7 +886,7 @@ impl Watch {
                     Some(token) => message.replace(token.as_str(), "[redacted]"),
                     None => message.to_owned(),
                 };
-                return Err(WatchError::Error(message.chars().take(300).collect()));
+                return Err(WatchError::Error(bounded(&message)));
             }
             return Ok(Some(WatchEvent {
                 kind: kind.to_owned(),
@@ -899,13 +905,21 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-/// The API's own `Status.message`, bounded, or nothing. Not cleared of the credential: quote it
-/// through [`Api::status_message`].
-pub(crate) fn status_message(body: &[u8]) -> String {
+/// The characters of an API-echoed message an error quotes.
+const MAX_MESSAGE_CHARS: usize = 300;
+
+/// `message` cut to [`MAX_MESSAGE_CHARS`]. Only ever applied to text already cleared of the
+/// credential.
+fn bounded(message: &str) -> String {
+    message.chars().take(MAX_MESSAGE_CHARS).collect()
+}
+
+/// The API's own `Status.message`, whole, or nothing. Neither cleared of the credential nor
+/// bounded: quote it through [`Api::status_message`], which does both in that order.
+fn status_message(body: &[u8]) -> String {
     serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|status| status["message"].as_str().map(str::to_owned))
-        .map(|message| message.chars().take(300).collect())
         .unwrap_or_default()
 }
 
