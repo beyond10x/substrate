@@ -1423,7 +1423,18 @@ pub fn read_regular_beneath(
 }
 
 /// [`pin_workspace_directory_beneath`] for a directory the caller has just created and holds by
-/// path, as the capability probe does: the parent is opened by path, following links.
+/// path, as the capability probe does.
+///
+/// **This follows links.** The parent is opened by path with `open(2)`, not `openat2` beneath a
+/// pinned root, so every component of the parent path, and a symlink in place of any of them,
+/// is followed; only the last component is held to `O_NOFOLLOW`. It is for host-side workspace
+/// pinning only, where the host itself created the path and trusts every component above it:
+/// the host driver's capability probe and its tests. Code that serves a workspace a confined
+/// process or an operator can write to, or that runs inside an exec image, pins beneath a
+/// descriptor with [`pin_workspace_directory_beneath`] instead.
+///
+/// It is `pub` because `b10x-substrate-host` calls it from another crate (design 34 § 2), and
+/// Rust has no visibility narrower than `pub` that reaches one named crate.
 pub fn pin_workspace_directory(workspace: &Path) -> Result<OwnedFd, DriverError> {
     let Some(parent) = workspace.parent() else {
         return Err(path_escape());

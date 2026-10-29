@@ -21,7 +21,7 @@ types:
     variants: [created, adopted]
   # What the operator placed under the workspace root at a name. `other` is
   # anything that is not a directory (a regular file, a symlink, a device);
-  # `observe_workspace` refuses each of them (crates/substrate-host/src/fs.rs).
+  # `observe_workspace` refuses each of them (crates/substrate-guarded/src/fs.rs).
   - name: substrate.workspaces.EntryKind
     kind: enum
     variants: [directory, other]
@@ -194,12 +194,12 @@ commands:
       # <workspace_root>/<root_name> through the confined root fd, not a store
       # read: ENOENT is resource.not-found (classify_open_error), and an entry
       # that is not a directory is workspace.path-escape, as observe_workspace
-      # answers today (crates/substrate-host/src/fs.rs). They are external
+      # answers today (crates/substrate-guarded/src/fs.rs). They are external
       # here; RootEntry is where a target shows what it observed.
       # Decided: adoption keeps the daemon-uid ownership check with the code
       # create uses: create_workspace calls observe_workspace
-      # (crates/substrate-host/src/fs.rs:133), which refuses st_uid !=
-      # effective_uid at fs.rs:139 with path_escape() (fs.rs:1381-1387):
+      # (crates/substrate-guarded/src/fs.rs:140), which refuses st_uid !=
+      # effective_uid at fs.rs:147 with path_escape() (fs.rs:1485-1491):
       # workspace.path-escape, address `path`.
       - name: absent
         external: no entry exists at <workspace_root>/<root_name>

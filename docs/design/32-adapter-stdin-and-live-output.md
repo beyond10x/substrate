@@ -1,9 +1,9 @@
 # Design 32: standard input and live output on the confinement adapters
 
 Status: accepted for implementation, 2026-10-28, under the coordinating session's D166
-(`approval-record:adapter-io-waves`); revised after review passes 1, 2 and 3 the same day (§ 13). § 11
-names the stories. It changes no wire byte and no contract bundle: the adapters are substrate-host's
-confinement API
+(`approval-record:adapter-io-waves`); revised after review passes 1, 2, 3 and 4 the same day (§ 13).
+§ 11 names the stories. It changes no wire byte and no contract bundle: the adapters are
+substrate-host's confinement API
 ([ADR 0044](../../adr/0044-confinement-is-a-contract-family-served-by-declared-adapters.md)
 decisions 7 and 8). No code before acceptance (invariant 8).
 
@@ -673,7 +673,9 @@ Pass 1 reviewed the first draft and returned needs-revision with eight blocking 
 notes (F1 to F13). Pass 2 reviewed the revision, held F4 to F7 and F9 to F13, reopened F1, F2, F3,
 F8 and F12, and returned needs-revision with five blocking findings and four notes (G1 to G9).
 Pass 3 reviewed the revision at `dc106e35`, held G1 to G9 and the pinned lane counts, and returned
-needs-revision with three blocking findings and three notes (H1 to H6). Where each is answered:
+needs-revision with three blocking findings and three notes (H1 to H6). Pass 4 reviewed the
+revision at PR 189 head `53fab50f`, held H1 to H6 and the pinned lane counts (49, 57, 65), and
+returned needs-revision with one blocking finding and one note (J1, J2). Where each is answered:
 
 | finding | answer |
 |---|---|

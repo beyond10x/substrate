@@ -15,7 +15,7 @@ not the daemon; the daemon's native tests (`crates/substrate-daemon/src/app/test
 ## Types (`identifier.yaml`)
 
 - `substrate.workspaces.RootName` is the single-component root-name set `validate_root_name`
-  admits (`crates/substrate-host/src/fs.rs`): ASCII alphanumerics, `_` and `-`, 1 to 255
+  admits (`crates/substrate-guarded/src/fs.rs`): ASCII alphanumerics, `_` and `-`, 1 to 255
   characters (Linux `NAME_MAX`), and no leading `-`. `.`, `..`, `/`, NUL and hidden names are
   outside the alphabet. It was `WorkspaceId` in the ADR 0034 cut. It is renamed because the wire
   workspace id stays `ws_…`, so this set names a directory, not a workspace. Its generated Rust
@@ -45,7 +45,7 @@ establishes it with a `setup:` row, and a conformance target makes it with `mkdi
   - a missing entry: `resource.not-found`;
   - an entry that is not a directory, or one the daemon's uid does not own:
     `workspace.path-escape`, the code `observe_workspace` gives create
-    (`crates/substrate-host/src/fs.rs:139`);
+    (`crates/substrate-guarded/src/fs.rs:147`);
   - a full subject partition: `workspace.capacity`.
 
   All of these are declared `external:` (see the limits below). Otherwise the outcome writes a
