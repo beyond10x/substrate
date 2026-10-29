@@ -302,6 +302,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "b10x-substrate-executor"
+version = "0.15.0"
+dependencies = [
+ "b10x-substrate-guarded",
+ "b10x-substrate-wire",
+ "base64 0.23.1",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "b10x-substrate-guarded"
 version = "0.15.0"
 dependencies = [

@@ -68,6 +68,7 @@ pub struct GuardedFilesystem {
     read_limit_bytes: u64,
     list_limit_items: u32,
     openat2: bool,
+    single: bool,
 }
 
 impl GuardedFilesystem {
@@ -76,6 +77,42 @@ impl GuardedFilesystem {
         max_file_bytes: u64,
         read_limit_bytes: u64,
         list_limit_items: u32,
+    ) -> Result<Self, DriverError> {
+        Self::open_root(
+            path,
+            max_file_bytes,
+            read_limit_bytes,
+            list_limit_items,
+            false,
+        )
+    }
+
+    /// A filesystem whose root directory is itself the one workspace it serves, as the keeper's
+    /// mounted volume is (design 34 § 7.2). Every root name still has to be a legal one, and
+    /// resolves to the pinned root rather than to a child of it; every path beneath it is opened
+    /// exactly as [`GuardedFilesystem::open`]'s are. It neither creates nor destroys a workspace:
+    /// both are `workspace.single-root`.
+    pub fn open_single(
+        path: &Path,
+        max_file_bytes: u64,
+        read_limit_bytes: u64,
+        list_limit_items: u32,
+    ) -> Result<Self, DriverError> {
+        Self::open_root(
+            path,
+            max_file_bytes,
+            read_limit_bytes,
+            list_limit_items,
+            true,
+        )
+    }
+
+    fn open_root(
+        path: &Path,
+        max_file_bytes: u64,
+        read_limit_bytes: u64,
+        list_limit_items: u32,
+        single: bool,
     ) -> Result<Self, DriverError> {
         let path = cstring(path.as_os_str())?;
         // SAFETY: path is a valid NUL-terminated string and flags require no variadic mode.
@@ -99,6 +136,7 @@ impl GuardedFilesystem {
             read_limit_bytes,
             list_limit_items,
             openat2,
+            single,
         })
     }
 
@@ -120,6 +158,9 @@ impl GuardedFilesystem {
     }
 
     pub fn create_workspace(&self, name: &str) -> Result<(), DriverError> {
+        if self.single {
+            return Err(single_root());
+        }
         validate_root_name(name)?;
         let name = CString::new(name).map_err(|_| path_escape())?;
         // SAFETY: root and name are valid; mode is used by mkdirat.
@@ -664,6 +705,9 @@ impl GuardedFilesystem {
         &self,
         root_name: &str,
     ) -> Result<WorkspaceDestroyBatch, DriverError> {
+        if self.single {
+            return Err(single_root());
+        }
         let workspace = match self.workspace_fd(root_name) {
             Ok(workspace) => workspace,
             Err(error) if error.class == crate::DriverErrorClass::NotFound => {
@@ -706,6 +750,9 @@ impl GuardedFilesystem {
 
     fn workspace_fd(&self, name: &str) -> Result<OwnedFd, DriverError> {
         validate_root_name(name)?;
+        if self.single {
+            return duplicate(self.root.as_raw_fd());
+        }
         openat2(
             self.root.as_raw_fd(),
             name,
@@ -1482,6 +1529,13 @@ fn classify_open_error(error: std::io::Error) -> DriverError {
     }
 }
 
+fn single_root() -> DriverError {
+    DriverError::failed(
+        "workspace.single-root",
+        "A single-workspace root neither creates nor destroys a workspace.",
+    )
+}
+
 fn path_escape() -> DriverError {
     DriverError::refused(
         "workspace.path-escape",
@@ -1751,6 +1805,52 @@ mod tests {
             std::fs::read_to_string(directory.path().join("harness/notes.txt")).expect("content"),
             "adopted"
         );
+    }
+
+    #[test]
+    fn a_single_workspace_root_serves_its_own_directory_and_still_refuses_a_link() {
+        // Design 34 § 7.2: the keeper's guarded root is the PVC itself, so the root *is* the one
+        // workspace; resolving a child named after it would cross nothing and find nothing.
+        let directory = tempdir().expect("tempdir");
+        let outside = tempdir().expect("outside");
+        std::fs::write(outside.path().join("secret"), b"outside").expect("outside file");
+        let filesystem = GuardedFilesystem::open_single(directory.path(), 1024, 1024, 100)
+            .expect("single-workspace filesystem");
+        if !filesystem.openat2_available() {
+            return;
+        }
+        filesystem
+            .write_atomic("ws_pvc", "workspace", "notes.txt", b"in the root")
+            .expect("a write lands in the root itself");
+        assert_eq!(
+            std::fs::read(directory.path().join("notes.txt")).expect("root file"),
+            b"in the root"
+        );
+        symlink(outside.path(), directory.path().join("link")).expect("symlink");
+        let escaped = filesystem
+            .read(
+                "ws_pvc",
+                "workspace",
+                "link/secret",
+                &FileReadQuery {
+                    mode: FileMode::File,
+                    offset: Some(0),
+                    limit_bytes: Some(64),
+                    cursor: None,
+                    limit_items: None,
+                },
+            )
+            .expect_err("a link in a single-workspace root is not followed");
+        assert_eq!(escaped.code, "workspace.path-escape");
+        let created = filesystem
+            .create_workspace("other")
+            .expect_err("a single-workspace root creates no workspace");
+        assert_eq!(created.code, "workspace.single-root");
+        let destroyed = filesystem
+            .destroy_workspace_batch("workspace")
+            .expect_err("a single-workspace root destroys no workspace");
+        assert_eq!(destroyed.code, "workspace.single-root");
+        assert!(directory.path().join("notes.txt").is_file());
     }
 
     #[test]
