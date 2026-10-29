@@ -665,19 +665,22 @@ no run, which its notes say. Both steps' refusals are executed offline by
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
-release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **`0.14.0` is the published
-release** (2026-10-27, tagged commit `0b9d50c`): daemon
-`ghcr.io/beyond10x/b10x-substrate-daemon:0.14.0` at
-`sha256:a22fc8a1707ac750eb86115422e26ecfb2fde64fb3df588e9fced32ef2a52182`, disposable MCP
-`ghcr.io/beyond10x/b10x-substrate-mcp:0.14.0` at
-`sha256:c6844980db262412db962228bb263421e285d57226e7c8a3a28fbbb85d589d42`, and development bundle
-`ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at
-`sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, plus the two binary
-archives under a signed `SHA256SUMS`. All were keyless-signed and verified with the exact tagged
-workflow identity (`release.yml@refs/tags/0.14.0`), and the three images were anonymously read back
-before the GitHub release was announced.
+release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **`0.15.0` is the published
+release** (2026-10-29, tagged commit `0739628`): daemon
+`ghcr.io/beyond10x/b10x-substrate-daemon:0.15.0` at
+`sha256:9bc33712eba8e359f08effba22162eef2c7b5f78e39bf4c8ebd66fea6ba139ba`, disposable MCP
+`ghcr.io/beyond10x/b10x-substrate-mcp:0.15.0` at
+`sha256:7b1b0bf9aa5400a9643c33e66cb39fee7ddc1783491827e23cd892889c486555`, development bundle
+`ghcr.io/beyond10x/b10x-substrate-wire:0.24.0` at
+`sha256:3623da7d342a2d6ce4623fa4b7b1910a7c47ca9a33b4056295cb2ab758f8be53` and chart
+`oci://ghcr.io/beyond10x/charts/b10x-substrate` `0.15.0` at
+`sha256:dd1d06e105bdd99fa1b628d8b1f7796a05f894002b39899fca14fdf772c8e2b1`, plus the two binary
+archives under a signed `SHA256SUMS`. The tag-push run failed, so a protected-`main` recovery
+dispatch published them: all were keyless-signed and verified with that run's workflow identity
+(`release.yml@refs/heads/main`) before the GitHub release was announced. It predates the executor
+image, so it published none; `0.16.0` is the first release that does.
 Do not maintain a second digest list here: the digests of every release are the GitHub release's own
-([0.14.0](https://github.com/beyond10x/substrate/releases/tag/0.14.0)) and
+([0.15.0](https://github.com/beyond10x/substrate/releases/tag/0.15.0)) and
 [CHANGELOG.md](CHANGELOG.md)'s.
 
 **Ruleset `main-requires-the-full-gate` (id 23425552, no bypass actors) requires that check on `main` (`gh api repos/beyond10x/substrate/rules/branches/main` → `required_status_checks` beside `creation`, `update`, `deletion`, `non_fast_forward` and the two email patterns); the legacy `GET …/branches/main/protection` still answers 404 `Branch not protected`, because rulesets are not branch protection.** The gate is also enforced at release time: `release.yml` reads

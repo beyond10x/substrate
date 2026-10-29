@@ -2,7 +2,8 @@
 
 The b10x execution data plane. It turns one Linux host into a governed service for confined
 workspaces, bounded processes and sessions, durable operations, leases, and observed state.
-Workloads, images, volumes, endpoints and cluster drivers remain future resource families.
+Workloads, images, volumes and endpoints remain future resource families. A Kubernetes namespace
+driver is in development source; it serves workspaces and refuses every exec.
 
 The problem it removes: anything that wants to run a command on behalf of somebody else has to
 build confinement, quotas, durable lifecycle state and honest reporting for itself, and usually
@@ -53,9 +54,11 @@ non-publishable.
 
 ## Status
 
-**Release [0.14.0](https://github.com/beyond10x/substrate/releases/tag/0.14.0) (2026-10-27)**
-ships keyless-signed daemon and disposable MCP images, the signed `0.23.0` development contract
-bundle, and signed x86_64 Linux binaries of the daemon and the command-line client. Signed distribution does not make the contract stable. Why bytes annotated
+**Release [0.15.0](https://github.com/beyond10x/substrate/releases/tag/0.15.0) (2026-10-29)**
+ships keyless-signed daemon and disposable MCP images, the signed Helm chart, the signed `0.24.0`
+development contract bundle, and signed x86_64 Linux binaries of the daemon and the command-line
+client. Current source advertises the unreleased `0.25.0` and adds the Kubernetes namespace
+driver ([below](#kubernetes-namespace-driver)). Signed distribution does not make the contract stable. Why bytes annotated
 `development` are signed, digest-pinned and published under a write-once tag at all is recorded in
 [ADR 0006](adr/0006-substrate-publishes-its-own-contract-bundle.md) § *Addendum*, which also records
 that no accepted text states the write-once-tag motive.
@@ -67,6 +70,7 @@ that no accepted text states the write-once-tag motive.
 | Recovery | Durable operation reservation before dispatch, stored answers, bounded events and reconciliation snapshots |
 | Transport | Personal Unix peer identity or explicit-root TLS 1.3 HTTPS/WSS with online hosted Identity admission |
 | Rust SDK and MCP | Typed clients and bounded tools over the daemon's authenticated service contract |
+| Drivers | The Linux host driver; in development source, the Kubernetes namespace driver, which serves empty workspaces and refuses every exec start `exec.sandbox-unavailable` |
 | Capability limits | Execution, PTY, Git, storage quotas and metrics depend on the running daemon's verified facts |
 | Model and derivation | Explicit wire types and frozen contract bundles; authored CLI, handlers and transitions, with an initial [ESS accepted-operation projection](spec/README.md), not whole-system derivation |
 
@@ -93,7 +97,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | secrets | `cargo xtask check-secrets` — scans every reachable commit, including root trees |
 | dependencies | `cargo xtask check-advisories` — rejects RustSec findings and HTTP/2 |
 | licences | `cargo xtask check-licenses` — verifies Apache-2.0 workspace metadata and deterministic third-party notices |
-| packages | `cargo xtask check-packages` — refuses every publishable workspace package, verifies the five runtime source packages' fixed names, exact internal versions, SPDX metadata, READMEs and public documentation targets, and refuses a Flux dependency or a `beyond10x` Git dependency in any dependency table |
+| packages | `cargo xtask check-packages` — refuses every publishable workspace package, verifies the ten runtime source packages' fixed names, exact internal versions, SPDX metadata, READMEs and public documentation targets, and refuses a Flux dependency or a `beyond10x` Git dependency in any dependency table |
 | MCP boundary | `cargo xtask check-mcp-boundary` — refuses a publishable MCP crate, a Substrate implementation dependency, an unpinned or featured MCP stack, and a built-in unbounded or remote transport |
 | contract bundle 0.1.0 | `python3 scripts/check-contract-bundle.py` |
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
@@ -326,6 +330,32 @@ installs the node profiles. Each release publishes the chart, signed and with bu
 lists what to supply, what the chart refuses and how to rotate certificates. `cargo xtask
 chart-lane static` checks the chart offline with Helm; `chart-lane cluster` runs it on kind
 (`.github/workflows/chart-lane.yml`).
+
+### Kubernetes namespace driver
+
+`substrate-daemon --driver kubernetes --kubernetes-config <file>` serves the wire from one
+namespace ([ADR 0047](adr/0047-a-kubernetes-namespace-driver-serves-workspaces-on-pvcs-and-execs-as-pods.md),
+[design 34](docs/design/34-kubernetes-namespace-driver.md)). It is a development profile,
+unreleased. A workspace is a PersistentVolumeClaim with a keeper Pod that runs the static
+`substrate-executor`; every file route reaches it through `pods/exec`. The driver claims the
+namespace with the Lease `b10x-substrate-driver`, holds one namespaced Role and refuses to open on
+more, and publishes `driver: kubernetes` with only the facts its own probe proved.
+
+Its limits, stated plainly:
+
+- **Exec is refused.** The probe proves neither the four Linux confinement facts nor
+  `confinement.no-egress`, so every exec start is `exec.sandbox-unavailable` (501). Exec Pods are
+  implemented but unverified on a real cluster: on kind no enforced egress denial was observed,
+  so `confinement.no-egress` stays absent.
+- **Shared clean-room conformance follows in the next release.** `cargo xtask namespace-lane
+  observe` runs design 34's observations and steps 3 and 5 to 7 on a kind cluster of its own, and
+  reports step 4 absent.
+
+From 0.16.0, each release publishes the executor image
+`ghcr.io/beyond10x/b10x-substrate-executor:<version>` and requires a `Namespace-lane:` record for
+the tagged commit ([AGENTS.md](AGENTS.md) § *Releases*). The
+[deployment guide](website/docs/guides/deployment.md#kubernetes-namespace-driver) lists the
+settings, the Role, the startup refusals and the answers.
 
 ### Git workspace sources
 
