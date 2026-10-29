@@ -13,8 +13,8 @@ use substrate_host::{
 #[cfg(test)]
 use substrate_store::NewOperation;
 use substrate_store::{
-    CommitEffectSink, ExecWrite, ExpiredLease, LeaseClock, LeaseResource, Scope, Store, StoreError,
-    WorkspaceAdmission,
+    BackendObjectKind, BackendObjectRole, CommitEffectSink, ExecWrite, ExpiredLease, LeaseClock,
+    LeaseResource, Scope, Store, StoreError, WorkspaceAdmission,
 };
 use substrate_wire::{
     ExecSignalInput, ExecState, OperationState, WorkspaceAbsence, WorkspaceKind, WorkspaceOrigin,
@@ -597,6 +597,47 @@ impl App {
                     }
                 }
                 Err(error) if error.class == DriverErrorClass::NotFound => {
+                    // Design 34 § 5.1: an exec whose `pod` row holds no bound uid never had its
+                    // create answered, and a driver that names such a row answers `NotFound` only
+                    // once the object can no longer be stored. That is dispatch absence: the
+                    // operation fails with no resource. A driver that names nothing (the host
+                    // driver) has no row, and its answer is read exactly as before.
+                    let Ok(rows) = self
+                        .store_io(|| {
+                            self.store.backend_objects(
+                                &candidate.scope.deployment,
+                                BackendObjectKind::Exec,
+                                &candidate.stored.resource.id,
+                            )
+                        })
+                        .await
+                    else {
+                        continue;
+                    };
+                    let never_stored = rows.iter().any(|row| {
+                        row.role == BackendObjectRole::Pod
+                            && row.uid.is_none()
+                            && row.settled_at.is_none()
+                    });
+                    if never_stored && candidate.operation_state != OperationState::Terminal {
+                        let (status, mut detail) =
+                            driver_detail(Some(&candidate.operation), &error);
+                        detail.retriable = false;
+                        let _ = self
+                            .store_io(|| {
+                                self.store.complete_dispatch_absence(
+                                    &candidate.scope,
+                                    &candidate.operation,
+                                    &self.authority.now().to_rfc3339(),
+                                    status.as_u16(),
+                                    "exec",
+                                    &candidate.stored.resource.id,
+                                    &detail,
+                                )
+                            })
+                            .await;
+                        continue;
+                    }
                     // Absence after restart proves only that no process remains now. It cannot
                     // prove whether dispatch crossed the launch barrier before the crash. Preserve
                     // the durable `unknown` operation/exec result while recording physical absence

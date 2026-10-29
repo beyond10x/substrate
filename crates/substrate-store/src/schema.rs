@@ -297,6 +297,7 @@ impl Store {
         migrate_operation_grant_attribution(&connection)?;
         crate::host_processes::migrate_host_processes(&connection)?;
         crate::process_events::migrate_process_events(&connection)?;
+        crate::backend::migrate_backend_objects(&connection)?;
         connection.pragma_update(None, "user_version", crate::SCHEMA_VERSION)?;
         Ok(Self {
             connection: Mutex::new(connection),

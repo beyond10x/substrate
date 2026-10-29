@@ -5,6 +5,8 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 mod aperture;
+// The backend ledger port of design 34 § 4, beside `Driver`.
+mod backend;
 // The confinement contract (atlas ADR 0109, ADR 0044): a profile, the adapter trait, the registry
 // of six adapters, and the `local` and `linux` adapters. Reached in process, never on the wire.
 pub mod confinement;
@@ -76,6 +78,9 @@ use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 pub use aperture::EgressAperture;
+pub use backend::{
+    BackendKind, BackendLedger, BackendName, BackendRecord, BackendRole, UidBinding,
+};
 pub use observation::{ExecObservation, PipeFrame, PipeStream};
 use output_retention::OutputRetention;
 // The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
@@ -510,6 +515,19 @@ pub trait Driver: Send + Sync {
     ///
     /// Returns a typed refusal when the logical identifier cannot be represented safely.
     fn workspace_root_identity(&self, id: &str) -> Result<String, DriverError>;
+
+    /// The backend objects this driver will create for one resource, named before any of them
+    /// is (design 34 § 4). The daemon reserves them in the transaction that records the
+    /// operation's `accepted` state. A driver that creates nothing outside its host names none,
+    /// and nothing is written.
+    ///
+    /// An exec whose `pod` row has no uid bound is the one case the daemon reads as dispatch
+    /// absence when [`Driver::observe_exec`] answers `NotFound` after a restart (§ 5.1). A driver
+    /// that names such a row answers `NotFound` for it only once it has proved the object can no
+    /// longer be stored, past its dispatch bound.
+    fn backend_names(&self, _kind: BackendKind, _id: &str) -> Vec<BackendName> {
+        Vec::new()
+    }
 
     async fn create_workspace(
         &self,

@@ -179,10 +179,21 @@ pub(super) async fn workspace_create(
         storage: None,
         lease: lease.as_ref().map(NewLease::observation),
     };
+    let backend = crate::backend_ledger::workspace_reservation(
+        app.driver.as_ref(),
+        &id,
+        &scope.subject,
+        &operation,
+    );
     if let Some(response) = reservation_response(
         app.store_io(|| {
-            app.store
-                .reserve_workspace_create(&new, &root_name, &provisional, lease.as_ref())
+            app.store.reserve_workspace_create_with_backend(
+                &new,
+                &root_name,
+                &provisional,
+                lease.as_ref(),
+                &backend,
+            )
         })
         .await,
         &request_id,
