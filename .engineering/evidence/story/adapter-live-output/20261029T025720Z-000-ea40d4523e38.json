@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-29T02:57:20Z",
+  "actor": "human:timo",
+  "artifact": "story:adapter-live-output",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "PR 193 CI Full gate at 7bd9515f, merged to main as 07396286",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40808037420/job/123235746767"
+  }
+}
