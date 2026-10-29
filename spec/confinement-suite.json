@@ -3,8 +3,8 @@
     "suite_version": "ess-conformance/34",
     "system": "substrate",
     "specification_version": "v1",
-    "spec_digest": "cdba8399a53e6528dd7540f29f9450c3ec5120100a544b743303baeae69c5f23",
-    "contract_digest": "a99c991bb6dd98038fda38de951b8886d7c40d5402cda4f72684030834931f34",
+    "spec_digest": "df98a2f81db665bd8493b7ad303ca6f70ee6bf5f2fe6148d7429027338f21c1f",
+    "contract_digest": "59aa97c5c2ed64992c17aff43577228fb3eecbd7303edc15a9558822ba0da7fa",
     "scenario_initial_state": "empty"
   },
   "scenarios": {
@@ -598,7 +598,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -810,7 +811,8 @@
                 "sealed_paths",
                 "exec_subpaths",
                 "private_tmpdir",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -1017,7 +1019,8 @@
               "kind": "literal",
               "value": [
                 "image_digest_pinned",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -1443,7 +1446,8 @@
                 "whole_tree_kill",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "inner": {
@@ -1658,7 +1662,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -1922,7 +1927,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -2143,6 +2149,246 @@
         }
       ]
     },
+    "substrate.confinement/authored/linux-admits-output-live-on-delegated": {
+      "purpose": "lane delegated: linux admits a profile requiring output_live, reported declared_insecure: false.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "whole_tree_kill",
+                "ipc_socket_allowlist",
+                "ipc_signals_contained",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "output_live"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "output_read"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "linux",
+            "declared_insecure": false,
+            "facts": [
+              "output_live"
+            ],
+            "families": [
+              "output_read"
+            ]
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "linux"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": false
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "output_live"
+                ]
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/linux-admits-stdin-pipe-on-delegated": {
       "purpose": "lane delegated: linux admits a profile requiring stdin_pipe, reported declared_insecure: false.",
       "steps": [
@@ -2161,7 +2407,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -2400,7 +2647,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -2571,7 +2819,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -2742,7 +2991,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -2913,7 +3163,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -3084,7 +3335,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -3254,7 +3506,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -3425,7 +3678,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -3579,6 +3833,254 @@
         }
       ]
     },
+    "substrate.confinement/authored/local-admits-output-live-on-portable": {
+      "purpose": "lane portable: local with a reason admits a profile requiring output_live, reported declared_insecure: true with the reason.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "local"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "declared_insecure",
+                "paths_are_host_paths",
+                "local_permitted",
+                "host_network",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "local"
+            },
+            "local_reason": {
+              "kind": "literal",
+              "value": "the operator follows this run's output on the developer's own machine"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "output_live"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "output_read"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted-insecure"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "local",
+            "declared_insecure": true,
+            "facts": [
+              "output_live"
+            ],
+            "families": [
+              "output_read"
+            ],
+            "local_reason": "the operator follows this run's output on the developer's own machine"
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "local"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": true
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "output_live"
+                ]
+              },
+              "local_reason": {
+                "kind": "literal",
+                "value": "the operator follows this run's output on the developer's own machine"
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted-insecure"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/local-admits-stdin-pipe-on-portable": {
       "purpose": "lane portable: local with a reason admits a profile requiring stdin_pipe, reported declared_insecure: true with the reason.",
       "steps": [
@@ -3598,7 +4100,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -3845,7 +4348,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -4092,7 +4596,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -4266,7 +4771,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -4439,7 +4945,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -4622,7 +5129,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -4796,7 +5304,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -4969,7 +5478,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -5176,7 +5686,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -5350,7 +5861,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -5531,7 +6043,8 @@
                 "paths_are_host_paths",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -5697,7 +6210,8 @@
                 "declared_insecure",
                 "paths_are_host_paths",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -5849,6 +6363,247 @@
         }
       ]
     },
+    "substrate.confinement/authored/macos-io-admits-output-live-on-macos": {
+      "purpose": "lane macos: macos admits a profile requiring output_live, reported declared_insecure: false.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "macos"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "paths_are_host_paths",
+                "ipc_signals_contained",
+                "sealed_paths",
+                "exec_subpaths",
+                "private_tmpdir",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "macos"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "output_live"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "output_read"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "macos",
+            "declared_insecure": false,
+            "facts": [
+              "output_live"
+            ],
+            "families": [
+              "output_read"
+            ]
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "macos"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": false
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "output_live"
+                ]
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/macos-io-admits-stdin-pipe-on-macos": {
       "purpose": "lane macos: macos admits a profile requiring stdin_pipe, reported declared_insecure: false.",
       "steps": [
@@ -5869,7 +6624,8 @@
                 "sealed_paths",
                 "exec_subpaths",
                 "private_tmpdir",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -6109,7 +6865,8 @@
                 "sealed_paths",
                 "exec_subpaths",
                 "private_tmpdir",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -6369,7 +7126,8 @@
                 "sealed_paths",
                 "exec_subpaths",
                 "private_tmpdir",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -6540,7 +7298,8 @@
                 "sealed_paths",
                 "exec_subpaths",
                 "private_tmpdir",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -6711,7 +7470,8 @@
                 "sealed_paths",
                 "exec_subpaths",
                 "private_tmpdir",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -6883,7 +7643,8 @@
                 "sealed_paths",
                 "exec_subpaths",
                 "private_tmpdir",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -7125,7 +7886,8 @@
                 "sealed_paths",
                 "exec_subpaths",
                 "private_tmpdir",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -7367,7 +8129,8 @@
                 "sealed_paths",
                 "exec_subpaths",
                 "private_tmpdir",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -7981,6 +8744,178 @@
         }
       ]
     },
+    "substrate.confinement/authored/model-output-live-unserved-on-interpreted": {
+      "purpose": "lane interpreted: an adapter row without output_live refuses a profile requiring it confinement.fact-unserved naming output_live.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "whole_tree_kill",
+                "ipc_socket_allowlist",
+                "ipc_signals_contained",
+                "stdin_pipe"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "output_read"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "fact-unserved-output-live"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.confinement.FactUnserved",
+          "fields": {
+            "adapter": "linux",
+            "fact": "output_live"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "counts",
+            "at_most": 0
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "fact-unserved-output-live"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.confinement.FactUnserved"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/model-stdin-pipe-unserved-on-interpreted": {
       "purpose": "lane interpreted: an adapter row without stdin_pipe refuses a profile requiring it confinement.fact-unserved naming stdin_pipe.",
       "steps": [
@@ -7998,7 +8933,8 @@
               "value": [
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
-                "ipc_signals_contained"
+                "ipc_signals_contained",
+                "output_live"
               ]
             },
             "served_families": {
@@ -8168,7 +9104,8 @@
               "kind": "literal",
               "value": [
                 "image_digest_pinned",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -8420,6 +9357,248 @@
         }
       ]
     },
+    "substrate.confinement/authored/oci-admits-output-live-on-oci": {
+      "purpose": "lane oci: oci admits a profile requiring output_live with an image named by digest, reported declared_insecure: false.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "oci"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "image_digest_pinned",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "oci"
+            },
+            "image": {
+              "kind": "literal",
+              "value": "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "output_live"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "output_read"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "oci",
+            "declared_insecure": false,
+            "facts": [
+              "output_live"
+            ],
+            "families": [
+              "output_read"
+            ]
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "oci"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": false
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "output_live"
+                ]
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/oci-admits-stdin-pipe-on-oci": {
       "purpose": "lane oci: oci on the lane's pinned runtime admits a profile requiring stdin_pipe with an image named by digest, reported declared_insecure: false.",
       "steps": [
@@ -8436,7 +9615,8 @@
               "kind": "literal",
               "value": [
                 "image_digest_pinned",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -8677,7 +9857,8 @@
               "kind": "literal",
               "value": [
                 "image_digest_pinned",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -8847,7 +10028,8 @@
               "kind": "literal",
               "value": [
                 "image_digest_pinned",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -9017,7 +10199,8 @@
               "kind": "literal",
               "value": [
                 "image_digest_pinned",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -9187,7 +10370,8 @@
               "kind": "literal",
               "value": [
                 "image_digest_pinned",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -9358,7 +10542,8 @@
             "facts": {
               "kind": "literal",
               "value": [
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "served_families": {
@@ -10179,6 +11364,177 @@
         }
       ]
     },
+    "substrate.confinement/authored/pod-output-live-unserved-on-pod": {
+      "purpose": "lane pod: pod, asked for output_live, is refused confinement.fact-unserved naming output_live.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "pod"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "image_digest_pinned"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "pod"
+            },
+            "image": {
+              "kind": "literal",
+              "value": "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "output_live"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "output_read"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "fact-unserved-output-live"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.confinement.FactUnserved",
+          "fields": {
+            "adapter": "pod",
+            "fact": "output_live"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "counts",
+            "at_most": 0
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "fact-unserved-output-live"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.confinement.FactUnserved"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/pod-stdin-pipe-unserved-on-pod": {
       "purpose": "lane pod: pod, asked for stdin_pipe, is refused confinement.fact-unserved naming stdin_pipe.",
       "steps": [
@@ -10368,7 +11724,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "inner": {
@@ -10600,6 +11957,259 @@
         }
       ]
     },
+    "substrate.confinement/authored/systemd-linux-admits-output-live-on-delegated": {
+      "purpose": "lane delegated: systemd around linux admits a profile requiring output_live, reported declared_insecure: false.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "systemd"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "whole_tree_kill",
+                "ipc_socket_allowlist",
+                "ipc_signals_contained",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "inner": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "systemd"
+            },
+            "inner": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "output_live"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "output_read"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "systemd",
+            "declared_insecure": false,
+            "facts": [
+              "output_live"
+            ],
+            "families": [
+              "output_read"
+            ],
+            "inner": "linux"
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "systemd"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": false
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "output_live"
+                ]
+              },
+              "inner": {
+                "kind": "literal",
+                "value": "linux"
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/systemd-linux-admits-stdin-pipe-on-delegated": {
       "purpose": "lane delegated: systemd around linux admits a profile requiring stdin_pipe, reported declared_insecure: false.",
       "steps": [
@@ -10618,7 +12228,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "inner": {
@@ -10870,7 +12481,8 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "inner": {
@@ -11051,7 +12663,8 @@
                 "whole_tree_kill",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "inner": {
@@ -11235,7 +12848,8 @@
                 "whole_tree_kill",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "inner": {
@@ -11473,6 +13087,269 @@
         }
       ]
     },
+    "substrate.confinement/authored/systemd-local-admits-output-live-on-delegated": {
+      "purpose": "lane delegated: systemd around local, with a reason, admits a profile requiring output_live, reported declared_insecure: true with the reason.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "systemd"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "declared_insecure",
+                "paths_are_host_paths",
+                "whole_tree_kill",
+                "local_permitted",
+                "host_network",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "inner": {
+              "kind": "literal",
+              "value": "local"
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "systemd"
+            },
+            "inner": {
+              "kind": "literal",
+              "value": "local"
+            },
+            "local_reason": {
+              "kind": "literal",
+              "value": "the operator follows this bounded run's output on the developer's own machine"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "output_live"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "output_read"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted-insecure"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "systemd",
+            "declared_insecure": true,
+            "facts": [
+              "output_live"
+            ],
+            "families": [
+              "output_read"
+            ],
+            "inner": "local",
+            "local_reason": "the operator follows this bounded run's output on the developer's own machine"
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "systemd"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": true
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "output_live"
+                ]
+              },
+              "inner": {
+                "kind": "literal",
+                "value": "local"
+              },
+              "local_reason": {
+                "kind": "literal",
+                "value": "the operator follows this bounded run's output on the developer's own machine"
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted-insecure"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/systemd-local-admits-stdin-pipe-on-delegated": {
       "purpose": "lane delegated: systemd around local, with a reason, admits a profile requiring stdin_pipe, reported declared_insecure: true with the reason.",
       "steps": [
@@ -11493,7 +13370,8 @@
                 "whole_tree_kill",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "inner": {
@@ -11755,7 +13633,8 @@
                 "whole_tree_kill",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "inner": {
@@ -11937,7 +13816,8 @@
                 "whole_tree_kill",
                 "local_permitted",
                 "host_network",
-                "stdin_pipe"
+                "stdin_pipe",
+                "output_live"
               ]
             },
             "inner": {

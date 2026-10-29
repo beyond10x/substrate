@@ -59,3 +59,11 @@ scenarios:
   - scenarios/macos-io-admits-stdin-pipe-on-macos.yaml
   - scenarios/oci-admits-stdin-pipe-on-oci.yaml
   - scenarios/pod-stdin-pipe-unserved-on-pod.yaml
+  - scenarios/local-admits-output-live-on-portable.yaml
+  - scenarios/linux-admits-output-live-on-delegated.yaml
+  - scenarios/systemd-local-admits-output-live-on-delegated.yaml
+  - scenarios/systemd-linux-admits-output-live-on-delegated.yaml
+  - scenarios/model-output-live-unserved-on-interpreted.yaml
+  - scenarios/macos-io-admits-output-live-on-macos.yaml
+  - scenarios/oci-admits-output-live-on-oci.yaml
+  - scenarios/pod-output-live-unserved-on-pod.yaml

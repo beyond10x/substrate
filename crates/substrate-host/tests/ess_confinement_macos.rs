@@ -1,6 +1,6 @@
 //! The confinement contract's macos lane (`story:macos-adapter-on-seatbelt`, S1, and
 //! `story:macos-seatbelt-policy-runs-cargo-test`, S2), and the `macos-io-*` stage of design 32
-//! (`story:adapter-stdin-pipe`).
+//! (`story:adapter-stdin-pipe` and `story:adapter-live-output`).
 //!
 //! Executes every authored `-on-macos` scenario of `spec/confinement-suite.json` against the real
 //! `macos` adapter, opened through `confinement::open` on a macOS host, and `absent-linux-*`
@@ -8,9 +8,9 @@
 //! it must equal what ran.
 //!
 //! Every macos open step states the final declared set, `sealed_paths`, `exec_subpaths` and
-//! `private_tmpdir` included, and `stdin_pipe` since design 32, and the adapter must have proved
-//! exactly that set; each `macos-s2-*` and `macos-io-*` admission runs through the runner like
-//! every other scenario.
+//! `private_tmpdir` included, and `stdin_pipe` and `output_live` since design 32, and the adapter
+//! must have proved exactly that set; each `macos-s2-*` and `macos-io-*` admission runs through
+//! the runner like every other scenario.
 //!
 //! Beside the suite: a run is confined to its workspace and its declared read-only roots, a root
 //! that would appear anywhere but at its host path is refused by name, and `limits`,
@@ -89,13 +89,13 @@ fn events(records: &Mutex<Vec<AuditRecord>>) -> Vec<String> {
 
 /// The authored `-on-macos` scenarios `spec/confinement-suite.json` holds. Pinned, so a scenario
 /// lost or renamed out of the lane fails here instead of shrinking what runs.
-const MACOS_DECLARED: usize = 9;
+const MACOS_DECLARED: usize = 10;
 
 /// Of those, the `macos-s1-*`, the `macos-s2-*` and the `macos-io-*` scenarios (design 32); the
 /// rest are `absent-*`.
 const MACOS_S1: usize = 4;
 const MACOS_S2: usize = 3;
-const MACOS_IO: usize = 1;
+const MACOS_IO: usize = 2;
 
 #[test]
 fn ess_confinement_macos_lane_executes_every_authored_macos_scenario() {

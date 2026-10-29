@@ -180,11 +180,11 @@ What it does not establish:
 confinement contract of atlas ADR 0109 before any adapter code. What the green check establishes:
 
 - The model validates under ESS 0.75.0 with no warning, and `confinement-suite.json` is its exact
-  synthesized suite (5 scenarios, 31 refusals) plus the 57 authored scenarios under
-  `confinement/scenarios/`. Each of the 36 outcomes has at least one scenario, and each refused
+  synthesized suite (5 scenarios, 32 refusals) plus the 65 authored scenarios under
+  `confinement/scenarios/`. Each of the 37 outcomes has at least one scenario, and each refused
   obligation an authored one ([`confinement/README.md`](confinement/README.md) says why synthesis
   refuses them).
-- All 62 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
+- All 70 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
   adapter.
 - `OpenAdapter` refuses a `local` (or `systemd` around `local`) set without `declared_insecure` and
   an `oci` or `pod` set without `image_digest_pinned`, so no admission can report `local`
@@ -207,9 +207,12 @@ What it does not establish:
   exactly 64 lowercase hex characters follow `@sha256:` is the `oci` and `pod` adapters' check.
 - **No probe.** Each scenario's open step states the adapter's declared set. Whether a host
   actually proves those facts is the adapter's runtime claim.
-- **No stream bounds.** A profile asking for a piped standard input requires `stdin_pipe`, which
-  the model holds. Its `limit_bytes` range is raised by an adapter's `check`, which `AdmitProfile`
-  does not model, and is held by the adapters' Rust cases (design 32 § 6).
+- **No stream bounds.** A profile asking for a piped standard input requires `stdin_pipe`, and one
+  asking for live output requires `output_live`, which the model holds. The `limit_bytes` and
+  `queued_chunks` ranges and the refusal of live output beside a retention other than `Head`
+  (`confinement.live-output-retention-invalid`) are raised by an adapter's `check`, which
+  `AdmitProfile` does not model, and `run_with_stdin`'s `confinement.live-output-unread` by a
+  helper outside admission; the adapters' Rust cases hold them (design 32 § 6).
 - **No refusal audit record.** ESS admits no event on an outcome that reports an error, so the
   refusal's `ProfileRefused` record is an adapter-test obligation: S0's tests assert it.
 - **No wire.** The contract is substrate-host's API. No route, wire field or bundle changes.

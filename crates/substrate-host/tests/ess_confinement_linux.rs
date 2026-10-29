@@ -73,7 +73,7 @@ fn open_linux(
 /// The authored `-on-delegated` scenarios of `spec/confinement-suite.json` that open only
 /// `linux`. Pinned, so a scenario lost or renamed out of the lane fails here instead of shrinking
 /// what runs.
-const LINUX_DELEGATED: usize = 10;
+const LINUX_DELEGATED: usize = 11;
 
 #[test]
 fn ess_confinement_delegated_lane_executes_every_authored_linux_scenario() {

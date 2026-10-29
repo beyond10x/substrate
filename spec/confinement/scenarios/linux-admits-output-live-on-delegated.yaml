@@ -1,0 +1,45 @@
+# Design 32 (`story:adapter-live-output`): `linux` delivers a run's output while it runs through
+# the host driver's pipe channel with a live sender, read in slices behind the adapter's reader
+# lock. It proves `output_live` with the floor that proves its other facts.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-admits-output-live-on-delegated
+summary: "lane delegated: linux admits a profile requiring output_live, reported declared_insecure: false."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-10-29T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-10-29T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [output_read]
+      required_facts: [output_live]
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: linux
+          families: [output_read]
+          facts: [output_live]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: linux
+      facts: [output_live]
+      declared_insecure: false

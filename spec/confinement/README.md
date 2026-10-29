@@ -113,26 +113,26 @@ follows:
 
 | lane | scenarios |
 |---|---|
-| `portable` | 19: twelve `local-*` (admission, a missing reason, host policy, a filesystem view, four facts, both reserved fields, the open without `declared_insecure`, `stdin_pipe` admitted), three `*-open-without-*` for `systemd` around `local`, `oci` and `pod`, and four `absent-*` (`macos`, `systemd`, `oci`, `pod`) with their setup in the summary |
-| `delegated` | 17: ten `linux-*`, seven `systemd-*` (three around `local`, four around `linux`, one of them requested on a scope opened around `local`); `stdin_pipe` admitted on `linux` and on `systemd` around each |
-| `macos` | 9: `absent-linux-*`, four `macos-s1-*`, three `macos-s2-*`, one `macos-io-*` (`stdin_pipe` admitted) |
-| `oci` | 6: admission by digest, `stdin_pipe` admitted on the lane's pinned runtime, egress refused, three images refused `image-unpinned` (a tag, `@sha256:` with no digest, a short digest) |
-| `pod` | 4: admission by digest, a filesystem view refused, `stdin_pipe` refused `fact-unserved`, `@sha256:latest` refused `image-unpinned` |
-| `interpreted` | 2: `model-*`, the six families every declared adapter serves, each refused by name, and `stdin_pipe` refused by name on a row that holds `linux`'s other facts |
+| `portable` | 20: thirteen `local-*` (admission, a missing reason, host policy, a filesystem view, four facts, both reserved fields, the open without `declared_insecure`, `stdin_pipe` admitted, `output_live` admitted), three `*-open-without-*` for `systemd` around `local`, `oci` and `pod`, and four `absent-*` (`macos`, `systemd`, `oci`, `pod`) with their setup in the summary |
+| `delegated` | 20: eleven `linux-*`, nine `systemd-*` (four around `local`, five around `linux`, one of them requested on a scope opened around `local`); `stdin_pipe` and `output_live` each admitted on `linux` and on `systemd` around each |
+| `macos` | 10: `absent-linux-*`, four `macos-s1-*`, three `macos-s2-*`, two `macos-io-*` (`stdin_pipe` admitted, `output_live` admitted) |
+| `oci` | 7: admission by digest, `stdin_pipe` admitted on the lane's pinned runtime, `output_live` admitted, egress refused, three images refused `image-unpinned` (a tag, `@sha256:` with no digest, a short digest) |
+| `pod` | 5: admission by digest, a filesystem view refused, `stdin_pipe` and `output_live` each refused `fact-unserved`, `@sha256:latest` refused `image-unpinned` |
+| `interpreted` | 3: `model-*`, the six families every declared adapter serves, each refused by name, and `stdin_pipe` and `output_live` each refused by name on a row that holds `linux`'s other facts |
 
 **Synthesized scenarios check the model against the interpreted reference only.** ESS names them
 by command and outcome (`substrate.confinement.OpenAdapter/outcome/opened`) and cannot rename
 them, so they carry no adapter and no lane, and no adapter lane selects them. Adapter lanes run the
 authored scenarios above.
 
-Synthesis writes 5 scenarios, all on `OpenAdapter`, and refuses 31 obligations, every one on
+Synthesis writes 5 scenarios, all on `OpenAdapter`, and refuses 32 obligations, every one on
 `AdmitProfile`. The open refusals that keep a `local` row declared insecure and an `oci` or `pod`
 row digest-pinned are guards on the adapter identity, and with them ESS 0.75.0 synthesis arranges
 no adapter row for an admission (`ESS-SYNTH-003`, "no candidate of the 15 tried satisfies
 `substrate.confinement.Adapter` stored related row selecting this branch", and `ESS-SYNTH-001` for
 the reserved fields and `adapter-not-open`). The model
-keeps the refusals and the authored scenarios carry admission: each of the 36 outcomes of the two
-commands has at least one scenario among the 57 authored. All 62 scenarios pass against ESS
+keeps the refusals and the authored scenarios carry admission: each of the 37 outcomes of the two
+commands has at least one scenario among the 65 authored. All 70 scenarios pass against ESS
 0.75.0's `interpreted` target.
 
 ## Open questions (`UNMAPPED:` in `confinement.yaml`)

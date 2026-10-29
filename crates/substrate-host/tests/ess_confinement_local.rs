@@ -70,7 +70,7 @@ fn open_portable(
 
 /// The authored `-on-portable` scenarios `spec/confinement-suite.json` holds. Pinned, so a
 /// scenario lost or renamed out of the lane fails here instead of shrinking what runs.
-const PORTABLE_DECLARED: usize = 19;
+const PORTABLE_DECLARED: usize = 20;
 
 /// The portable scenarios this host cannot execute, by name: an `absent-<adapter>-*` scenario on
 /// the platform where that adapter is present.
@@ -82,9 +82,9 @@ const NOT_EXECUTABLE_HERE: &[&str] = &[];
 
 /// What this host executes of the portable lane.
 #[cfg(target_os = "macos")]
-const PORTABLE_EXECUTED: usize = 18;
-#[cfg(not(target_os = "macos"))]
 const PORTABLE_EXECUTED: usize = 19;
+#[cfg(not(target_os = "macos"))]
+const PORTABLE_EXECUTED: usize = 20;
 
 #[test]
 fn ess_confinement_portable_lane_executes_every_authored_portable_scenario() {

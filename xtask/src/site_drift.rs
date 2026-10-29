@@ -69,7 +69,7 @@ pub(crate) fn check(root: &Path, rendered: &BTreeMap<&str, Rendered>) -> Result<
     );
     first_column(
         page(CONTRACTS)?,
-        "the-twelve-facts",
+        "the-thirteen-facts",
         &enums.facts,
         &mut failures,
     );

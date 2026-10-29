@@ -1,0 +1,52 @@
+# Design 32 (`story:adapter-live-output`): `systemd` around `local` spawns the run with the same
+# live queue as `local`, and a stall kills the run's cgroup; the run stays declared insecure and
+# needs a reason.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: systemd-local-admits-output-live-on-delegated
+summary: "lane delegated: systemd around local, with a reason, admits a profile requiring output_live, reported declared_insecure: true with the reason."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-10-29T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [declared_insecure, paths_are_host_paths, whole_tree_kill, local_permitted, host_network, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-10-29T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      required_families: [output_read]
+      required_facts: [output_live]
+      local_reason: the operator follows this bounded run's output on the developer's own machine
+    outcome: admitted-insecure
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: systemd
+          inner: local
+          families: [output_read]
+          facts: [output_live]
+          declared_insecure: true
+          local_reason: the operator follows this bounded run's output on the developer's own machine
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: systemd
+      inner: local
+      facts: [output_live]
+      declared_insecure: true
+      local_reason: the operator follows this bounded run's output on the developer's own machine

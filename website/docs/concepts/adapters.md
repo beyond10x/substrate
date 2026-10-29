@@ -68,6 +68,7 @@ scenarios.
 | `host_network` | TRUE | FALSE | FALSE | TRUE | FALSE | FALSE | FALSE |
 | `image_digest_pinned` | FALSE | FALSE | FALSE | FALSE | FALSE | TRUE | TRUE |
 | `stdin_pipe` | TRUE | UNKNOWN | TRUE | TRUE | UNKNOWN | UNKNOWN | FALSE |
+| `output_live` | TRUE | UNKNOWN | TRUE | TRUE | UNKNOWN | TRUE | FALSE |
 
 Every refusal in the sections below comes after the contract's own order (a reserved field, an
 adapter that did not open, a missing reason, an unpinned image, the host's policy, then the first

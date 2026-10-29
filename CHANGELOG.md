@@ -140,6 +140,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **Breaking (`substrate-host` public API, design 32):** the confinement `Fact` enum gains `StdinPipe`, so an exhaustive `match` on it breaks and a consumer on an older revision cannot deserialize an `AdapterFacts` or an audit record that names `stdin_pipe`.
 - **Breaking (`substrate-host` public API, design 32):** `FACT_ORDER` changes type from `[Fact; 11]` to `[Fact; 12]`; code that names the array type or relies on its length breaks.
 - **Breaking (`substrate-host` public API, design 32):** `ConfinementProfile` gains `stdin`, so a struct literal without `..ConfinementProfile::default()` and an exhaustive destructuring pattern break.
+- **Breaking (`substrate-host` public API, design 32):** the confinement `Fact` enum gains `OutputLive`, so an exhaustive `match` on it breaks and a consumer on an older revision cannot deserialize an `AdapterFacts` or an audit record that names `output_live`.
+- **Breaking (`substrate-host` public API, design 32):** `FACT_ORDER` changes type from `[Fact; 12]` to `[Fact; 13]`; code that names the array type or relies on its length breaks.
 
 ### Fixed
 
