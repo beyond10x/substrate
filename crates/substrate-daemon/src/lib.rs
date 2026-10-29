@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod backend_ledger;
 mod delegation;
 mod hosted;
 mod runtime;
@@ -9,6 +10,7 @@ mod tls;
 pub use app::{
     App, Authority, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity, SystemAuthority, router,
 };
+pub use backend_ledger::{StoreBackendLedger, UNSETTLED_PAGE, operation_digest};
 pub use delegation::{ContextRefusal, DelegatedContextPolicy, TrustedKey, VerifiedContext};
 pub use hosted::HostedIdentityConfig;
 pub use runtime::{

@@ -1,3 +1,4 @@
+use crate::backend::insert_backend_objects;
 use crate::events::{append_event, commit_effect};
 use crate::leases::{freeze_workspace_lease_if_due, upsert_lease};
 use crate::operations::{
@@ -7,8 +8,8 @@ use crate::operations::{
 };
 use crate::sessions::{load_session_for_exec, project_session_from_exec, session_transition};
 use crate::{
-    LeaseClock, NewLease, NewOperation, OperationCapacity, RecoveryExec, Reservation,
-    ResourceCapacity, Scope, Store, StoreError, StoredAnswer,
+    BackendObjectKind, BackendReservation, LeaseClock, NewLease, NewOperation, OperationCapacity,
+    RecoveryExec, Reservation, ResourceCapacity, Scope, Store, StoreError, StoredAnswer,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
@@ -93,6 +94,29 @@ impl Store {
         lease: Option<&NewLease>,
         workspace_clock: Option<&LeaseClock>,
         git_roots: &[String],
+    ) -> Result<Reservation, StoreError> {
+        self.reserve_exec_start_with_backend(
+            new,
+            provisional,
+            lease,
+            workspace_clock,
+            git_roots,
+            &BackendReservation::default(),
+        )
+    }
+
+    /// [`Self::reserve_exec_start_binding`] that also reserves the backend object names a driver
+    /// will create for the exec (design 34 § 4), in the transaction that records `accepted`. A
+    /// name the deployment already holds refuses the whole reservation and commits nothing.
+    #[allow(clippy::too_many_lines)] // Admission, acceptance, lease and names are atomic.
+    pub fn reserve_exec_start_with_backend(
+        &self,
+        new: &NewOperation,
+        provisional: &StoredExec,
+        lease: Option<&NewLease>,
+        workspace_clock: Option<&LeaseClock>,
+        git_roots: &[String],
+        backend: &BackendReservation,
     ) -> Result<Reservation, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -186,6 +210,14 @@ impl Store {
                 &new.operation,
             )?;
         }
+        insert_backend_objects(
+            &transaction,
+            &new.scope.deployment,
+            BackendObjectKind::Exec,
+            &provisional.resource.id,
+            &new.accepted_at,
+            backend,
+        )?;
         transaction.commit()?;
         drop(connection);
         self.report_committed(&[commit_effect(&new.scope, &event)]);

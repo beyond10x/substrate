@@ -9,6 +9,7 @@ use substrate_wire::{
 };
 use thiserror::Error;
 
+mod backend;
 mod events;
 mod execs;
 mod host_processes;
@@ -24,6 +25,10 @@ mod workspaces;
 #[cfg(test)]
 mod tests;
 
+pub use backend::{
+    BackendObject, BackendObjectKind, BackendObjectName, BackendObjectRole, BackendReservation,
+    BackendUidBinding,
+};
 pub use events::{CommitEffect, CommitEffectSink, EventCursorError};
 pub use execs::{ExecRetireReservation, ExecWrite, StoredExec, WorkspaceExecState};
 pub use host_processes::{
@@ -55,7 +60,9 @@ pub use workspaces::{
 
 /// The schema version this binary opens: stamped into the database's `user_version` once every
 /// migration has run, and compared by the daemon's readiness check (ADR 0045).
-pub const SCHEMA_VERSION: i64 = 1;
+///
+/// 2 adds the `backend_objects` table (design 34 § 4).
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub const DEFAULT_OPERATION_SUBJECT_MAX_ROWS: u64 = OPERATION_LEDGER_SUBJECT_MAX_ROWS;
 
@@ -178,6 +185,10 @@ pub enum StoreError {
     InvalidSessionAuthority,
     #[error("host process record invariant violated: {0}")]
     HostProcessInvariant(&'static str),
+    #[error("backend object name {0} is already reserved in this deployment")]
+    BackendNameHeld(String),
+    #[error("stored backend object does not match its closed shape")]
+    BackendObjectShape,
 }
 
 fn to_u64(value: i64) -> Result<u64, StoreError> {
