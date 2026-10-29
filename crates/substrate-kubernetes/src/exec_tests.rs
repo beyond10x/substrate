@@ -1170,5 +1170,99 @@ async fn a_gone_log_leaves_the_exec_unknown_without_an_exit() {
     );
 }
 
+/// Design 28 and design 34 § 9: the wall bound is `activeDeadlineSeconds`, and a Pod not ended 60 s
+/// after it is deleted under its uid and ends as a `Kill`. A Pod the kubelet never started
+/// (unschedulable, image not pulled) shows no terminated container, so only the driver's own
+/// deletion ends it: past the bound plus 60 s the exec is `Cancelled` and its Pod is gone.
+#[tokio::test]
+async fn a_pod_never_started_is_deleted_sixty_seconds_past_its_wall_bound() {
+    let rig = rig().await;
+    let id = "exec_wall";
+    rig.started(id, &input(&["/bin/sleep", "60"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.clock.set(Duration::from_secs(10 + 60 + 1));
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        ended.resource.state,
+        ExecState::Cancelled,
+        "the wall bound and its 60 s deletion ended the exec"
+    );
+    assert!(
+        rig.pod(&name).is_none(),
+        "the Pod is deleted under its uid past the wall bound"
+    );
+}
+
+/// Design 34 § 5, exec start's restart column: a `pod` row that reconciliation settled (its create
+/// never answered past the N9 bound) is never dispatched again, so starting it creates no Pod.
+#[tokio::test]
+async fn a_settled_pod_row_is_never_dispatched_again() {
+    let rig = rig().await;
+    let id = "exec_settled";
+    let name = rig.reserve(id);
+    rig.ledger.settle(&name).expect("the row settles");
+    let outcome = rig
+        .driver
+        .exec_start(id, &rig.pvc, &input(&["/bin/true"]))
+        .await;
+    assert_eq!(rig.pod_creates(), 0, "a settled row created a Pod");
+    let DispatchOutcome::NotDispatched(_) = outcome else {
+        panic!("a settled row was dispatched");
+    };
+}
+
+/// Design 34 § 7.3: an exec Pod is owned by the workspace PVC by uid and mounts it by name. A PVC
+/// deleted and created again under the same name has another uid, so a start over the workspace's
+/// bound rows is refused before any Pod create.
+#[tokio::test]
+async fn a_replaced_workspace_pvc_refuses_the_start_before_any_pod() {
+    let rig = rig().await;
+    rig.admin
+        .delete(&format!("{}/{}", rig.admin.claims(), rig.pvc), 0)
+        .await
+        .expect("the PVC is deleted");
+    let replacement = rig
+        .fake
+        .seed(
+            "persistentvolumeclaims",
+            json!({"metadata": {"name": rig.pvc}, "spec": {}}),
+        )
+        .expect("the PVC is stored again");
+    assert_ne!(
+        uid(&replacement),
+        rig.pvc_uid,
+        "the replacement has another uid"
+    );
+    let outcome = rig.start("exec_pvc", &input(&["/bin/true"])).await;
+    assert_eq!(
+        rig.pod_creates(),
+        0,
+        "a Pod was created over a replaced PVC"
+    );
+    let DispatchOutcome::NotDispatched(_) = outcome else {
+        panic!("the start over a replaced PVC was dispatched");
+    };
+}
+
+/// Design 34 § 7.3 and invariant 3: the executor exits 125 when its applied limits differ from the
+/// run spec and says so only in its log. A log whose applied record differs from the Pod's own spec,
+/// followed by exit 0, must not be reported as an `exited` run: the bounds it did not apply are not
+/// proven.
+#[tokio::test]
+async fn an_applied_record_that_differs_from_the_spec_is_not_an_exit() {
+    let rig = rig().await;
+    let id = "exec_mismatch";
+    rig.started(id, &input(&["/bin/true"])).await;
+    let log = [applied_line(1, 1), exit_line(0)].concat();
+    rig.terminated(&names::exec_pod(DEPLOYMENT, id), 0, log.as_bytes())
+        .await;
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_ne!(
+        ended.resource.state,
+        ExecState::Exited,
+        "a run whose applied limits differ from its spec was reported as exited"
+    );
+}
+
 #[path = "restart_tests.rs"]
 mod restart;
