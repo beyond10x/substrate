@@ -85,8 +85,8 @@ An unconfined host process, always declared insecure.
   run's process group; the leader stays unreaped until its output closes, so its group id cannot
   be reused.
 - **Declares.** `process_run`, `process_watch`, `output_read`, `wait`, `workspace` (a host
-  directory) and `audit`; the facts `declared_insecure`, `paths_are_host_paths` and
-  `host_network`, and `local_permitted` unless the host forbids it.
+  directory) and `audit`; the facts `declared_insecure`, `paths_are_host_paths`, `host_network`
+  and `output_live`, and `local_permitted` unless the host forbids it.
 - **Refuses by name.** A profile without a reason (`confinement.local-reason-missing`); any profile
   when the host forbids `local` (`confinement.local-refused`); every filesystem view, network
   policy and bound (`confinement.family-unserved`); a profile that requires a fact it does not
@@ -112,7 +112,7 @@ The host driver behind the contract: bubblewrap, namespaces, cgroup v2, seccomp 
   namespaces), `output_read` with an output limit, `workspace` with guarded I/O,
   `filesystem_view` with read-only roots and files, `network_egress` with a declared egress
   aperture, `limits` with cgroup limits on processes, memory and CPU, and `audit` always. Facts:
-  `whole_tree_kill` with cgroup kill, `ipc_socket_allowlist` on the floor, and
+  `whole_tree_kill` with cgroup kill, `ipc_socket_allowlist` and `output_live` on the floor, and
   `ipc_signals_contained` on the floor with a pid namespace.
 - **Refuses by name.** A profile that requires `paths_are_host_paths`, `sealed_paths`,
   `exec_subpaths`, `private_tmpdir` or `host_network` (`confinement.fact-unserved`); a working
@@ -137,7 +137,8 @@ A host process under a Seatbelt profile, run through `/usr/bin/sandbox-exec`.
   subpaths are admitted, and the run's environment is all it sees. `signal` reaches only the same
   sandbox.
 - **Declares.** `process_run`, `process_watch`, `output_read`, `wait`, `workspace`,
-  `filesystem_view` and `audit`; the facts `paths_are_host_paths` and `ipc_signals_contained`.
+  `filesystem_view` and `audit`; the facts `paths_are_host_paths`, `ipc_signals_contained` and
+  `output_live`.
   The build policy adds three facts, each only when a Seatbelt probe at open saw it enforced:
   `sealed_paths` (paths inside the workspace, and the directories above them, stay unwritable),
   `exec_subpaths` (programs beneath a declared directory may run: a workspace-relative path such as
@@ -170,10 +171,10 @@ adapter the process opens shares it.
   swap, `memory.oom.group`, the timeout and the cumulative CPU budget, and `cgroup.kill`. Around
   `linux`: the scope is the host driver's delegated cgroup root, so `linux` enforces its own
   bounds. The scope carries the nearest process and memory bound of the cgroup the process left.
-- **Declares.** Around `local`: `local`'s families plus `limits`, and `local`'s facts plus
-  `whole_tree_kill`. The run stays declared insecure and needs a reason, because a run with the
-  embedder's uid can raise its own `pids.max` or leave its cgroup. Around `linux`: exactly what
-  `linux` proved inside the scope.
+- **Declares.** Around `local`: `local`'s families plus `limits`, and `local`'s facts,
+  `output_live` among them, plus `whole_tree_kill`. The run stays declared insecure and needs a
+  reason, because a run with the embedder's uid can raise its own `pids.max` or leave its cgroup.
+  Around `linux`: exactly what `linux` proved inside the scope, `output_live` on the floor.
 - **Refuses by name.** Around `local`, an environment that names `DBUS_SESSION_BUS_ADDRESS`,
   `DBUS_STARTER_ADDRESS` or `XDG_RUNTIME_DIR` (`exec.environment-refused`); a requested `inner`
   other than the one it opened around (`confinement.adapter-unserved`); a second `systemd` around
@@ -198,8 +199,8 @@ One Docker or podman container per run, the image named by digest only.
   read-only. The container is removed after `wait`, a kill or a timeout.
 - **Declares.** `process_run`, `process_watch`, `output_read`, `wait`, `workspace`,
   `filesystem_view` and `audit`, `limits` when the runtime reports memory, swap, pids and CPU quota
-  control, and the fact `image_digest_pinned`. It does not prove `ipc_socket_allowlist`: a Unix
-  socket beneath a bound root is reachable from the container.
+  control, and the facts `image_digest_pinned` and `output_live`. It does not prove
+  `ipc_socket_allowlist`: a Unix socket beneath a bound root is reachable from the container.
 - **Refuses by name.**
   - An image that is not `name@sha256:` and 64 lowercase hex characters
     (`confinement.image-unpinned`), and a pinned image the runtime does not hold
@@ -241,8 +242,9 @@ cluster configuration names. The adapter speaks to the API server itself; it run
   writable or read-only roots and files (`confinement.family-unserved` naming `filesystem_view`);
   a network policy (`confinement.family-unserved` naming `network_egress`); a processes bound the
   cluster does not hold (`confinement.pod-processes-unserved`); an interrupt signal, since the API
-  delivers only termination (`confinement.pod-signal-unserved`); an argv over 256 KiB or holding a
-  NUL (`exec.argv-invalid`); a request the API refused or failed (`confinement.pod-api-failed`).
+  delivers only termination (`confinement.pod-signal-unserved`); live output
+  (`confinement.fact-unserved` naming `output_live`); an argv over 256 KiB or holding a NUL
+  (`exec.argv-invalid`); a request the API refused or failed (`confinement.pod-api-failed`).
 - **Needs.** The JSON form of a kubeconfig whose current context names a namespace, a cluster and a
   user. The optional `b10x-substrate/pod` context extension sets `run_as_user`, `pod_pids_limit` and
   `ephemeral_storage_bytes`; without `pod_pids_limit` no profile is admitted. The credential must
