@@ -5,6 +5,9 @@ mod backend_ledger;
 mod delegation;
 mod hosted;
 mod runtime;
+#[cfg(test)]
+#[path = "../../../test-support/unix_socket.rs"]
+mod test_unix_socket;
 mod tls;
 
 pub use app::{

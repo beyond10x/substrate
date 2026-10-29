@@ -19,6 +19,9 @@ use substrate_store::Store;
 use tempfile::TempDir;
 use tower::ServiceExt as _;
 
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
 const HEADER: &str = "x-b10x-omitted-entries";
 
 struct Harness {
@@ -108,7 +111,13 @@ fn mkfifo(path: &std::path::Path) {
 }
 
 fn socket(path: &std::path::Path) {
-    drop(std::os::unix::net::UnixListener::bind(path).expect("bind socket"));
+    let directory = path.parent().expect("socket directory");
+    let name = path
+        .file_name()
+        .expect("socket name")
+        .to_str()
+        .expect("UTF-8 name");
+    drop(unix_socket::bind_in(directory, name));
 }
 
 fn non_utf8(directory: &std::path::Path, raw: &[u8]) -> PathBuf {

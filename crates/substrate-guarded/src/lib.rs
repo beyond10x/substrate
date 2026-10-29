@@ -17,6 +17,9 @@
 pub mod environment;
 #[cfg(target_os = "linux")]
 pub mod fs;
+#[cfg(test)]
+#[path = "../../../test-support/unix_socket.rs"]
+mod test_unix_socket;
 
 use thiserror::Error;
 

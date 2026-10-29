@@ -90,6 +90,10 @@ fn atomic_replace(path: &Path, bytes: &[u8], mode: u32) {
 
 #[path = "support/ports.rs"]
 mod ports;
+#[path = "../../../test-support/readiness.rs"]
+mod readiness;
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
 use ports::unused_address;
 
 fn daemon_command(
@@ -287,7 +291,7 @@ async fn connect_when_ready(
     address: SocketAddr,
     connector: &TlsConnector,
 ) -> TlsStream<TcpStream> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + readiness::DAEMON_READINESS;
     loop {
         if let Some(status) = child.try_wait().expect("inspect daemon") {
             let mut stderr = String::new();
@@ -301,12 +305,57 @@ async fn connect_when_ready(
         if let Ok(stream) = connect(address, connector, SERVER_NAME).await {
             return stream;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "TLS daemon readiness timed out"
-        );
+        if tokio::time::Instant::now() >= deadline {
+            let stderr = readiness::stderr_of_unready(child).await;
+            panic!(
+                "TLS daemon readiness timed out after {:?}: {stderr}",
+                readiness::DAEMON_READINESS
+            );
+        }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+/// story:test-daemon-readiness-under-load: a daemon still running at the readiness deadline is
+/// killed and its own stderr is handed to the failure message. A stand-in that writes a line and
+/// never becomes ready plays the daemon, so the case does not wait out the deadline.
+#[tokio::test]
+async fn an_unready_daemon_is_ended_and_its_stderr_reported() {
+    let root = TempDir::new().expect("temporary root");
+    let written = root.path().join("written");
+    let mut child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "echo never-ready-marker >&2; : > \"$1\"; exec sleep 600",
+            "sh",
+        ])
+        .arg(&written)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn the stand-in daemon");
+    // The line is in the pipe once the file exists; nothing reads the pipe before the helper.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !written.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the stand-in never wrote"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        child.try_wait().expect("inspect").is_none(),
+        "still running"
+    );
+
+    let stderr = readiness::stderr_of_unready(&mut child).await;
+    assert!(
+        child.try_wait().expect("inspect").is_some(),
+        "the unready daemon was left running"
+    );
+    assert_eq!(stderr, "never-ready-marker\n");
 }
 
 async fn request(stream: &mut TlsStream<TcpStream>, request: &[u8]) -> Vec<u8> {
@@ -1581,7 +1630,7 @@ async fn ops_connect_from(source: [u8; 4], address: SocketAddr) -> TcpStream {
 /// listener's task for it runs, after the client has moved on. So no attempt opens a connection
 /// it does not send a request on: a test that fills the slots next must find them free.
 async fn ops_when_ready(child: &mut Child, address: SocketAddr) -> OpsAnswer {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + readiness::DAEMON_READINESS;
     loop {
         let last;
         if let Some(status) = child.try_wait().expect("inspect daemon") {
@@ -1615,10 +1664,13 @@ async fn ops_when_ready(child: &mut Child, address: SocketAddr) -> OpsAnswer {
             }
             Err(error) => panic!("operational listener connection: {error}"),
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "operational readiness timed out; last attempt: {last}"
-        );
+        if tokio::time::Instant::now() >= deadline {
+            let stderr = readiness::stderr_of_unready(child).await;
+            panic!(
+                "operational readiness timed out after {:?}; last attempt: {last}: {stderr}",
+                readiness::DAEMON_READINESS
+            );
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

@@ -17,6 +17,9 @@ use substrate_wire::{
 use tempfile::TempDir;
 use tower::ServiceExt as _;
 
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
 struct Harness {
     directory: TempDir,
     app: Arc<App>,
@@ -676,7 +679,7 @@ async fn special_entries_are_omitted_from_both_listing_routes_rather_than_refuse
         .status()
         .expect("run mkfifo");
     assert!(fifo.success(), "mkfifo");
-    drop(std::os::unix::net::UnixListener::bind(mixed.join("b-socket")).expect("bind socket"));
+    drop(unix_socket::bind_in(&mixed, "b-socket"));
     std::fs::write(
         mixed.join(std::ffi::OsString::from_vec(b"c\xff".to_vec())),
         b"x",
@@ -800,6 +803,50 @@ async fn strict_limits_and_path_escape_are_typed_before_dispatch() {
         .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(limit["error"]["code"], "request.body-limit");
+}
+
+/// story:test-socket-paths-fit-sun-len: under a `TMPDIR` of 100 bytes, a socket the test may place
+/// anywhere goes to a short directory the helper owns, a socket that must be one directory's entry
+/// is bound there all the same, and a path that cannot fit is refused naming its length and the
+/// limit.
+#[test]
+fn socket_helpers_fit_beneath_a_100_byte_tmpdir() {
+    use std::os::unix::fs::FileTypeExt as _;
+    use std::os::unix::net::UnixStream;
+
+    let base = unix_socket::tempdir(&"t".repeat(60));
+    let pad = 100 - base.path().as_os_str().len() - 1;
+    let tmpdir = base.path().join("t".repeat(pad));
+    std::fs::create_dir(&tmpdir).expect("the 100-byte TMPDIR");
+    assert_eq!(tmpdir.as_os_str().len(), 100);
+
+    let owned = unix_socket::tempdir_under(&tmpdir, "owned/substrate.sock");
+    let socket = owned.path().join("owned/substrate.sock");
+    std::fs::create_dir(socket.parent().expect("parent")).expect("socket parent");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("owned socket binds");
+    UnixStream::connect(&socket).expect("owned socket connects");
+    drop(listener);
+
+    let beside = unix_socket::socket_path(&tmpdir, "substrate.sock");
+    assert_ne!(beside.parent(), Some(tmpdir.as_path()));
+    drop(std::os::unix::net::UnixListener::bind(&*beside).expect("relocated socket binds"));
+
+    let entry = tmpdir.join("workspace");
+    std::fs::create_dir(&entry).expect("fixed directory");
+    let long = entry.join("b-socket");
+    assert!(unix_socket::check(&long).is_err(), "{}", long.display());
+    drop(unix_socket::bind_in(&entry, "b-socket"));
+    let kind = std::fs::symlink_metadata(&long)
+        .expect("the entry")
+        .file_type();
+    assert!(kind.is_socket(), "{kind:?}");
+
+    let refused = unix_socket::check(&tmpdir.join("x".repeat(10))).expect_err("111 bytes");
+    assert!(
+        refused.contains("is 111 bytes")
+            && refused.contains(&format!("{}-byte", unix_socket::SUN_PATH_BYTES)),
+        "{refused}"
+    );
 }
 
 /// The daemon advertises `x-b10x-contract-bundle-sha256` on every response. That header is a

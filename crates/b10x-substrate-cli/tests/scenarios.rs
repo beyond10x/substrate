@@ -13,6 +13,11 @@ use serde_json::Value;
 /// The shipped daemon binary. `SUBSTRATE_TEST_DAEMON` names one; otherwise the one beside this
 /// test, which a workspace run builds; otherwise the workspace's own `substrate-daemon` target is
 /// built once, in this test's profile and target directory, so the lane never runs without one.
+#[path = "../../../test-support/readiness.rs"]
+mod readiness;
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
 fn daemon_binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY
@@ -71,12 +76,13 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
-    let data = tempfile::tempdir().expect("temporary parent");
+    let data = unix_socket::tempdir("owned/substrate.sock");
     let root = data.path().join("owned");
     let mut builder = ManagedDaemon::builder()
         .data_dir(&root)
         .deployment("cli_test")
-        .external_binary(daemon_binary());
+        .external_binary(daemon_binary())
+        .startup_timeout(readiness::DAEMON_READINESS);
     if let Some(cgroup) = std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT") {
         builder = builder.cgroup_root(cgroup);
     }

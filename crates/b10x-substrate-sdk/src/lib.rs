@@ -8,6 +8,9 @@
 mod http_pool;
 mod managed;
 mod model;
+#[cfg(test)]
+#[path = "../../../test-support/unix_socket.rs"]
+mod test_unix_socket;
 mod transport;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -2281,7 +2284,7 @@ mod tests {
     #[tokio::test]
     async fn a_lost_mutation_response_reconciles_and_replays_the_same_operation() {
         const OPERATION: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-        let temporary = tempfile::tempdir().expect("temporary socket directory");
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(

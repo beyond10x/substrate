@@ -38,6 +38,11 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
+#[path = "../../../test-support/readiness.rs"]
+mod readiness;
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
 /// The shipped binary, built by cargo before this integration test runs.
 const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
@@ -202,7 +207,6 @@ fn a_busy_per_test_cgroup_fails_teardown_naming_what_it_held() {
 const HANDSHAKE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 const HANDSHAKE_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
-const READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------------------------
@@ -555,7 +559,7 @@ impl SessionChannel {
 // ---------------------------------------------------------------------------------------------
 
 struct Daemon {
-    socket: PathBuf,
+    socket: unix_socket::SocketPath,
     workspaces: PathBuf,
     command: Vec<String>,
     child: Child,
@@ -619,7 +623,7 @@ impl Daemon {
         writable_roots: &[String],
         extra: &[String],
     ) -> Self {
-        let socket = root.join("substrate.sock");
+        let socket = unix_socket::socket_path(root, "substrate.sock");
         let workspaces = root.join("workspaces");
         let mut command = vec![
             daemon_binary().display().to_string(),
@@ -690,16 +694,23 @@ impl Daemon {
             let _ = pipe.read_to_string(&mut captured).await;
             captured
         });
-        let deadline = Instant::now() + READINESS_TIMEOUT;
+        let deadline = Instant::now() + readiness::DAEMON_READINESS;
         while !socket.exists() {
             if let Some(status) = child.try_wait().expect("daemon status") {
                 let error = (&mut stderr).await.unwrap_or_default();
                 panic!("substrate-daemon exited before readiness ({status}): {error}");
             }
-            assert!(
-                Instant::now() < deadline,
-                "substrate-daemon did not create its Unix socket"
-            );
+            if Instant::now() >= deadline {
+                let _ = child.start_kill();
+                let error = tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut stderr)
+                    .await
+                    .map(Result::unwrap_or_default)
+                    .unwrap_or_default();
+                panic!(
+                    "substrate-daemon did not create its Unix socket within {:?}: {error}",
+                    readiness::DAEMON_READINESS
+                );
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         Self {
