@@ -36,9 +36,10 @@ use substrate_wire::{
 
 use crate::logs::{self, EXECUTOR_PROTOCOL, RunEnd};
 use crate::names::{self, DEPLOYMENT_LABEL, MANAGED_BY, MANAGED_BY_LABEL};
+use crate::namespace::workspace::is_quota_refusal;
 use crate::ownership::{Ownership, ownership};
 use crate::pod::{self, ExecPod, KILL_GRACE_SECONDS, RunBounds, TERM_GRACE_SECONDS};
-use crate::{API_FAILED, EXCEEDED_QUOTA, NamespaceDriver, Removal};
+use crate::{API_FAILED, NamespaceDriver, Removal};
 
 /// A create the namespace refused for its quota (O7, D184): the `ResourceQuota` admission refusal.
 pub const EXEC_CAPACITY: &str = "exec.capacity";
@@ -323,9 +324,8 @@ impl NamespaceDriver {
             },
             Ok((403, body)) => {
                 let message = self.api().status_message(&body);
-                let forbidden = serde_json::from_slice::<Value>(&body)
-                    .is_ok_and(|status| status["reason"] == "Forbidden");
-                DispatchOutcome::NotDispatched(if forbidden && message.contains(EXCEEDED_QUOTA) {
+                let reason = self.api().status_reason(&body);
+                DispatchOutcome::NotDispatched(if is_quota_refusal(403, &reason, &message) {
                     DriverError::exhausted(
                         EXEC_CAPACITY,
                         format!("The namespace's quota refused the exec Pod: {message}"),

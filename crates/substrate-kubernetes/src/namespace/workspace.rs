@@ -33,6 +33,12 @@ pub const WORKSPACE_CAPACITY: &str = "workspace.capacity";
 /// `persistentvolumeclaims "<name>" is forbidden: exceeded quota: <quota>, requested: …`, so the
 /// message is matched for this text anywhere, never only at its start (D184).
 pub const EXCEEDED_QUOTA: &str = "is forbidden: exceeded quota: ";
+
+/// D184: a `ResourceQuota` refusal is a 403 whose `Status.reason` is `Forbidden` and whose
+/// message contains [`EXCEEDED_QUOTA`], all three; the workspace and the exec path both ask this.
+pub(crate) fn is_quota_refusal(status: u16, reason: &str, message: &str) -> bool {
+    status == 403 && reason == "Forbidden" && message.contains(EXCEEDED_QUOTA)
+}
 /// The keeper's container, which `pods/exec` names.
 pub const KEEPER_CONTAINER: &str = "keeper";
 /// Where the keeper mounts the PVC: the executor's guarded root.
@@ -399,9 +405,10 @@ impl NamespaceDriver {
         let stored = match self.api.create(collection, &object).await {
             Ok(created) => created,
             Err(ApiError::Answered {
-                status: 403,
+                status,
+                reason,
                 detail,
-            }) if detail.contains(EXCEEDED_QUOTA) => {
+            }) if is_quota_refusal(status, &reason, &detail) => {
                 return Created::Refused(DriverError::exhausted(
                     WORKSPACE_CAPACITY,
                     "The namespace's ResourceQuota refused the workspace's objects; destroy a \

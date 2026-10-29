@@ -28,7 +28,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   keyless-signed, verified with the tagged workflow identity and read back anonymously before the
   GitHub release is announced, with its digest beside the others. The release also refuses a tag
   without a `Namespace-lane: <sha> <observation-count> <RFC 3339 UTC>` record for the tagged commit,
-  counted from `OBSERVATIONS` in `xtask/src/namespace_lane.rs` (D182).
+  counted from `OBSERVATIONS` in `xtask/src/namespace_lane.rs` (D182), and a tag whose commit has
+  no successful `namespace-lane.yml` run.
+- The Kubernetes namespace driver (design 34, ADR 0047): `substrate-daemon --driver kubernetes
+  --kubernetes-config <file>` serves workspaces as a PersistentVolumeClaim with a keeper Pod, every
+  file route through the executor over `pods/exec`, and each exec as one Pod, in one namespace the
+  driver claims with a Lease. The file is a self-contained JSON kubeconfig with the context
+  extension `b10x-substrate/namespace-driver`; nothing else is read, no ambient kubeconfig and no
+  in-cluster account. A file that does not load stops startup with `kubernetes.config-invalid`, and
+  host-only flags are refused (`config.driver-conflict`). A cluster check that fails leaves every
+  driver fact absent while the daemon serves; each failure's code is logged. `/readyz` reads the
+  snapshot taken after the first probe, or when the cluster check fails for a reason a retry cannot
+  clear; a held Lease is retried. The driver's Role needs `get` and `create` on `pods/exec`,
+  because the API server authorizes the exec WebSocket as
+  `get`, and `get` and `list` on `networkpolicies`. A ResourceQuota refusal is `workspace.capacity`
+  or `exec.capacity` (429). `workspace.adopt` is refused `workspace.adopt-unserved` before any name
+  is looked up, and the `INT` signal `exec.signal-unserved`, both 501. After a restart a running exec reads `unknown` and its Pod is deleted. The
+  probe never proves the four Linux confinement facts or `confinement.no-egress`, so every exec
+  start on this driver is refused `exec.sandbox-unavailable` in this release. The deployment guide
+  has its section.
+- `cargo xtask namespace-lane check` holds the namespace lane's rendered objects to their goldens
+  and its Role to ADR 0047 decision 3, run by the new `namespace-lane.yml` workflow;
+  `cargo xtask namespace-lane observe` runs design 34 § 10.3's observations on a kind cluster of its
+  own on a workstation and prints the `Namespace-lane:` record a release requires.
 
 ### Changed
 
@@ -67,6 +89,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   table (design 34) and stamps it schema version 2. Substrate `0.15.x` and earlier refuse a
   store stamped 2 at open with `NewerSchema` and do not start on it. If you may roll back, back
   up the state directory before upgrading.
+
+### Fixed
+
+- The host confinement probe binds its sentinel socket on a path that fits `sun_path`. Under a
+  long `TMPDIR` the path exceeded it, so the probe answered false and the daemon published no
+  `exec.*` fact for a reason unrelated to the host. It now tries a fresh private directory under
+  `TMPDIR`, then `XDG_RUNTIME_DIR`, then binds through `/proc/self/fd`; when none fits, the log
+  names each path's length and the limit.
 
 ## [0.15.0] — 2026-10-29
 

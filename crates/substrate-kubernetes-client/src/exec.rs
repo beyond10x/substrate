@@ -150,6 +150,7 @@ impl Api {
                     let body = response.body().as_deref().unwrap_or_default();
                     return Err(ApiError::Answered {
                         status,
+                        reason: self.status_reason(body),
                         detail: format!("exec answered {status}: {}", self.status_message(body)),
                     });
                 }

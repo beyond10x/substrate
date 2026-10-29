@@ -26,14 +26,19 @@ use axum::http::{Method, Request, StatusCode};
 use base64::Engine as _;
 use serde_json::{Value, json};
 use substrate_daemon::{
-    App, DaemonConfig, DriverSelection, EgressAperture, GitSourceConfig, Identity, SecretSlot,
-    StoreBackendLedger, SystemAuthority, WritableRootConfig, router, serve,
+    App, DaemonConfig, DriverSelection, EgressAperture, GitSourceConfig, Identity,
+    OpsListenerConfig, SecretSlot, StoreBackendLedger, SystemAuthority, WritableRootConfig, router,
+    serve,
 };
 use substrate_host::{Driver, HostConfig, HostDriver};
 use substrate_kubernetes::NamespaceDriver;
 use substrate_store::Store;
 use tempfile::TempDir;
 use tower::ServiceExt as _;
+
+#[path = "support/ports.rs"]
+mod ports;
+use ports::unused_address;
 
 /// Sets one host-only declaration on a configuration.
 type Declare = fn(&mut DaemonConfig, &Path);
@@ -198,6 +203,148 @@ async fn an_unopened_namespace_driver_is_served_with_every_driver_fact_absent() 
     }
 }
 
+/// ADR 0045 D5 A and design 34 § 6.1: readiness reads one snapshot, taken once the namespace
+/// driver's first open sequence has settled. Until then `driver` fails, even for a fact the
+/// daemon publishes itself. Here the first open's connection is closed unanswered, a refusal the
+/// open's retry can clear, so nothing settles and the daemon stays not ready. The retry's rules
+/// review is held, then answered with a grant beyond the Role: `kubernetes.rbac-excess`, which no
+/// retry clears, settles it, the snapshot taken then publishes `events.pull`, and the daemon is
+/// ready. A host daemon's snapshot is taken as it starts, as before, so it is ready at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn readiness_reads_the_snapshot_taken_once_the_first_open_sequence_has_settled() {
+    let required = vec!["events.pull".to_owned()];
+    let (_directory, base) = tree();
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("an API address");
+    let server = format!("https://{}", api.local_addr().expect("API address"));
+    let (ca_pem, acceptor) = api_identity();
+    let path = base.join("other/kubeconfig.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&kubeconfig_naming(&server, &ca_pem, Some(extension())))
+            .expect("kubeconfig"),
+    )
+    .expect("write kubeconfig");
+    let ops = unused_address();
+    let mut namespace = config(&base, path);
+    namespace.ops = Some(OpsListenerConfig {
+        listen: ops,
+        require_facts: required.clone(),
+    });
+    let daemon = tokio::spawn(serve(namespace));
+    let (unanswered, _) = tokio::time::timeout(Duration::from_secs(10), api.accept())
+        .await
+        .expect("the open sequence reached the API")
+        .expect("accept the open's connection");
+    let pending = "store ok\nschema ok\nmaintenance ok\ndriver failed\n";
+    let socket = base.join("other/api.sock");
+    let (status, body) = readiness_until(ops, |status, body| {
+        socket.exists() && status == 503 && body == pending
+    })
+    .await;
+    assert_eq!(
+        (status, body.as_str()),
+        (503, pending),
+        "before the open settled"
+    );
+    drop(unanswered);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        readyz(ops).await,
+        Some((503, pending.to_owned())),
+        "an open refused for a reason its retry can clear has not settled"
+    );
+
+    // The retry, after the driver's 10 s: its rules review is held, then refused for good.
+    let (retry, _) = tokio::time::timeout(Duration::from_secs(15), api.accept())
+        .await
+        .expect("the open is retried")
+        .expect("accept the retry's connection");
+    let mut review = acceptor.accept(retry).await.expect("the retry's TLS");
+    let request = read_request(&mut review).await;
+    assert!(
+        request.starts_with("POST /apis/authorization.k8s.io/v1/selfsubjectrulesreviews "),
+        "{request}"
+    );
+    assert_eq!(
+        readyz(ops).await,
+        Some((503, pending.to_owned())),
+        "an open in flight is not ready"
+    );
+    answer_excess_rules(&mut review).await;
+    let ready = "store ok\nschema ok\nmaintenance ok\ndriver ok\n";
+    let settled = readiness_until(ops, |status, _| status == 200).await;
+    assert_eq!(
+        (settled.0, settled.1.as_str()),
+        (200, ready),
+        "the open settled"
+    );
+    daemon.abort();
+
+    let (_host_directory, host_base) = tree();
+    std::fs::create_dir(host_base.join("workspaces")).expect("workspaces");
+    let host_ops = unused_address();
+    let mut host = DaemonConfig::minimum(
+        host_base.join("other/api.sock"),
+        host_base.join("state/state.db"),
+        host_base.join("workspaces"),
+        "d",
+        vec![nix::unistd::getuid().as_raw()],
+    );
+    host.ops = Some(OpsListenerConfig {
+        listen: host_ops,
+        require_facts: required,
+    });
+    let host_daemon = tokio::spawn(serve(host));
+    let host_ready = readiness_until(host_ops, |status, _| status == 200).await;
+    host_daemon.abort();
+    assert_eq!(
+        (host_ready.0, host_ready.1.as_str()),
+        (200, ready),
+        "a host daemon"
+    );
+}
+
+/// `/readyz` until `done` holds for its answer or 10 s have passed; the last answer.
+async fn readiness_until(
+    ops: std::net::SocketAddr,
+    mut done: impl FnMut(u16, &str) -> bool,
+) -> (u16, String) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = (0, String::new());
+    while Instant::now() < deadline {
+        if let Some(answer) = readyz(ops).await {
+            if done(answer.0, &answer.1) {
+                return answer;
+            }
+            last = answer;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    last
+}
+
+/// One `GET /readyz` on the operational listener: its status and body, or `None` before it
+/// listens.
+async fn readyz(ops: std::net::SocketAddr) -> Option<(u16, String)> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut stream = tokio::net::TcpStream::connect(ops).await.ok()?;
+    stream
+        .write_all(b"GET /readyz HTTP/1.1\r\nHost: substrate\r\n\r\n")
+        .await
+        .ok()?;
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut answer))
+        .await
+        .ok()?
+        .ok()?;
+    let text = String::from_utf8(answer).ok()?;
+    let (head, body) = text.split_once("\r\n\r\n")?;
+    let status = head.get(9..12)?.parse().ok()?;
+    Some((status, body.to_owned()))
+}
+
 /// Design 34 § 8 and § 14 Q3 A: every `workspace.adopt` on a namespace machine is
 /// `workspace.adopt-unserved` (501), decided before any name is looked up. A free name, a name
 /// another subject holds and a name the caller holds get the same answer, so the answer says
@@ -305,11 +452,95 @@ fn extension() -> Value {
 /// A self-contained JSON kubeconfig naming a loopback port nothing listens on, trusted through a
 /// CA made here, with `extension` as the namespace driver's context extension.
 fn unreachable_kubeconfig(extension: Option<Value>) -> Value {
+    let (ca, _) = certificate_authority();
+    kubeconfig_naming("https://127.0.0.1:1", &ca.pem(), extension)
+}
+
+/// A CA made here and its issuer.
+fn certificate_authority() -> (rcgen::Certificate, rcgen::Issuer<'static, rcgen::KeyPair>) {
     let key = rcgen::KeyPair::generate().expect("a CA key");
     let mut params =
         rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA certificate parameters");
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let ca = params.self_signed(&key).expect("a CA certificate");
+    (ca, rcgen::Issuer::new(params, key))
+}
+
+/// A CA's PEM and a TLS acceptor holding a `127.0.0.1` certificate it issued: an API server the
+/// kubeconfig naming that CA trusts.
+fn api_identity() -> (String, tokio_rustls::TlsAcceptor) {
+    let (ca, issuer) = certificate_authority();
+    let key = rcgen::KeyPair::generate().expect("a server key");
+    let server = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()])
+        .expect("server certificate parameters")
+        .signed_by(&key, &issuer)
+        .expect("a server certificate");
+    let private = rustls::pki_types::PrivateKeyDer::try_from(key.serialize_der())
+        .expect("a server key in DER");
+    let tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![server.der().clone()], private)
+        .expect("the API's TLS configuration");
+    (ca.pem(), tokio_rustls::TlsAcceptor::from(Arc::new(tls)))
+}
+
+/// One HTTP/1.1 request's head and body, read whole.
+async fn read_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
+    use tokio::io::AsyncReadExt as _;
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 4_096];
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buffer))
+            .await
+            .expect("the request arrives")
+            .expect("read the request");
+        assert_ne!(read, 0, "the request ended early");
+        bytes.extend_from_slice(&buffer[..read]);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            if body.len() >= length {
+                return text;
+            }
+        }
+    }
+}
+
+/// Answers a rules review with one grant beyond the driver's Role: `get` on `secrets`.
+async fn answer_excess_rules(stream: &mut (impl tokio::io::AsyncWrite + Unpin)) {
+    use tokio::io::AsyncWriteExt as _;
+    let body = json!({
+        "apiVersion": "authorization.k8s.io/v1",
+        "kind": "SelfSubjectRulesReview",
+        "status": {
+            "resourceRules": [{"verbs": ["get"], "apiGroups": [""], "resources": ["secrets"]}],
+            "nonResourceRules": [],
+            "incomplete": false,
+        },
+    })
+    .to_string();
+    let answer = format!(
+        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(answer.as_bytes())
+        .await
+        .expect("answer the review");
+    stream.shutdown().await.expect("close the answer");
+}
+
+/// A self-contained JSON kubeconfig naming `server`, trusted through the CA `ca_pem`, with
+/// `extension` as the namespace driver's context extension.
+fn kubeconfig_naming(server: &str, ca_pem: &str, extension: Option<Value>) -> Value {
     let mut context = json!({"cluster": "c", "user": "u", "namespace": "substrate"});
     if let Some(extension) = extension {
         context["extensions"] = json!([{
@@ -322,9 +553,9 @@ fn unreachable_kubeconfig(extension: Option<Value>) -> Value {
         "kind": "Config",
         "current-context": "c",
         "clusters": [{"name": "c", "cluster": {
-            "server": "https://127.0.0.1:1",
+            "server": server,
             "certificate-authority-data":
-                base64::engine::general_purpose::STANDARD.encode(ca.pem()),
+                base64::engine::general_purpose::STANDARD.encode(ca_pem),
         }}],
         "contexts": [{"name": "c", "context": context}],
         "users": [{"name": "u", "user": {"token": "unused-token"}}],
