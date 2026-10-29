@@ -25,7 +25,7 @@ use substrate_host::{
 use substrate_kubernetes_client::gone::WATCH_LIMIT;
 use substrate_kubernetes_client::{
     ApiError, ListForm, MAX_API_BODY_BYTES, Method, PodEnd, PodTrace, RUN_CONTAINER, WatchError,
-    WatchEvent, container_state, watch_event,
+    WatchEvent, container_state,
 };
 use substrate_wire::{
     AppliedConfinement, AppliedFilesystem, AppliedNetwork, Base64Content, Base64Encoding, Exec,
@@ -96,6 +96,16 @@ enum LogRead {
     Overlong,
     Gone,
     Unreadable(String),
+    /// The name was not shown holding the bound uid on both sides of the read, so what it
+    /// answered is not evidence about this exec's run.
+    NotOurs,
+}
+
+/// What a read of the exec Pod's name shows holding it.
+enum Holder {
+    Ours,
+    Other,
+    Absent,
 }
 
 impl NamespaceDriver {
@@ -480,7 +490,10 @@ impl NamespaceDriver {
                         let object = serde_json::from_slice::<Value>(&line)
                             .map(|event| event["object"].clone())
                             .unwrap_or_default();
-                        match watch_event(&line, &tracked.pod, &mut trace) {
+                        match self
+                            .api()
+                            .quoted_watch_event(&line, &tracked.pod, &mut trace)
+                        {
                             Some(PodEnd::Stopped) if shows_end(&object) => {
                                 return Gone::Terminated(object);
                             }
@@ -502,17 +515,27 @@ impl NamespaceDriver {
                 }
             }
         };
-        tokio::time::timeout(WATCH_LIMIT, read)
+        let shown = tokio::time::timeout(WATCH_LIMIT, read)
             .await
             .unwrap_or_else(|_| {
                 Gone::Unproven(format!(
                     "the watch showed no end of the container within {WATCH_LIMIT:?}"
                 ))
-            })
+            });
+        match shown {
+            Gone::Unproven(why) => Gone::Unproven(self.api().redact(&why)),
+            Gone::Unanswered(why) => Gone::Unanswered(self.api().redact(&why)),
+            shown @ (Gone::Terminated(_) | Gone::NeverBound) => shown,
+        }
     }
 
     /// The container is shown terminated under the bound uid: read the log, take the exit from
     /// the API, commit the end and delete the Pod (§ 5 exec start, after column).
+    ///
+    /// The exit alone cannot tell a run from a refusal: the executor exits 125 when the limits
+    /// read back differ and says so only in its log (§ 7.3). So a log that is gone or unreadable
+    /// leaves the exec `unknown` with no exit. A log read while the name was not shown holding
+    /// the bound uid is no output of this exec; the exit is still the one `pod` shows.
     async fn finish(
         &self,
         id: &str,
@@ -524,47 +547,58 @@ impl NamespaceDriver {
         let code = terminated["exitCode"].as_i64();
         let deadline = pod["status"]["reason"] == "DeadlineExceeded";
         let budget = pod::log_budget_bytes(tracked.output_bytes);
-        let read = self.read_log(&tracked.pod, budget).await;
+        let read = self.read_owned_log(&tracked, budget).await;
         if let (LogRead::Unreadable(why), true) = (&read, present) {
             return Err(DriverError::failed(API_FAILED, why.clone()));
         }
-        let decoded = match read {
-            LogRead::Read(bytes) => logs::decode(&bytes, tracked.output_bytes)
-                .map_err(|why| (EXECUTOR_PROTOCOL, format!("the exec's log: {why}"))),
-            LogRead::Overlong => Err((
-                EXECUTOR_PROTOCOL,
-                format!("the exec's log passes its budget of {budget} bytes"),
-            )),
-            LogRead::Gone => Err((API_FAILED, "the exec Pod's log is gone".to_owned())),
-            LogRead::Unreadable(why) => Err((API_FAILED, why)),
-        };
-        let (exit, output) = match decoded {
-            Ok(decoded) => match decoded.end {
-                RunEnd::Refused(refusal) => {
-                    if refusal == Refusal::LimitsUnapplied {
-                        self.execs().unapplied.fetch_add(1, Ordering::Relaxed);
+        let (exit, output) = match read {
+            LogRead::NotOurs => {
+                tracing::warn!(
+                    pod = tracked.pod,
+                    "an exec Pod's name was not shown holding its uid around the log read"
+                );
+                (api_exit(code, None), Output::Unknown)
+            }
+            LogRead::Gone => lost("the exec Pod's log is gone".to_owned()),
+            LogRead::Unreadable(why) => lost(why),
+            LogRead::Overlong => (
+                api_exit(code, None),
+                Output::Failed(
+                    EXECUTOR_PROTOCOL,
+                    format!("the exec's log passes its budget of {budget} bytes"),
+                ),
+            ),
+            LogRead::Read(bytes) => match logs::decode(&bytes, tracked.output_bytes) {
+                Err(why) => (
+                    api_exit(code, None),
+                    Output::Failed(EXECUTOR_PROTOCOL, format!("the exec's log: {why}")),
+                ),
+                Ok(decoded) => match decoded.end {
+                    RunEnd::Refused(refusal) => {
+                        if refusal == Refusal::LimitsUnapplied {
+                            self.execs().unapplied.fetch_add(1, Ordering::Relaxed);
+                        }
+                        tracing::warn!(?refusal, ?decoded.applied, "an exec's argv was not started");
+                        (None, Output::Empty)
                     }
-                    tracing::warn!(?refusal, ?decoded.applied, "an exec's argv was not started");
-                    (None, Output::Empty)
-                }
-                RunEnd::SpawnFailed { .. } => (api_exit(code, None), Output::Empty),
-                RunEnd::Exit {
-                    stdout,
-                    stderr,
-                    stdout_truncated,
-                    stderr_truncated,
-                    record,
-                } => (
-                    api_exit(code, Some(&record)),
-                    Output::Read {
+                    RunEnd::SpawnFailed { .. } => (api_exit(code, None), Output::Empty),
+                    RunEnd::Exit {
                         stdout,
                         stderr,
                         stdout_truncated,
                         stderr_truncated,
-                    },
-                ),
+                        record,
+                    } => (
+                        api_exit(code, Some(&record)),
+                        Output::Read {
+                            stdout,
+                            stderr,
+                            stdout_truncated,
+                            stderr_truncated,
+                        },
+                    ),
+                },
             },
-            Err((failure, why)) => (api_exit(code, None), Output::Failed(failure, why)),
         };
         let state = if exit.is_none() {
             ExecState::Unknown
@@ -585,6 +619,37 @@ impl NamespaceDriver {
             }
         }
         Ok(ended)
+    }
+
+    /// `pods/log` addresses a Pod by name only (§ 4 uid rule): the log is read only when a GET
+    /// right before shows the name holding the bound uid, and what it answered is this exec's
+    /// only when a GET right after shows the same uid.
+    async fn read_owned_log(&self, tracked: &Tracked, budget: u64) -> LogRead {
+        match self.holder(tracked).await {
+            Ok(Holder::Ours) => {}
+            Ok(Holder::Other) => return LogRead::NotOurs,
+            Ok(Holder::Absent) => return LogRead::Gone,
+            Err(why) => return LogRead::Unreadable(why),
+        }
+        let read = self.read_log(&tracked.pod, budget).await;
+        if !matches!(read, LogRead::Read(_) | LogRead::Overlong) {
+            return read;
+        }
+        match self.holder(tracked).await {
+            Ok(Holder::Ours) => read,
+            Ok(Holder::Other | Holder::Absent) => LogRead::NotOurs,
+            Err(why) => LogRead::Unreadable(why),
+        }
+    }
+
+    async fn holder(&self, tracked: &Tracked) -> Result<Holder, String> {
+        let path = format!("{}/{}", self.api().pods(), tracked.pod);
+        match self.api().get(&path).await {
+            Ok(Some(pod)) if uid_of(&pod) == Some(tracked.uid.as_str()) => Ok(Holder::Ours),
+            Ok(Some(_)) => Ok(Holder::Other),
+            Ok(None) => Ok(Holder::Absent),
+            Err(error) => Err(format!("the exec Pod beside its log: {error}")),
+        }
     }
 
     async fn read_log(&self, pod: &str, budget: u64) -> LogRead {
@@ -925,7 +990,7 @@ impl NamespaceDriver {
             }) else {
                 return;
             };
-            let decided = watch_event(&line, name, &mut entry.trace);
+            let decided = self.api().quoted_watch_event(&line, name, &mut entry.trace);
             if uid_of(&event.object) == Some(entry.uid.as_str()) && shows_end(&event.object) {
                 entry.terminated = Some(event.object.clone());
             }
@@ -1165,6 +1230,14 @@ fn running(id: &str, input: &ExecStartInput, pod: &str) -> ExecObservation {
         cgroup: Some(pod.to_owned()),
         leader_pid: None,
     }
+}
+
+/// A log that is gone or unreadable: the exit alone cannot tell a run from the executor's
+/// limits-unapplied refusal (exit 125, stated only in the log), so the end is unknown and no exit
+/// is fabricated (§ 7.3); the output is unservable for `why`.
+fn lost(why: String) -> (Option<ExecExit>, Output) {
+    tracing::warn!(why, "an exec's log is lost, so its end is unknown");
+    (None, Output::Failed(API_FAILED, why))
 }
 
 /// The exit the API states, with the signal name only when the executor's record agrees with

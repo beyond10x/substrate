@@ -187,6 +187,18 @@ pub async fn pod_end(api: &Api, name: &str, trace: &PodTrace) -> PodEnd {
 }
 
 impl Api {
+    /// [`watch_event`] as this client's own replay decides it: an `ERROR` event's message is
+    /// cleared of the bearer token and then bounded, so a driver that replays a gone Pod's watch
+    /// itself quotes what this client would.
+    pub fn quoted_watch_event(
+        &self,
+        line: &[u8],
+        name: &str,
+        trace: &mut PodTrace,
+    ) -> Option<PodEnd> {
+        decide(line, name, trace, |text| self.quote(text))
+    }
+
     /// What a watch of the Pod `name` from the `resourceVersion` `trace` last read shows of its
     /// container within [`WATCH_LIMIT`]: the API server replays every change since, and the
     /// deletion last. Only a container shown terminated is [`PodEnd::Stopped`]. A `name` that is
@@ -239,7 +251,7 @@ impl Api {
         loop {
             match watch.next_line().await {
                 Ok(Some(line)) => {
-                    if let Some(decided) = decide(&line, name, trace, |text| self.quote(text)) {
+                    if let Some(decided) = self.quoted_watch_event(&line, name, trace) {
                         return decided;
                     }
                 }
