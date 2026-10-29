@@ -8,6 +8,10 @@
 //! variable set, an absent runtime **fails** these cases. Without it they are **absent, never
 //! reported as passed** (invariant 3): each prints `ABSENT` and its reason.
 //!
+//! The stdin cases and the scenarios' `stdin_pipe` follow the runtime's own probe: on a runtime
+//! outside the stdin pin each asserts that a piped profile is refused `confinement.fact-unserved`
+//! naming `stdin_pipe`, and prints which branch it took.
+//!
 //! The portable cases need no runtime: a stand-in program answers `info`, and they assert what
 //! `open` reads from it, the named refusals of admission, and the `render` argv.
 
@@ -801,15 +805,126 @@ fn ess_confinement_oci_lane_executes_every_authored_oci_scenario() {
         declared,
         "an oci-lane scenario is not an oci-* scenario"
     );
-    let (executed, audited, open_checks) = support::run(&scenarios, |step| {
-        assert_eq!(step.adapter, "oci");
-        Ok(open_lane(&runtime, Vec::new()))
-    });
+    // The scenarios state the stdin pin's runtime. On any other `stdin_pipe` is unproved: each
+    // open proves the declared set without it, and an admission requiring it is its refusal.
+    let pinned = stdin_pinned("ESS confinement oci lane", &runtime);
+    let unproved: &[Fact] = if pinned { &[] } else { &[Fact::StdinPipe] };
+    let requiring_stdin = scenarios
+        .iter()
+        .filter(|(_, scenario)| {
+            scenario["steps"]
+                .as_array()
+                .expect("steps")
+                .iter()
+                .any(|step| {
+                    step["command"] == "substrate.confinement.AdmitProfile"
+                        && step["input"]["required_facts"]["value"]
+                            .as_array()
+                            .expect("required facts")
+                            .contains(&serde_json::json!("stdin_pipe"))
+                })
+        })
+        .count();
+    assert!(requiring_stdin > 0, "no oci scenario admits stdin_pipe");
+    let (executed, audited, open_checks, refused) =
+        support::run_without(&scenarios, unproved, |step| {
+            assert_eq!(step.adapter, "oci");
+            Ok(open_lane(&runtime, Vec::new()))
+        });
     assert_eq!(executed, declared, "an oci scenario did not run");
+    assert_eq!(
+        refused,
+        if pinned { 0 } else { requiring_stdin },
+        "each admission requiring stdin_pipe follows the probe"
+    );
     println!(
         "ESS confinement oci lane: {executed} scenarios executed of {declared} declared, \
-         {audited} refusal audit records asserted, {open_checks} open checks refused, 0 failed"
+         {audited} refusal audit records asserted, {open_checks} open checks refused, \
+         {refused} admissions refused fact-unserved stdin_pipe on an unpinned runtime, 0 failed"
     );
+}
+
+/// Whether the lane's runtime, probed as `open` probes it, is an entry of the stdin pin (design 32
+/// D13), so `oci` proves `stdin_pipe` on it. Prints the probed versions and the branch taken.
+fn stdin_pinned(name: &str, runtime: &Path) -> bool {
+    let probe = oci::probe(&OciRequest {
+        runtime: runtime.to_path_buf(),
+        workspace_root: workspace_root(),
+        writable_roots: Vec::new(),
+    })
+    .unwrap_or_else(|error| panic!("{LANE_ENV}=1 and the runtime does not probe: {error}"));
+    let pinned = oci::proof(&probe).proves(&Fact::StdinPipe);
+    println!(
+        "{name}: runtime {:?} server {} client {:?}: stdin {}",
+        probe.flavor,
+        probe.version,
+        probe.client_version,
+        if pinned { "pinned" } else { "not pinned" }
+    );
+    pinned
+}
+
+/// The branch of a stdin case on the lane's runtime: `true` on the stdin pin, where the opened
+/// adapter proves `stdin_pipe` and the caller's piped assertions apply. Otherwise `piped` is
+/// refused `confinement.fact-unserved` naming `stdin_pipe` (501) and audited, and the same profile
+/// with stdin `Null` still runs `cat` to exit 0 on its end of file with no output; `false`.
+async fn stdin_served(
+    name: &str,
+    runtime: &Path,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    piped: &ConfinementProfile,
+) -> bool {
+    let pinned = stdin_pinned(name, runtime);
+    assert_eq!(
+        adapter.facts().proves(&Fact::StdinPipe),
+        pinned,
+        "{name}: the opened adapter's stdin_pipe follows its probe"
+    );
+    if pinned {
+        return true;
+    }
+    let (sink, records) = recording();
+    let error = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..piped.clone()
+        })
+        .expect_err("a piped profile on an unpinned runtime");
+    assert!(
+        matches!(
+            &error,
+            ConfinementError::FactUnserved {
+                adapter: AdapterName::Oci,
+                fact: Fact::StdinPipe
+            }
+        ),
+        "{name}: {error:?}"
+    );
+    support::assert_refused(&error, "confinement.fact-unserved", 501);
+    let audited = events(&records);
+    assert_eq!(audited.len(), 1, "{name}: {audited:?}");
+    assert_eq!(audited[0]["event"], "profile_refused", "{name}");
+    assert_eq!(audited[0]["fact"], "stdin_pipe", "{name}");
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            stdin: confinement::StdinMode::Null,
+            ..piped.clone()
+        })
+        .expect("the same profile without a piped stdin is admitted");
+    let cat = Command {
+        argv: vec!["/bin/cat".into()],
+        env: BTreeMap::new(),
+    };
+    let run = adapter.start(&admitted, &cat).await.expect("cat starts");
+    let ended = tokio::time::timeout(Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("cat read end of file and ended")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    assert!(output.stdout.is_empty(), "{name}");
+    println!("{name}: piped refused fact-unserved stdin_pipe, unpiped cat ran");
+    false
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1188,20 +1303,24 @@ async fn an_oci_run_reads_every_byte_of_its_piped_stdin_and_the_end_of_file() {
     };
     let (_ws, workspace) = canonical_tempdir();
     let adapter = open_lane(&runtime, Vec::new());
+    let piped = ConfinementProfile {
+        image: Some(image()),
+        workspace: Some(workspace),
+        process_bounds: Some(ProcessBounds {
+            timeout_ms: 60_000,
+            processes: 8,
+            memory_bytes: 64 << 20,
+            cpu_millis: 30_000,
+        }),
+        stdin: confinement::StdinMode::Piped { limit_bytes: 1_024 },
+        ..ConfinementProfile::default()
+    };
+    if !stdin_served(NAME, &runtime, &adapter, &piped).await {
+        return;
+    }
     support::stdin_echoes_through(
         &adapter,
-        &ConfinementProfile {
-            image: Some(image()),
-            workspace: Some(workspace),
-            process_bounds: Some(ProcessBounds {
-                timeout_ms: 60_000,
-                processes: 8,
-                memory_bytes: 64 << 20,
-                cpu_millis: 30_000,
-            }),
-            stdin: confinement::StdinMode::Piped { limit_bytes: 1_024 },
-            ..ConfinementProfile::default()
-        },
+        &piped,
         &Command {
             argv: vec!["/bin/cat".into()],
             env: BTreeMap::new(),
@@ -1356,6 +1475,16 @@ async fn adv_an_oci_run_whose_stdin_is_closed_before_any_write_reads_end_of_file
     };
     let (_ws, workspace) = canonical_tempdir();
     let adapter = open_lane(&runtime, Vec::new());
+    if !stdin_served(
+        NAME,
+        &runtime,
+        &adapter,
+        &oci_piped(workspace.clone(), 60_000),
+    )
+    .await
+    {
+        return;
+    }
     let admitted = adapter
         .admit(&oci_piped(workspace, 60_000))
         .expect("admitted");
@@ -1398,6 +1527,16 @@ async fn adv_an_oci_container_that_never_reads_stdin_is_bounded_by_the_run_timeo
     };
     let (_ws, workspace) = canonical_tempdir();
     let adapter = open_lane(&runtime, Vec::new());
+    if !stdin_served(
+        NAME,
+        &runtime,
+        &adapter,
+        &oci_piped(workspace.clone(), 3_000),
+    )
+    .await
+    {
+        return;
+    }
     let admitted = adapter
         .admit(&oci_piped(workspace.clone(), 3_000))
         .expect("admitted");

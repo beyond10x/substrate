@@ -211,6 +211,13 @@ pub struct Target<'a> {
     rows: Vec<Value>,
     view: String,
     audit: Arc<Mutex<Vec<AuditRecord>>>,
+    /// Facts the scenarios declare that this host's adapter does not prove, as its own probe
+    /// decided: removed from every open step's expected set, and an admission requiring one is
+    /// that fact's named refusal.
+    unproved: Vec<String>,
+    /// Set once an admission requiring an unproved fact was refused by its name: the authored
+    /// steps after it state the admission on a host that proves the fact.
+    refused_unproved: Option<String>,
     /// Refusal audit records asserted, across the scenario.
     pub refusals_audited: usize,
     /// Opens refused by `confinement::check_open` on the scenario's declared set.
@@ -218,8 +225,10 @@ pub struct Target<'a> {
 }
 
 impl<'a> Target<'a> {
-    pub fn new(opener: &'a mut Opener<'a>) -> Self {
+    pub fn new(opener: &'a mut Opener<'a>, unproved: &[Fact]) -> Self {
         Self {
+            unproved: unproved.iter().map(erased::Named::name).collect(),
+            refused_unproved: None,
             opener,
             opened: BTreeMap::new(),
             forced: BTreeMap::new(),
@@ -324,18 +333,25 @@ impl<'a> Target<'a> {
                 let facts = adapter.facts();
                 let observed = serde_json::to_value(facts).expect("adapter facts serialize");
                 // The scenario's open step is the adapter's declared set; the real adapter must
-                // have proved exactly that, in the contract's order.
+                // have proved exactly that, in the contract's order, less the facts this host's
+                // probe does not prove.
                 assert_eq!(
                     observed["served_families"],
                     json!(step.served_families),
                     "{} serves other families than the scenario declares",
                     step.adapter
                 );
+                let expected: Vec<&String> = step
+                    .facts
+                    .iter()
+                    .filter(|fact| !self.unproved.contains(fact))
+                    .collect();
                 assert_eq!(
                     observed["facts"],
-                    json!(step.facts),
-                    "{} proved other facts than the scenario declares",
-                    step.adapter
+                    json!(expected),
+                    "{} proved other facts than the scenario declares (unproved here: {:?})",
+                    step.adapter,
+                    self.unproved
                 );
                 assert_eq!(observed["adapter"], json!(step.adapter));
                 assert_eq!(
@@ -404,6 +420,40 @@ impl<'a> Target<'a> {
             "an admission writes exactly one audit record: {audited:?}"
         );
         let record = serde_json::to_value(&audited[0]).expect("audit record serializes");
+        let required_unproved: Vec<String> = strings(&input["required_facts"])
+            .into_iter()
+            .filter(|fact| self.unproved.contains(fact))
+            .collect();
+        if !required_unproved.is_empty() {
+            // The model's answer on this host: the open's set lacks the fact, so the admission is
+            // that fact's named refusal, audited, and admits nothing.
+            let error = result.err().unwrap_or_else(|| {
+                panic!("{name} admitted a profile requiring {required_unproved:?}, unproved here")
+            });
+            let (outcome, error_name, fields) = refusal(&error);
+            assert_eq!(error_name, "FactUnserved", "{error}");
+            assert_eq!(fields["adapter"], json!(name), "{error}");
+            let fact = text(&fields["fact"]).to_owned();
+            assert!(required_unproved.contains(&fact), "{error}");
+            assert_eq!(outcome, format!("fact-unserved-{}", kebab(&fact)));
+            assert_eq!(record["event"], "profile_refused", "{record}");
+            assert_eq!(record["code"], json!(error.code()), "{record}");
+            for (field, value) in fields.as_object().expect("fields") {
+                assert_eq!(
+                    &record[field], value,
+                    "refusal record field {field}: {record}"
+                );
+            }
+            self.refusals_audited += 1;
+            println!(
+                "  {name}: admission requiring {fact} refused {} by name",
+                error.code()
+            );
+            self.outcome = outcome;
+            self.error = Some((format!("{PREFIX}{error_name}"), fields));
+            self.refused_unproved = Some(fact);
+            return;
+        }
         match result {
             Ok(admitted) => {
                 let mut event =
@@ -498,6 +548,15 @@ impl<'a> Target<'a> {
     }
 
     pub fn step(&mut self, step: &Value) {
+        if let Some(fact) = &self.refused_unproved {
+            // The remaining steps state the admission on a host that proves `fact`.
+            assert_ne!(
+                text(&step["step"]),
+                "execute_command",
+                "a command follows an admission refused for {fact}"
+            );
+            return;
+        }
         match text(&step["step"]) {
             "configure_external_outcome" => {
                 let force = &step["force"];
@@ -608,23 +667,38 @@ impl<'a> Target<'a> {
 /// records were asserted and how many opens `confinement::check_open` refused.
 pub fn run(
     scenarios: &[(String, Value)],
-    mut opener: impl FnMut(&OpenStep) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError>,
+    opener: impl FnMut(&OpenStep) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError>,
 ) -> (usize, usize, usize) {
+    let (executed, audited, open_checks, refused_unproved) = run_without(scenarios, &[], opener);
+    assert_eq!(refused_unproved, 0);
+    (executed, audited, open_checks)
+}
+
+/// [`run`] on a host whose adapter does not prove `unproved`, as its own probe decided: each open
+/// step's expected set lacks those facts, and an admission requiring one must be that fact's
+/// named refusal. Also returns how many scenarios ended on such a refusal.
+pub fn run_without(
+    scenarios: &[(String, Value)],
+    unproved: &[Fact],
+    mut opener: impl FnMut(&OpenStep) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError>,
+) -> (usize, usize, usize, usize) {
     let mut executed = 0;
     let mut audited = 0;
     let mut open_checks = 0;
+    let mut refused_unproved = 0;
     for (id, scenario) in scenarios {
         println!("ESS scenario: {id}");
         let opener: &mut Opener<'_> = &mut opener;
-        let mut target = Target::new(opener);
+        let mut target = Target::new(opener, unproved);
         for step in scenario["steps"].as_array().expect("steps") {
             target.step(step);
         }
         audited += target.refusals_audited;
         open_checks += target.open_checks_refused;
+        refused_unproved += usize::from(target.refused_unproved.is_some());
         executed += 1;
     }
-    (executed, audited, open_checks)
+    (executed, audited, open_checks, refused_unproved)
 }
 
 /// What `seq 1 <last>` writes: every number from 1 to `last` on its own line.
