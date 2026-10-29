@@ -487,3 +487,68 @@ async fn adopt_is_unserved_before_any_name_is_looked_at() {
         "nothing was asked of the cluster"
     );
 }
+
+/// § 6.1: retaking a lost Lease runs steps 4 to 7 again, and a proof holds only under the Lease
+/// it was taken under. A probe that was in flight when the Lease lapsed and finishes after the
+/// Lease was retaken was not taken under the retaken Lease, so it may not stand for step 7: the
+/// probe is due again and its facts stay absent until a probe started under the new Lease.
+#[tokio::test]
+async fn a_probe_in_flight_across_a_lost_and_retaken_lease_does_not_stand_for_step_seven() {
+    let mut rig = rig(Child::Exact, None).await;
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    rig.kubelet.abort();
+    rig.kubelet = {
+        let admin = admin(&rig.fake);
+        let fake = Arc::clone(&rig.fake);
+        let ran = Arc::clone(&rig.ran);
+        let release = Arc::clone(&release);
+        tokio::spawn(async move {
+            // Schedules the probe keeper, and holds the probe Pod unended until released.
+            while !release.load(std::sync::atomic::Ordering::SeqCst) {
+                let listed = admin
+                    .list(&admin.pods(), "PodList", ListForm::Whole, 100, 4)
+                    .await
+                    .map(|listed| listed.items)
+                    .unwrap_or_default();
+                for mut pod in listed {
+                    if pod["metadata"]["labels"]["b10x-substrate/role"] == "keeper"
+                        && pod["spec"]["nodeName"].is_null()
+                    {
+                        let name = pod["metadata"]["name"].as_str().unwrap_or_default();
+                        let path = format!("{}/{name}", admin.pods());
+                        pod["spec"]["nodeName"] = json!(NODE);
+                        let _ = admin.update(&path, &pod).await;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            play_kubelet(admin, fake, Child::Exact, ran).await;
+        })
+    };
+    let lapse = async {
+        while !rig
+            .ledger
+            .rows_of(BackendKind::Probe)
+            .iter()
+            .any(|row| row.role == BackendRole::Pod && row.uid.is_some())
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        rig.clock.set(HELD_FOR + Duration::from_secs(1));
+        assert!(!rig.driver.lease_held(), "the Lease lapsed mid-probe");
+        rig.driver.lease_round().await;
+        assert!(rig.driver.lease_held(), "the Lease is retaken");
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+    };
+    let (probed, ()) = tokio::join!(rig.driver.probe(), lapse);
+    probed.expect("the in-flight probe completes");
+    assert!(
+        rig.driver.probe_due(),
+        "a retaken Lease runs step 7 again; the probe begun under the lost Lease stood for it"
+    );
+    assert_eq!(
+        rig.machine().facts.exec_argv_only,
+        None,
+        "a proof begun under the lost Lease is published under the retaken one"
+    );
+}
