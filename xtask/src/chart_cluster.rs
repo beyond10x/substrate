@@ -39,7 +39,14 @@
 //! It then uninstalls the release and removes the profile its own run loaded, by its name, through
 //! the node, which holds the source, so the next run starts from the same kernel. It prints
 //! `Chart-lane: <sha> <count> <instant>` only when every declared scenario passed, the profile was
-//! removed, `HEAD` did not move and the checkout was clean before and after the run.
+//! removed, `HEAD` did not move and the checkout was clean before and after the run. It installs
+//! the chart and compares the seccomp profile as that commit holds them, extracted with
+//! `git archive`, as it builds the recipe that commit holds.
+//!
+//! The cluster is the run's, and deleted on every exit path, only once `kind create` succeeded. A
+//! SIGINT or SIGTERM stops the running command and runs the same cleanup, the cluster's deletion
+//! and the removal of the run's own profile, before the verb exits non-zero; a second signal exits
+//! at once, and the commands that remove each by hand are printed when the run creates it.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -175,8 +182,12 @@ pub const SCENARIOS: [&str; 4] = [
 /// The number of entries of the one `pub const SCENARIOS: [&str; N] = [` array in `source`, each
 /// on its own line as `    "name",`, closed by `];` — the count `release.yml` reads from the
 /// tagged source. `None` for a missing, repeated, empty or malformed array, or one whose declared
-/// length is not its entry count.
+/// length is not its entry count, and for any source holding a carriage return: `lines()` strips
+/// one before a line feed, the workflow's awk does not, so the two would count differently.
 pub fn declared_scenarios(source: &str) -> Option<usize> {
+    if source.contains('\r') {
+        return None;
+    }
     let mut lines = source.lines();
     let mut found = None;
     while let Some(line) = lines.next() {
@@ -302,12 +313,16 @@ fn evidence_line(sha: &str, count: usize, at: SystemTime) -> String {
     record_line(TRAILER, sha, count, at)
 }
 
-/// The image the chart lab's recipe builds on: its one `FROM` reference.
+/// The image the chart lab's recipe builds on: its one `FROM` reference. Docker reads the
+/// instruction word in any case, after leading white space, and separated by a space or a tab, so
+/// every such spelling counts as a stage.
 fn lab_base(recipe: &str) -> Option<&str> {
-    let mut bases = recipe
-        .lines()
-        .filter_map(|line| line.strip_prefix("FROM "))
-        .map(str::trim);
+    let mut bases = recipe.lines().filter_map(|line| {
+        let (word, rest) = line
+            .trim_start()
+            .split_once(|character: char| character.is_ascii_whitespace())?;
+        word.eq_ignore_ascii_case("FROM").then(|| rest.trim())
+    });
     let base = bases.next()?;
     bases.next().is_none().then_some(base)
 }
@@ -356,6 +371,11 @@ fn removal_argv(profile: &str) -> [String; 3] {
         "--remove".to_owned(),
         format!("/var/lib/kubelet/seccomp/b10x-substrate/{profile}.apparmor"),
     ]
+}
+
+/// What removes `profile` from the host kernel by hand, by its name, without its source.
+fn profile_removal(profile: &str) -> String {
+    format!("sudo sh -c 'printf %s {profile} > /sys/kernel/security/apparmor/.remove'")
 }
 
 /// Whether the shared kernel's `listing` lets this run load `profile`: refused only when that
@@ -463,9 +483,14 @@ struct Lane<'a> {
     work: PathBuf,
     /// The `AppArmor` profile this run installs and selects: its own lane name in local mode.
     profile: String,
+    /// The committed seccomp profile source, read from the recorded commit; local mode only.
+    seccomp: Option<String>,
+    /// Set by a signal: every command this lane starts afterwards is refused, and a running one is
+    /// stopped. Cleanup runs on [`Lane::cleanup`], which ignores it.
+    stop: &'a AtomicBool,
 }
 
-impl Lane<'_> {
+impl<'a> Lane<'a> {
     fn tool(&self, program: &Path) -> Command {
         let mut command = Command::new(program);
         command.env("KUBECONFIG", &self.kubeconfig);
@@ -473,31 +498,133 @@ impl Lane<'_> {
     }
 
     fn kubectl(&self, args: &[&str]) -> Result<String> {
-        output(self.tool(&self.args.kubectl).args(args))
+        output(self.tool(&self.args.kubectl).args(args), self.stop)
     }
 
     fn helm(&self, args: &[&str]) -> Result<String> {
-        output(self.tool(&self.args.helm).args(args))
+        output(self.tool(&self.args.helm).args(args), self.stop)
+    }
+
+    /// The same lane for cleanup, which a signal does not stop: it removes what the run created.
+    fn cleanup(&self) -> Lane<'a> {
+        Lane {
+            args: self.args,
+            kubeconfig: self.kubeconfig.clone(),
+            work: self.work.clone(),
+            profile: self.profile.clone(),
+            seccomp: self.seccomp.clone(),
+            stop: &NEVER,
+        }
     }
 }
 
-fn output(command: &mut Command) -> Result<String> {
-    let rendered = format!("{command:?}");
-    let result = command
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("starting {rendered}"))?;
-    ensure!(
-        result.status.success(),
-        "{rendered} exited {}: {}{}",
-        result.status,
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    Ok(String::from_utf8(result.stdout)?)
+/// Set by the first SIGINT or SIGTERM once [`arm_signals`] ran. The lane stops the command it is
+/// running, starts no other, and runs its cleanup: the cluster's deletion and, in local mode, the
+/// removal of its own profile.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// The flag cleanup runs under: never set.
+static NEVER: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    if INTERRUPTED.swap(true, Ordering::SeqCst) {
+        // A second signal leaves at once; the run printed its removal commands when it started.
+        // SAFETY: `_exit` is async-signal-safe.
+        unsafe { libc::_exit(130) };
+    }
 }
 
-/// Deletes the cluster on every exit path.
+/// Routes SIGINT and SIGTERM to [`INTERRUPTED`], so a stopped run cleans up before it exits non-zero.
+pub fn arm_signals() -> Result<()> {
+    let handler: extern "C" fn(libc::c_int) = on_signal;
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: the handler touches one lock-free atomic and calls `_exit`, both
+        // async-signal-safe.
+        let previous = unsafe { libc::signal(signal, handler as libc::sighandler_t) };
+        ensure!(
+            previous != libc::SIG_ERR,
+            "installing the handler for signal {signal} failed"
+        );
+    }
+    Ok(())
+}
+
+/// Runs `command` in a process group of its own and returns its standard output. Refused without
+/// starting when `stop` is set; stopped, with its whole group, when `stop` is set while it runs.
+fn output(command: &mut Command, stop: &AtomicBool) -> Result<String> {
+    use std::os::unix::process::CommandExt as _;
+    let rendered = format!("{command:?}");
+    ensure!(
+        !stop.load(Ordering::SeqCst),
+        "interrupted by a signal before {rendered} started"
+    );
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("starting {rendered}"))?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let status = wait_until(&mut child, stop, &rendered)?;
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    ensure!(
+        status.success(),
+        "{rendered} exited {status}: {}{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    Ok(String::from_utf8(stdout)?)
+}
+
+/// Reads `pipe` to its end on a thread of its own, so a child never blocks on a full pipe.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    })
+}
+
+/// The exit status of `child`, a process group leader; `Err` once `stop` is set, after the group
+/// is stopped: SIGTERM, then SIGKILL to whatever of it remains after five seconds.
+fn wait_until(
+    child: &mut Child,
+    stop: &AtomicBool,
+    rendered: &str,
+) -> Result<std::process::ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if stop.load(Ordering::SeqCst) {
+            let group = libc::pid_t::try_from(child.id())?;
+            // SAFETY: `kill` takes no pointer; a negative pid names the child's own group.
+            unsafe { libc::kill(-group, libc::SIGTERM) };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline && !matches!(child.try_wait(), Ok(Some(_))) {
+                thread::sleep(Duration::from_millis(50));
+            }
+            // SAFETY: as above; a group already gone is `ESRCH`, which changes nothing.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+            let _ = child.wait();
+            bail!("interrupted by a signal: stopped {rendered}");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The command that deletes the lane's cluster by hand.
+fn cluster_removal(cluster: &str) -> String {
+    format!("kind delete cluster --name {cluster}")
+}
+
+/// Deletes the cluster on every exit path. Built only once `kind create` succeeded, so a create
+/// refused for a name another run holds never deletes that run's cluster.
 struct Cluster<'a> {
     args: &'a Args,
     kubeconfig: PathBuf,
@@ -505,6 +632,9 @@ struct Cluster<'a> {
 
 impl Drop for Cluster<'_> {
     fn drop(&mut self) {
+        use std::os::unix::process::CommandExt as _;
+        // Its own process group: a second signal, which ends the lane at once, leaves the
+        // deletion running.
         let deleted = Command::new(&self.args.kind)
             .args([
                 "delete",
@@ -515,6 +645,7 @@ impl Drop for Cluster<'_> {
             ])
             .arg(&self.kubeconfig)
             .stdin(Stdio::null())
+            .process_group(0)
             .status();
         if !deleted
             .as_ref()
@@ -529,20 +660,35 @@ impl Drop for Cluster<'_> {
     }
 }
 
-#[allow(clippy::too_many_lines)] // The lane in its fixed order: cluster, fixtures, install, six scenarios, teardown.
+/// The lane, stopped by [`INTERRUPTED`]: a run a signal stopped cleans up and exits non-zero,
+/// whatever its scenarios came to.
 pub fn run(args: &Args) -> Result<ExitCode> {
+    let result = run_until(args, &INTERRUPTED);
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        eprintln!(
+            "chart lane cluster: interrupted by a signal; the run removed what it created and is \
+             no record"
+        );
+        return result.and(Ok(ExitCode::FAILURE));
+    }
+    result
+}
+
+#[allow(clippy::too_many_lines)] // The lane in its fixed order: cluster, fixtures, install, six scenarios, teardown.
+fn run_until(args: &Args, stop: &AtomicBool) -> Result<ExitCode> {
     let root = crate::repo::root()?;
-    let chart_dir = root.join(CHART);
     let (repository, tag) = args
         .image
         .rsplit_once(':')
         .filter(|(repository, _)| !repository.is_empty())
         .ok_or_else(|| anyhow!("--image {:?} is not repository:tag", args.image))?;
-    let clusters = output(Command::new(&args.kind).args(["get", "clusters"]))?;
+    let clusters = output(Command::new(&args.kind).args(["get", "clusters"]), stop)?;
     ensure!(
         !clusters.lines().any(|line| line == args.cluster),
-        "a kind cluster named {} already exists; the lane creates and deletes its own",
-        args.cluster
+        "a kind cluster named {} already exists; the lane creates and deletes its own. If no \
+         other run holds it, remove it with `{}`",
+        args.cluster,
+        cluster_removal(&args.cluster)
     );
 
     // Local mode reads `HEAD` and the checkout state once, here; a record names this commit, and
@@ -550,13 +696,16 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     let start = if args.node_profiles {
         let sha = git_text(&root, &["rev-parse", "HEAD"])?;
         let clean = git_text(&root, &["status", "--porcelain"])?.is_empty();
-        let label = output(Command::new(&args.docker).args([
-            "image",
-            "inspect",
-            "--format",
-            &format!("{{{{ index .Config.Labels \"{REVISION_LABEL}\" }}}}"),
-            &args.image,
-        ]))?;
+        let label = output(
+            Command::new(&args.docker).args([
+                "image",
+                "inspect",
+                "--format",
+                &format!("{{{{ index .Config.Labels \"{REVISION_LABEL}\" }}}}"),
+                &args.image,
+            ]),
+            stop,
+        )?;
         if let Err(reason) = revision_verdict(label.trim(), &sha) {
             eprintln!("{}", refusal(&reason));
             return Ok(ExitCode::FAILURE);
@@ -597,8 +746,20 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     };
 
     let work = tempfile::tempdir()?;
+    // A record names the commit, so local mode installs the chart and compares the seccomp
+    // profile as that commit holds them, like the recipe; the hosted mode records nothing.
+    let (chart_dir, seccomp) = match &start {
+        Some((sha, _, _)) => match committed_sources(&root, sha, &work.path().join("source")) {
+            Ok((chart_dir, seccomp)) => (chart_dir, Some(seccomp)),
+            Err(error) => {
+                eprintln!("{}", refusal(&format!("{error:#}")));
+                return Ok(ExitCode::FAILURE);
+            }
+        },
+        None => (root.join(CHART), None),
+    };
     let node_image = match &start {
-        Some((_, _, recipe)) => match build_lab(args, &root, recipe, work.path()) {
+        Some((_, _, recipe)) => match build_lab(args, &root, recipe, work.path(), stop) {
             Ok(image) => image,
             Err(error) => {
                 eprintln!(
@@ -615,11 +776,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     let kubeconfig = work.path().join("kubeconfig");
     let config = work.path().join("kind.yaml");
     fs::write(&config, kind_config(args.node_profiles))?;
-    let cluster = Cluster {
-        args,
-        kubeconfig: kubeconfig.clone(),
-    };
-    output(
+    let created = output(
         Command::new(&args.kind)
             .args([
                 "create",
@@ -634,14 +791,42 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             .arg("--kubeconfig")
             .arg(&kubeconfig)
             .args(["--wait", "120s"]),
+        stop,
+    );
+    if let Err(error) = created {
+        // A refused create may be refused because another run holds the name: delete nothing.
+        // Only a create this run stopped can have left a cluster of its own behind.
+        if stop.load(Ordering::SeqCst) {
+            eprintln!(
+                "chart lane cluster: kind create was stopped; if it left the cluster {}, remove \
+                 it with `{}`",
+                args.cluster,
+                cluster_removal(&args.cluster)
+            );
+        }
+        return Err(error);
+    }
+    // Armed only now: from here on the cluster is this run's, and every exit path deletes it.
+    let cluster = Cluster {
+        args,
+        kubeconfig: kubeconfig.clone(),
+    };
+    println!(
+        "chart lane cluster: created kind cluster {}; a run killed before it deletes it leaves it \
+         behind, removed with `{}`",
+        args.cluster,
+        cluster_removal(&args.cluster)
+    );
+    output(
+        Command::new(&args.kind).args([
+            "load",
+            "docker-image",
+            &args.image,
+            "--name",
+            &args.cluster,
+        ]),
+        stop,
     )?;
-    output(Command::new(&args.kind).args([
-        "load",
-        "docker-image",
-        &args.image,
-        "--name",
-        &args.cluster,
-    ]))?;
     let lane = Lane {
         args,
         kubeconfig,
@@ -651,11 +836,15 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         } else {
             APPARMOR_PROFILE.to_owned()
         },
+        seccomp,
+        stop,
     };
     if args.node_profiles {
         println!(
-            "chart lane cluster: this run's own AppArmor profile is {}",
-            lane.profile
+            "chart lane cluster: this run's own AppArmor profile is {}; a run killed before it \
+             removes it leaves it loaded, removed with `{}`",
+            lane.profile,
+            profile_removal(&lane.profile)
         );
     }
 
@@ -702,7 +891,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             &format!("{POOL_KEY}={POOL_VALUE}:NoSchedule"),
         ])?;
     }
-    let gateway = kind_gateway(args)?;
+    let gateway = kind_gateway(args, lane.stop)?;
 
     let material = Material::new(gateway, &chart_dir, &args.helm)?;
     let identity = Listener::identity(gateway, &material)?;
@@ -762,9 +951,10 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             if let Err(error) = remove_own_profile(&lane, worker) {
                 let profile = &lane.profile;
                 failures.push(format!(
-                    "removing this run's {profile} through {worker}: {error:#}; it stays loaded \
-                     in the host kernel until the host reboots or root removes it by name: sudo \
-                     sh -c 'printf %s {profile} > /sys/kernel/security/apparmor/.remove'"
+                    "removing this run's {profile} through {worker}: {error:#}; while it is \
+                     loaded it stays in the host kernel until the host reboots or root removes it \
+                     by name: {}",
+                    profile_removal(profile)
                 ));
             }
         }
@@ -864,6 +1054,76 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     }
 }
 
+/// What a finished local run prints: standard output, then standard error, and whether it exits 0.
+struct Report {
+    stdout: Vec<String>,
+    stderr: Vec<String>,
+    success: bool,
+}
+
+/// The lines of one [`Decision`]. A run that passed every scenario and is no record exits 0, as
+/// `quota-fixture` does, and its last standard-error line says it is not a release record.
+fn report_lines(decision: Decision, sha: &str, at: SystemTime) -> Report {
+    match decision {
+        Decision::Record(count) => Report {
+            stdout: vec![
+                format!(
+                    "chart lane cluster: all {count} scenarios passed at {sha}; record this line in the annotated tag:"
+                ),
+                evidence_line(sha, count, at),
+            ],
+            stderr: Vec::new(),
+            success: true,
+        },
+        Decision::NoRecord(reason) => Report {
+            stdout: vec![format!(
+                "chart lane cluster: all {} scenarios passed at {sha}, but {reason}; this run is \
+                 not a release record for any commit",
+                SCENARIOS.len()
+            )],
+            stderr: vec!["chart lane cluster: not a release record".to_owned()],
+            success: true,
+        },
+        Decision::Failed(reason) => Report {
+            stdout: Vec::new(),
+            stderr: vec![format!("chart lane cluster: no record: {reason}")],
+            success: false,
+        },
+    }
+}
+
+/// The chart and the seccomp profile source as committed at `sha`, extracted with `git archive`
+/// into `into`: the directory to install the chart from and the profile's exact text. A local run
+/// records `sha`, so it installs what `sha` holds, as it builds the recipe `sha` holds, and never
+/// what the working tree holds.
+fn committed_sources(root: &Path, sha: &str, into: &Path) -> Result<(PathBuf, String)> {
+    fs::create_dir_all(into)?;
+    let mut archive = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["archive", "--format=tar", sha, "--", CHART, SECCOMP_SOURCE])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("git archive")?;
+    let tar = archive.stdout.take().context("piped git archive")?;
+    let extracted = Command::new("tar")
+        .args(["-x", "-f", "-", "-C"])
+        .arg(into)
+        .stdin(tar)
+        .status()
+        .context("tar")?;
+    let archived = archive.wait().context("awaiting git archive")?;
+    ensure!(
+        archived.success() && extracted.success(),
+        "extracting {CHART} and {SECCOMP_SOURCE} at {sha} failed: git archive {archived}, tar \
+         {extracted}"
+    );
+    let seccomp = fs::read_to_string(into.join(SECCOMP_SOURCE))
+        .with_context(|| format!("{SECCOMP_SOURCE} at {sha}"))?;
+    Ok((into.join(CHART), seccomp))
+}
+
 /// The local mode's report: every outcome and failure, then the record or why there is none.
 fn report_local(
     root: &Path,
@@ -896,32 +1156,27 @@ fn report_local(
             return ExitCode::FAILURE;
         }
     };
-    match decision(
-        local_verdict(outcomes, failures),
+    let report = report_lines(
+        decision(
+            local_verdict(outcomes, failures),
+            sha,
+            &head_after,
+            clean_before,
+            clean_after,
+        ),
         sha,
-        &head_after,
-        clean_before,
-        clean_after,
-    ) {
-        Decision::Record(count) => {
-            println!(
-                "chart lane cluster: all {count} scenarios passed at {sha}; record this line in the annotated tag:"
-            );
-            println!("{}", evidence_line(sha, count, SystemTime::now()));
-            ExitCode::SUCCESS
-        }
-        Decision::NoRecord(reason) => {
-            println!(
-                "chart lane cluster: all {} scenarios passed at {sha}, but {reason}; this run is \
-                 not a release record for any commit",
-                SCENARIOS.len()
-            );
-            ExitCode::SUCCESS
-        }
-        Decision::Failed(reason) => {
-            eprintln!("chart lane cluster: no record: {reason}");
-            ExitCode::FAILURE
-        }
+        SystemTime::now(),
+    );
+    for line in &report.stdout {
+        println!("{line}");
+    }
+    for line in &report.stderr {
+        eprintln!("{line}");
+    }
+    if report.success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
@@ -936,17 +1191,30 @@ fn profile_loaded(listing: &str, profile: &str) -> bool {
 
 /// Builds the chart lab's node image from the committed `recipe`, alone in a fresh build context
 /// under the lane's work directory, and tags it for this checkout. Never pushed.
-fn build_lab(args: &Args, root: &Path, recipe: &str, work: &Path) -> Result<String> {
+fn build_lab(
+    args: &Args,
+    root: &Path,
+    recipe: &str,
+    work: &Path,
+    stop: &AtomicBool,
+) -> Result<String> {
+    use std::os::unix::process::CommandExt as _;
     let image = lab_image(&fs::canonicalize(root)?);
     let context = work.join("chart-lab");
     fs::create_dir(&context)?;
     fs::write(context.join("Dockerfile"), recipe)?;
-    let status = Command::new(&args.docker)
+    ensure!(
+        !stop.load(Ordering::SeqCst),
+        "interrupted by a signal before docker build started"
+    );
+    let mut child = Command::new(&args.docker)
         .args(["build", "--tag", &image])
         .arg(&context)
         .stdin(Stdio::null())
-        .status()
+        .process_group(0)
+        .spawn()
         .context("docker build")?;
+    let status = wait_until(&mut child, stop, "docker build")?;
     ensure!(
         status.success(),
         "building {image} from {LAB_RECIPE} failed: {status}"
@@ -956,18 +1224,33 @@ fn build_lab(args: &Args, root: &Path, recipe: &str, work: &Path) -> Result<Stri
 
 /// Removes the `AppArmor` profile this run loaded, through the node holding its source, after
 /// nothing on the cluster can load it again: the release is uninstalled and no pod of it remains,
-/// so the holding installer cannot restart and reload it. A profile already gone is no error.
+/// so the holding installer cannot restart and reload it. A profile already gone is no error; a
+/// failed `helm uninstall` is, reported after the profile itself was dealt with. Cleanup: a
+/// signal does not stop it.
 fn remove_own_profile(lane: &Lane<'_>, worker: &str) -> Result<()> {
-    // An install that never created a release has nothing to uninstall; the pod check decides.
-    let _ = lane.helm(&[
-        "uninstall",
-        RELEASE,
-        "-n",
-        PRIVILEGED_NAMESPACE,
-        "--wait",
-        "--timeout",
-        "3m",
-    ]);
+    let lane = &lane.cleanup();
+    let uninstalled = lane
+        .helm(&[
+            "uninstall",
+            RELEASE,
+            "-n",
+            PRIVILEGED_NAMESPACE,
+            "--wait",
+            "--timeout",
+            "3m",
+        ])
+        .context("helm uninstall of the release");
+    let removed = remove_loaded_profile(lane, worker);
+    match (uninstalled, removed) {
+        (Ok(_), removed) => removed,
+        (Err(uninstall), Ok(())) => Err(uninstall),
+        (Err(uninstall), Err(removal)) => Err(removal.context(format!("{uninstall:#}"))),
+    }
+}
+
+/// [`remove_own_profile`] after the uninstall: wait until no pod of the release remains, then
+/// remove the run's own profile if it is loaded.
+fn remove_loaded_profile(lane: &Lane<'_>, worker: &str) -> Result<()> {
     let selector = format!("app.kubernetes.io/instance={RELEASE}");
     let deadline = Instant::now() + Duration::from_mins(3);
     for namespace in [PRIVILEGED_NAMESPACE, NODE_PROFILES_NAMESPACE] {
@@ -1014,6 +1297,7 @@ fn on_node(lane: &Lane<'_>, node: &str, argv: &[&str]) -> Result<String> {
         Command::new(&lane.args.docker)
             .args(["exec", node])
             .args(argv),
+        lane.stop,
     )
 }
 
@@ -1528,8 +1812,11 @@ fn syscall_names(seccomp: &Value) -> BTreeSet<String> {
 }
 
 fn localhost_seccomp(lane: &Lane<'_>, pods: &[DaemonProcess]) -> Result<Outcome> {
-    let source = fs::read_to_string(crate::repo::root()?.join(SECCOMP_SOURCE))?;
-    let profile: Value = serde_json::from_str(&source)?;
+    let source = lane
+        .seccomp
+        .as_deref()
+        .with_context(|| format!("no committed {SECCOMP_SOURCE} was read for this run"))?;
+    let profile: Value = serde_json::from_str(source)?;
     let names = syscall_names(&profile);
     ensure!(!names.is_empty(), "{SECCOMP_SOURCE} names no syscall");
     for pod in pods {
@@ -1662,14 +1949,17 @@ fn key_after_drop(
     )))
 }
 
-fn kind_gateway(args: &Args) -> Result<Ipv4Addr> {
-    let config = output(Command::new(&args.docker).args([
-        "network",
-        "inspect",
-        "kind",
-        "--format",
-        "{{json .IPAM.Config}}",
-    ]))?;
+fn kind_gateway(args: &Args, stop: &AtomicBool) -> Result<Ipv4Addr> {
+    let config = output(
+        Command::new(&args.docker).args([
+            "network",
+            "inspect",
+            "kind",
+            "--format",
+            "{{json .IPAM.Config}}",
+        ]),
+        stop,
+    )?;
     let config: Value = serde_json::from_str(config.trim())?;
     config
         .as_array()
@@ -3056,5 +3346,251 @@ mod tests {
                 "a recipe whose last stage is `{second}` passes as built on {node}"
             );
         }
+    }
+
+    /// An executable shell script at `directory/name` with `body` after the interpreter line.
+    fn stand_in(directory: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = directory.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}")).expect("the stand-in");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
+        path
+    }
+
+    fn stand_in_args(kind: PathBuf) -> Args {
+        Args {
+            image: "b10x-substrate-daemon:9.9.9".to_owned(),
+            node_image: "kindest/node:v1.37.0".to_owned(),
+            kind,
+            kubectl: PathBuf::from("kubectl-not-used"),
+            helm: PathBuf::from("helm-not-used"),
+            docker: PathBuf::from("docker-not-used"),
+            cluster: "substrate-chart-lane".to_owned(),
+            node_profiles: false,
+        }
+    }
+
+    #[test]
+    fn a_source_with_a_carriage_return_declares_no_scenarios() {
+        // `release.yml` counts the array with awk, which keeps a carriage return in each line and
+        // so matches none of a CRLF source; `lines()` strips it and would count four.
+        let source = include_str!("chart_cluster.rs");
+        assert_eq!(declared_scenarios(source), Some(SCENARIOS.len()));
+        assert_eq!(declared_scenarios(&source.replace('\n', "\r\n")), None);
+        let one = source.replacen(
+            "    \"execution bootstrap\",\n",
+            "    \"execution bootstrap\",\r\n",
+            1,
+        );
+        assert_ne!(one, source);
+        assert_eq!(declared_scenarios(&one), None);
+    }
+
+    #[test]
+    fn a_cluster_name_already_taken_is_refused_naming_its_removal_command() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let log = directory.path().join("kind.log");
+        let kind = stand_in(
+            directory.path(),
+            "kind",
+            &format!(
+                "echo \"$*\" >> '{}'\nif [ \"$1\" = get ]; then echo substrate-chart-lane; fi\nexit 0\n",
+                log.display()
+            ),
+        );
+        let error = run(&stand_in_args(kind)).expect_err("the name is taken");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("`kind delete cluster --name substrate-chart-lane`"),
+            "{message}"
+        );
+        let calls = fs::read_to_string(&log).expect("kind was asked");
+        assert_eq!(
+            calls, "get clusters\n",
+            "the refusal ran more than the listing"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_command_is_stopped_and_refused() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let setter = Arc::clone(&stop);
+        let signal = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            setter.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let result = output(Command::new("sleep").arg("30"), &stop);
+        signal.join().expect("the setter");
+        let error = result.expect_err("an interrupted command is no success");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the command ran on for {:?} after the signal",
+            started.elapsed()
+        );
+        assert!(format!("{error:#}").contains("interrupted"), "{error:#}");
+        // Once interrupted, the next command is not started at all.
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let marker = directory.path().join("started");
+        let touch = output(Command::new("touch").arg(&marker), &stop);
+        assert!(touch.is_err());
+        assert!(!marker.exists(), "a command started after the signal");
+    }
+
+    #[test]
+    fn a_signal_during_the_run_deletes_the_cluster_it_created_and_fails() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let log = directory.path().join("kind.log");
+        let kind = stand_in(
+            directory.path(),
+            "kind",
+            &format!(
+                "echo \"$*\" >> '{}'\nif [ \"$1\" = load ]; then exec sleep 30; fi\nexit 0\n",
+                log.display()
+            ),
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let setter = Arc::clone(&stop);
+        let signal = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            setter.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let result = run_until(&stand_in_args(kind), &stop);
+        signal.join().expect("the setter");
+        assert!(
+            !matches!(result, Ok(code) if code == ExitCode::SUCCESS),
+            "an interrupted run succeeded"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the run went on for {:?} after the signal",
+            started.elapsed()
+        );
+        let calls = fs::read_to_string(&log).expect("kind was asked");
+        assert!(
+            calls
+                .lines()
+                .any(|call| call.starts_with("delete cluster --name substrate-chart-lane ")),
+            "the interrupted run left its cluster: {calls}"
+        );
+    }
+
+    #[test]
+    fn a_failed_helm_uninstall_is_a_removal_failure() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let helm = stand_in(
+            directory.path(),
+            "helm",
+            "if [ \"$1\" = uninstall ]; then echo 'Error: uninstall: timed out' >&2; exit 1; fi\nexit 0\n",
+        );
+        let kubectl = stand_in(directory.path(), "kubectl", "exit 0\n");
+        let docker = stand_in(
+            directory.path(),
+            "docker",
+            "echo 'substrate-host-exec-v2 (enforce)'\nexit 0\n",
+        );
+        let mut args = stand_in_args(PathBuf::from("kind-not-used"));
+        args.helm = helm;
+        args.kubectl = kubectl;
+        args.docker = docker;
+        // Cleanup runs after a signal, so the lane's stop flag is set and the removal runs anyway.
+        let stopped = AtomicBool::new(true);
+        let lane = Lane {
+            args: &args,
+            kubeconfig: directory.path().join("kubeconfig"),
+            work: directory.path().to_path_buf(),
+            profile: "substrate-host-exec-v2-lane-01k8xyz".to_owned(),
+            seccomp: None,
+            stop: &stopped,
+        };
+        let error = remove_own_profile(&lane, "substrate-chart-lane-worker")
+            .expect_err("a failed uninstall is a failed removal");
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    }
+
+    #[test]
+    fn an_all_passed_run_that_is_no_record_says_so_last_on_stderr() {
+        let at = UNIX_EPOCH + Duration::from_hours(497_986);
+        let report = report_lines(
+            Decision::NoRecord("HEAD moved from a to b during the run".to_owned()),
+            "a",
+            at,
+        );
+        assert!(
+            report.success,
+            "an all-passed run exits 0, as quota-fixture does"
+        );
+        assert_eq!(
+            report.stderr.last().map(String::as_str),
+            Some("chart lane cluster: not a release record")
+        );
+        assert!(
+            report
+                .stdout
+                .iter()
+                .all(|line| !line.starts_with("Chart-lane:"))
+        );
+        let record = report_lines(Decision::Record(4), "a", at);
+        assert!(record.success && record.stderr.is_empty());
+        assert_eq!(
+            record.stdout.last().map(String::as_str),
+            Some("Chart-lane: a 4 2026-10-23T10:00:00Z")
+        );
+        let failed = report_lines(Decision::Failed("x".to_owned()), "a", at);
+        assert!(!failed.success && failed.stdout.is_empty());
+    }
+
+    #[test]
+    fn the_lane_reads_the_chart_and_seccomp_profile_from_the_recorded_commit() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let root = repository.path();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args([
+                    "-c",
+                    "user.name=lane",
+                    "-c",
+                    "user.email=lane@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        fs::create_dir_all(root.join(CHART).join("templates")).expect("chart directory");
+        fs::create_dir_all(root.join("deploy/seccomp")).expect("seccomp directory");
+        fs::write(root.join(CHART).join("Chart.yaml"), "committed\n").expect("chart");
+        fs::write(root.join(CHART).join("templates/a.yaml"), "committed\n").expect("template");
+        fs::write(root.join(SECCOMP_SOURCE), "{\"committed\": true}\n\n").expect("seccomp");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "committed"]);
+        let sha = git_text(root, &["rev-parse", "HEAD"]).expect("HEAD");
+        fs::write(root.join(CHART).join("Chart.yaml"), "edited\n").expect("edit");
+        fs::write(root.join(CHART).join("templates/b.yaml"), "untracked\n").expect("add");
+        fs::write(root.join(SECCOMP_SOURCE), "edited\n").expect("edit");
+        let into = tempfile::tempdir().expect("extraction directory");
+        let (chart_dir, seccomp) =
+            committed_sources(root, &sha, into.path()).expect("the committed sources");
+        assert!(
+            chart_dir.starts_with(into.path()),
+            "{}",
+            chart_dir.display()
+        );
+        assert_eq!(
+            fs::read_to_string(chart_dir.join("Chart.yaml")).expect("chart"),
+            "committed\n"
+        );
+        assert!(!chart_dir.join("templates/b.yaml").exists());
+        assert_eq!(seccomp, "{\"committed\": true}\n\n");
     }
 }

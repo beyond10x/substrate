@@ -10,7 +10,8 @@
 //!   too. A flag rule is matched as `apparmor.d(5)` states: `options=(…)` is the exact flag set,
 //!   `options in (…)` any subset of it, no options any flags; an option that clears a flag (`rw`,
 //!   `suid`, …) sets none.
-//! - **Text.** With each policy's own name replaced, the two sources are the same lines except the
+//! - **Text.** With each policy's own name replaced and comment lines set aside (`v2` carries none;
+//!   an `#include` is a directive and stays), the two sources are the same lines except the
 //!   one `remount options in (…) /**,` rule, whose options in `v2` are exactly `v1`'s plus
 //!   `noatime` and `nodiratime`. That holds every rule this module does not model, the `mount`
 //!   rules whose remount behaviour is the parser's business included, identical by text, and it
@@ -289,12 +290,21 @@ fn widened_or_narrowed(v1: &[u8], v2: &[u8]) -> Vec<String> {
     failures
 }
 
-/// The textual half: the sources differ only in their own names and the atime options.
+/// Whether `line` is an `AppArmor` comment: a `#` after leading white space that does not open an
+/// `#include` directive.
+fn comment(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with('#') && !line.starts_with("#include")
+}
+
+/// The textual half: the sources differ only in their own names and the atime options. Comment
+/// lines carry no policy and are compared by neither side: `v1`'s frozen bytes keep theirs, and
+/// `v2` holds none.
 fn text_difference(v1: &[u8], v2: &[u8]) -> Vec<String> {
     let old = std::str::from_utf8(v1).unwrap().replace(V1, "@self");
     let new = std::str::from_utf8(v2).unwrap().replace(V2, "@self");
-    let old: Vec<&str> = old.lines().collect();
-    let new: Vec<&str> = new.lines().collect();
+    let old: Vec<&str> = old.lines().filter(|line| !comment(line)).collect();
+    let new: Vec<&str> = new.lines().filter(|line| !comment(line)).collect();
     if old.len() != new.len() {
         return vec![format!("v1 has {} lines, v2 {}", old.len(), new.len())];
     }
@@ -371,6 +381,25 @@ fn the_remount_the_kernel_denied_under_v1_is_admitted_by_v2() {
     let relatime = denied & !ATIME;
     assert!(any_admits(&v1, relatime, DENIED_PATH));
     assert!(any_admits(&v2, relatime, DENIED_PATH));
+}
+
+/// Comment lines carry no policy. `v2` holds none, `v1` keeps its frozen ones, and the text check
+/// compares the two without them. An `#include` is a directive, not a comment: dropping one fails.
+#[test]
+fn comment_lines_are_not_policy_but_include_directives_are() {
+    let source = std::str::from_utf8(POLICY_V2).unwrap();
+    assert!(
+        source.lines().all(|line| {
+            let line = line.trim_start();
+            !line.starts_with('#') || line.starts_with("#include")
+        }),
+        "v2 carries a comment line: {source}"
+    );
+    let commented = format!("# a note\n{source}").replace("  file,\n", "  # another\n  file,\n");
+    assert!(text_difference(POLICY_V1, commented.as_bytes()).is_empty());
+    let without = source.replace("  #include <abstractions/base>\n", "");
+    assert_ne!(without, source);
+    assert!(!text_difference(POLICY_V1, without.as_bytes()).is_empty());
 }
 
 /// The checker itself: a `v2` that admits another flag, loses one, or lists a no-op option fails.

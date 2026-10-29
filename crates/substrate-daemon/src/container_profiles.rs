@@ -278,7 +278,7 @@ mod tests {
         );
         assert_eq!(
             hex::encode(sha2::Sha256::digest(render(&ProfileName::default()))),
-            "6ac530bcbff411ef0a765d2f81db777ea073e0bb57374b92cac2b068d373e968"
+            "4e21cd28e0237e7bee192e150d8f004d1718edd78688db84dc93db9e39d0c038"
         );
     }
 

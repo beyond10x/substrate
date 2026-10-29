@@ -11,7 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The host execution AppArmor profile `substrate-host-exec-v2`
   (`deploy/apparmor/substrate-host-execution-v2`): `v1`'s rules with `noatime` and `nodiratime`
-  added to the `remount options in (…) /**` set, and nothing else changed. Bubblewrap keeps a
+  added to the `remount options in (…) /**` set, no comment lines, and nothing else changed. Bubblewrap keeps a
   source mount's `noatime` when it remounts a bind read-only. `v1` refuses that remount, so on a
   node whose filesystems are mounted `noatime` the confinement probe failed and the daemon
   published no `exec.*` fact. A test checks every remount flag combination against both
@@ -25,13 +25,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `substrate-host-exec-v2`. They accept `substrate-host-exec-v1`, `substrate-host-exec-v2` and
   either followed by `-<suffix>`. `v1` stays byte for byte as released since `0.10.0` and is
   still installed and checked when named.
-- **Upgrade: nodes load `v2`.** With `nodeProfiles.enabled`, the installer DaemonSet loads it
-  during `helm upgrade`. A node image that carries the profiles itself must add
-  `substrate-host-exec-v2` before the daemon restarts under it, or set
-  `execution.appArmorProfile: substrate-host-exec-v1` to stay on `v1`. The installer removes
-  nothing, so a loaded `v1` stays loaded.
+- **Upgrade: the default profile is now `v2`, and nodes must load it.** Every pool node needs
+  `substrate-host-exec-v2` loaded before the daemon restarts under it: with
+  `nodeProfiles.enabled` the installer DaemonSet loads it during `helm upgrade`; with it disabled,
+  load it on each node by hand. The daemon image must carry the `v2` policy file
+  (`/usr/share/substrate/apparmor/substrate-host-execution-v2`), as images from this release do.
+  Setting `execution.appArmorProfile: substrate-host-exec-v1` keeps the old behaviour. The chart
+  does not refuse the upgrade; its install notes say the same. The installer removes nothing, so
+  a loaded `v1` stays loaded.
 - `cargo xtask chart-lane cluster --node-profiles` names its profile
   `substrate-host-exec-v2-lane-<ulid>`.
+- `cargo xtask chart-lane cluster` deletes its kind cluster only once `kind create` succeeded, so
+  a create refused for a name another run holds deletes nothing. SIGINT or SIGTERM stops the
+  running command and runs the same cleanup (the cluster's deletion and, with `--node-profiles`,
+  the removal of the run's own profile) before it exits non-zero; a second signal exits at once.
+  The run prints the exact removal commands when it creates each, and the refusal of a name
+  already taken names `kind delete cluster --name <name>`.
+- `cargo xtask chart-lane cluster --node-profiles` installs the chart and compares the seccomp
+  profile as the recorded commit holds them, extracted with `git archive` like the chart-lab
+  recipe, not from the working tree. A failed `helm uninstall` is a removal failure. A run that
+  passed every scenario but is no record still exits 0 and ends its standard error with
+  `not a release record`. It refuses a chart-lab recipe with a second `FROM` in any case, indented
+  or tab-separated, and a lane source holding a carriage return, whose `SCENARIOS` the release
+  workflow's awk would count differently.
+- `helm template` and `helm lint` in both chart lanes run with an empty kubeconfig of their own
+  and without the ambient `HELM_KUBE*` overrides.
 - **Upgrade: the state store upgrade is one-way.** Opening a store adds the `backend_objects`
   table (design 34) and stamps it schema version 2. Substrate `0.15.x` and earlier refuse a
   store stamped 2 at open with `NewerSchema` and do not start on it. If you may roll back, back
