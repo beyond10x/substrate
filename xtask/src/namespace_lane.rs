@@ -866,7 +866,15 @@ fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<(ExitCode, bool)
     let unlabelled = format!("snl-{id}-unlabelled");
     let work = tempfile::tempdir()?;
     let admin_path = work.path().join("admin.json");
+    let built = |stop: &AtomicBool| {
+        println!(
+            "namespace lane: building the shipped daemon and the vectors' test binary for steps \
+             3 to 7, before any cluster of the lane's exists"
+        );
+        run::build_daemon(&root, stop)
+    };
 
+    let mut daemon = None;
     let mut cluster = None;
     let mut registry = None;
     let mut lane_id = None;
@@ -877,6 +885,7 @@ fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<(ExitCode, bool)
         image = format!("{BUSYBOX_REPOSITORY}@{BUSYBOX_DIGEST}");
         docker_kubeconfig = admin_path.clone();
     } else {
+        daemon = Some(built(stop)?);
         let name = cluster_name(&id);
         let kind_kubeconfig = work.path().join("kind-kubeconfig.yaml");
         cluster = Some(create_cluster(
@@ -896,6 +905,10 @@ fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<(ExitCode, bool)
     }
 
     let admin = client(&admin_path)?;
+    let daemon = match daemon {
+        Some(path) => path,
+        None => built(stop)?,
+    };
     let executor_image = match (&args.executor_image, &registry) {
         (Some(given), _) => given.clone(),
         (None, Some(_)) => push_executor(args, &root, &image, &sha, &docker_kubeconfig, stop)?,
@@ -910,8 +923,6 @@ fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<(ExitCode, bool)
         exec_image: image.clone(),
         egress_probe_address: format!("{gateway}:9"),
     };
-    println!("namespace lane: building the shipped daemon for steps 3 to 7");
-    let daemon = run::build_daemon(&root, stop)?;
     let driver_path = work.path().join("driver.json");
     let lane_driver_path = work.path().join("driver-lane.json");
     let runtime = tokio::runtime::Builder::new_current_thread()

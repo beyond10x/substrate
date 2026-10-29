@@ -67,8 +67,10 @@ const ABSENCE_BOUND: Duration = Duration::from_mins(3);
 /// How long a Role-verb case watches for its dependent to be refused: a probe on pulled images,
 /// then past the Lease's 20 s held window and one more 10 s round, so a lost renewal shows.
 const VERB_BOUND: Duration = Duration::from_mins(2);
-/// How long a Role-verb case waits on a pending destroy to finish or name why it cannot.
-const PENDING_BOUND: Duration = Duration::from_secs(90);
+/// How long a Role-verb case waits on a pending destroy to finish or name why it cannot: the
+/// keeper's termination comes first, and a loaded kind node took minutes to kill a Pod (run 2,
+/// 2026-10-29, where 90 s ran out before the PVC's deletion was tried).
+const PENDING_BOUND: Duration = Duration::from_mins(4);
 /// The daemon's answer to a mutation whose driver reported progress, not an end.
 const OUTCOME_UNKNOWN: &str = "operation.outcome-unknown";
 /// When a Role-verb case whose facts stayed whole tries its dependent route.
@@ -300,6 +302,45 @@ pub fn named_codes(log: &str) -> BTreeSet<String> {
         }
     }
     codes
+}
+
+/// The facts a daemon's log says, on a `WARN` line, were `<fact> was not proved`: the probe's
+/// own statement for `exec.argv-only`, which carries the API's answer as `why=` and no code.
+pub fn unproved_facts(log: &str) -> BTreeSet<String> {
+    const NOT_PROVED: &str = " was not proved";
+    log.lines()
+        .filter(|line| line.contains("WARN"))
+        .filter_map(|line| {
+            let plain = without_escapes(line);
+            let before = &plain[..plain.find(NOT_PROVED)?];
+            let fact = before.rsplit(char::is_whitespace).next()?;
+            (!fact.is_empty()).then(|| fact.to_owned())
+        })
+        .collect()
+}
+
+/// A Role-verb case's refusal once a full-set fact is `missing`: ADR 0047 decision 13's "the
+/// dependent fact is absent and its refusal named". A reason code on a `WARN` line names it, or
+/// the probe's `WARN` that this very missing fact was not proved, which states why.
+pub fn verb_refusal(
+    missing: &BTreeSet<String>,
+    codes: &BTreeSet<String>,
+    unproved: &BTreeSet<String>,
+) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    if !codes.is_empty() {
+        return Some(format!("absent {missing:?}; the log names {codes:?}"));
+    }
+    let stated: Vec<&String> = missing.intersection(unproved).collect();
+    (!stated.is_empty()).then(|| {
+        let warned: Vec<String> = stated
+            .iter()
+            .map(|fact| format!("{fact} was not proved"))
+            .collect();
+        format!("absent {missing:?}; the log warns {warned:?}, with the API's answer")
+    })
 }
 
 /// `line` without its ANSI CSI sequences (`ESC [ … final byte`), should the log be coloured.
@@ -716,11 +757,15 @@ pub struct Steps<'a> {
     pub stop: &'a AtomicBool,
 }
 
-/// Builds the shipped daemon in this checkout's profile and target directory; its path.
+/// Builds the shipped daemon in this checkout's profile and target directory, and step 5's
+/// vectors test binary beside it; the daemon's path. Both are built before the cluster exists:
+/// a build while the kind node runs starves it (run 2, 2026-10-29: containerd kill deadlines and
+/// an apiserver liveness failure while step 5 compiled, and its first create past the driver's
+/// handshake bound).
 ///
 /// # Errors
 ///
-/// The build or `cargo metadata` failed.
+/// A build or `cargo metadata` failed.
 pub fn build_daemon(root: &Path, stop: &AtomicBool) -> Result<PathBuf> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     output(
@@ -731,6 +776,18 @@ pub fn build_daemon(root: &Path, stop: &AtomicBool) -> Result<PathBuf> {
             DAEMON_PACKAGE,
             "--bin",
             "substrate-daemon",
+        ]),
+        stop,
+    )?;
+    output(
+        Command::new(&cargo).current_dir(root).args([
+            "test",
+            "--locked",
+            "--no-run",
+            "-p",
+            DAEMON_PACKAGE,
+            "--test",
+            "runtime_vectors",
         ]),
         stop,
     )?;
@@ -1271,13 +1328,13 @@ impl Steps<'_> {
                 break Err(anyhow!("interrupted by a signal"));
             }
             let facts = published(&daemon.machine().await?);
-            let codes = named_codes(&daemon.log());
-            let missing: Vec<&String> = full.difference(&facts).collect();
-            if !codes.is_empty()
-                && !missing.is_empty()
-                && started.elapsed() > Duration::from_secs(2)
+            let log = daemon.log();
+            let codes = named_codes(&log);
+            let missing: BTreeSet<String> = full.difference(&facts).cloned().collect();
+            if started.elapsed() > Duration::from_secs(2)
+                && let Some(refused) = verb_refusal(&missing, &codes, &unproved_facts(&log))
             {
-                break Ok(format!("absent {missing:?}; the log names {codes:?}"));
+                break Ok(refused);
             }
             if route.is_none() && missing.is_empty() && started.elapsed() >= VERB_ROUTE_AFTER {
                 let (answer, created) = self.route(&mut daemon).await?;
@@ -1655,6 +1712,51 @@ mod tests {
             named_codes(coloured),
             BTreeSet::from(["kubernetes.api-failed".to_owned()])
         );
+    }
+
+    #[test]
+    fn a_probe_warn_names_the_fact_it_did_not_prove() {
+        let log = "2026-10-29T10:02:34.861357Z  WARN substrate_kubernetes::namespace::probe: \
+                   exec.argv-only was not proved why=\"the exec's log answered 403: pods \
+                   \\\"sbx-pr-dw7dhppsb6lkqjib-pod\\\" is forbidden\"\n\
+                   2026-10-29T10:02:35Z  INFO substrate_kubernetes: workspace.other was not proved";
+        assert_eq!(
+            unproved_facts(log),
+            BTreeSet::from(["exec.argv-only".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_missing_fact_is_refused_by_a_code_or_by_its_own_unproved_warn() {
+        let set = |names: &[&str]| -> BTreeSet<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let by_warn = verb_refusal(
+            &set(&["exec.argv-only"]),
+            &set(&[]),
+            &set(&["exec.argv-only"]),
+        )
+        .expect("the probe's WARN names the missing fact");
+        assert!(
+            by_warn.contains("exec.argv-only was not proved"),
+            "{by_warn}"
+        );
+        assert!(
+            verb_refusal(
+                &set(&["exec.argv-only"]),
+                &set(&[]),
+                &set(&["workspace.guarded-io"])
+            )
+            .is_none()
+        );
+        assert!(verb_refusal(&set(&[]), &set(&["kubernetes.api-failed"]), &set(&[])).is_none());
+        let by_code = verb_refusal(
+            &set(&["workspace.guarded-io"]),
+            &set(&["kubernetes.api-failed"]),
+            &set(&[]),
+        )
+        .expect("a code names the refusal");
+        assert!(by_code.contains("kubernetes.api-failed"), "{by_code}");
     }
 
     #[test]
