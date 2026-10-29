@@ -57,21 +57,24 @@ const PROBE_POLL: Duration = Duration::from_millis(200);
 /// What the end may take beyond the probe's own deadline: scheduling, image pulls and the API.
 const PROBE_SLACK: Duration = Duration::from_mins(1);
 
-/// One probe's proofs, bound to the binding generation it ran under.
+/// One probe's proofs, bound to the binding generation and the Lease epoch it ran under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Probed {
     generation: u64,
+    lease_epoch: u64,
     at: DateTime<Utc>,
     valid_until: DateTime<Utc>,
     guarded_io: bool,
     argv_only: bool,
 }
 
-/// The last proof and when the next probe is due; `None` is due now.
+/// The last proof and when the next probe is due; `None` is due now. `lease_epoch` moves on
+/// every lost or retaken Lease, which a same-holder retake does not show in `config_generation`.
 #[derive(Debug, Default)]
 pub(crate) struct ProbeState {
     proved: Option<Probed>,
     next_at: Option<DateTime<Utc>>,
+    lease_epoch: u64,
 }
 
 /// What one run observed.
@@ -96,6 +99,7 @@ impl NamespaceDriver {
             return Err(refusal(API_FAILED, "the namespace driver is not open"));
         };
         let generation = binding.config_generation();
+        let lease_epoch = lock(&self.probe).lease_epoch;
         self.remove_probe_leftovers().await;
         let nonce = names::probe_nonce();
         let mut sent = Vec::new();
@@ -104,10 +108,17 @@ impl NamespaceDriver {
         let now = self.clock.wall();
         let interval = Duration::from_secs(self.config.probe_interval_seconds);
         let mut state = lock(&self.probe);
+        if state.lease_epoch != lease_epoch {
+            // The Lease was lost while this run was in flight: it neither proves nor delays
+            // anything under the Lease held now, which takes its own run (§ 6.1).
+            tracing::info!("the probe outlived the Lease it began under; its result is dropped");
+            return observed.map(|_| ());
+        }
         match observed {
             Ok(observation) => {
                 state.proved = Some(Probed {
                     generation,
+                    lease_epoch,
                     at: now,
                     valid_until: now + interval + VALIDITY_SLACK,
                     guarded_io: observation.guarded_io,
@@ -134,16 +145,22 @@ impl NamespaceDriver {
             return false;
         }
         let state = lock(&self.probe);
-        let superseded = state
-            .proved
-            .as_ref()
-            .is_some_and(|proved| proved.generation != binding.config_generation());
+        let superseded = state.proved.as_ref().is_some_and(|proved| {
+            proved.generation != binding.config_generation()
+                || proved.lease_epoch != state.lease_epoch
+        });
         superseded || state.next_at.is_none_or(|at| self.clock.wall() >= at)
     }
 
-    /// Forgets the last proof: the Lease was retaken, so steps 4 to 7 run again (§ 6.1).
+    /// Forgets the last proof and moves the Lease epoch: the Lease was lost or retaken, so steps
+    /// 4 to 7 run again (§ 6.1), and a probe still in flight proves nothing under the new Lease.
     pub fn forget_probe(&self) {
-        *lock(&self.probe) = ProbeState::default();
+        let mut state = lock(&self.probe);
+        let lease_epoch = state.lease_epoch.wrapping_add(1);
+        *state = ProbeState {
+            lease_epoch,
+            ..ProbeState::default()
+        };
     }
 
     /// Serves the driver until the task is dropped: the Lease is renewed every
@@ -209,10 +226,13 @@ impl NamespaceDriver {
         let held = binding.is_some() && self.lease_held();
         // Open is all seven steps of § 6.1: the binding, the Lease, and a probe under this
         // binding that passed the executor handshake. Only then are the declared bounds served.
-        let opened = lock(&self.probe)
-            .proved
-            .clone()
-            .filter(|proved| held && proved.generation == config_generation);
+        let opened = {
+            let state = lock(&self.probe);
+            state.proved.clone().filter(|proved| {
+                held && proved.generation == config_generation
+                    && proved.lease_epoch == state.lease_epoch
+            })
+        };
         let serving = opened.is_some();
         let now = self.clock.wall();
         let proved = opened.filter(|proved| now < proved.valid_until);

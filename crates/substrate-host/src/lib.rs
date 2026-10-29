@@ -568,6 +568,13 @@ pub trait Driver: Send + Sync {
         previous: &Workspace,
     ) -> Result<Workspace, DriverError>;
 
+    /// The refusal a driver that adopts no operator directory answers every `workspace.adopt`
+    /// with. The daemon asks before it looks up any name, so the answer does not depend on who
+    /// holds the name. `None`, the default, serves adoption.
+    fn adopt_refusal(&self) -> Option<DriverError> {
+        None
+    }
+
     async fn read_workspace_path(
         &self,
         workspace_id: &str,

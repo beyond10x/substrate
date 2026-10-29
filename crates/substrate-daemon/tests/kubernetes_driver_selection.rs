@@ -17,15 +17,23 @@
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::Extension;
+use axum::body::{Body, to_bytes};
+use axum::http::{Method, Request, StatusCode};
 use base64::Engine as _;
 use serde_json::{Value, json};
 use substrate_daemon::{
-    DaemonConfig, DriverSelection, EgressAperture, GitSourceConfig, SecretSlot, WritableRootConfig,
-    serve,
+    App, DaemonConfig, DriverSelection, EgressAperture, GitSourceConfig, Identity, SecretSlot,
+    StoreBackendLedger, SystemAuthority, WritableRootConfig, router, serve,
 };
+use substrate_host::{Driver, HostConfig, HostDriver};
+use substrate_kubernetes::NamespaceDriver;
+use substrate_store::Store;
 use tempfile::TempDir;
+use tower::ServiceExt as _;
 
 /// Sets one host-only declaration on a configuration.
 type Declare = fn(&mut DaemonConfig, &Path);
@@ -150,16 +158,7 @@ async fn an_unloadable_namespace_configuration_stops_the_daemon_before_it_listen
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unopened_namespace_driver_is_served_with_every_driver_fact_absent() {
     let (_directory, base) = tree();
-    let kubeconfig = unreachable_kubeconfig(Some(json!({
-        "storage_class": "standard",
-        "workspace_size_bytes": 1_073_741_824_u64,
-        "executor_image": format!("registry.invalid/substrate/executor@sha256:{DIGEST}"),
-        "exec_image": format!("registry.invalid/busybox@sha256:{DIGEST}"),
-        "default_deny_policy": "default-deny",
-        "egress_probe_address": "192.0.2.10:443",
-        "pod_pids_limit": 1024,
-        "container_log_max_bytes": 10_485_760,
-    })));
+    let kubeconfig = unreachable_kubeconfig(Some(extension()));
     let path = base.join("other/kubeconfig.json");
     std::fs::write(&path, serde_json::to_vec(&kubeconfig).expect("kubeconfig"))
         .expect("write kubeconfig");
@@ -197,6 +196,110 @@ async fn an_unopened_namespace_driver_is_served_with_every_driver_fact_absent() 
     ] {
         assert!(!facts.contains_key(absent), "{absent} published: {machine}");
     }
+}
+
+/// Design 34 § 8 and § 14 Q3 A: every `workspace.adopt` on a namespace machine is
+/// `workspace.adopt-unserved` (501), decided before any name is looked up. A free name, a name
+/// another subject holds and a name the caller holds get the same answer, so the answer says
+/// nothing about who holds which name. The names are held through a host driver over the same
+/// store, as a host daemon would have left them; the namespace driver is never opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_adopt_on_a_namespace_machine_is_unserved_before_any_name_is_looked_up() {
+    const OWNER: &str = "local:1001";
+    const CALLER: &str = "local:1000";
+    let (_directory, base) = tree();
+    std::fs::create_dir_all(base.join("workspaces/project")).expect("operator directory");
+    let store = Arc::new(Store::open(base.join("state.db")).expect("state store"));
+    let host = HostDriver::open(HostConfig::minimum(base.join("workspaces"))).expect("host driver");
+    let host = App::new(Arc::clone(&store), host as Arc<dyn Driver>, "d");
+    let held = adopt(&host, OWNER, "01JFXN0ADOPTHELD000000000", "project").await;
+    assert_eq!(held.0, StatusCode::CREATED, "{}", held.1);
+    let kubeconfig =
+        serde_json::to_vec(&unreachable_kubeconfig(Some(extension()))).expect("kubeconfig");
+    let ledger = Arc::new(StoreBackendLedger::new(
+        Arc::clone(&store),
+        "d",
+        Arc::new(SystemAuthority),
+    ));
+    let namespace = NamespaceDriver::parse(&kubeconfig, "d", ledger).expect("the configuration");
+    let namespace = App::new(store, Arc::new(namespace) as Arc<dyn Driver>, "d");
+    for (subject, operation, root_name, holder) in [
+        (CALLER, "01JFXN0ADOPTFREE000000000", "free", "nobody"),
+        (
+            CALLER,
+            "01JFXN0ADOPTOTHER00000000",
+            "project",
+            "another subject",
+        ),
+        (OWNER, "01JFXN0ADOPTOWN0000000000", "project", "the caller"),
+    ] {
+        let (status, body) = adopt(&namespace, subject, operation, root_name).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_IMPLEMENTED,
+            "a name {holder} holds: {body}"
+        );
+        assert_eq!(
+            body["error"]["code"],
+            substrate_wire::WORKSPACE_ADOPT_UNSERVED,
+            "a name {holder} holds: {body}"
+        );
+        assert_eq!(body["error"]["class"], "unserved", "{body}");
+        assert!(body["error"].get("address").is_none(), "{body}");
+    }
+}
+
+async fn adopt(
+    app: &Arc<App>,
+    subject: &str,
+    operation: &str,
+    root_name: &str,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/workspaces/adopt")
+        .header("content-type", "application/json")
+        .header("x-request-id", "req_namespace_adopt")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "op": operation,
+                "input": {"root_name": root_name, "labels": {}},
+            }))
+            .expect("mutation"),
+        ))
+        .expect("request");
+    let identity = Identity {
+        subject: subject.to_owned(),
+        actor: "namespace-adopt-test".to_owned(),
+        principal: None,
+    };
+    let response = router(Arc::clone(app))
+        .layer(Extension(identity))
+        .oneshot(request)
+        .await
+        .expect("router response");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 65_536)
+        .await
+        .expect("response body");
+    (
+        status,
+        serde_json::from_slice(&bytes).expect("JSON response"),
+    )
+}
+
+/// The namespace driver's context extension, naming images by digest and nothing host-only.
+fn extension() -> Value {
+    json!({
+        "storage_class": "standard",
+        "workspace_size_bytes": 1_073_741_824_u64,
+        "executor_image": format!("registry.invalid/substrate/executor@sha256:{DIGEST}"),
+        "exec_image": format!("registry.invalid/busybox@sha256:{DIGEST}"),
+        "default_deny_policy": "default-deny",
+        "egress_probe_address": "192.0.2.10:443",
+        "pod_pids_limit": 1024,
+        "container_log_max_bytes": 10_485_760,
+    })
 }
 
 /// A self-contained JSON kubeconfig naming a loopback port nothing listens on, trusted through a
