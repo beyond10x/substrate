@@ -10,6 +10,8 @@ use std::process::Command;
 
 use anyhow::{Context as _, Result, ensure};
 
+use crate::profile_name::ProfileName;
+
 const ROOT: &str = "/sys/fs/cgroup";
 const INIT: &str = "/usr/bin/tini";
 const UID: u32 = 65532;
@@ -17,7 +19,7 @@ const SYS_ADMIN: u32 = 21;
 const BOOTSTRAP_CAPS: u64 = (1 << 0) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << SYS_ADMIN);
 const LIMITS: [&str; 4] = ["cpu.max", "memory.max", "memory.swap.max", "pids.max"];
 
-pub fn run(quotas: bool, arguments: Vec<OsString>) -> Result<()> {
+pub fn run(quotas: bool, profile: &ProfileName, arguments: Vec<OsString>) -> Result<()> {
     validate_arguments(&arguments)?;
     let executable = if quotas {
         "/usr/local/bin/substrate-daemon-quota"
@@ -31,7 +33,7 @@ pub fn run(quotas: bool, arguments: Vec<OsString>) -> Result<()> {
             "init/daemon executable must be a root-owned regular file without setuid/setgid or group/other write"
         );
     }
-    let before = preflight(quotas)?;
+    let before = preflight(quotas, profile)?;
     make_delegation()?;
     prepare_private_proc()?;
     ensure!(limits()? == before, "enclosing resource limits changed");
@@ -71,7 +73,7 @@ fn validate_arguments(arguments: &[OsString]) -> Result<()> {
     Ok(())
 }
 
-fn preflight(quotas: bool) -> Result<BTreeMap<String, String>> {
+fn preflight(quotas: bool, profile: &ProfileName) -> Result<BTreeMap<String, String>> {
     // SAFETY: these identity queries take no pointers and change no process state.
     ensure!(
         unsafe { libc::getpid() == 1 && libc::geteuid() == 0 },
@@ -86,10 +88,7 @@ fn preflight(quotas: bool) -> Result<BTreeMap<String, String>> {
     validate_proc_mount(&mountinfo)?;
     let label = fs::read_to_string("/proc/self/attr/apparmor/current")
         .or_else(|_| fs::read_to_string("/proc/self/attr/current"))?;
-    ensure!(
-        label.trim() == "substrate-host-exec-v1 (enforce)",
-        "the exact enforced container execution AppArmor profile is required"
-    );
+    require_label(&label, profile)?;
     ensure!(
         prctl(libc::PR_GET_SECUREBITS, 0)? == 0,
         "unsupported securebits"
@@ -130,6 +129,15 @@ fn preflight(quotas: bool) -> Result<BTreeMap<String, String>> {
     let limits = limits()?;
     validate_enclosing_limits(&limits)?;
     Ok(limits)
+}
+
+/// The process's own `AppArmor` label must be the configured profile, enforced (design 33 § 5).
+fn require_label(label: &str, profile: &ProfileName) -> Result<()> {
+    ensure!(
+        label.trim() == profile.enforced_label(),
+        "the exact enforced container execution AppArmor profile is required"
+    );
+    Ok(())
 }
 
 fn validate_mount(mountinfo: &str) -> Result<()> {
@@ -424,6 +432,61 @@ mod tests {
             String::new(),
         ] {
             assert!(validate_proc_mount(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn requires_exactly_the_configured_profile_enforced() {
+        let default = ProfileName::default();
+        assert!(require_label("substrate-host-exec-v1 (enforce)\n", &default).is_ok());
+        let lane: ProfileName = "substrate-host-exec-v1-lane-01k8xyz".parse().unwrap();
+        assert!(require_label("substrate-host-exec-v1-lane-01k8xyz (enforce)\n", &lane).is_ok());
+        for (label, profile) in [
+            ("substrate-host-exec-v1 (enforce)", &lane),
+            ("substrate-host-exec-v1-lane-01k8xyz (complain)", &lane),
+            ("substrate-host-exec-v1-lane-other (enforce)", &lane),
+            ("substrate-host-exec-v1-lane-01k8xyz (enforce)", &default),
+            ("substrate-host-exec-v1 (complain)", &default),
+            ("unconfined", &default),
+            ("cri-containerd.apparmor.d (enforce)", &default),
+        ] {
+            assert!(
+                require_label(label, profile).is_err(),
+                "{label:?} admitted for {profile}"
+            );
+        }
+    }
+
+    /// Adversary: a label that only ends with, starts with or contains `<name> (enforce)` is
+    /// another profile: a hat of another profile, a stack, a policy namespace or another mode.
+    #[test]
+    fn adversary_a_label_merely_containing_the_enforced_name_is_refused() {
+        let default = ProfileName::default();
+        let lane: ProfileName = "substrate-host-exec-v1-lane-a".parse().unwrap();
+        for profile in [&default, &lane] {
+            let label = profile.enforced_label();
+            for refused in [
+                format!("docker-default//{label}"),
+                format!("unconfined//&{label}"),
+                format!(":other:{label}"),
+                format!(":other://{label}"),
+                format!("{label}//&docker-default (enforce)"),
+                format!("{profile}//null-x (enforce)"),
+                format!("{profile} (kill)"),
+                format!("{profile} (unconfined)"),
+                format!("{profile} (mixed)"),
+                format!("{profile} (ENFORCE)"),
+                format!("{profile}  (enforce)"),
+                format!("{profile}(enforce)"),
+                format!("{label}\0"),
+                format!("{label}\nunconfined"),
+                format!("{profile}-x (enforce)"),
+            ] {
+                assert!(
+                    require_label(&refused, profile).is_err(),
+                    "{refused:?} admitted for {profile}"
+                );
+            }
         }
     }
 

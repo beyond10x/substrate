@@ -102,6 +102,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     A recovery reuses an existing chart only when its chart layer is the local package byte for
     byte. The release notes list the scenarios the chart lane reported absent.
   - The gate preflight now also counts only a push to `main` or a dispatch in this repository.
+- A confinement adapter run can read a piped standard input (design 32). A profile asks for it
+  with `StdinMode::Piped { limit_bytes }`, 1 to `MAX_STDIN_BYTES` (16 MiB, the daemon session's
+  input bound), and requires the new fact `stdin_pipe`. The embedder writes with
+  `ConfinementAdapter::write_stdin`, 1 to `STDIN_CHUNK_BYTES` (64 KiB) a call, one write in flight
+  a run, and ends input with `close_stdin`; `run_with_stdin` writes a whole buffer, closes, waits
+  and returns the output with the bytes the pipe took, and kills its run if it is dropped first.
+  A cancelled write closes the pipe, so the child reads a prefix and then end of file, and from
+  the run's observed end a write is `session.input-closed` while a pending one fails
+  `session.write-failed`. The default, `StdinMode::Null`, is `/dev/null` as before. The trait's two
+  new methods answer `session.not-pipe` by default, so an implementor outside the crate compiles
+  unchanged. `local`, `linux`, `macos` and `systemd` around either prove `stdin_pipe`; `oci`
+  proves it only on a runtime its lane pinned (Docker 29.7.2), and `pod` refuses `Piped` naming
+  the fact.
+- A confinement adapter run can deliver its output live while it runs (design 32). A profile asks
+  for it with `OutputDelivery::Live { queued_chunks }`, 1 to `MAX_QUEUED_CHUNKS` (16), and
+  requires the new fact `output_live`; the default, `OutputDelivery::Recorded`, is the recorded
+  output as before. `ConfinementAdapter::read_output` returns the next `OutputEvent`: a `Chunk`
+  with its stream and its offset in that stream's record, `Bounded` for a stream that reached its
+  output bound, `Stalled` once, then `None` after the run's end. Live output needs `Head`
+  retention on both streams: anything else is `confinement.live-output-retention-invalid` (422),
+  and a queue outside 1 to 16 is `session.limit-unserved` (429), both at admission. When the queue
+  stays full for one second the run is killed and `Stalled` follows the queued chunks;
+  `output_stalled` reports it. A zero read timeout is `session.timeout-invalid`, a read that
+  waited its timeout `session.read-timeout`, and a run whose output is recorded only
+  `session.not-pipe`, the trait's default, so an implementor outside the crate compiles
+  unchanged. `run_with_stdin` refuses a live profile `confinement.live-output-unread` before it
+  starts anything. `local`, `macos`, `oci` and `systemd` around `local` prove `output_live`;
+  `linux` and `systemd` around it prove it with the enforced isolation floor; `pod` refuses
+  `Live` naming the fact.
+- The host execution AppArmor profile name is a deployment parameter (design 33). The chart
+  value `execution.appArmorProfile` (default `substrate-host-exec-v1`) and `--apparmor-profile`
+  on `substrate-container-profiles` and `substrate-container-exec` accept `substrate-host-exec-v1`
+  or `substrate-host-exec-v1-<suffix>`. The installer renders the unchanged policy under that
+  name, renaming its declaration and its two self-peers, installs and loads it from
+  `<name>.apparmor`, and refuses any source that is not those exact bytes. The bootstrap
+  requires `<name> (enforce)`. The schema and the templates refuse any other name. With the
+  value unset, the policy, the installer, the bootstrap check and `helm template` output are
+  byte-identical to before.
 
 ### Security
 
@@ -113,7 +151,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The specification and CI use ESS 0.72.0 (was 0.70.0); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
 - The specification and CI use ESS 0.74.0 (was 0.72.0). The host-process suite gains the synthesized `AppendStreamEvent/unknown-process` scenario (92 synthesized, 27 refusals); the other suites, wire types and CLI package regenerate unchanged apart from the generator header.
+- The specification and CI use ESS 0.75.0 (was 0.74.0); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
 - A `session.not-attachable` refusal now names which condition failed (state not `ready`, attachment not `available`, lease not `active`) and states the three observed values, for example "The pty session is not attachable: its state is not ready, its attachment is not available. Observed state exited, attachment consumed, lease active." Code, status, class and `retriable` are unchanged; only the free-text `error.message` differs, and no bundle changes. Under the hosted posture the attachment-authority mint, where a hosted client meets this refusal first, says the same.
+- **Breaking (`substrate-host` public API, design 32):** the confinement `Fact` enum gains `StdinPipe`, so an exhaustive `match` on it breaks and a consumer on an older revision cannot deserialize an `AdapterFacts` or an audit record that names `stdin_pipe`.
+- **Breaking (`substrate-host` public API, design 32):** `FACT_ORDER` changes type from `[Fact; 11]` to `[Fact; 12]`; code that names the array type or relies on its length breaks.
+- **Breaking (`substrate-host` public API, design 32):** `ConfinementProfile` gains `stdin`, so a struct literal without `..ConfinementProfile::default()` and an exhaustive destructuring pattern break.
+- **Breaking (`substrate-host` public API, design 32):** the confinement `Fact` enum gains `OutputLive`, so an exhaustive `match` on it breaks and a consumer on an older revision cannot deserialize an `AdapterFacts` or an audit record that names `output_live`.
+- **Breaking (`substrate-host` public API, design 32):** `FACT_ORDER` changes type from `[Fact; 12]` to `[Fact; 13]`; code that names the array type or relies on its length breaks.
+- **Breaking (`substrate-host` public API, design 32):** `ConfinementProfile` gains `output_delivery`, so a struct literal without `..ConfinementProfile::default()` and an exhaustive destructuring pattern break.
 
 ### Fixed
 
@@ -128,6 +173,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `pod`: a policy open keeps, younger than 90 s or with its run's Pod present, no longer stays until the next open: the adapter checks it again every 2 s on a thread of its own, with one list of its owned Pods' metadata alone per round (a page of whole Pods of ten admitted runs, each up to 256 KiB of argv and 256 KiB of environment, would pass the 4 MiB page bound and fail every round), and deletes it once its Pod is gone and either the API showed that Pod before or the policy is 90 s old. The thread ends when nothing is kept or the adapter and its runs' tasks are gone.
 - `pod`: after `Unknown` the task reads the Pod every 2 s between its backed-off deletions, so a policy follows its Pod within 2 s of the kubelet removing it, not at the next deletion up to 30 s later.
 - `pod`: `start` reads the run's NetworkPolicy back once the Pod is stored, and the Pod carries an `ownerReference` to that policy (`controller: false`), so a Pod whose policy is gone is removed by the garbage collector; a policy not read back removes the Pod and refuses the start `confinement.pod-api-failed`.
+- `pod`: a Pod that reads 404 no longer releases its run's NetworkPolicy by itself. A forced deletion, PodGC's after a node stopped answering or an operator's, removes a Pod while its container may still run. The run's task, the open sweep, the deferred sweep and an abandoned start now delete the policy only once the API shows the container terminated in a Pod whose `restartPolicy` reads `Never`, or the Pod deleted without ever being bound to a node: a read showed it, or a watch of the Pod from the last `resourceVersion` read, at first what the start's creates answered, replays it before the deletion, as the kubelet writes it before it removes a Pod. A run whose task is still asking counts against the tracked-run cap. A watch answered 410, one that shows nothing within 5 s, a deletion of a container not shown terminated, or no `resourceVersion` to watch from keeps the policy and reports the run `Unknown`; a `Failed` phase alone does not count, because PodGC sets it before a forced deletion. **Required RBAC change:** the adapter's Role needs `watch` on `pods` (now `create`, `get`, `list`, `watch`, `delete` on `pods` and `networkpolicies`, and `get` on `pods/log`); a deployment that pre-creates the Role must add it, or every run whose Pod goes before its container is read terminated keeps its policy and reads `Unknown`.
 
 ### Fixed
 

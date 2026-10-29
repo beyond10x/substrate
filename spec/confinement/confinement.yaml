@@ -42,6 +42,11 @@ types:
   # - private_tmpdir: a per-run TMPDIR, invisible to another run and gone after wait.
   # - host_network: the run uses the host's network directly.
   # - image_digest_pinned: the image runs by digest only.
+  # - stdin_pipe: the run's standard input is a pipe the embedder writes and closes, ended by EOF
+  #   (design 32, section 2). Without it a run's standard input is `/dev/null`.
+  # - output_live: the run's output reaches the embedder while the run runs, in order and
+  #   contiguous per stream, from a bounded queue whose stall ends the run (design 32, section 3).
+  #   Without it output is read from the run's record.
   - name: substrate.confinement.Fact
     kind: enum
     variants:
@@ -56,6 +61,8 @@ types:
       - private_tmpdir
       - host_network
       - image_digest_pinned
+      - stdin_pipe
+      - output_live
   # The two profile fields ADR 0109 F1 B reserves: setting either is refused until a later story
   # fills it. Spelled with `-` because ESS reads a bare `ingress_routes` in a payload as the input
   # of that name.
@@ -179,11 +186,15 @@ commands:
   # runner holding a real adapter compares its facts with it. The declared sets the scenarios open:
   # - local: process_run, process_watch, output_read, wait, workspace, audit; declared_insecure,
   #   paths_are_host_paths, local_permitted (absent where the host forbids `local`, F3 A),
-  #   host_network (decision 4: direct networking). No whole-tree kill (the systemd story).
+  #   host_network (decision 4: direct networking), stdin_pipe (design 32: a piped standard input
+  #   held by the adapter's shared writer), output_live (design 32: the shared drain's live queue).
+  #   No whole-tree kill (the systemd story).
   # - linux: process_run, process_watch, output_read, wait, workspace, filesystem_view, limits,
   #   audit, and network_egress where the operator declared an egress aperture
   #   (`crates/substrate-host/src/probe.rs`); whole_tree_kill (cgroup kill), ipc_socket_allowlist
-  #   (ADR 0039's seccomp socket filter), ipc_signals_contained (its own pid namespace). The S0
+  #   (ADR 0039's seccomp socket filter), ipc_signals_contained (its own pid namespace),
+  #   stdin_pipe and output_live (design 32: the host driver's pipe channel, with a live sender
+  #   for output_live, each proved with the floor). The S0
   #   story: paths_are_host_paths, sealed_paths and host_network are not proved.
   #   UNMAPPED: exec_subpaths and private_tmpdir. The bwrap argv mounts a fresh `/tmp`
   #   (`crates/substrate-host/src/process.rs`), but no story declares either fact for `linux`;
@@ -191,17 +202,26 @@ commands:
   # - macos, final state after `story:macos-seatbelt-policy-runs-cargo-test`: process_run,
   #   process_watch, output_read, wait, workspace, filesystem_view, audit; paths_are_host_paths,
   #   ipc_signals_contained (the profile's `signal (target same-sandbox)` rule,
-  #   `crates/substrate-host/src/seatbelt.rs`), sealed_paths, exec_subpaths, private_tmpdir.
-  #   No limits, egress or whole-tree kill (ADR 0037).
+  #   `crates/substrate-host/src/seatbelt.rs`), sealed_paths, exec_subpaths, private_tmpdir,
+  #   stdin_pipe (design 32: the run inherits descriptor 0; declared once the macos lane proves a
+  #   confined `cat` reads it), output_live (design 32: the shared drain's live queue; declared
+  #   once the macos lane proves a confined run's output arrives while it runs). No limits,
+  #   egress or whole-tree kill (ADR 0037).
   # - systemd around local: local's families plus limits; local's facts plus whole_tree_kill.
   # - systemd around linux: linux's set.
   # - oci: process_run, process_watch, output_read, wait, workspace, filesystem_view, limits,
-  #   audit; image_digest_pinned (`story:oci-adapter`).
+  #   audit; image_digest_pinned (`story:oci-adapter`); stdin_pipe only where the runtime's flavor,
+  #   server version and client version are an entry in `OCI_STDIN_PINNED` (design 32 D13). The scenarios state what the
+  #   oci lane's pinned runtime yields, which holds it. output_live on every runtime (design 32:
+  #   the attached runtime client's two pipes feed the shared drain's live queue).
   #   UNMAPPED: the oci story names a "rootless or not" fact with no Fact variant, and states no
   #   whole_tree_kill, IPC, private_tmpdir or paths_are_host_paths fact; none is declared.
   # - pod: process_run, process_watch, output_read, wait, workspace, limits, audit;
   #   image_digest_pinned (its posture runs "an image by digest", `story:pod-adapter`).
-  #   UNMAPPED: whole_tree_kill; no story declares it for `pod`.
+  #   UNMAPPED: whole_tree_kill; no story declares it for `pod`. No stdin_pipe: it needs
+  #   `pods/attach`, which the Role does not grant (design 32 D10). No output_live: the log
+  #   endpoint merges stdout and stderr into one stream, which no chunk's stream can name, and
+  #   merged-stream delivery waits for its own design (design 32 D10, Q8).
   # UNMAPPED: no family states the audit record's own snapshot fact (decision 2); `audit` is
   # declared served by every adapter, as each story lists it.
   - name: substrate.confinement.OpenAdapter
@@ -275,7 +295,7 @@ commands:
   # `confinement.adapter-unserved` (the `adapter-unserved` branch). The model takes this decision;
   # no source states it.
   # UNMAPPED: `OpenAdapter` accepts `inner` beside an adapter other than `systemd`, and `systemd`
-  # without `inner`. Refusing either at open made ESS 0.74.0 synthesis refuse every admission
+  # without `inner`. Refusing either at open made ESS 0.75.0 synthesis refuse every admission
   # (ESS-SYNTH-002), so the model leaves both to the S0 contract's open. Open question.
   # UNMAPPED: ADR 0109 decision 2 and this story make every refusal an audit record
   # (`ProfileRefused`, carrying the adapter and the family or fact named). ESS refuses an event on
@@ -321,7 +341,7 @@ commands:
       # `systemd` around `linux` on a scope opened around `local` and the reverse, an `inner`
       # beside an adapter opened without one, and `systemd` requested without the `inner` it was
       # opened around. The branch reads the opened row's stored `inner` beside the requested one; it
-      # never compares the requested `adapter` identity with a literal (ESS 0.74.0 synthesis ignores
+      # never compares the requested `adapter` identity with a literal (ESS 0.75.0 synthesis ignores
       # such a guard, beyond10x/ess#693). Each comparison sits behind a presence test, so no guard
       # compares an absent `inner` (ESS reads that as unknown and decides no branch).
       - name: adapter-unserved
@@ -350,7 +370,7 @@ commands:
       # `image_digest_pinned` (`oci`, `pod`) refuses a reference that names no `sha256` digest.
       # UNMAPPED: an `oci` or `pod` profile with no image at all. The model refuses it as unpinned
       # (no digest is named; invariant 3, fail closed); no source says so. Open question.
-      # A pinned reference ends `@sha256:` and exactly 64 lowercase hex characters. ESS 0.74.0 has
+      # A pinned reference ends `@sha256:` and exactly 64 lowercase hex characters. ESS 0.75.0 has
       # no pattern predicate and no substring, so the model states every part of that it can: the
       # reference names `@sha256:`, ends with a lowercase hex character, and is long enough to hold
       # a one-character name, `@sha256:` and 64 characters (73). That `@sha256:` is exactly the 64
@@ -569,6 +589,24 @@ commands:
         error: substrate.confinement.FactUnserved
         payload:
           substrate.confinement.FactUnserved: {adapter: input.adapter, fact: image_digest_pinned}
+      # Design 32: a profile asking for a piped standard input requires `stdin_pipe`.
+      - name: fact-unserved-stdin-pipe
+        when: {exists: {in: required_facts, as: needed, that: needed == stdin_pipe}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == stdin_pipe}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: stdin_pipe}
+      # Design 32: a profile asking for live output requires `output_live`.
+      - name: fact-unserved-output-live
+        when: {exists: {in: required_facts, as: needed, that: needed == output_live}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == output_live}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: output_live}
       # Decision 4: `local` is a configuration, not an absence. It runs only with a reason, and the
       # admission records it as declared insecure.
       - name: admitted-insecure

@@ -1,0 +1,34 @@
+# Design 32 (`story:adapter-stdin-pipe`, D10): `pod` serves no standard input. It would need
+# `stdin: true` in the Pod and `pods/attach` on the Role, new authority no story grants, so a
+# profile requiring `stdin_pipe` is refused `confinement.fact-unserved` before any API call.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: pod-stdin-pipe-unserved-on-pod
+summary: "lane pod: pod, asked for stdin_pipe, is refused confinement.fact-unserved naming stdin_pipe."
+
+timeline:
+  - at: 2026-10-28T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [image_digest_pinned]
+    outcome: opened
+  - at: 2026-10-28T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      required_families: [process_run]
+      required_facts: [stdin_pipe]
+      image: "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    outcome: fact-unserved-stdin-pipe
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: pod, fact: stdin_pipe}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

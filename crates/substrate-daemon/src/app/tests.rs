@@ -1728,3 +1728,13 @@ mod stream_caps_security_pass1 {
         drop(open);
     }
 }
+
+// T18 of design 32: an embedder's piped standard input on a confinement adapter and a daemon
+// session's input are bounded alike, so a client moving from one to the other meets the same total.
+#[test]
+fn the_session_input_bound_is_the_adapter_stdin_bound() {
+    assert_eq!(
+        super::PIPE_MAX_INPUT_BYTES,
+        substrate_host::confinement::MAX_STDIN_BYTES
+    );
+}

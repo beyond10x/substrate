@@ -34,11 +34,13 @@
 
 pub mod facts;
 pub mod linux;
+pub(crate) mod live;
 pub mod local;
 pub mod macos;
 pub mod oci;
 pub mod pod;
 pub mod profile;
+mod stdin;
 pub mod systemd;
 
 use std::collections::BTreeMap;
@@ -46,6 +48,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -59,7 +62,16 @@ pub use crate::{DeclaredWritableRoot, HostConfig};
 // Which bytes of each output stream a run keeps (design 29 § 5).
 pub use crate::output_retention::{KeptOutput, OutputRetention, Retention};
 pub use facts::{AdapterFacts, FACT_ORDER, FAMILY_ORDER, InnerAdapter, ReservedField};
-pub use profile::{ConfinementProfile, IoBounds, Ipc, Network, ProcessBounds, image_is_pinned};
+pub use profile::{
+    ConfinementProfile, IoBounds, Ipc, Network, OutputDelivery, ProcessBounds, StdinMode,
+    image_is_pinned,
+};
+// A run's standard input (design 32 § 2).
+pub use stdin::{MAX_STDIN_BYTES, STDIN_CHUNK_BYTES, run_with_stdin};
+// A run's output delivered while it runs (design 32 § 3). `PipeStream` is the host's own type;
+// the wire's `OutputStream` is a different one.
+pub use crate::observation::PipeStream;
+pub use live::{LIVE_OUTPUT_RETENTION_INVALID, LIVE_OUTPUT_UNREAD, MAX_QUEUED_CHUNKS, OutputEvent};
 pub use substrate_wire::{ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest, Signal, WritableHostRoot};
 // What a run may write inside its workspace: the wire's own type, so one validator answers it
 // (design 29 § 1).
@@ -739,6 +751,61 @@ pub trait ConfinementAdapter: Send + Sync {
     async fn wait(&self, run: &RunId) -> Result<RunObservation, ConfinementError>;
 
     async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError>;
+
+    /// Writes one chunk to the run's standard input, returning once the pipe took every byte
+    /// (design 32 § 2). At most one write is in flight per run; a second waits for the first.
+    /// Dropping the future while it writes closes the run's standard input.
+    ///
+    /// # Errors
+    ///
+    /// `session.not-pipe` (422) for a run admitted without [`StdinMode::Piped`], and on an
+    /// adapter that does not prove `stdin_pipe`; `session.frame-limit` (429) for an empty write
+    /// or one over [`STDIN_CHUNK_BYTES`]; `session.input-limit` (429) past the run's
+    /// `limit_bytes`; `session.input-closed` (422) after `close_stdin`, a cancelled write or the
+    /// run's observed end; `session.write-failed` (500) when the pipe refused the bytes or the run
+    /// ended while the write was pending.
+    async fn write_stdin(&self, _run: &RunId, _bytes: &[u8]) -> Result<(), ConfinementError> {
+        Err(stdin::not_pipe())
+    }
+
+    /// Ends the run's standard input: the child reads end of file. Waits for a pending write, and
+    /// returns `Ok` however often it is called.
+    ///
+    /// # Errors
+    ///
+    /// `session.not-pipe` (422) for a run admitted without [`StdinMode::Piped`], and on an
+    /// adapter that does not prove `stdin_pipe`.
+    async fn close_stdin(&self, _run: &RunId) -> Result<(), ConfinementError> {
+        Err(stdin::not_pipe())
+    }
+
+    /// The next event of a run admitted with [`OutputDelivery::Live`], waiting at most
+    /// `timeout`; `None` once both streams ended and every event was read (design 32 § 3).
+    ///
+    /// Each stream's chunks come in order with contiguous offsets, and the record begins with
+    /// them. After the last chunk come, each at most once, `Bounded` for a stream whose every
+    /// kept byte was delivered and whose record was truncated, and `Stalled` when delivery
+    /// stopped at the stall deadline. Concurrent calls are served one after the other.
+    ///
+    /// # Errors
+    ///
+    /// `session.not-pipe` (422) for a run admitted [`OutputDelivery::Recorded`], and on an
+    /// adapter that does not prove `output_live`; `session.timeout-invalid` (422) for a zero
+    /// `timeout`; `session.read-timeout` (500) when it elapsed with no event.
+    async fn read_output(
+        &self,
+        _run: &RunId,
+        _timeout: Duration,
+    ) -> Result<Option<OutputEvent>, ConfinementError> {
+        Err(live::not_live())
+    }
+
+    /// Whether this run's live delivery stopped at the stall deadline. `false` for a run that
+    /// did not stall, a run admitted [`OutputDelivery::Recorded`], and a run this adapter does
+    /// not track, or no longer does.
+    fn output_stalled(&self, _run: &RunId) -> bool {
+        false
+    }
 }
 
 /// `open` for an adapter this tree does not serve yet: always `confinement.adapter-unserved`.
@@ -931,6 +998,98 @@ mod tests {
                 records[0]["code"],
                 substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID
             );
+        }
+    }
+
+    // T1a of design 32: a piped standard input outside 1 to 16 MiB is refused at admission, by
+    // the shared stream check every adapter's `check` runs first, with its audit record.
+    #[test]
+    fn a_piped_stdin_bound_outside_one_to_sixteen_mib_is_refused_at_admission() {
+        let adapter =
+            open(AdapterRequest::Local(local::LocalRequest::default())).expect("local opens");
+        for limit_bytes in [0, MAX_STDIN_BYTES + 1] {
+            let records = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let sink_records = Arc::clone(&records);
+            let error = adapter
+                .admit(&ConfinementProfile {
+                    local_reason: Some(REASON.into()),
+                    stdin: StdinMode::Piped { limit_bytes },
+                    audit: Some(AuditSink::new(move |record: &AuditRecord| {
+                        sink_records
+                            .lock()
+                            .push(serde_json::to_value(record).expect("record"));
+                    })),
+                    ..ConfinementProfile::default()
+                })
+                .expect_err("refused");
+            assert_eq!(
+                error.code(),
+                substrate_wire::SESSION_LIMIT_UNSERVED,
+                "{limit_bytes}: {error}"
+            );
+            assert_eq!(error.status(), 429);
+            let records = records.lock();
+            assert_eq!(records.len(), 1, "{records:?}");
+            assert_eq!(records[0]["event"], "profile_refused");
+            assert_eq!(records[0]["code"], substrate_wire::SESSION_LIMIT_UNSERVED);
+        }
+    }
+
+    // T1b of design 32: `queued_chunks` outside 1 to 16 and `Live` with a retention other than
+    // `Head` are refused at admission by the shared stream check, each with its audit record.
+    #[test]
+    fn a_live_queue_outside_one_to_sixteen_or_beside_a_tail_is_refused_at_admission() {
+        let adapter =
+            open(AdapterRequest::Local(local::LocalRequest::default())).expect("local opens");
+        let tail = OutputRetention {
+            stdout: Retention::Tail,
+            stderr: Retention::Head,
+        };
+        for (queued_chunks, output_retention, code, status) in [
+            (
+                0,
+                OutputRetention::default(),
+                substrate_wire::SESSION_LIMIT_UNSERVED,
+                429,
+            ),
+            (
+                MAX_QUEUED_CHUNKS + 1,
+                OutputRetention::default(),
+                substrate_wire::SESSION_LIMIT_UNSERVED,
+                429,
+            ),
+            (1, tail, LIVE_OUTPUT_RETENTION_INVALID, 422),
+        ] {
+            let records = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let sink_records = Arc::clone(&records);
+            let error = adapter
+                .admit(&ConfinementProfile {
+                    local_reason: Some(REASON.into()),
+                    output_delivery: OutputDelivery::Live { queued_chunks },
+                    output_retention,
+                    audit: Some(AuditSink::new(move |record: &AuditRecord| {
+                        sink_records
+                            .lock()
+                            .push(serde_json::to_value(record).expect("record"));
+                    })),
+                    ..ConfinementProfile::default()
+                })
+                .expect_err("refused");
+            assert_eq!(error.code(), code, "{queued_chunks}: {error}");
+            assert_eq!(error.status(), status, "{queued_chunks}");
+            let records = records.lock();
+            assert_eq!(records.len(), 1, "{records:?}");
+            assert_eq!(records[0]["event"], "profile_refused");
+            assert_eq!(records[0]["code"], code);
+        }
+        for queued_chunks in [1, MAX_QUEUED_CHUNKS] {
+            adapter
+                .admit(&ConfinementProfile {
+                    local_reason: Some(REASON.into()),
+                    output_delivery: OutputDelivery::Live { queued_chunks },
+                    ..ConfinementProfile::default()
+                })
+                .expect("in range, with the head kept");
         }
     }
 

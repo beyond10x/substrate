@@ -33,6 +33,8 @@ const STATE_MOUNT: &str = "/var/lib/b10x-substrate";
 const STATE_PATH: &str = "/var/lib/b10x-substrate/state/state.db";
 const SECCOMP_PROFILE: &str = "b10x-substrate/host-exec-v1-amd64.json";
 const APPARMOR_PROFILE: &str = "substrate-host-exec-v1";
+/// How the bootstrap and the installer are told a profile name other than the default (design 33).
+const PROFILE_FLAG: &str = "--apparmor-profile";
 const RELEASE: &str = "lane";
 const NAMESPACE: &str = "substrate-lane";
 const NODE_PROFILES_NAMESPACE: &str = "substrate-node-profiles";
@@ -108,6 +110,8 @@ pub struct Expect {
     pub execution: bool,
     pub quotas: bool,
     pub node_profiles: Option<String>,
+    /// The `AppArmor` profile the values name (design 33).
+    pub apparmor_profile: String,
     pub allow_any_egress: bool,
     /// The dedicated pool: the node label `(key, value)` and the taint `(key, value, effect)`.
     pub pool: Pool,
@@ -145,6 +149,7 @@ impl Expect {
             execution: false,
             quotas: false,
             node_profiles: None,
+            apparmor_profile: APPARMOR_PROFILE.to_owned(),
             allow_any_egress: false,
             pool: Pool::of(&base_values()),
             egress: None,
@@ -198,6 +203,25 @@ pub fn accepted_cases() -> Vec<Accepted> {
                 replicas: 3,
                 execution: true,
                 node_profiles: Some(NODE_PROFILES_NAMESPACE.to_owned()),
+                ..lane.clone()
+            },
+        },
+        Accepted {
+            name: "execution, project quotas and node profiles under a named AppArmor profile",
+            values: json!({
+                "execution": {
+                    "enabled": true,
+                    "appArmorProfile": "substrate-host-exec-v1-lane-01k8xyz",
+                    "projectQuotas": {"enabled": true, "ids": "200000-200511"}
+                },
+                "persistence": {"projectQuotaCapable": true},
+                "nodeProfiles": {"enabled": true, "namespace": NODE_PROFILES_NAMESPACE}
+            }),
+            expect: Expect {
+                execution: true,
+                quotas: true,
+                node_profiles: Some(NODE_PROFILES_NAMESPACE.to_owned()),
+                apparmor_profile: "substrate-host-exec-v1-lane-01k8xyz".to_owned(),
                 ..lane.clone()
             },
         },
@@ -426,6 +450,11 @@ pub fn refused_cases() -> Vec<Refused> {
             json!({"podAnnotations": {"seccomp.security.alpha.kubernetes.io/pod": "unconfined"}}),
         ),
         schema(
+            "an AppArmor profile outside the execution profile's family",
+            Posture::Privilege,
+            json!({"execution": {"enabled": true, "appArmorProfile": "unconfined"}}),
+        ),
+        schema(
             "an IPv6 prefix length spelled with a leading zero",
             Posture::Egress,
             json!({"identity": {"egress": {"cidr": "::/00", "port": 443}}}),
@@ -456,6 +485,11 @@ pub fn injected_cases() -> Vec<(&'static str, Value)> {
         (
             "a storage class name that adds a key",
             json!({"persistence": {"storageClassName": "standard\n        volumeMode: Block"}}),
+        ),
+        (
+            "an AppArmor profile name that unconfines the daemon and adds a command word",
+            json!({"execution": {"enabled": true, "appArmorProfile": "unconfined\n            - --allow-uid"},
+                   "nodeProfiles": {"enabled": true, "namespace": NODE_PROFILES_NAMESPACE}}),
         ),
         (
             "an Identity CA key that adds a command word",
@@ -859,7 +893,11 @@ fn check_statefulset(statefulset: &Value, documents: &[Value], expect: &Expect) 
                 .into(),
         );
     }
-    failures.extend(pod_posture(pod, expect.execution, "daemon pod"));
+    failures.extend(pod_posture(
+        pod,
+        expect.execution.then_some(expect.apparmor_profile.as_str()),
+        "daemon pod",
+    ));
     failures.extend(check_daemon(pod, expect));
     failures.extend(check_init(pod));
     failures
@@ -918,7 +956,10 @@ pub fn security_profile_annotation(key: &str) -> bool {
 }
 
 /// K4: no privileged container, host namespace or host path; capabilities only as design 25 adds.
-pub fn pod_posture(pod: &Value, execution: bool, what: &str) -> Vec<String> {
+/// `execution` is the `AppArmor` profile the daemon runs under when execution is enabled.
+pub fn pod_posture(pod: &Value, execution: Option<&str>, what: &str) -> Vec<String> {
+    let profile = execution.unwrap_or(APPARMOR_PROFILE);
+    let execution = execution.is_some();
     let mut failures = Vec::new();
     for field in ["hostNetwork", "hostPID", "hostIPC", "hostUsers"] {
         if field != "hostUsers" && pod[field] == Value::Bool(true) {
@@ -973,9 +1014,11 @@ pub fn pod_posture(pod: &Value, execution: bool, what: &str) -> Vec<String> {
                 failures.push(format!("container {name} does not select the Localhost seccomp profile {SECCOMP_PROFILE}"));
             }
             if text(context, "/appArmorProfile/type") != "Localhost"
-                || text(context, "/appArmorProfile/localhostProfile") != APPARMOR_PROFILE
+                || text(context, "/appArmorProfile/localhostProfile") != profile
             {
-                failures.push(format!("container {name} does not select the Localhost AppArmor profile {APPARMOR_PROFILE}"));
+                failures.push(format!(
+                    "container {name} does not select the Localhost AppArmor profile {profile}"
+                ));
             }
         } else {
             if !added.is_empty() {
@@ -1001,6 +1044,79 @@ pub fn pod_posture(pod: &Value, execution: bool, what: &str) -> Vec<String> {
         }
     }
     failures
+}
+
+/// Design 33 § 6: `--apparmor-profile <profile>` appears exactly once when `profile` is not the
+/// default, and not at all when it is. The one-word `--apparmor-profile=<profile>`, which clap
+/// reads the same way, counts as a statement of the flag.
+fn profile_flag(words: &[&str], profile: &str) -> Vec<String> {
+    let stated: Vec<Option<&str>> = words
+        .iter()
+        .enumerate()
+        .filter_map(|(at, word)| {
+            if *word == PROFILE_FLAG {
+                Some(words.get(at + 1).copied())
+            } else {
+                one_word_value(word, PROFILE_FLAG).map(Some)
+            }
+        })
+        .collect();
+    let expected: &[Option<&str>] = if profile == APPARMOR_PROFILE {
+        &[]
+    } else {
+        &[Some(profile)]
+    };
+    if stated == expected {
+        Vec::new()
+    } else {
+        vec![format!(
+            "{PROFILE_FLAG} is stated as {stated:?} in {words:?}, not {expected:?} for the AppArmor profile {profile}"
+        )]
+    }
+}
+
+/// The bootstrap states a named profile before `--`, and nothing after it passes one to the
+/// daemon.
+fn bootstrap_profile(args: &[Value], profile: &str) -> Vec<String> {
+    let words: Vec<&str> = args.iter().filter_map(Value::as_str).collect();
+    let separator = words
+        .iter()
+        .position(|word| *word == "--")
+        .unwrap_or(words.len());
+    let mut failures: Vec<String> = profile_flag(&words[..separator], profile)
+        .into_iter()
+        .map(|failure| format!("the bootstrap: {failure}"))
+        .collect();
+    if states_flag(&words[separator..], PROFILE_FLAG) {
+        failures.push(format!("the daemon itself is passed {PROFILE_FLAG}"));
+    }
+    failures
+}
+
+/// The value of `word` when it is `flag` in clap's one-word spelling, `--flag=<value>`.
+fn one_word_value<'a>(word: &'a str, flag: &str) -> Option<&'a str> {
+    word.strip_prefix(flag)?.strip_prefix('=')
+}
+
+/// Whether `words` state `flag` in either spelling clap reads: `--flag <value>` or
+/// `--flag=<value>`.
+fn states_flag(words: &[&str], flag: &str) -> bool {
+    words
+        .iter()
+        .any(|word| *word == flag || one_word_value(word, flag).is_some())
+}
+
+/// The hosted daemon never listens on development TCP, maps a peer uid or takes a cgroup root.
+fn forbidden_daemon_flags(words: &[&str]) -> Vec<String> {
+    words
+        .iter()
+        .filter(|word| {
+            word.starts_with("--tcp-")
+                || states_flag(&[word], "--allow-uid")
+                || word.starts_with("--cgroup-root")
+        })
+        .map(|word| format!("the daemon is started with {word}"))
+        .collect()
 }
 
 fn pairs(args: &[Value]) -> Vec<(&str, &str)> {
@@ -1045,6 +1161,13 @@ fn check_daemon(pod: &Value, expect: &Expect) -> Vec<String> {
                 .into(),
         );
     }
+    if expect.execution {
+        failures.extend(bootstrap_profile(args, &expect.apparmor_profile));
+    } else if states_flag(&words, PROFILE_FLAG) {
+        failures.push(format!(
+            "the daemon is started with {PROFILE_FLAG} without the execution bootstrap"
+        ));
+    }
     if expect.quotas != (words.first() == Some(&"--project-quotas"))
         || expect.quotas != value("--project-quota-ids").is_some()
     {
@@ -1082,12 +1205,7 @@ fn check_daemon(pod: &Value, expect: &Expect) -> Vec<String> {
             failures.push(format!("the daemon is started without {required}"));
         }
     }
-    for word in &words {
-        if word.starts_with("--tcp-") || *word == "--allow-uid" || word.starts_with("--cgroup-root")
-        {
-            failures.push(format!("the daemon is started with {word}"));
-        }
-    }
+    failures.extend(forbidden_daemon_flags(&words));
     let operations = value("--ops-listen").unwrap_or("");
     if !operations.ends_with(":9090")
         || !array(daemon, "/ports")
@@ -1422,6 +1540,20 @@ fn check_node_profiles(documents: &[Value], expect: &Expect) -> Vec<String> {
         ));
     }
     for container in array(pod, "/containers") {
+        for (what, pointer) in [
+            ("command", "/command"),
+            ("readiness probe", "/readinessProbe/exec/command"),
+        ] {
+            let words: Vec<&str> = array(container, pointer)
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            failures.extend(
+                profile_flag(&words, &expect.apparmor_profile)
+                    .into_iter()
+                    .map(|failure| format!("the node-profile installer's {what}: {failure}")),
+            );
+        }
         let context = &container["securityContext"];
         let added: Vec<&str> = array(context, "/capabilities/add")
             .iter()
@@ -1683,8 +1815,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        Expect, Posture, base_values, check_certificate_names, check_network_policy,
-        check_services, merged, pod_posture, refused_cases, released_sources,
+        Expect, Posture, base_values, bootstrap_profile, check_certificate_names, check_daemon,
+        check_network_policy, check_services, forbidden_daemon_flags, merged, pod_posture,
+        profile_flag, refused_cases, released_sources,
     };
     use crate::chart_yaml;
 
@@ -1840,27 +1973,27 @@ mod tests {
     #[test]
     fn the_pod_posture_check_refuses_privilege_host_namespaces_and_host_paths() {
         let clean = json!({"containers": [container("daemon", &restricted())], "volumes": [{"name": "tmp", "emptyDir": {}}]});
-        assert!(pod_posture(&clean, false, "pod").is_empty());
+        assert!(pod_posture(&clean, None, "pod").is_empty());
 
         let mut privileged = restricted();
         privileged["privileged"] = json!(true);
         let pod = json!({"containers": [container("daemon", &privileged)]});
         assert!(
-            pod_posture(&pod, false, "pod")
+            pod_posture(&pod, None, "pod")
                 .iter()
                 .any(|f| f.contains("privileged"))
         );
 
         let pod = json!({"hostPID": true, "containers": [container("daemon", &restricted())]});
         assert!(
-            pod_posture(&pod, false, "pod")
+            pod_posture(&pod, None, "pod")
                 .iter()
                 .any(|f| f.contains("hostPID"))
         );
 
         let pod = json!({"containers": [container("daemon", &restricted())], "volumes": [{"name": "root", "hostPath": {"path": "/"}}]});
         assert!(
-            pod_posture(&pod, false, "pod")
+            pod_posture(&pod, None, "pod")
                 .iter()
                 .any(|f| f.contains("host path"))
         );
@@ -1870,19 +2003,19 @@ mod tests {
             "appArmorProfile": {"type": "Localhost", "localhostProfile": "substrate-host-exec-v1"}, "readOnlyRootFilesystem": true});
         let pod = json!({"containers": [container("daemon", &extra)]});
         assert!(
-            pod_posture(&pod, true, "pod")
+            pod_posture(&pod, Some(super::APPARMOR_PROFILE), "pod")
                 .iter()
                 .any(|f| f.contains("five"))
         );
         extra["capabilities"]["add"] = json!(["CHOWN", "SETUID", "SETGID", "SETPCAP", "SYS_ADMIN"]);
         let pod = json!({"containers": [container("daemon", &extra)]});
         assert!(
-            pod_posture(&pod, true, "pod").is_empty(),
+            pod_posture(&pod, Some(super::APPARMOR_PROFILE), "pod").is_empty(),
             "{:?}",
-            pod_posture(&pod, true, "pod")
+            pod_posture(&pod, Some(super::APPARMOR_PROFILE), "pod")
         );
         assert!(
-            !pod_posture(&pod, false, "pod").is_empty(),
+            !pod_posture(&pod, None, "pod").is_empty(),
             "five capabilities without execution"
         );
     }
@@ -1924,6 +2057,49 @@ mod tests {
                 "{names}"
             );
         }
+    }
+
+    /// clap reads `--flag=value` as `--flag value`, so every flag the lane refuses by name is
+    /// refused in its one-word spelling too.
+    #[test]
+    fn a_refused_daemon_flag_in_its_one_word_spelling_is_refused() {
+        let daemon = |args: &[&str]| {
+            json!({"containers": [{
+                "name": "daemon",
+                "command": ["/usr/local/bin/substrate-daemon"],
+                "args": args,
+            }]})
+        };
+        for word in [
+            "--apparmor-profile=substrate-host-exec-v1",
+            "--apparmor-profile=",
+        ] {
+            let failures = check_daemon(&daemon(&[word]), &Expect::lane());
+            assert!(
+                failures
+                    .iter()
+                    .any(|failure| failure.contains("without the execution bootstrap")),
+                "{word} admitted without the bootstrap: {failures:?}"
+            );
+        }
+        assert!(
+            !check_daemon(&daemon(&[]), &Expect::lane())
+                .iter()
+                .any(|failure| failure.contains("without the execution bootstrap"))
+        );
+        for words in [
+            &["--allow-uid", "0"][..],
+            &["--allow-uid=0"],
+            &["--allow-uid="],
+            &["--tcp-listen=127.0.0.1:1"],
+            &["--cgroup-root=/sys/fs/cgroup"],
+        ] {
+            assert!(
+                !forbidden_daemon_flags(words).is_empty(),
+                "{words:?} admitted"
+            );
+        }
+        assert!(forbidden_daemon_flags(&["--allow-uids-x", "--state", "/s"]).is_empty());
     }
 
     #[test]
@@ -1991,7 +2167,7 @@ mod tests {
         writable["readOnlyRootFilesystem"] = json!(false);
         let pod = json!({"containers": [container("daemon", &writable)]});
         assert!(
-            !pod_posture(&pod, false, "pod").is_empty(),
+            !pod_posture(&pod, None, "pod").is_empty(),
             "a daemon container with a writable root filesystem passes the K4 posture check"
         );
         let bootstrap = json!({"capabilities": {"drop": ["ALL"], "add": super::BOOTSTRAP_CAPABILITIES},
@@ -2000,7 +2176,7 @@ mod tests {
             "readOnlyRootFilesystem": false});
         let pod = json!({"containers": [container("daemon", &bootstrap)]});
         assert!(
-            !pod_posture(&pod, true, "pod").is_empty(),
+            !pod_posture(&pod, Some(super::APPARMOR_PROFILE), "pod").is_empty(),
             "the execution bootstrap with a writable root filesystem passes the K4 posture check"
         );
     }
@@ -2179,6 +2355,154 @@ mod tests {
         );
         assert!(validator.is_valid(&values));
         assert!(!super::security_profile_annotation("b10x.dev/lane-roll"));
+    }
+
+    const NAMED: &str = "substrate-host-exec-v1-lane-a";
+
+    /// Design 33 § 6: the value defaults to today's name, and the schema admits only the family.
+    #[test]
+    fn the_profile_value_defaults_to_today_and_the_schema_admits_only_its_family() {
+        assert_eq!(
+            defaults()["execution"]["appArmorProfile"],
+            json!(super::APPARMOR_PROFILE)
+        );
+        let validator = jsonschema::validator_for(&schema()).unwrap();
+        let lane = merged(&defaults(), &base_values());
+        let longest = format!("substrate-host-exec-v1-{}", "a".repeat(40));
+        for name in [super::APPARMOR_PROFILE, NAMED, longest.as_str()] {
+            let values = merged(&lane, &json!({"execution": {"appArmorProfile": name}}));
+            assert!(validator.is_valid(&values), "the schema refuses {name}");
+        }
+        let too_long = format!("{longest}a");
+        for name in [
+            "unconfined",
+            "substrate-host-exec-v2",
+            "substrate-host-exec-v1-",
+            "substrate-host-exec-v1-A",
+            "substrate-host-exec-v1-a\n",
+            too_long.as_str(),
+        ] {
+            let values = merged(&lane, &json!({"execution": {"appArmorProfile": name}}));
+            assert!(!validator.is_valid(&values), "the schema admits {name:?}");
+        }
+        assert!(
+            super::accepted_cases()
+                .iter()
+                .any(
+                    |case| case.expect.apparmor_profile != super::APPARMOR_PROFILE
+                        && case.expect.node_profiles.is_some()
+                ),
+            "no accepted rendering states a named profile with the installer"
+        );
+        assert!(
+            super::injected_cases()
+                .iter()
+                .any(|(_, values)| values.pointer("/execution/appArmorProfile").is_some()),
+            "no injected profile name"
+        );
+    }
+
+    /// Design 33 § 6: the daemon selects the configured profile, and the bootstrap and the
+    /// installer state it exactly when it is not the default.
+    #[test]
+    fn a_named_profile_is_selected_and_stated_where_it_is_used() {
+        let context = |profile: &str| {
+            json!({"capabilities": {"drop": ["ALL"], "add": ["CHOWN", "SETUID", "SETGID", "SETPCAP", "SYS_ADMIN"]},
+                "seccompProfile": {"type": "Localhost", "localhostProfile": "b10x-substrate/host-exec-v1-amd64.json"},
+                "appArmorProfile": {"type": "Localhost", "localhostProfile": profile}, "readOnlyRootFilesystem": true})
+        };
+        let pod = |profile: &str| json!({"containers": [container("daemon", &context(profile))]});
+        assert!(pod_posture(&pod(NAMED), Some(NAMED), "pod").is_empty());
+        assert!(
+            pod_posture(
+                &pod(super::APPARMOR_PROFILE),
+                Some(super::APPARMOR_PROFILE),
+                "pod"
+            )
+            .is_empty()
+        );
+        for (selected, configured) in [
+            (super::APPARMOR_PROFILE, NAMED),
+            (NAMED, super::APPARMOR_PROFILE),
+        ] {
+            assert!(
+                pod_posture(&pod(selected), Some(configured), "pod")
+                    .iter()
+                    .any(|failure| failure.contains("AppArmor")),
+                "{selected} admitted for {configured}"
+            );
+        }
+
+        let default = super::APPARMOR_PROFILE;
+        assert!(profile_flag(&["--hold"], default).is_empty());
+        assert!(profile_flag(&["--hold", "--apparmor-profile", NAMED], NAMED).is_empty());
+        for (words, profile) in [
+            (vec!["--hold", "--apparmor-profile", default], default),
+            (vec!["--hold"], NAMED),
+            (
+                vec![
+                    "--hold",
+                    "--apparmor-profile",
+                    "substrate-host-exec-v1-lane-b",
+                ],
+                NAMED,
+            ),
+            (
+                vec!["--apparmor-profile", NAMED, "--apparmor-profile", NAMED],
+                NAMED,
+            ),
+            (vec!["--apparmor-profile"], NAMED),
+        ] {
+            assert!(
+                !profile_flag(&words, profile).is_empty(),
+                "{words:?} admitted for {profile}"
+            );
+        }
+
+        let bootstrap = |words: &[&str], profile: &str| {
+            bootstrap_profile(
+                &words.iter().map(|word| json!(word)).collect::<Vec<_>>(),
+                profile,
+            )
+        };
+        assert!(bootstrap(&["--", "--socket", "s"], default).is_empty());
+        assert!(
+            bootstrap(
+                &[
+                    "--project-quotas",
+                    "--apparmor-profile",
+                    NAMED,
+                    "--",
+                    "--socket",
+                    "s"
+                ],
+                NAMED
+            )
+            .is_empty()
+        );
+        assert!(!bootstrap(&["--", "--apparmor-profile", NAMED], NAMED).is_empty());
+        assert!(
+            bootstrap(
+                &["--apparmor-profile=substrate-host-exec-v1-lane-a", "--"],
+                NAMED
+            )
+            .is_empty()
+        );
+        assert!(!bootstrap(&["--apparmor-profile=", "--"], NAMED).is_empty());
+        assert!(!bootstrap(&["--apparmor-profile=", "--"], default).is_empty());
+        assert!(
+            !bootstrap(
+                &[
+                    "--apparmor-profile",
+                    NAMED,
+                    "--",
+                    "--apparmor-profile",
+                    NAMED
+                ],
+                NAMED
+            )
+            .is_empty()
+        );
     }
 }
 

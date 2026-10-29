@@ -1,5 +1,5 @@
 format: ess-inputs/2
-requires: ess 0.74.0
+requires: ess 0.75.0
 specification: [system.yaml, components.yaml, confinement.yaml]
 scenarios:
   - scenarios/local-admitted-with-reason-on-portable.yaml
@@ -51,3 +51,19 @@ scenarios:
   - scenarios/oci-image-digestless-unpinned-on-oci.yaml
   - scenarios/pod-image-non-hex-digest-unpinned-on-pod.yaml
   - scenarios/systemd-linux-requested-on-local-scope-unserved-on-delegated.yaml
+  - scenarios/local-admits-stdin-pipe-on-portable.yaml
+  - scenarios/linux-admits-stdin-pipe-on-delegated.yaml
+  - scenarios/systemd-local-admits-stdin-pipe-on-delegated.yaml
+  - scenarios/systemd-linux-admits-stdin-pipe-on-delegated.yaml
+  - scenarios/model-stdin-pipe-unserved-on-interpreted.yaml
+  - scenarios/macos-io-admits-stdin-pipe-on-macos.yaml
+  - scenarios/oci-admits-stdin-pipe-on-oci.yaml
+  - scenarios/pod-stdin-pipe-unserved-on-pod.yaml
+  - scenarios/local-admits-output-live-on-portable.yaml
+  - scenarios/linux-admits-output-live-on-delegated.yaml
+  - scenarios/systemd-local-admits-output-live-on-delegated.yaml
+  - scenarios/systemd-linux-admits-output-live-on-delegated.yaml
+  - scenarios/model-output-live-unserved-on-interpreted.yaml
+  - scenarios/macos-io-admits-output-live-on-macos.yaml
+  - scenarios/oci-admits-output-live-on-oci.yaml
+  - scenarios/pod-output-live-unserved-on-pod.yaml

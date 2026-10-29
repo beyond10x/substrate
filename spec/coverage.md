@@ -90,7 +90,7 @@ from (id, root name, labels, origin, owner), the entry under the workspace root,
 `Create` (only as far as adoption collides with it), `Adopt` and `Destroy`. What the green check
 establishes:
 
-- The model validates under ESS 0.74.0, and `workspaces-suite.json` is its exact synthesized suite
+- The model validates under ESS 0.75.0, and `workspaces-suite.json` is its exact synthesized suite
   (18 scenarios) plus the five authored scenarios under `workspaces/scenarios/`. Synthesis refuses
   one obligation (`ESS-SYNTH-013`: no view row asserts `.count` of `RootName`).
 - All 23 scenarios pass against ESS's `interpreted` reference. That executes the model, not the
@@ -146,10 +146,10 @@ repeating the expected outcome. The full adoption report records the command and
 ADR 0036 before its implementation. No shipped code, route or wire bundle carries it yet. What the
 green check establishes:
 
-- `ess specify validate --path spec/host-processes` resolves the model, its actors and its 19
+- `ess specify validate --path spec/host-processes` resolves the model, its actors and its 21
   authored scenarios.
 - `spec/host-processes-suite.json` is the exact `ess verify conform synthesize` output;
-  `cargo xtask check-ess` fails on drift. Under ESS 0.74.0 it holds 92 synthesized scenarios
+  `cargo xtask check-ess` fails on drift. Under ESS 0.75.0 it holds 92 synthesized scenarios
   and records 27 refusals: 23 for seven of the eight stream bindings, whose invocation synthesis
   cannot force and whose `drop` publishes nothing (ESS-SYNTH-010); 3 for branches and bindings
   whose arrangement passes through a row-set guard: the `AppendStreamEvent` branches `appended`
@@ -158,7 +158,7 @@ green check establishes:
   `StartProcess/name-conflict` and both stop-by-owner branches, which 0.68.0 refused, and since
   0.74.0 `AppendStreamEvent/unknown-process`, which earlier releases refused.
   An authored scenario exercises each refused branch and binding.
-- `ess verify conform run --target interpreted` passes all 111 scenarios, synthesized and
+- `ess verify conform run --target interpreted` passes all 113 scenarios, synthesized and
   authored, against the ESS reference. That checks the model only.
 
 What it does not establish:
@@ -179,12 +179,12 @@ What it does not establish:
 `confinement/confinement.yaml` (domain `substrate.confinement`, ADR 0044) specifies the
 confinement contract of atlas ADR 0109 before any adapter code. What the green check establishes:
 
-- The model validates under ESS 0.74.0 with no warning, and `confinement-suite.json` is its exact
-  synthesized suite (5 scenarios, 30 refusals) plus the 49 authored scenarios under
-  `confinement/scenarios/`. Each of the 35 outcomes has at least one scenario, and each refused
+- The model validates under ESS 0.75.0 with no warning, and `confinement-suite.json` is its exact
+  synthesized suite (5 scenarios, 32 refusals) plus the 65 authored scenarios under
+  `confinement/scenarios/`. Each of the 37 outcomes has at least one scenario, and each refused
   obligation an authored one ([`confinement/README.md`](confinement/README.md) says why synthesis
   refuses them).
-- All 54 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
+- All 70 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
   adapter.
 - `OpenAdapter` refuses a `local` (or `systemd` around `local`) set without `declared_insecure` and
   an `oci` or `pod` set without `image_digest_pinned`, so no admission can report `local`
@@ -201,12 +201,18 @@ What it does not establish:
 - **Synthesized scenarios reach no adapter.** ESS names them by command and outcome and cannot
   rename them, so they name no adapter or lane and no adapter lane selects them; they check the
   model against the interpreted reference only. The same holds for the authored `model-*`
-  scenario. Adapter lanes run the authored scenarios.
-- **No full digest check.** ESS 0.74.0 has no pattern predicate, so the model checks that an image
+  scenarios. Adapter lanes run the authored scenarios.
+- **No full digest check.** ESS 0.75.0 has no pattern predicate, so the model checks that an image
   names `@sha256:`, ends with a lowercase hex character and is at least 73 characters long. That
   exactly 64 lowercase hex characters follow `@sha256:` is the `oci` and `pod` adapters' check.
 - **No probe.** Each scenario's open step states the adapter's declared set. Whether a host
   actually proves those facts is the adapter's runtime claim.
+- **No stream bounds.** A profile asking for a piped standard input requires `stdin_pipe`, and one
+  asking for live output requires `output_live`, which the model holds. The `limit_bytes` and
+  `queued_chunks` ranges and the refusal of live output beside a retention other than `Head`
+  (`confinement.live-output-retention-invalid`) are raised by an adapter's `check`, which
+  `AdmitProfile` does not model, and `run_with_stdin`'s `confinement.live-output-unread` by a
+  helper outside admission; the adapters' Rust cases hold them (design 32 § 6).
 - **No refusal audit record.** ESS admits no event on an outcome that reports an error, so the
   refusal's `ProfileRefused` record is an adapter-test obligation: S0's tests assert it.
 - **No wire.** The contract is substrate-host's API. No route, wire field or bundle changes.

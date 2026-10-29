@@ -234,6 +234,144 @@ fn gate_cache_excludes_workspace_build_outputs() {
     assert!(!GATE_WORKFLOW.contains("uses: actions/cache@"));
 }
 
+/// The text of one job of `gate.yml`, from its `  <id>:` line to the next job.
+fn gate_job(id: &str) -> &'static str {
+    let header = format!("\n  {id}:\n");
+    let start = GATE_WORKFLOW
+        .find(&header)
+        .unwrap_or_else(|| panic!("gate.yml has no job {id}"))
+        + header.len();
+    let body = &GATE_WORKFLOW[start..];
+    let end = body
+        .match_indices('\n')
+        .map(|(index, _)| index)
+        .find(|&index| {
+            let line = &body[index + 1..];
+            line.starts_with("  ") && !line.starts_with("   ")
+        })
+        .unwrap_or(body.len());
+    &body[..end]
+}
+
+/// Runs `scripts/gate.sh` with `arguments` against `cargo` and `python3` stubs that only succeed,
+/// and returns its exit status and every `gate:` line it printed.
+fn gate_steps(arguments: &[&str]) -> (Option<i32>, Vec<String>) {
+    let tools = tempfile::tempdir().expect("stub directory");
+    for tool in ["cargo", "python3"] {
+        let path = tools.path().join(tool);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("stub");
+        let mut permissions = fs::metadata(&path).expect("stub metadata").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        fs::set_permissions(&path, permissions).expect("stub mode");
+    }
+    let path = format!(
+        "{}:{}",
+        tools.path().display(),
+        std::env::var("PATH").expect("PATH")
+    );
+    let output = std::process::Command::new("bash")
+        .arg(repository_root().join("scripts/gate.sh"))
+        .args(arguments)
+        .current_dir(repository_root())
+        .env("PATH", path)
+        .output()
+        .expect("bash runs the gate");
+    let lines = String::from_utf8(output.stdout)
+        .expect("utf-8")
+        .lines()
+        .filter(|line| line.starts_with("gate: "))
+        .map(str::to_owned)
+        .collect();
+    (output.status.code(), lines)
+}
+
+/// `scripts/gate.sh` with no argument runs every step in its order; each phase runs a part of it,
+/// in the same order, and the two parts are disjoint and together the whole.
+#[test]
+fn the_two_gate_phases_partition_every_gate_step() {
+    let (status, all) = gate_steps(&[]);
+    assert_eq!(status, Some(0), "{all:?}");
+    assert_eq!(all.last().map(String::as_str), Some("gate: passed"));
+    let all = &all[..all.len() - 1];
+    let mut phases = Vec::new();
+    for phase in ["tests", "static"] {
+        let (status, lines) = gate_steps(&[phase]);
+        assert_eq!(status, Some(0), "{phase}: {lines:?}");
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(format!("gate: phase {phase} passed").as_str())
+        );
+        let lines = lines[..lines.len() - 1].to_vec();
+        assert!(!lines.is_empty(), "the {phase} phase runs no step");
+        let mut from = 0;
+        for line in &lines {
+            let at = all[from..]
+                .iter()
+                .position(|step| step == line)
+                .unwrap_or_else(|| panic!("{phase} runs {line} out of the full gate's order"));
+            from += at + 1;
+        }
+        phases.push(lines);
+    }
+    let mut union: Vec<&String> = phases.iter().flatten().collect();
+    union.sort();
+    let mut every: Vec<&String> = all.iter().collect();
+    every.sort();
+    assert_eq!(union, every, "the phases are not a partition of the gate");
+    assert!(phases[0].contains(&"gate: cargo test --workspace --release --locked".to_owned()));
+    assert!(phases[1].contains(&"gate: cargo xtask check-secrets".to_owned()));
+    for refused in [&["unit"][..], &["tests", "static"][..]] {
+        let (status, lines) = gate_steps(refused);
+        assert_eq!(status, Some(2), "{refused:?} was accepted");
+        assert!(lines.is_empty(), "{refused:?} ran {lines:?}");
+    }
+}
+
+/// `Full gate` is the status context `main`'s ruleset requires, and `release.yml` reads this
+/// workflow's run conclusion. The phases run as two jobs side by side; `Full gate` waits for both,
+/// runs whatever they concluded, and succeeds only when both succeeded.
+#[test]
+fn the_full_gate_context_is_green_only_when_both_gate_phases_are() {
+    assert_eq!(GATE_WORKFLOW.matches("name: Full gate\n").count(), 1);
+    assert!(!GATE_WORKFLOW.contains("bash scripts/gate.sh\n"));
+    let tests = gate_job("gate-tests");
+    let checks = gate_job("gate-static");
+    let full = gate_job("gate");
+    assert!(tests.contains("        run: bash scripts/gate.sh tests\n"));
+    assert!(checks.contains("        run: bash scripts/gate.sh static\n"));
+    assert!(full.contains("    name: Full gate\n"));
+    assert!(full.contains("    needs: [gate-tests, gate-static]\n"));
+    assert!(full.contains("    if: always()\n"));
+    assert!(full.contains("TESTS: ${{ needs.gate-tests.result }}"));
+    assert!(full.contains("STATIC: ${{ needs.gate-static.result }}"));
+    assert!(full.contains("test \"$TESTS\" = success"));
+    assert!(full.contains("test \"$STATIC\" = success"));
+    assert!(!full.contains("continue-on-error"));
+    assert!(tests.contains("SUBSTRATE_OCI_LANE: \"1\""));
+    assert!(tests.contains("- name: Report execution lanes"));
+    assert!(tests.contains("- name: Lane summary"));
+    assert!(tests.contains("--component clippy"));
+    assert!(
+        checks.contains("fetch-depth: 0"),
+        "check-secrets refuses a shallow history, so the static phase checks out all of it"
+    );
+    assert!(checks.contains("--component rustfmt"));
+    assert!(checks.contains("- name: Install the pinned licence inventory tool"));
+    assert!(checks.contains("- name: Install the specification's pinned ESS release"));
+    let key = |job: &str| {
+        job.lines()
+            .find_map(|line| line.trim().strip_prefix("shared-key: "))
+            .map(str::to_owned)
+    };
+    assert_ne!(key(tests), None);
+    assert_ne!(key(checks), None);
+    assert_ne!(
+        key(tests),
+        key(checks),
+        "two build graphs share one cache key"
+    );
+}
+
 #[test]
 fn a_release_refuses_without_a_recorded_confinement_lane_run() {
     let require = position("Require a recorded confinement-lane run for this commit");

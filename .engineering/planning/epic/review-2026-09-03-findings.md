@@ -2,14 +2,18 @@
 format: aep.planning-md/3
 id: epic:review-2026-09-03-findings
 kind: epic
-status: draft
+status: implemented
 title: Close the 2026-09-03 in-depth review findings
 summary: 'Fourteen review findings: two correctness defects, three authenticated-client capacity gaps, three confinement hardening gaps, three design constraints to record, three minor costs.'
 owner: substrate
 tags:
 - hardening
 - review
-revision: 2
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-28T15:49:10Z", actor: "human:timo", revision: 3, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "proposed", to: "active", at: "2026-10-28T15:49:10Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "active", to: "implemented", at: "2026-10-28T15:49:10Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"review_outcome":1}}}
 ---
 # Epic: Close the 2026-09-03 in-depth review findings
 

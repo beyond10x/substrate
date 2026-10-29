@@ -1,6 +1,6 @@
 ---
 title: Contracts overview
-description: Every contract Substrate publishes, who uses it, where it is defined and how it is checked, with the confinement contract's ten families and eleven facts.
+description: Every contract Substrate publishes, who uses it, where it is defined and how it is checked, with the confinement contract's ten families and thirteen facts.
 ---
 
 # What Substrate promises, and where
@@ -68,7 +68,7 @@ Every adapter's declared set in the specification holds `process_run`, `process_
 `output_read`, `wait`, `workspace` and
 `audit`; the specification's `model-*` scenario refuses each by name on an adapter that lacks it.
 
-### The eleven facts
+### The thirteen facts
 
 A refusal names the first missing fact in this order.
 
@@ -85,6 +85,8 @@ A refusal names the first missing fact in this order.
 | `private_tmpdir` | a per-run `TMPDIR`, invisible to another run and gone after `wait` |
 | `host_network` | the run uses the host's network directly |
 | `image_digest_pinned` | the image runs by digest only |
+| `stdin_pipe` | the run's standard input is a pipe the embedder writes and closes; without it, `/dev/null` |
+| `output_live` | the run's output reaches the embedder while it runs, in order per stream, from a bounded queue whose stall ends the run; without it, output is read from the record |
 
 Two facts are checked when an adapter opens: `local`, bare or inside `systemd`, must prove
 `declared_insecure`, and `oci` and `pod` must prove `image_digest_pinned`. An open without them is
@@ -100,17 +102,17 @@ status.
 
 ### Scenarios and lanes
 
-The specification holds 49 authored scenarios. Each is named for its adapter and the lane it runs
+The specification holds 65 authored scenarios. Each is named for its adapter and the lane it runs
 in, and each adapter's test file runs its lane's scenarios against the real adapter.
 
 | Lane | Scenarios | Runs against |
 |---|---|---|
-| `portable` | 18 | `local`, and the open refusals and absences any host can check |
-| `delegated` | 14 | `linux` and `systemd` on a host with a delegated cgroup v2 root |
-| `macos` | 8 | `macos` on the `macos-15` CI job |
-| `oci` | 5 | `oci` against Docker in the gate workflow |
-| `pod` | 3 | `pod` against a pinned `kind` cluster in the gate workflow |
-| `interpreted` | 1 | ESS's interpreted reference only |
+| `portable` | 20 | `local`, and the open refusals and absences any host can check |
+| `delegated` | 20 | `linux` and `systemd` on a host with a delegated cgroup v2 root |
+| `macos` | 10 | `macos` on the `macos-15` CI job |
+| `oci` | 7 | `oci` against Docker in the gate workflow |
+| `pod` | 5 | `pod` against a pinned `kind` cluster in the gate workflow |
+| `interpreted` | 3 | ESS's interpreted reference only |
 
 ## The consumer surface
 

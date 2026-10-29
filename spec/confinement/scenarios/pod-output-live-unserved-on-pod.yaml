@@ -1,0 +1,35 @@
+# Design 32 (`story:adapter-live-output`, D10, Q8): `pod` delivers no live output. The kubelet's
+# log merges stdout and stderr into one stream, so no chunk could name its true stream, and
+# merged-stream delivery waits for its own design. A profile requiring `output_live` is refused
+# `confinement.fact-unserved` before any API call.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: pod-output-live-unserved-on-pod
+summary: "lane pod: pod, asked for output_live, is refused confinement.fact-unserved naming output_live."
+
+timeline:
+  - at: 2026-10-29T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [image_digest_pinned]
+    outcome: opened
+  - at: 2026-10-29T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      required_families: [output_read]
+      required_facts: [output_live]
+      image: "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    outcome: fact-unserved-output-live
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: pod, fact: output_live}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

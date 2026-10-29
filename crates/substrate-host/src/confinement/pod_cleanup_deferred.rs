@@ -20,6 +20,7 @@ fn kept(run: &str, age: Duration) -> Deferred {
         created: (chrono::Utc::now() - chrono::Duration::from_std(age).expect("an age"))
             .fixed_offset(),
         pod_seen: false,
+        trace: PodTrace::since(Some("1")),
     }
 }
 

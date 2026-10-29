@@ -15,7 +15,7 @@ timeline:
     input:
       adapter: local
       served_families: [process_run, process_watch, output_read, wait, workspace, audit]
-      facts: [paths_are_host_paths, local_permitted, host_network]
+      facts: [paths_are_host_paths, local_permitted, host_network, stdin_pipe, output_live]
     outcome: local-not-declared-insecure
     error:
       name: substrate.confinement.FactUnserved

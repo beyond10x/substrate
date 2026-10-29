@@ -29,6 +29,8 @@ use crate::output_retention::OutputRetention;
 /// | `ipc.socket_allowlist` | the fact `ipc_socket_allowlist` |
 /// | `ipc.signals_contained` | the fact `ipc_signals_contained` |
 /// | `process_bounds`, `io_bounds` | `limits` |
+/// | `stdin: Piped` | `process_run` and the fact `stdin_pipe` (design 32) |
+/// | `output_delivery: Live` | `output_read` and the fact `output_live` (design 32) |
 /// | `audit` | `audit` is checked, and records go to the sink |
 /// | `image` | an `image_digest_pinned` adapter's digest rule |
 /// | `ingress_routes`, `rate_bounds` | reserved: always refused (ADR 0109 F1 B) |
@@ -79,6 +81,10 @@ pub struct ConfinementProfile {
     /// Which bytes of each output stream the run keeps within its bound (design 29 § 5). `Head`
     /// on both, the default, is what every adapter kept before.
     pub output_retention: OutputRetention,
+    /// The run's standard input (design 32). `Null`, the default, is `/dev/null`, as before.
+    pub stdin: StdinMode,
+    /// How output reaches the embedder (design 32). `Recorded`, the default, is the record only.
+    pub output_delivery: OutputDelivery,
     pub secret_slots: Vec<SecretSlotRequest>,
     /// Where admission, refusal and start records go (ADR 0109 decision 2).
     pub audit: Option<AuditSink>,
@@ -96,6 +102,48 @@ pub enum Network {
     Isolated,
     /// Only the named operator-declared egress apertures (ADR 0013, design 26).
     Egress { apertures: Vec<String> },
+}
+
+/// A run's standard input (design 32 § 2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StdinMode {
+    /// `/dev/null`.
+    #[default]
+    Null,
+    /// A pipe the embedder writes with `write_stdin` and ends with `close_stdin`, taking at most
+    /// `limit_bytes` in total: 1 to [`MAX_STDIN_BYTES`](super::MAX_STDIN_BYTES).
+    Piped { limit_bytes: u64 },
+}
+
+impl StdinMode {
+    /// Whether the run's standard input is a pipe.
+    pub fn is_piped(self) -> bool {
+        matches!(self, Self::Piped { .. })
+    }
+}
+
+/// How a run's output reaches the embedder (design 32 § 3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OutputDelivery {
+    /// The record only, read with `output` and kept as `output_retention` says.
+    #[default]
+    Recorded,
+    /// Also delivered while the run runs, read with `read_output`, at most `queued_chunks`
+    /// chunks waiting: 1 to [`MAX_QUEUED_CHUNKS`](super::MAX_QUEUED_CHUNKS). A run whose chunks
+    /// wait unread past the stall deadline is ended.
+    Live { queued_chunks: u32 },
+}
+
+impl OutputDelivery {
+    /// The queue's size, when output is delivered live.
+    pub(crate) fn queued_chunks(self) -> Option<u32> {
+        match self {
+            Self::Live { queued_chunks } => Some(queued_chunks),
+            Self::Recorded => None,
+        }
+    }
 }
 
 /// IPC the run is confined to.
@@ -134,12 +182,15 @@ impl ConfinementProfile {
     /// that proves `host_network`, which the profile alone cannot know.
     pub fn required_families(&self) -> Vec<ContractFamily> {
         let implied = |family: &ContractFamily| match family {
+            ContractFamily::ProcessRun => self.stdin.is_piped(),
             ContractFamily::Workspace => {
                 self.workspace.is_some()
                     || self.workdir.is_some()
                     || !self.workspace_access.is_read_write()
             }
-            ContractFamily::OutputRead => !self.output_retention.is_head(),
+            ContractFamily::OutputRead => {
+                !self.output_retention.is_head() || self.output_delivery.queued_chunks().is_some()
+            }
             ContractFamily::FilesystemView => {
                 !self.writable_roots.is_empty()
                     || !self.read_only_roots.is_empty()
@@ -166,6 +217,8 @@ impl ConfinementProfile {
             Fact::PrivateTmpdir => self.private_tmpdir,
             Fact::IpcSocketAllowlist => self.ipc.socket_allowlist,
             Fact::IpcSignalsContained => self.ipc.signals_contained,
+            Fact::StdinPipe => self.stdin.is_piped(),
+            Fact::OutputLive => self.output_delivery.queued_chunks().is_some(),
             _ => false,
         };
         FACT_ORDER
@@ -261,6 +314,46 @@ mod tests {
                 Fact::SealedPaths
             ]
         );
+    }
+
+    // Design 32 § 2: a piped standard input requires running a process and the fact that proves
+    // the pipe; the default `/dev/null` requires neither.
+    #[test]
+    fn a_piped_stdin_implies_process_run_and_stdin_pipe() {
+        let piped = ConfinementProfile {
+            stdin: StdinMode::Piped { limit_bytes: 1 },
+            ..ConfinementProfile::default()
+        };
+        assert_eq!(piped.required_families(), [ContractFamily::ProcessRun]);
+        assert_eq!(piped.required_facts(), [Fact::StdinPipe]);
+        let null = ConfinementProfile::default();
+        assert_eq!(null.stdin, StdinMode::Null);
+        assert!(null.required_families().is_empty());
+        assert!(null.required_facts().is_empty());
+    }
+
+    // Design 32 § 4: live output requires reading output and the fact that proves the queue;
+    // the default `Recorded` requires neither.
+    #[test]
+    fn live_output_implies_output_read_and_output_live() {
+        let live = ConfinementProfile {
+            output_delivery: OutputDelivery::Live { queued_chunks: 1 },
+            ..ConfinementProfile::default()
+        };
+        assert_eq!(live.required_families(), [ContractFamily::OutputRead]);
+        assert_eq!(live.required_facts(), [Fact::OutputLive]);
+        let both = ConfinementProfile {
+            stdin: StdinMode::Piped { limit_bytes: 1 },
+            ..live
+        };
+        assert_eq!(
+            both.required_facts(),
+            [Fact::StdinPipe, Fact::OutputLive],
+            "in the Fact order"
+        );
+        let recorded = ConfinementProfile::default();
+        assert_eq!(recorded.output_delivery, OutputDelivery::Recorded);
+        assert!(recorded.required_facts().is_empty());
     }
 
     #[test]

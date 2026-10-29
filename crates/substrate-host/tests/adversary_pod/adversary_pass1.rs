@@ -218,6 +218,7 @@ fn policies_path() -> String {
 fn list_body() -> String {
     let item = |name: &str, created: &str| {
         json!({"metadata": {"name": name, "namespace": NAMESPACE, "creationTimestamp": created,
+                            "resourceVersion": "1",
                             "labels": {pod::MANAGED_BY_LABEL: pod::MANAGED_BY, pod::RUN_LABEL: name}},
                "spec": {"podSelector": {}}})
     };
@@ -247,6 +248,22 @@ fn adv1_open_reads_policy_age_by_the_server_date_with_any_rfc3339_form() {
                 Some(SERVER_DATE.to_owned()),
                 r#"{"kind":"Status","code":404}"#.to_owned(),
             )
+        } else if method == "GET"
+            && target.starts_with(&format!("{}?watch=", pods.trim_end_matches('/')))
+        {
+            // story:pod-force-deleted-keeps-its-policy: each Pod's watch replays its container
+            // terminated, so age alone decides here.
+            let name = target
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("fieldSelector=metadata.name%3D"))
+                .unwrap_or_default();
+            let deleted = json!({"type": "DELETED", "object": {
+                "metadata": {"name": name, "resourceVersion": "2"},
+                "spec": {"nodeName": "node-a", "restartPolicy": "Never"},
+                "status": {"containerStatuses": [{"name": "run",
+                                                  "state": {"terminated": {"exitCode": 0}}}]},
+            }});
+            (200, Some(SERVER_DATE.to_owned()), format!("{deleted}\n"))
         } else if method == "DELETE" && target.starts_with(&format!("{policies}/")) {
             (200, Some(SERVER_DATE.to_owned()), "{}".to_owned())
         } else {
