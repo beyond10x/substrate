@@ -1272,3 +1272,134 @@ async fn an_oci_run_under_tail_keeps_the_last_bytes() {
     assert!(output.stdout_truncated);
     println!("{NAME}: executed");
 }
+
+// ---- adversary pass on `story:adapter-stdin-pipe` ----
+
+/// A piped `oci` profile in `workspace` with a run timeout of `timeout_ms`.
+fn oci_piped(workspace: PathBuf, timeout_ms: u64) -> ConfinementProfile {
+    ConfinementProfile {
+        image: Some(image()),
+        workspace: Some(workspace),
+        process_bounds: Some(ProcessBounds {
+            timeout_ms,
+            processes: 8,
+            memory_bytes: 64 << 20,
+            cpu_millis: 30_000,
+        }),
+        stdin: confinement::StdinMode::Piped {
+            limit_bytes: confinement::MAX_STDIN_BYTES,
+        },
+        ..ConfinementProfile::default()
+    }
+}
+
+// The end of file with no byte before it: `close_stdin` before any write, possibly before the
+// runtime client attached, still ends `cat` in the container; and `run_with_stdin` with an empty
+// input does the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_an_oci_run_whose_stdin_is_closed_before_any_write_reads_end_of_file() {
+    const NAME: &str = "ESS confinement oci adv immediate eof";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    let admitted = adapter
+        .admit(&oci_piped(workspace, 60_000))
+        .expect("admitted");
+    let cat = Command {
+        argv: vec!["/bin/cat".into()],
+        env: BTreeMap::new(),
+    };
+    let run = adapter.start(&admitted, &cat).await.expect("cat starts");
+    adapter.close_stdin(&run).await.expect("closed");
+    let ended = tokio::time::timeout(Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("cat read end of file and ended")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let (ended, output, accepted) = tokio::time::timeout(
+        Duration::from_secs(30),
+        confinement::run_with_stdin(&adapter, &admitted, &cat, b""),
+    )
+    .await
+    .expect("run_with_stdin returned")
+    .expect("an empty input is no error");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert_eq!(accepted, 0);
+    assert!(output.stdout.is_empty());
+    println!("{NAME}: executed");
+}
+
+// Backpressure through the runtime client: a container that never reads its standard input and
+// never ends cannot hold `run_with_stdin` past the run's timeout (3 s) by more than seconds, and
+// 200 000 bytes through `cat` come back whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_an_oci_container_that_never_reads_stdin_is_bounded_by_the_run_timeout() {
+    const NAME: &str = "ESS confinement oci adv never reads";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    let admitted = adapter
+        .admit(&oci_piped(workspace.clone(), 3_000))
+        .expect("admitted");
+    let large = vec![b'z'; 4 << 20];
+    let started = Instant::now();
+    let (ended, _, accepted) = tokio::time::timeout(
+        Duration::from_secs(30),
+        confinement::run_with_stdin(
+            &adapter,
+            &admitted,
+            &Command {
+                argv: vec!["/bin/sleep".into(), "60".into()],
+                env: BTreeMap::new(),
+            },
+            &large,
+        ),
+    )
+    .await
+    .expect("run_with_stdin returned within 30 s of a 3 s timeout")
+    .expect("the timeout is an end, not an error");
+    assert_ne!(ended.state, RunState::Running);
+    assert!(accepted < large.len() as u64, "{NAME}: {accepted}");
+    assert!(started.elapsed() >= Duration::from_secs(2), "{NAME}");
+
+    let admitted = adapter
+        .admit(&oci_piped(workspace, 60_000))
+        .expect("admitted");
+    let input: Vec<u8> = (0..200_000_u32)
+        .map(|i| u8::try_from(i % 251).expect("below 251"))
+        .collect();
+    let (ended, output, accepted) = tokio::time::timeout(
+        Duration::from_secs(45),
+        confinement::run_with_stdin(
+            &adapter,
+            &admitted,
+            &Command {
+                argv: vec!["/bin/cat".into()],
+                env: BTreeMap::new(),
+            },
+            &input,
+        ),
+    )
+    .await
+    .expect("returned")
+    .expect("cat ran");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert_eq!(accepted, input.len() as u64);
+    assert_eq!(
+        output.stdout, input,
+        "{NAME}: every byte crossed the client"
+    );
+    println!("{NAME}: executed");
+}
