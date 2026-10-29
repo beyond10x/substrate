@@ -202,8 +202,8 @@ commands:
   # - systemd around local: local's families plus limits; local's facts plus whole_tree_kill.
   # - systemd around linux: linux's set.
   # - oci: process_run, process_watch, output_read, wait, workspace, filesystem_view, limits,
-  #   audit; image_digest_pinned (`story:oci-adapter`); stdin_pipe only where the runtime's flavor
-  #   and version are a pair in `OCI_STDIN_PINNED` (design 32 D13). The scenarios state what the
+  #   audit; image_digest_pinned (`story:oci-adapter`); stdin_pipe only where the runtime's flavor,
+  #   server version and client version are an entry in `OCI_STDIN_PINNED` (design 32 D13). The scenarios state what the
   #   oci lane's pinned runtime yields, which holds it.
   #   UNMAPPED: the oci story names a "rootless or not" fact with no Fact variant, and states no
   #   whole_tree_kill, IPC, private_tmpdir or paths_are_host_paths fact; none is declared.
