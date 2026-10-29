@@ -586,6 +586,7 @@ workspace backup/restore snapshots remain absent.
 | `crates/substrate-host` | the Linux host driver |
 | `crates/substrate-guarded` | guarded workspace file access (`openat2` beneath a pinned root), the driver error type and the exec environment rule, shared by every driver and by a binary that must not link the host driver |
 | `crates/substrate-kubernetes-client` | the bounded Kubernetes API client the `pod` confinement adapter and the namespace driver share: kubeconfig loading, HTTPS requests, watches, `pods/exec` and the gone-Pod rule |
+| `crates/substrate-kubernetes` | the Kubernetes namespace driver (ADR 0047): its settings, object names and labels, the ownership rule, the namespace `Lease`, the startup refusals and the snapshot binding |
 | `crates/substrate-daemon` | the standalone HTTP daemon: `DaemonConfig` plus the async `serve` entrypoint |
 | `crates/substrate-contract-check` | the offline contract checker |
 | `crates/b10x-substrate-sdk` | the typed Rust client over the daemon's authenticated service contract, with an opt-in linked-daemon mode |

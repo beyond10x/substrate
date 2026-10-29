@@ -363,6 +363,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "b10x-substrate-kubernetes"
+version = "0.15.0"
+dependencies = [
+ "b10x-substrate-host",
+ "b10x-substrate-kubernetes-client",
+ "b10x-substrate-wire",
+ "base64 0.23.1",
+ "chrono",
+ "getrandom 0.4.3",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "b10x-substrate-kubernetes-client"
 version = "0.15.0"
 dependencies = [
