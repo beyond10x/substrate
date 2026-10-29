@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-10-29
+
 ### Added
 
 - Host processes publish their lifecycle and stream it (ADR 0036 S12, contract bundle `0.24.0`).
@@ -166,18 +168,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - A raw-pipe or pty session whose child exited after the driver answered the start and before the daemon recorded it no longer reads `ready` with attachment `available` over the dead child. The start keeps the recorded exit: the session reads `exited` with attachment `consumed`, its exec reads `exited`, and the start's result is that session.
 - The lease sweeper no longer expires a lease issued while it runs: a just-started raw-pipe or pty session or exec is no longer killed, and a just-leased workspace no longer frozen. The lease sweeper judged each lease by a clock it had read before its store calls; a start that issued its lease from a later reading in between looked like a clock regression, which expires conservatively, so the sweeper killed the child and a freshly started session refused its first attach with `session.not-attachable` (state `expired`, attachment `consumed`, lease `expired`). The claim now reads the clock inside its own transaction. Seen once in 1,500 sequential pty start-and-attach rounds on a loaded host.
 - Two concurrent renewals of one live session or exec lease no longer refuse the slower one `lease.expired` (409). A renewal judged the stored lease by a clock it had read before its store calls, so a renewal that committed a later issue in between made that reading look like a clock regression. Session and exec renewals now read the clock inside their own transaction and issue the renewed lease from that reading; workspace renewals read it under the workspace lock and were not affected.
-
-### Fixed
-
 - `pod`: a run read `Unknown` because its Pod's removal was not confirmed no longer gives up after two removal rounds; its task deletes and reads the Pod again, the pause doubling from 500 ms to 30 s, until the API confirms it gone, then removes its NetworkPolicy (design 28). Until then the run stays counted against the 128 tracked runs, so at that cap a start is refused `exec.tracking-capacity` rather than adding another removal task.
 - `pod`: open removes a NetworkPolicy carrying the adapter's owner label, named for the run that label names, whose run's Pod no longer exists and which the API server created at least 90 s earlier (twice the 30 s API timeout plus 30 s), the policy a process that ended before its run's cleanup left behind. It reads the list in pages of 100, at most 64, each policy's metadata alone (`PartialObjectMetadataList`); a longer list, or a sweep the API refuses, does not open (`confinement.adapter-unserved`).
 - `pod`: a policy open keeps, younger than 90 s or with its run's Pod present, no longer stays until the next open: the adapter checks it again every 2 s on a thread of its own, with one list of its owned Pods' metadata alone per round (a page of whole Pods of ten admitted runs, each up to 256 KiB of argv and 256 KiB of environment, would pass the 4 MiB page bound and fail every round), and deletes it once its Pod is gone and either the API showed that Pod before or the policy is 90 s old. The thread ends when nothing is kept or the adapter and its runs' tasks are gone.
 - `pod`: after `Unknown` the task reads the Pod every 2 s between its backed-off deletions, so a policy follows its Pod within 2 s of the kubelet removing it, not at the next deletion up to 30 s later.
 - `pod`: `start` reads the run's NetworkPolicy back once the Pod is stored, and the Pod carries an `ownerReference` to that policy (`controller: false`), so a Pod whose policy is gone is removed by the garbage collector; a policy not read back removes the Pod and refuses the start `confinement.pod-api-failed`.
 - `pod`: a Pod that reads 404 no longer releases its run's NetworkPolicy by itself. A forced deletion, PodGC's after a node stopped answering or an operator's, removes a Pod while its container may still run. The run's task, the open sweep, the deferred sweep and an abandoned start now delete the policy only once the API shows the container terminated in a Pod whose `restartPolicy` reads `Never`, or the Pod deleted without ever being bound to a node: a read showed it, or a watch of the Pod from the last `resourceVersion` read, at first what the start's creates answered, replays it before the deletion, as the kubelet writes it before it removes a Pod. A run whose task is still asking counts against the tracked-run cap. A watch answered 410, one that shows nothing within 5 s, a deletion of a container not shown terminated, or no `resourceVersion` to watch from keeps the policy and reports the run `Unknown`; a `Failed` phase alone does not count, because PodGC sets it before a forced deletion. **Required RBAC change:** the adapter's Role needs `watch` on `pods` (now `create`, `get`, `list`, `watch`, `delete` on `pods` and `networkpolicies`, and `get` on `pods/log`); a deployment that pre-creates the Role must add it, or every run whose Pod goes before its container is read terminated keeps its policy and reads `Unknown`.
-
-### Fixed
-
 - The event log reads an `ev2` cursor by its published `event-cursor` pattern: one outside it
   (a scope without the `scope_` form, generation 0, more than 512 characters) is
   `event.cursor-invalid` (409), where it was `event.source-mismatch`. A cursor inside the pattern
