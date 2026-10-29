@@ -3,11 +3,14 @@
 //! code against the PVC. No shell performs file I/O.
 //!
 //! **A lost answer is resolved once, never resent (D10).** When a mutation's call goes unanswered,
-//! one `stat` call follows. If the file's digest is the one the request would have left — the
-//! written or replacing content's, or absence for a delete — that observation is the answer;
-//! otherwise the answer is `Failed` `kubernetes.executor-unanswered`, retriable. An edit or a
-//! patch states no resulting digest, so its `stat` cannot match and it always ends so. A read that
-//! goes unanswered is that failure at once: there is nothing to resolve.
+//! one `stat` call follows. For an unconditional write or delete, if the file's digest is the one
+//! the request would have left — the written content's, or absence — that observation is the
+//! answer; otherwise the answer is `Failed` `kubernetes.executor-unanswered`, retriable. A request
+//! with a precondition (a replace's create-if-absent or expected digest, an edit's or a patch's
+//! expected digest) always ends so: the state it would leave is also the state another writer can
+//! leave while this call is refused, so no `stat` tells the two apart. Its retry is safe, because
+//! an applied call's precondition no longer holds. A read that goes unanswered is that failure at
+//! once: there is nothing to resolve.
 
 use chrono::Utc;
 use serde::de::DeserializeOwned;
@@ -18,9 +21,9 @@ use substrate_executor::message::{PROTOCOL_FAILURE, Request, Response, read_resp
 use substrate_host::{DriverError, Listed};
 use substrate_kubernetes_client::ApiError;
 use substrate_wire::{
-    DigestedFileSlice, ExpectedFileState, FileAbsence, FileEditInput, FileKind, FileMutationResult,
-    FileObservation, FilePatchInput, FileReadQuery, FileReadResult, FileReplaceInput, UnifiedDiff,
-    WorkspaceTree, WorkspaceTreeQuery,
+    DigestedFileSlice, FileAbsence, FileEditInput, FileKind, FileMutationResult, FileObservation,
+    FilePatchInput, FileReadQuery, FileReadResult, FileReplaceInput, WorkspaceTree,
+    WorkspaceTreeQuery,
 };
 
 use super::NamespaceDriver;
@@ -51,8 +54,33 @@ enum Expected {
     Digest { sha256: String, size: u64 },
     /// No file.
     Absent,
-    /// A state the request does not state: no `stat` can match.
-    Unstated,
+    /// No `stat` may become the answer: the request carries a precondition, so the state it
+    /// would leave cannot tell an applied call from a refused one, or it is not a mutation.
+    Unresolvable,
+}
+
+impl Expected {
+    /// The state `request` leaves when applied, if a `stat` may answer for it. Only an
+    /// unconditional write or delete qualifies; every request with a precondition (create-if-absent
+    /// or an expected digest) does not, whatever it would leave. The match names every request so
+    /// a new one is classified here before it compiles.
+    fn of(request: &Request, content: &[u8]) -> Self {
+        match request {
+            Request::Write { .. } => Self::Digest {
+                sha256: hex(&Sha256::digest(content)),
+                size: u64::try_from(content.len()).unwrap_or(u64::MAX),
+            },
+            Request::Delete { .. } => Self::Absent,
+            Request::ReplaceV2 { .. }
+            | Request::EditV2 { .. }
+            | Request::PatchV2 { .. }
+            | Request::Read { .. }
+            | Request::ReadV2 { .. }
+            | Request::TreeV2 { .. }
+            | Request::Stat { .. }
+            | Request::Check {} => Self::Unresolvable,
+        }
+    }
 }
 
 /// What a `stat` call answered.
@@ -136,12 +164,8 @@ impl NamespaceDriver {
             workspace: workspace.to_owned(),
             path: path.to_owned(),
         };
-        let expected = Expected::Digest {
-            sha256: hex(&Sha256::digest(content)),
-            size: u64::try_from(content.len()).unwrap_or(u64::MAX),
-        };
         match self
-            .mutation_call(workspace, path, &request, content, &expected)
+            .mutation_call(workspace, path, &request, content)
             .await?
         {
             Resolution::Answered(value) => decode(value),
@@ -172,10 +196,7 @@ impl NamespaceDriver {
             workspace: workspace.to_owned(),
             path: path.to_owned(),
         };
-        match self
-            .mutation_call(workspace, path, &request, &[], &Expected::Absent)
-            .await?
-        {
+        match self.mutation_call(workspace, path, &request, &[]).await? {
             Resolution::Answered(value) => decode(value),
             Resolution::Absent => Ok(FileAbsence {
                 kind: FileKind::File,
@@ -188,9 +209,11 @@ impl NamespaceDriver {
         }
     }
 
-    /// `workspace.file.replace-v2`. A lost answer whose `stat` shows the replacing content is
-    /// answered with that observation: the previous digest is the one the request required, and
-    /// the diff, which only the executor saw, is stated as withheld (`truncated`, no text).
+    /// `workspace.file.replace-v2`. Every replacement is conditional (create-if-absent or an
+    /// expected digest), so a lost answer is `kubernetes.executor-unanswered` whatever its `stat`
+    /// shows: the replacing content on disk does not say whether this call applied it or another
+    /// writer did and this call was refused. A retry is safe: after an applied call its
+    /// precondition no longer holds.
     ///
     /// # Errors
     ///
@@ -206,38 +229,7 @@ impl NamespaceDriver {
             path: path.to_owned(),
             input: input.clone(),
         };
-        let expected = input
-            .content
-            .decode()
-            .map_or(Expected::Unstated, |content| Expected::Digest {
-                sha256: hex(&Sha256::digest(&content)),
-                size: u64::try_from(content.len()).unwrap_or(u64::MAX),
-            });
-        match self
-            .mutation_call(workspace, path, &request, &[], &expected)
-            .await?
-        {
-            Resolution::Answered(value) => decode(value),
-            Resolution::Stated { sha256, size } => Ok(FileMutationResult {
-                kind: FileKind::File,
-                workspace: workspace.to_owned(),
-                path: path.to_owned(),
-                size,
-                before_sha256: match &input.expected {
-                    ExpectedFileState::Absent => None,
-                    ExpectedFileState::Sha256 { sha256 } => Some(sha256.clone()),
-                },
-                after_sha256: sha256,
-                atomic_replacement: true,
-                diff: UnifiedDiff {
-                    text: String::new(),
-                    truncated: true,
-                    binary: false,
-                },
-                observed_at: Utc::now(),
-            }),
-            Resolution::Absent => Err(unanswered()),
-        }
+        self.conditional_mutation(workspace, path, &request).await
     }
 
     /// `workspace.file.edit-v2`.
@@ -256,7 +248,7 @@ impl NamespaceDriver {
             path: path.to_owned(),
             input: input.clone(),
         };
-        self.unstated_mutation(workspace, path, &request).await
+        self.conditional_mutation(workspace, path, &request).await
     }
 
     /// `workspace.file.patch-v2`.
@@ -275,19 +267,18 @@ impl NamespaceDriver {
             path: path.to_owned(),
             input: input.clone(),
         };
-        self.unstated_mutation(workspace, path, &request).await
+        self.conditional_mutation(workspace, path, &request).await
     }
 
-    async fn unstated_mutation(
+    /// A mutation with a precondition: its answer, or `kubernetes.executor-unanswered` when the
+    /// answer is lost, whatever the one `stat` shows.
+    async fn conditional_mutation(
         &self,
         workspace: &str,
         path: &str,
         request: &Request,
     ) -> Result<FileMutationResult, DriverError> {
-        match self
-            .mutation_call(workspace, path, request, &[], &Expected::Unstated)
-            .await?
-        {
+        match self.mutation_call(workspace, path, request, &[]).await? {
             Resolution::Answered(value) => decode(value),
             Resolution::Stated { .. } | Resolution::Absent => Err(unanswered()),
         }
@@ -309,16 +300,17 @@ impl NamespaceDriver {
         }
     }
 
-    /// One mutation call; when its answer is lost, one `stat` call and its comparison with
-    /// `expected`.
+    /// One mutation call; when its answer is lost, one `stat` call and its comparison with what
+    /// the request leaves ([`Expected::of`]). A request with a precondition is never resolved by
+    /// the `stat`.
     async fn mutation_call(
         &self,
         workspace: &str,
         path: &str,
         request: &Request,
         content: &[u8],
-        expected: &Expected,
     ) -> Result<Resolution, DriverError> {
+        let expected = Expected::of(request, content);
         match self.fs_call(workspace, request, content).await {
             Ok((value, _)) => return Ok(Resolution::Answered(value)),
             Err(CallFailure::Failed(error)) => return Err(error),
@@ -344,7 +336,7 @@ impl NamespaceDriver {
                     sha256: seen,
                     size: seen_size,
                 },
-            ) if *sha256 == seen && *size == seen_size => Resolution::Stated {
+            ) if sha256 == seen && size == seen_size => Resolution::Stated {
                 sha256: seen,
                 size: seen_size,
             },

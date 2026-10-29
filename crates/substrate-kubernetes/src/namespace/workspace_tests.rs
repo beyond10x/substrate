@@ -705,8 +705,11 @@ async fn a_lost_answer_with_another_digest_is_executor_unanswered_and_retriable(
     assert!(!s.file("a.txt").exists());
 }
 
+/// Only an unconditional delete (or write) is resolved by its `stat`; every request with a
+/// precondition (replace, edit, patch) is `kubernetes.executor-unanswered` and retriable even when
+/// it applied and the `stat` shows exactly the state it would leave.
 #[tokio::test]
-async fn lost_answers_of_replace_delete_and_edit_resolve_by_the_state_each_requests() {
+async fn lost_answers_resolve_only_unconditional_mutations_by_their_stat() {
     let mut s = setup();
     s.created().await;
     std::fs::write(s.file("a.txt"), b"old\n").expect("seeded");
@@ -720,10 +723,11 @@ async fn lost_answers_of_replace_delete_and_edit_resolve_by_the_state_each_reque
     .expect("a replacement");
     let replaced = Driver::replace_workspace_file_v2(&s.driver, WORKSPACE, &pvc, "a.txt", &replace)
         .await
-        .expect("the stat shows the replacing content");
-    assert_eq!(replaced.before_sha256, Some(sha(b"old\n")));
-    assert_eq!(replaced.after_sha256, sha(b"new\n"));
-    assert!(replaced.diff.truncated && replaced.diff.text.is_empty());
+        .expect_err("a conditional replace is never resolved by its stat");
+    assert_eq!(replaced.class, DriverErrorClass::Failed);
+    assert_eq!(replaced.code, EXECUTOR_UNANSWERED);
+    assert!(replaced.retriable);
+    assert_eq!(std::fs::read(s.file("a.txt")).expect("applied"), b"new\n");
 
     stall_next(&mut s);
     let edit: FileEditInput = serde_json::from_value(json!({
@@ -735,7 +739,24 @@ async fn lost_answers_of_replace_delete_and_edit_resolve_by_the_state_each_reque
         .await
         .expect_err("an edit states no resulting digest");
     assert_eq!(edited.code, EXECUTOR_UNANSWERED);
+    assert!(edited.retriable);
     assert_eq!(std::fs::read(s.file("a.txt")).expect("kept"), b"edited\n");
+
+    stall_next(&mut s);
+    let patch: FilePatchInput = serde_json::from_value(json!({
+        "expected_sha256": sha(b"edited\n"),
+        "edits": [{"kind": "insert_before", "line": 1, "text": "zero\n"}],
+    }))
+    .expect("a patch");
+    let patched = Driver::patch_workspace_file_v2(&s.driver, WORKSPACE, &pvc, "a.txt", &patch)
+        .await
+        .expect_err("a conditional patch is never resolved by its stat");
+    assert_eq!(patched.code, EXECUTOR_UNANSWERED);
+    assert!(patched.retriable);
+    assert_eq!(
+        std::fs::read(s.file("a.txt")).expect("patched"),
+        b"zero\nedited\n"
+    );
 
     stall_next(&mut s);
     let absence = Driver::delete_workspace_file(&s.driver, WORKSPACE, &pvc, "a.txt")
@@ -745,7 +766,16 @@ async fn lost_answers_of_replace_delete_and_edit_resolve_by_the_state_each_reque
 
     assert_eq!(
         s.executor.fs_ops(),
-        ["replace-v2", "stat", "edit-v2", "stat", "delete", "stat"]
+        [
+            "replace-v2",
+            "stat",
+            "edit-v2",
+            "stat",
+            "patch-v2",
+            "stat",
+            "delete",
+            "stat"
+        ]
     );
 }
 
@@ -884,4 +914,195 @@ async fn a_requested_storage_quota_is_unserved_before_anything_is_sent() {
     assert_eq!(unserved.class, DriverErrorClass::Unserved);
     assert_eq!(unserved.code, "workspace.storage-quota-unserved");
     assert!(s.fake.requests().is_empty());
+}
+
+// Security review of U8 (integrity conformance): what a lost-answer resolution may report, the
+// root-name check, the keeper's security profile and the quota match.
+
+/// A create-if-absent the executor refused, because the file already held the same bytes another
+/// writer put there, is not a success: the refusal is the answer the executor gave, and one `stat`
+/// cannot tell it from an applied create. Reporting `before_sha256: None` would tell a second
+/// writer it created a file it did not.
+#[tokio::test]
+async fn sec_a_lost_answer_never_turns_a_refused_create_if_absent_into_success() {
+    let mut s = setup();
+    s.created().await;
+    std::fs::write(s.file("lock"), b"held\n").expect("another writer created it");
+    stall_next(&mut s);
+    let create: FileReplaceInput = serde_json::from_value(json!({
+        "content": {"encoding": "base64", "data": "aGVsZAo="},
+        "expected": {"state": "absent"},
+    }))
+    .expect("a create-if-absent");
+    let answer =
+        Driver::replace_workspace_file_v2(&s.driver, WORKSPACE, &pvc_name(), "lock", &create).await;
+    assert_eq!(s.executor.fs_ops(), ["replace-v2", "stat"]);
+    let error = answer.expect_err(
+        "the executor refused the create (the file existed); a lost answer must not report it \
+         applied",
+    );
+    assert_eq!(error.code, EXECUTOR_UNANSWERED);
+}
+
+/// The same for a compare-and-swap from a digest the file never held: the executor refused it, and
+/// the answer must not state `before_sha256` as the request's expected digest.
+#[tokio::test]
+async fn sec_a_lost_answer_never_reports_a_compare_and_swap_from_a_digest_the_file_never_had() {
+    let mut s = setup();
+    s.created().await;
+    std::fs::write(s.file("a.txt"), b"new\n").expect("another writer replaced it first");
+    stall_next(&mut s);
+    let replace: FileReplaceInput = serde_json::from_value(json!({
+        "content": {"encoding": "base64", "data": "bmV3Cg=="},
+        "expected": {"state": "sha256", "sha256": sha(b"old\n")},
+    }))
+    .expect("a replacement");
+    let answer =
+        Driver::replace_workspace_file_v2(&s.driver, WORKSPACE, &pvc_name(), "a.txt", &replace)
+            .await;
+    assert_eq!(s.executor.fs_ops(), ["replace-v2", "stat"]);
+    let error = answer.expect_err(
+        "the executor refused the swap (the file never held the expected digest); a lost answer \
+         must not report it applied",
+    );
+    assert_eq!(error.code, EXECUTOR_UNANSWERED);
+}
+
+/// Only the exact PVC name derived for the workspace passes `check_root`, on every route, and a
+/// refused root sends nothing to the cluster or the executor.
+#[tokio::test]
+async fn sec_check_root_admits_only_the_exact_derived_name_and_sends_nothing_otherwise() {
+    let s = setup();
+    s.created().await;
+    let exact = pvc_name();
+    let sent = s.fake.requests().len();
+    let homoglyph = exact.replacen('s', "\u{0455}", 1);
+    let near = [
+        String::new(),
+        exact.to_uppercase(),
+        format!("{exact} "),
+        format!("{exact}\0"),
+        format!("{exact}/.."),
+        format!("../{exact}"),
+        "..".to_owned(),
+        homoglyph,
+        "a".repeat(255),
+        names::workspace_pvc(DEPLOYMENT, "ws_two"),
+        names::workspace_pvc("deploy-b", WORKSPACE),
+        keeper_name(),
+    ];
+    for root in &near {
+        let d = &s.driver;
+        let errors = [
+            Driver::write_workspace_file(d, WORKSPACE, root, "a.txt", b"x")
+                .await
+                .err(),
+            Driver::read_workspace_path(d, WORKSPACE, root, "a.txt", &file_query())
+                .await
+                .err(),
+            Driver::delete_workspace_file(d, WORKSPACE, root, "a.txt")
+                .await
+                .err(),
+            Driver::observe_workspace(d, WORKSPACE, root, &provisional())
+                .await
+                .err(),
+            Driver::destroy_workspace(d, WORKSPACE, root).await.err(),
+        ];
+        for error in errors {
+            let error = error.unwrap_or_else(|| panic!("{root:?} is admitted"));
+            assert_eq!(error.code, API_FAILED, "{root:?}");
+        }
+        assert!(
+            !matches!(
+                Driver::create_workspace(d, "ws_three", root, &empty()).await,
+                DispatchOutcome::Observed(_)
+            ),
+            "{root:?}"
+        );
+    }
+    assert_eq!(
+        s.fake.requests().len(),
+        sent,
+        "a refused root sends nothing"
+    );
+    assert!(s.executor.fs_ops().is_empty());
+    assert!(!s.file("a.txt").exists());
+}
+
+/// The keeper conforms to Pod Security `restricted` and states requests equal to limits, with no
+/// token, no environment, no host namespace and no capability added.
+#[test]
+fn sec_the_keeper_pod_states_the_restricted_profile_and_equal_bounds() {
+    let s = setup();
+    let keeper = s.driver.render_keeper(
+        WORKSPACE,
+        &s.ledger.row(&keeper_name()),
+        &pvc_name(),
+        "uid-1",
+    );
+    let spec = &keeper["spec"];
+    assert_eq!(spec["automountServiceAccountToken"], false);
+    assert_eq!(spec["enableServiceLinks"], false);
+    for host in ["hostIPC", "hostNetwork", "hostPID"] {
+        assert_eq!(spec[host], false, "{host}");
+    }
+    assert!(spec.get("initContainers").is_none());
+    assert!(spec.get("ephemeralContainers").is_none());
+    assert_eq!(spec["securityContext"]["runAsNonRoot"], true);
+    assert_ne!(spec["securityContext"]["runAsUser"], 0);
+    assert_eq!(
+        spec["securityContext"]["seccompProfile"]["type"],
+        "RuntimeDefault"
+    );
+    let volumes = spec["volumes"].as_array().expect("volumes");
+    assert_eq!(volumes.len(), 1);
+    assert!(volumes[0].get("hostPath").is_none());
+    let containers = spec["containers"].as_array().expect("containers");
+    assert_eq!(containers.len(), 1);
+    let container = &containers[0];
+    let context = &container["securityContext"];
+    assert_eq!(context["runAsNonRoot"], true);
+    assert_ne!(context["runAsUser"], 0);
+    assert_eq!(context["allowPrivilegeEscalation"], false);
+    assert_eq!(context["privileged"], false);
+    assert_eq!(context["readOnlyRootFilesystem"], true);
+    assert_eq!(context["capabilities"], json!({"drop": ["ALL"]}));
+    assert_eq!(context["seccompProfile"]["type"], "RuntimeDefault");
+    assert!(container.get("env").is_none() && container.get("envFrom").is_none());
+    assert!(container.get("ports").is_none());
+    assert_eq!(
+        container["resources"]["requests"],
+        container["resources"]["limits"]
+    );
+    for resource in ["cpu", "memory", "ephemeral-storage"] {
+        assert!(
+            container["resources"]["limits"][resource].is_string(),
+            "{resource}"
+        );
+    }
+    let image = container["image"].as_str().expect("an image");
+    assert!(image.contains("@sha256:"), "{image}");
+}
+
+/// A 403 is capacity only by the API server's quota phrase after `is forbidden: `: the words
+/// `exceeded quota` elsewhere, as an admission webhook may write them, stay `api-failed`.
+#[tokio::test]
+async fn sec_exceeded_quota_without_the_forbidden_phrase_stays_api_failed() {
+    let s = setup();
+    s.fake.fault(Fault::Answer {
+        method: Method::POST,
+        path: CLAIMS.to_owned(),
+        status: 403,
+        body: json!({
+            "kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
+            "message": "admission webhook \"limits.example\" denied the request: exceeded quota: \
+                        team-a",
+            "reason": "Forbidden", "code": 403,
+        }),
+    });
+    let DispatchOutcome::NotDispatched(failed) = s.create().await else {
+        panic!("a refused create stores nothing");
+    };
+    assert_eq!(failed.code, API_FAILED);
+    assert_eq!(failed.class, DriverErrorClass::Failed);
 }
