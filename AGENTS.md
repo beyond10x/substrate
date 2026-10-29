@@ -678,7 +678,9 @@ release** (2026-10-29, tagged commit `0739628`): daemon
 archives under a signed `SHA256SUMS`. The tag-push run failed, so a protected-`main` recovery
 dispatch published them: all were keyless-signed and verified with that run's workflow identity
 (`release.yml@refs/heads/main`) before the GitHub release was announced. It predates the executor
-image, so it published none; `0.16.0` is the first release that does.
+image, so it published none. `0.16.1` is the first release that does: tag `0.16.0` was never
+published, because `main`'s gate on its commit failed `cargo xtask check-advisories` and release
+tags are write-once.
 Do not maintain a second digest list here: the digests of every release are the GitHub release's own
 ([0.15.0](https://github.com/beyond10x/substrate/releases/tag/0.15.0)) and
 [CHANGELOG.md](CHANGELOG.md)'s.

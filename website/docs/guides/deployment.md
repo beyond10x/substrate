@@ -252,7 +252,7 @@ stays with its ordinal. Delete the claims yourself to destroy the ledgers.
 ## Kubernetes namespace driver
 
 `--driver kubernetes` serves workspaces as objects in one namespace. It is a development profile,
-unreleased until 0.16.0.
+unreleased until 0.16.1.
 
 What it does not do yet:
 
