@@ -64,7 +64,10 @@ pub struct StaticArgs {
 pub fn run_lane(args: &LaneArgs) -> Result<ExitCode> {
     match &args.lane {
         Lane::Static(args) => run_static(args),
-        Lane::Cluster(args) => crate::chart_cluster::run(args),
+        Lane::Cluster(args) => {
+            crate::chart_cluster::arm_signals()?;
+            crate::chart_cluster::run(args)
+        }
     }
 }
 
@@ -511,6 +514,27 @@ pub fn injected_cases() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// `command`, a Helm that reaches no cluster: an empty kubeconfig of its own in `directory` and
+/// none of the ambient `HELM_KUBE*` overrides. A workstation's ambient contexts may be production
+/// clusters, and rendering or linting the chart needs none.
+fn without_cluster<'c>(command: &'c mut Command, directory: &Path) -> Result<&'c mut Command> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let kubeconfig = directory.join("kubeconfig");
+    // Owner-only, so Helm does not warn that a group- or world-readable kubeconfig is insecure.
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&kubeconfig)?;
+    command.env("KUBECONFIG", &kubeconfig);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("HELM_KUBE") {
+            command.env_remove(name);
+        }
+    }
+    Ok(command)
+}
+
 fn render_skipping_schema(
     helm: &Path,
     chart: &Path,
@@ -519,7 +543,7 @@ fn render_skipping_schema(
     let directory = tempfile::tempdir()?;
     let file = directory.path().join("values.json");
     fs::write(&file, serde_json::to_vec_pretty(values)?)?;
-    let output = Command::new(helm)
+    let output = without_cluster(&mut Command::new(helm), directory.path())?
         .args(["template", RELEASE])
         .arg(chart)
         .args([
@@ -566,7 +590,7 @@ pub fn render(
     let directory = tempfile::tempdir()?;
     let file = directory.path().join("values.json");
     fs::write(&file, serde_json::to_vec_pretty(values)?)?;
-    let output = Command::new(helm)
+    let output = without_cluster(&mut Command::new(helm), directory.path())?
         .arg("template")
         .arg(release)
         .arg(chart)
@@ -648,7 +672,7 @@ fn run_static(args: &StaticArgs) -> Result<ExitCode> {
     let directory = tempfile::tempdir()?;
     let base_file = directory.path().join("lane.json");
     fs::write(&base_file, serde_json::to_vec_pretty(&base_values())?)?;
-    let lint = Command::new(&args.helm)
+    let lint = without_cluster(&mut Command::new(&args.helm), directory.path())?
         .args(["lint", "--strict"])
         .arg(&chart)
         .arg("--values")
@@ -2531,6 +2555,31 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// `helm template` reaches no cluster: both renderers hand Helm an empty kubeconfig of their
+    /// own, never the ambient one, whose contexts on a workstation may be production clusters.
+    #[test]
+    fn helm_template_is_given_an_empty_kubeconfig_of_its_own() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let helm = directory.path().join("helm");
+        std::fs::write(
+            &helm,
+            "#!/bin/sh\nif [ -n \"$KUBECONFIG\" ] && [ -f \"$KUBECONFIG\" ] && [ ! -s \"$KUBECONFIG\" ]; then echo empty; else echo \"ambient:$KUBECONFIG\"; fi\nenv | grep '^HELM_KUBE' || true\n",
+        )
+        .expect("the stand-in helm");
+        std::fs::set_permissions(&helm, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        let chart = std::path::Path::new(ROOT);
+        let rendered = super::render(&helm, chart, "lane", "lane", &json!({}))
+            .expect("helm ran")
+            .expect("helm succeeded");
+        assert_eq!(rendered, "empty\n");
+        let skipping = super::render_skipping_schema(&helm, chart, &json!({}))
+            .expect("helm ran")
+            .expect("helm succeeded");
+        assert_eq!(skipping, "empty\n");
     }
 }
 

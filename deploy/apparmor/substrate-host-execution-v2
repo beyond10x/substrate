@@ -1,5 +1,3 @@
-# Explicit container-private host execution profile. Never replace the runtime default.
-# See design 25 for namespaces, capability drop and no_new_privs requirements.
 #include <tunables/global>
 
 profile substrate-host-exec-v2 flags=(attach_disconnected,mediate_deleted) {
@@ -11,12 +9,9 @@ profile substrate-host-exec-v2 flags=(attach_disconnected,mediate_deleted) {
   capability setuid,
   capability setpcap,
   capability sys_admin,
-  # Bubblewrap configures loopback only after entering its private user/network namespaces.
   capability net_admin,
   capability sys_chroot,
-  # kernel/ucount.c requires this inside the nested user namespace to lower its ceiling.
   capability sys_resource,
-  # One inherited label: no_new_privs forbids relaxing policy at exec.
   userns,
   remount options=(rw,bind,nosuid,nodev,noexec,relatime) /sys/fs/cgroup/,
   mount fstype=tmpfs,
@@ -45,6 +40,4 @@ profile substrate-host-exec-v2 flags=(attach_disconnected,mediate_deleted) {
   deny /sys/kernel/security/** rwklx,
   deny /sys/firmware/** rwklx,
   deny /sys/devices/virtual/powercap/** rwklx,
-  # Namespace-local userns ceilings support --disable-userns. New cgroup and block
-  # filesystem mounts have no allow rule. Sandboxes retain the existing seccomp floor.
 }
