@@ -2,10 +2,15 @@
 //! a relist, a preconditioned delete refused 409, an answer lost after the API stored the object,
 //! and no credential in any error. Each case runs once, in seconds.
 
+use base64::Engine as _;
+use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::{HeaderValue, header};
 
 use crate::fake::{ExecAnswer, ExecRequest, FakeCluster, Fault};
-use crate::{Api, ApiError, ListForm, Method, WatchError, kubeconfig};
+use crate::{Api, ApiError, ListForm, Method, PodEnd, PodTrace, WatchError, kubeconfig, pod_end};
 
 const NAMESPACE: &str = "substrate-client";
 const CREDENTIAL: &str = "fake-bearer-credential";
@@ -386,5 +391,159 @@ async fn a_watch_whose_answer_is_later_than_the_timeout_is_unanswered_at_it() {
     assert!(
         waited < LATE,
         "the watch waited {waited:?}, past its timeout"
+    );
+}
+
+/// The message a gone Pod's watch quotes from an `ERROR` event is bounded to the 300 characters
+/// that every other API message the client quotes is bounded to (`WatchError::Error`).
+#[tokio::test]
+async fn an_error_event_quoted_for_a_gone_pod_is_bounded_like_every_other_api_message() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: format!("{}?watch=1", api.pods()),
+        status: 200,
+        body: json!({"type": "ERROR", "object": {"kind": "Status", "message": "e".repeat(5_000)}}),
+    });
+
+    let end = pod_end(&api, "gone", &PodTrace::since(Some("1"))).await;
+    let PodEnd::Unproven(why) = end else {
+        panic!("an ERROR event leaves the policy in place: {end:?}");
+    };
+    let quoted = why
+        .strip_prefix("the watch answered an error: ")
+        .expect("the reason names the ERROR event");
+    assert!(
+        quoted.chars().count() <= 300,
+        "the quoted message is {} characters",
+        quoted.chars().count()
+    );
+}
+
+/// A TLS WebSocket server under its own CA that answers `pods/exec` as a kubelet streams a command
+/// which writes while it reads: every stdin frame is echoed on stdout as it arrives, and the
+/// channel-3 `Success` follows the client's close. Returns the kubeconfig that names it.
+async fn echoing_exec_server() -> Value {
+    let ca_key = rcgen::KeyPair::generate().expect("a CA key");
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA parameters");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "echo cluster CA");
+    let ca = ca_params.self_signed(&ca_key).expect("the CA");
+    let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+    let server_key = rcgen::KeyPair::generate().expect("a server key");
+    let server = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()])
+        .and_then(|params| params.signed_by(&server_key, &issuer))
+        .expect("the server certificate");
+    let mut tls = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![server.der().clone()],
+        rustls::pki_types::PrivatePkcs8KeyDer::from(server_key.serialize_der()).into(),
+    )
+    .expect("the server identity");
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback port");
+    let address = listener.local_addr().expect("the port");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                #[allow(
+                    clippy::result_large_err,
+                    reason = "the handshake callback's error type is fixed by tungstenite"
+                )]
+                let echo =
+                    |_: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+                        response.headers_mut().insert(
+                            header::SEC_WEBSOCKET_PROTOCOL,
+                            HeaderValue::from_static("v5.channel.k8s.io"),
+                        );
+                        Ok(response)
+                    };
+                let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(tls, echo).await else {
+                    return;
+                };
+                while let Some(Ok(message)) = socket.next().await {
+                    let Message::Binary(data) = message else {
+                        continue;
+                    };
+                    match data.split_first() {
+                        Some((0, input)) => {
+                            let mut frame = vec![1_u8];
+                            frame.extend_from_slice(input);
+                            if socket.send(Message::binary(frame)).await.is_err() {
+                                return;
+                            }
+                        }
+                        Some((255, _)) => break,
+                        _ => {}
+                    }
+                }
+                let status = serde_json::to_vec(&json!({"metadata": {}, "status": "Success"}))
+                    .unwrap_or_default();
+                let mut frame = vec![3_u8];
+                frame.extend_from_slice(&status);
+                let _ = socket.send(Message::binary(frame)).await;
+                let _ = socket.close(None).await;
+            });
+        }
+    });
+
+    json!({
+        "current-context": "echo",
+        "clusters": [{"name": "echo", "cluster": {
+            "server": format!("https://{address}"),
+            "certificate-authority-data":
+                base64::engine::general_purpose::STANDARD.encode(ca.pem()),
+        }}],
+        "contexts": [{"name": "echo", "context": {
+            "cluster": "echo", "user": "echo", "namespace": NAMESPACE,
+        }}],
+        "users": [{"name": "echo", "user": {"token": CREDENTIAL}}],
+    })
+}
+
+/// An exec whose command writes while it reads completes: a 64 MiB input the command echoes back
+/// is answered in full, not held until the call bound, because the client sends its whole input
+/// before it reads any output and both sides then wait on full socket buffers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exec_whose_command_writes_while_it_reads_completes_its_echo() {
+    let config = echoing_exec_server().await;
+    let (mut api, ()) =
+        kubeconfig::parse(config.to_string().as_bytes(), |_, _| Ok(())).expect("parses");
+    api.timeout = std::time::Duration::from_secs(5);
+    let small = api
+        .exec("keeper", "run", &["cat"], b"ping", 16)
+        .await
+        .expect("a small echo completes");
+    assert_eq!(small.stdout, b"ping");
+
+    let input = vec![b'x'; 64 * 1024 * 1024];
+    let output = api
+        .exec("keeper", "run", &["cat"], &input, input.len())
+        .await
+        .expect("the echo of 64 MiB completes within the call bound");
+    assert!(
+        output.stdout == input,
+        "the echo returned {} of {} bytes",
+        output.stdout.len(),
+        input.len()
     );
 }
