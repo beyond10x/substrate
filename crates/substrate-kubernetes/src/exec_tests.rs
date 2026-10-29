@@ -1170,5 +1170,90 @@ async fn a_gone_log_leaves_the_exec_unknown_without_an_exit() {
     );
 }
 
+/// Design 28 and design 34 § 9: the wall bound is `activeDeadlineSeconds`, and a Pod not ended 60 s
+/// after it is deleted under its uid and ends as a `Kill`. A Pod the kubelet never started
+/// (unschedulable, image not pulled) shows no terminated container, so only the driver's own
+/// deletion ends it: past the bound plus 60 s the exec is `Cancelled` and its Pod is gone.
+#[tokio::test]
+async fn a_pod_never_started_is_deleted_sixty_seconds_past_its_wall_bound() {
+    let rig = rig().await;
+    let id = "exec_wall";
+    rig.started(id, &input(&["/bin/sleep", "60"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.clock.set(Duration::from_secs(10 + 60 + 1));
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        ended.resource.state,
+        ExecState::Cancelled,
+        "the wall bound and its 60 s deletion ended the exec"
+    );
+    assert!(
+        rig.pod(&name).is_none(),
+        "the Pod is deleted under its uid past the wall bound"
+    );
+}
+
+/// § 4: the wall-bound deletion is a deletion under the bound uid, so a same-named replacement,
+/// even one that carries our labels and annotation, is never deleted past the bound.
+#[tokio::test]
+async fn a_replacement_past_the_wall_bound_is_never_deleted() {
+    let rig = rig().await;
+    let id = "exec_wall_swap";
+    rig.started(id, &input(&["/bin/sleep", "60"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    let mut replacement = rig.pod(&name).expect("present");
+    rig.admin
+        .delete(&format!("{}/{name}", rig.admin.pods()), 0)
+        .await
+        .expect("an operator deletes it");
+    for member in ["uid", "resourceVersion", "creationTimestamp"] {
+        replacement["metadata"]
+            .as_object_mut()
+            .expect("metadata")
+            .remove(member);
+    }
+    let replaced = rig.fake.seed("pods", replacement).expect("replaced");
+    rig.clock.set(Duration::from_secs(10 + 60 + 1));
+    let _ = rig.driver.exec_observe(id).await;
+    assert_eq!(
+        rig.pod(&name),
+        Some(replaced),
+        "the replacement is untouched past the wall bound"
+    );
+}
+
+/// Design 34 § 7.3: an exec Pod is owned by the workspace PVC by uid and mounts it by name. A PVC
+/// deleted and created again under the same name has another uid, so a start over the workspace's
+/// bound rows is refused before any Pod create.
+#[tokio::test]
+async fn a_replaced_workspace_pvc_refuses_the_start_before_any_pod() {
+    let rig = rig().await;
+    rig.admin
+        .delete(&format!("{}/{}", rig.admin.claims(), rig.pvc), 0)
+        .await
+        .expect("the PVC is deleted");
+    let replacement = rig
+        .fake
+        .seed(
+            "persistentvolumeclaims",
+            json!({"metadata": {"name": rig.pvc}, "spec": {}}),
+        )
+        .expect("the PVC is stored again");
+    assert_ne!(
+        uid(&replacement),
+        rig.pvc_uid,
+        "the replacement has another uid"
+    );
+    let outcome = rig.start("exec_pvc", &input(&["/bin/true"])).await;
+    assert_eq!(
+        rig.pod_creates(),
+        0,
+        "a Pod was created over a replaced PVC"
+    );
+    let DispatchOutcome::NotDispatched(_) = outcome else {
+        panic!("the start over a replaced PVC was dispatched");
+    };
+}
+
 #[path = "restart_tests.rs"]
 mod restart;
