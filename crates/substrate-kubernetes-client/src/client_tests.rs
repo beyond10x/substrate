@@ -332,3 +332,31 @@ async fn no_error_carries_the_credential() {
         );
     }
 }
+
+/// Security review pass 1 (design 34 § 9, design 28): an echoed `Status.message` is cut to 300
+/// characters, and the bearer token is cleared from what is left. A token the cut splits is no
+/// longer whole, so the clearing misses it and its first characters reach the error. Clearing
+/// before cutting keeps every part of it out.
+#[tokio::test]
+async fn an_echoed_credential_split_by_the_message_bound_leaves_no_part_of_it() {
+    const SPLIT: &str = "split-fake-bearer-credential-0123456789abcdef";
+    let fake = FakeCluster::start(NAMESPACE, SPLIT).expect("the fake starts");
+    let api = client(&fake.kubeconfig());
+    let message = format!("{}{SPLIT}", "x".repeat(290));
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: format!("{}/split", api.pods()),
+        status: 403,
+        body: json!({"kind": "Status", "message": message}),
+    });
+
+    let error = api
+        .get(&format!("{}/split", api.pods()))
+        .await
+        .expect_err("refused")
+        .to_string();
+    assert!(
+        !error.contains(&SPLIT[..10]),
+        "the credential's first characters leaked: {error}"
+    );
+}
