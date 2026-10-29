@@ -16,7 +16,11 @@ pub const TEST_PORT_FLOOR: u16 = 16_384;
 /// The test binaries that draw from the pool, each from its own slice of it, so binaries running
 /// at the same time never draw the same port: a process-wide counter does not reach across
 /// processes. A binary that is not listed refuses to allocate.
-const BINARIES: [&str; 2] = ["tls_listener", "hosted_pool_adversary_pass1"];
+const BINARIES: [&str; 3] = [
+    "tls_listener",
+    "hosted_pool_adversary_pass1",
+    "kubernetes_driver_selection",
+];
 
 /// The slices the pool is cut into; more than `BINARIES` has, so a binary can be added.
 const SLICES: usize = 8;

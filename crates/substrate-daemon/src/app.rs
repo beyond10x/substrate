@@ -33,8 +33,8 @@ mod workspaces;
 mod tests;
 
 pub(crate) use self::health::{
-    Admission, ConnectionGauge, Listener, MaintenanceTask, Operations, RequestMetrics, Telemetry,
-    is_capability_fact_name, record_request,
+    Admission, ConnectionGauge, Listener, MaintenanceTask, Operations, RequestMetrics,
+    StartupFacts, Telemetry, is_capability_fact_name, record_request,
 };
 pub use self::routes::router;
 pub(crate) use self::routes::{development_router, hosted_router};

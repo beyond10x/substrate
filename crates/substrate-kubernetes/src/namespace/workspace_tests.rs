@@ -397,6 +397,28 @@ async fn a_quota_refusal_is_workspace_capacity_and_any_other_403_is_api_failed()
     assert_eq!(s.deletes(), [format!("DELETE {CLAIMS}/{}", pvc_name())]);
 }
 
+/// D184: the quota message alone is not a quota refusal. A 403 whose `Status.reason` is not
+/// `Forbidden` is `kubernetes.api-failed`, whatever its message says, as on the exec path.
+#[tokio::test]
+async fn a_quota_message_under_another_reason_is_not_workspace_capacity() {
+    let s = setup();
+    for reason in [json!("Invalid"), json!(""), Value::Null] {
+        let mut body = quota_refusal("persistentvolumeclaims", &pvc_name(), "requests.storage");
+        body["reason"] = reason.clone();
+        s.fake.fault(Fault::Answer {
+            method: Method::POST,
+            path: CLAIMS.to_owned(),
+            status: 403,
+            body,
+        });
+        let DispatchOutcome::NotDispatched(failed) = s.create().await else {
+            panic!("a refused create stores nothing");
+        };
+        assert_eq!(failed.code, API_FAILED, "reason {reason}");
+        assert_eq!(failed.class, DriverErrorClass::Failed, "reason {reason}");
+    }
+}
+
 #[tokio::test]
 async fn a_create_whose_answer_was_lost_adopts_the_stored_pvc_and_sends_nothing_again() {
     let s = setup();

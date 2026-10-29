@@ -227,14 +227,20 @@ and the reason code is logged. These codes are log reasons, not wire refusals.
 A lost Lease while serving makes every fact absent and refuses a start `exec.capability-stale` (422)
 until the Lease is retaken (decision 2). Reconciliation pauses. Retaking it runs steps 4 to 7 again.
 
-`/readyz` reads the startup snapshot (ADR 0045 D5 A): the capability snapshot the operational
-listener takes when it starts (`Operations::with_store_probe`,
-`crates/substrate-daemon/src/app/health.rs`). A failed open leaves the driver facts absent from it,
-so a fact named with `--ops-require-fact` keeps `/readyz` not ready (D185). The listener starts
-as the driver task does, before the open sequence's probe can have run, so a fact the driver
-publishes only once open is absent from that snapshot after a successful open too; the
-deployment guide names no probed fact for `--ops-require-fact` (`website/docs/guides/deployment.md`).
-A live re-probe stays deferred (ADR 0045 D5 B).
+`/readyz` reads the startup snapshot (ADR 0045 D5 A): one capability snapshot, taken once the
+first open sequence has settled (`NamespaceDriver::opening_settles`, `start_ops_listener` in
+`crates/substrate-daemon/src/runtime.rs`). It settles when the first probe after a successful
+open has run, whatever it proved, or when the open is refused for a reason no retry clears:
+`kubernetes.rbac-excess`, `kubernetes.policy-not-default-deny` or
+`kubernetes.pod-security-unenforced` (`settles_opening`). `kubernetes.lease-held`,
+`kubernetes.lease-foreign` and `kubernetes.api-failed` (no answer, a timeout, an unreadable
+answer) do not settle it: the open is retried every 10 s, so a successor whose predecessor's
+Lease has not yet expired becomes ready once it takes the Lease and probes. Until then the
+`driver` check fails. A lasting refusal or a failed first probe leaves the driver facts absent
+from that snapshot, so a fact named with `--ops-require-fact` keeps `/readyz` not ready (D185)
+until the daemon restarts. A host
+daemon's snapshot is taken as its operational listener starts. A live re-probe stays deferred
+(ADR 0045 D5 B).
 
 ### 6.2 The probe
 
@@ -820,7 +826,7 @@ memory, so it does not survive a restart (§ 5, the signal row).
 - § 5: a finished Pod already being deleted at restart reads `unknown`, not its exit; a signal intent does not survive a restart; no daemon task runs the garbage round yet.
 - § 5.1: the N9 bound is read on the daemon's wall clock against `created_at`, not on the API server's `Date` header.
 - § 5.2: no daemon task runs the watch round yet.
-- § 6.1: step 1's failure stops the daemon; `/readyz` reads the startup snapshot (ADR 0045 D5 A, D185); a live re-probe stays deferred (D5 B).
+- § 6.1: step 1's failure stops the daemon; `/readyz` reads the startup snapshot taken once the first open sequence settles (ADR 0045 D5 A, D185); a live re-probe stays deferred (D5 B).
 - § 7.3: a replaced Pod name reports the API's exit with unknown output, so a lost limits-unapplied refusal reads as exit 125.
 - § 8, § 10.1, § 10.2 step 6, § 10.3 O7: a quota refusal is a 403 `Forbidden` whose message contains `is forbidden: exceeded quota: ` (D184).
 - § 10.2: the static checks stay in `namespace-lane.yml`, and the cluster part runs on a workstation as `cargo xtask namespace-lane observe` (D182); step 4 is absent until `story:remote-clean-room-conformance` lands (D186).
