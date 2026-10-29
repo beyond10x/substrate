@@ -394,6 +394,31 @@ async fn a_watch_whose_answer_is_later_than_the_timeout_is_unanswered_at_it() {
     );
 }
 
+/// A driver that replays a gone Pod's watch itself quotes an `ERROR` event's message as this
+/// client's own replay does: the bearer token cleared first, then bounded, so a token that
+/// straddles the bound is not left as a prefix either.
+#[test]
+fn an_error_event_a_driver_replays_is_quoted_without_the_bearer_token() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    for message in [
+        format!("refused Bearer {CREDENTIAL}"),
+        format!("{}{CREDENTIAL}", "e".repeat(290)),
+    ] {
+        let line = serde_json::to_vec(
+            &json!({"type": "ERROR", "object": {"kind": "Status", "message": message}}),
+        )
+        .expect("serializes");
+        let end = api.quoted_watch_event(&line, "gone", &mut PodTrace::since(Some("1")));
+        let Some(PodEnd::Unproven(why)) = end else {
+            panic!("an ERROR event is unproven: {end:?}");
+        };
+        assert!(!why.contains(CREDENTIAL), "{why}");
+        assert!(!why.contains(&CREDENTIAL[..8]), "{why}");
+        assert_eq!(api.redact(&format!("echo {CREDENTIAL}")), "echo [redacted]");
+    }
+}
+
 /// The message a gone Pod's watch quotes from an `ERROR` event is bounded to the 300 characters
 /// that every other API message the client quotes is bounded to (`WatchError::Error`).
 #[tokio::test]

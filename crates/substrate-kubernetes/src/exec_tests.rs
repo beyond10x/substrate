@@ -1012,3 +1012,165 @@ async fn a_waiting_start_answers_the_end() {
     };
     assert_eq!(ended.resource.state, ExecState::Exited);
 }
+
+/// Security review, design 34 U9 (§ 4 uid rule, § 7.3 *Reading output*): `pods/log` addresses a
+/// Pod by name only. Once our Pod ended, was deleted and a same-named Pod took the name, the end
+/// is taken from our uid-proven terminated object, but the log read by name is the replacement's.
+/// The exec's output must never be bytes the replacement wrote: a log read is evidence about our
+/// run only while the name is shown to hold our uid.
+#[tokio::test]
+async fn output_is_never_read_from_a_same_named_replacement() {
+    let rig = rig().await;
+    let id = "exec_relog";
+    rig.started(id, &input(&["/bin/true"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    let running = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(running.resource.state, ExecState::Running);
+
+    let ours = [applied_line(67_108_864, 500), exit_line(0)].concat();
+    rig.terminated(&name, 0, ours.as_bytes()).await;
+    let mut replacement = rig.pod(&name).expect("present");
+    rig.admin
+        .delete(&format!("{}/{name}", rig.admin.pods()), 0)
+        .await
+        .expect("an operator deletes the ended Pod");
+    for member in ["uid", "resourceVersion", "creationTimestamp"] {
+        replacement["metadata"]
+            .as_object_mut()
+            .expect("metadata")
+            .remove(member);
+    }
+    replacement["status"] = json!({});
+    rig.fake.seed("pods", replacement).expect("replaced");
+    let forged = [
+        applied_line(67_108_864, 500),
+        frame(&Frame::Output {
+            stream: substrate_executor::frame::Stream::Stdout,
+            bytes: b"written by the replacement".to_vec(),
+        }),
+        exit_line(0),
+    ]
+    .concat();
+    rig.fake.set_log(&name, forged.as_bytes());
+
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        ended.resource.exit.as_ref().and_then(|exit| exit.code),
+        Some(0),
+        "the end is our uid-proven one"
+    );
+    assert!(
+        ended.stdout.is_empty(),
+        "the exec reported the replacement's log as its stdout: {:?}",
+        String::from_utf8_lossy(&ended.stdout)
+    );
+}
+
+/// The ended Pod `name` is deleted and a same-named Pod with no status takes the name, with
+/// `log` as its log.
+async fn replace(rig: &Rig, name: &str, log: &[u8]) {
+    let mut replacement = rig.pod(name).expect("present");
+    rig.admin
+        .delete(&format!("{}/{name}", rig.admin.pods()), 0)
+        .await
+        .expect("an operator deletes the ended Pod");
+    for member in ["uid", "resourceVersion", "creationTimestamp"] {
+        replacement["metadata"]
+            .as_object_mut()
+            .expect("metadata")
+            .remove(member);
+    }
+    replacement["status"] = json!({});
+    rig.fake.seed("pods", replacement).expect("replaced");
+    rig.fake.set_log(name, log);
+}
+
+/// Security review, design 34 U9, the second half of the uid rule on `pods/log`: a GET before
+/// the read shows the bound uid, the name is replaced while the log is read, and the GET after
+/// shows another uid. The bytes read are not proven ours, so no output is reported as the exec's;
+/// the exit stays the one our uid-proven object shows.
+#[tokio::test]
+async fn a_log_read_while_the_name_is_replaced_is_not_the_execs_output() {
+    let rig = rig().await;
+    let id = "exec_midlog";
+    rig.started(id, &input(&["/bin/true"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    let ours = [applied_line(67_108_864, 500), exit_line(0)].concat();
+    rig.terminated(&name, 0, ours.as_bytes()).await;
+    rig.fake.fault(Fault::Delay {
+        method: Method::GET,
+        path: format!("{}/{name}/log", rig.admin.pods()),
+        by: Duration::from_millis(400),
+    });
+    let forged = [
+        applied_line(67_108_864, 500),
+        frame(&Frame::Output {
+            stream: substrate_executor::frame::Stream::Stdout,
+            bytes: b"written by the replacement".to_vec(),
+        }),
+        exit_line(0),
+    ]
+    .concat();
+
+    let (ended, ()) = tokio::join!(rig.driver.exec_observe(id), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        replace(&rig, &name, forged.as_bytes()).await;
+    });
+    let ended = ended.expect("observed");
+    assert_eq!(
+        ended.resource.exit.as_ref().and_then(|exit| exit.code),
+        Some(0),
+        "the end is our uid-proven one"
+    );
+    assert!(
+        ended.stdout.is_empty(),
+        "the exec reported a log read across a replacement as its stdout: {:?}",
+        String::from_utf8_lossy(&ended.stdout)
+    );
+    assert!(
+        !ended.output_complete,
+        "an output not proven ours is not whole"
+    );
+}
+
+/// Design 34 § 7.3: the exit alone cannot tell a run from a refusal, because the executor exits
+/// 125 when the limits read back differ and writes the refusal only to the log. A Pod deleted
+/// before its log was read leaves the exec `unknown` with no exit, for the limits-unapplied 125
+/// shape and for an ordinary 0 alike, and its output is never served as whole.
+#[tokio::test]
+async fn a_gone_log_leaves_the_exec_unknown_without_an_exit() {
+    let rig = rig().await;
+    let refused = [
+        applied_line(1, 1),
+        frame(&Frame::Control(Control::Refused(Refusal::LimitsUnapplied))),
+    ]
+    .concat();
+    let exited = [applied_line(67_108_864, 500), exit_line(0)].concat();
+    for (id, code, log) in [
+        ("exec_gone125", 125, refused.as_bytes()),
+        ("exec_gone0", 0, exited.as_bytes()),
+    ] {
+        rig.started(id, &input(&["/bin/true"])).await;
+        let name = names::exec_pod(DEPLOYMENT, id);
+        rig.running(&name).await;
+        let running = rig.driver.exec_observe(id).await.expect("observed");
+        assert_eq!(running.resource.state, ExecState::Running);
+        rig.terminated(&name, code, log).await;
+        rig.admin
+            .delete(&format!("{}/{name}", rig.admin.pods()), 0)
+            .await
+            .expect("an operator deletes the ended Pod");
+
+        let ended = rig.driver.exec_observe(id).await.expect("observed");
+        assert_eq!(ended.resource.state, ExecState::Unknown, "{id}");
+        assert_eq!(ended.resource.exit, None, "{id}: no exit without its log");
+        assert!(!ended.output_complete, "{id}");
+    }
+    assert_eq!(
+        rig.driver.limits_unapplied_total(),
+        0,
+        "a refusal never read is not counted"
+    );
+}

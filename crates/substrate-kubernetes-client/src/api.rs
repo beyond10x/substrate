@@ -242,7 +242,8 @@ impl Api {
 
     /// `text` with every occurrence of the bearer token replaced, so an API server that echoes the
     /// credential back cannot put it in an error.
-    pub(crate) fn redact(&self, text: &str) -> String {
+    #[must_use]
+    pub fn redact(&self, text: &str) -> String {
         match &self.bearer {
             Some(token) if text.contains(token.as_str()) => {
                 text.replace(token.as_str(), "[redacted]")
