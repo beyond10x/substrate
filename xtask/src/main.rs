@@ -17,11 +17,21 @@ mod container_profiles;
 mod docs;
 mod ess;
 mod image_startup;
+// The driver's own allowed-rule set, compiled here from its one source file: O8 checks a real
+// review against exactly what the startup review allows, never a copy (design 34 § 10.3 O8).
+#[path = "../../crates/substrate-kubernetes/src/rules.rs"]
+#[allow(dead_code)]
+mod driver_rules;
 mod json;
+mod lane_record;
 mod licenses;
 mod links;
 mod mcp;
 mod mcp_smoke;
+mod namespace_lane;
+mod namespace_lane_observe;
+mod namespace_lane_render;
+mod namespace_lane_run;
 mod package;
 mod packages;
 mod quota_fixture;
@@ -54,6 +64,9 @@ enum Command {
     /// Check the Kubernetes chart (static) or run its kind scenarios (cluster), per ADR 0046.
     #[command(name = "chart-lane")]
     ChartLane(chart::LaneArgs),
+    /// Check the namespace lane's objects (check) or run its first observations on kind (observe).
+    #[command(name = "namespace-lane")]
+    NamespaceLane(namespace_lane::Args),
     /// Package the released Kubernetes chart with its version and pinned daemon digest.
     #[command(name = "package-chart")]
     PackageChart(chart::PackageArgs),
@@ -143,6 +156,7 @@ fn dispatch() -> Result<ExitCode> {
     // outcome shares a binding with another verb's report.
     match cli.command {
         Command::ChartLane(args) => chart::run_lane(&args),
+        Command::NamespaceLane(args) => namespace_lane::run(&args),
         Command::PackageChart(args) => chart::run_package(&args),
         Command::CheckEss => Ok(ess::check(&repo::root()?)?.emit()),
         Command::CheckDocs => Ok(docs::check(&repo::root()?)?.emit()),
@@ -152,7 +166,7 @@ fn dispatch() -> Result<ExitCode> {
         Command::ImageStartup(args) => image_startup::run(&args),
         Command::Advisories => Ok(advisories::check(&repo::root()?)?.emit()),
         Command::Licenses => Ok(licenses::check(&repo::root()?)?.emit()),
-        Command::Packages => Ok(packages::check(&repo::root()?)?.emit()),
+        Command::Packages => Ok(packages::check_with_executor_tree(&repo::root()?)?.emit()),
         Command::Secrets => Ok(secrets::check(&repo::root()?)?.emit()),
         Command::BotFiles(args) => Ok(bot_files::check(&args).emit()),
         Command::Toolchain { root } => {

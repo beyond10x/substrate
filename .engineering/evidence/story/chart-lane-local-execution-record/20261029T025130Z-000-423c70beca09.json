@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-29T02:51:30Z",
+  "actor": "human:timo",
+  "artifact": "story:chart-lane-local-execution-record",
+  "kind": "story",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo xtask chart-lane cluster --node-profiles at deb154c8: Chart-lane: deb154c8ee7ad04f8cea23266d0527fdc7a40e9b 4 2026-10-29T02:51:30Z (4 of 4 scenarios, profile substrate-host-exec-v2-lane-01m62s2qd6s0c3xd7t59pyryhj, workstation kind run)"
+  }
+}

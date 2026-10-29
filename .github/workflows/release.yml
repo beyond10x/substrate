@@ -1,52 +1,12 @@
-# Publishes the daemon image and the explicitly pinned current development contract bundle for a
-# release tag: an **annotated bare-version tag** on `main` (AGENTS.md § "Releases" — "the bare
-# version … annotated, at a fully gated `main` commit"). A deliberate manual recovery may name an
-# existing eligible tag after a partial release failed; it runs the current protected-main workflow
-# against the immutable tagged source and never moves the tag. The results are
-# `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
-# `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>` and the development-only
-# `ghcr.io/beyond10x/b10x-substrate-mcp:<version>`, all keyless-signed with cosign. Their
-# digests are written to the GitHub release and emitted as the exact `CHANGELOG.md` stanza that must
-# land through the protected-main pull-request path. `b10x-substrate-*` is the source-package prefix
+# Publishes a release for an **annotated bare-version tag** on `main` (AGENTS.md § "Releases" — "the
+# bare version … annotated, at a fully gated `main` commit"). A deliberate manual recovery may name
+# an existing eligible tag after a partial release failed; it runs the current protected-main
+# workflow against the immutable tagged source and never moves the tag. Every published digest is
+# written to the GitHub release and emitted as the exact `CHANGELOG.md` stanza that must land
+# through the protected-main pull-request path. `b10x-substrate-*` is the source-package prefix
 # fixed by README.md. The GitHub release also carries the daemon and CLI binaries as
 # `<binary>-<version>-x86_64-unknown-linux-gnu.tar.gz`, exported from the same pinned builder stage
 # as the images, with `SHA256SUMS` over both archives and its keyless `cosign sign-blob` bundle.
-#
-# What this workflow refuses, and why each refusal is a refusal rather than a warning:
-#
-#   * a tag that is not the bare version form. `0.2.2-rc.0` must produce nothing. The ref filter
-#     below is a GitHub glob, not a regex, so it is a coarse first cut; the "Refuse a tag that is
-#     not the bare version form" step re-checks with a real anchored regex. Two mechanisms because
-#     the glob dialect is the part this file cannot prove offline.
-#   * a lightweight tag, or a tag whose commit is not an ancestor of `origin/main`.
-#   * a tag whose version disagrees with `[workspace.package] version` in `Cargo.toml`.
-#   * a tag with no recorded delegated confinement-lane run for its own commit. `gate.yml` green is
-#     the portable lane; the delegated lane is absent on a hosted runner and never reported passed,
-#     so a release with no recorded local run would claim nothing about confinement at all. The
-#     record arrives in the annotated tag's `Confinement-lane:` trailer, or as the
-#     `confinement_evidence` input of a recovery dispatch, and goes into the release notes.
-#   * a tag with no recorded project-quota-lane run for its own commit. The seven `real_quota_*`
-#     cases need a project-quota filesystem no hosted runner has and are outside the confinement
-#     count, so the record arrives in the annotated tag's `Quota-lane:` trailer, written by
-#     `cargo xtask quota-fixture run`, or as the `quota_evidence` input of a recovery dispatch.
-#   * a commit for which `.github/workflows/gate.yml` has not concluded `success`. The gate is the
-#     bar for `main` (AGENTS.md § "The gate"); this workflow reads that workflow's own conclusion
-#     for the exact tagged SHA rather than re-running a lookalike, so "the gate was green for this
-#     commit" means the recorded run, not a second opinion.
-#   * an existing image version tag on an initial tag-push run, an existing image whose source label
-#     disagrees during explicit recovery, or a contract-bundle tag whose digest differs from the
-#     deterministic local package. All canonical tags are write-once. Recovery may verify and reuse
-#     an image already written by this same release; it never replaces an image or bundle tag.
-#   * a release binary that needs a glibc newer than 2.35 (Ubuntu 22.04) or a shared library the
-#     README does not document, or that does not start in that exact Ubuntu 22.04 image; and an
-#     archived daemon that is not byte for byte the daemon of the image being published. All of
-#     these run before any image tag moves.
-#   * a tag push whose Dockerfile has no `release-binaries` stage. Only a recovery dispatch of a
-#     tag cut before that stage existed publishes without binaries, and its notes say so.
-#   * a signature that does not verify. Signing and `cosign verify` for **all** artifacts run before
-#     the GitHub release is created, so a Sigstore failure fails the job with nothing announced.
-#     Registry writes cannot be rolled back here, but no release, changelog stanza or digest claim
-#     is emitted on their strength.
 #
 # Permissions. `contents: read` at workflow level. `preflight` adds `actions: read`, the only
 # scope that can read another workflow's conclusion for a SHA, and `checks: read`, which reads the
@@ -111,6 +71,22 @@ on:
           empty uses the annotated tag's own Quota-lane trailer
         required: false
         type: string
+      chart_evidence:
+        description: >-
+          Recorded execution-enabled chart-lane run for the tagged commit, as
+          "<source-sha> <scenario-count> <RFC 3339 UTC>" from
+          `cargo xtask chart-lane cluster --node-profiles`; empty uses the annotated tag's own
+          Chart-lane trailer
+        required: false
+        type: string
+      namespace_evidence:
+        description: >-
+          Recorded namespace kind-lane run for the tagged commit, as
+          "<source-sha> <observation-count> <RFC 3339 UTC>" from
+          `cargo xtask namespace-lane observe`; empty uses the annotated tag's own
+          Namespace-lane trailer
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -125,10 +101,11 @@ concurrency:
 env:
   IMAGE: ghcr.io/beyond10x/b10x-substrate-daemon
   MCP_IMAGE: ghcr.io/beyond10x/b10x-substrate-mcp
+  EXECUTOR_IMAGE: ghcr.io/beyond10x/b10x-substrate-executor
   # Explicit, reviewable publication input. A successor bundle must move this pin in the same
   # change; deriving "largest directory" at release time would silently broaden what a tag ships.
   BUNDLE_IMAGE: ghcr.io/beyond10x/b10x-substrate-wire
-  BUNDLE_VERSION: 0.24.0
+  BUNDLE_VERSION: 0.25.0
   BUNDLE_LAYOUT: target/release-contract-bundle
   BINARY_TARGET: x86_64-unknown-linux-gnu
   BINARY_DIST: target/release-binaries
@@ -136,6 +113,7 @@ env:
   GLIBC_FLOOR_IMAGE: ubuntu:22.04@sha256:e0f80c829509ef4df9e76bd8944eb7b8ec25cbb379b112a7f9448b2c77a77c9b
   GATE_WORKFLOW: gate.yml
   CHART_WORKFLOW: chart-lane.yml
+  NAMESPACE_WORKFLOW: namespace-lane.yml
   CHART_REPOSITORY: ghcr.io/beyond10x/charts
   CHART_IMAGE: ghcr.io/beyond10x/charts/b10x-substrate
   HELM_VERSION: v3.22.1
@@ -159,8 +137,13 @@ jobs:
       chart: ${{ steps.chart-lane.outputs.chart }}
       chart-lane-run-url: ${{ steps.chart-lane.outputs.run-url }}
       chart-lane-absent: ${{ steps.chart-lane.outputs.absent }}
+      namespace-lane-workflow: ${{ steps.namespace-workflow.outputs.workflow }}
+      namespace-lane-run-url: ${{ steps.namespace-workflow.outputs.run-url }}
       confinement-evidence: ${{ steps.confinement.outputs.evidence }}
       quota-evidence: ${{ steps.quota.outputs.evidence }}
+      chart-evidence: ${{ steps.chart-record.outputs.evidence }}
+      namespace-lane: ${{ steps.namespace.outputs.lane }}
+      namespace-evidence: ${{ steps.namespace.outputs.evidence }}
 
     steps:
       - name: Check out source
@@ -374,6 +357,62 @@ jobs:
             sleep 30
           done
 
+      - name: Require a green namespace-lane run for this commit
+        id: namespace-workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${SOURCE_SHA}:.github/workflows/${NAMESPACE_WORKFLOW}" 2>/dev/null; then
+            if [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "refused: the tagged source ${SOURCE_SHA} has no .github/workflows/${NAMESPACE_WORKFLOW}; a tag push always carries it." >&2
+              exit 1
+            fi
+            echo "the tagged source ${SOURCE_SHA} predates ${NAMESPACE_WORKFLOW}; no run of it applies"
+            echo "workflow=absent" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          deadline=$(( $(date +%s) + 50 * 60 ))
+          admitted=".workflow_runs[] | select((.event == \"push\" and .head_branch == \"main\") or .event == \"workflow_dispatch\") | select(.head_repository.full_name == \"${GITHUB_REPOSITORY}\")"
+
+          while :; do
+            runs=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${NAMESPACE_WORKFLOW}/runs?head_sha=${SOURCE_SHA}&per_page=100" \
+              --jq "${admitted} | [.status, (.conclusion // \"-\"), .html_url] | @tsv")
+
+            success_url=$(printf '%s\n' "$runs" \
+              | awk -F'\t' '$1 == "completed" && $2 == "success" { print $3; exit }')
+            if [ -n "$success_url" ]; then
+              echo "namespace lane green for ${SOURCE_SHA}: ${success_url}"
+              {
+                echo "workflow=present"
+                echo "run-url=${success_url}"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            pending=$(printf '%s\n' "$runs" | awk -F'\t' 'NF && $1 != "completed" { c++ } END { print c + 0 }')
+            if [ "$pending" -eq 0 ]; then
+              if [ -n "${runs//[[:space:]]/}" ]; then
+                echo "refused: every ${NAMESPACE_WORKFLOW} run for ${SOURCE_SHA} is completed and none concluded success:" >&2
+                printf '%s\n' "$runs" >&2
+                exit 1
+              fi
+              echo "no ${NAMESPACE_WORKFLOW} run recorded for ${SOURCE_SHA} yet; waiting"
+            else
+              echo "${pending} ${NAMESPACE_WORKFLOW} run(s) for ${SOURCE_SHA} still running; waiting"
+            fi
+
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "refused: no successful ${NAMESPACE_WORKFLOW} run for ${SOURCE_SHA} within the wait window." >&2
+              echo "A release requires the namespace lane's static checks to have passed for its commit (design 34, section 10.4)." >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
       # `gate.yml` green is the portable lane only. The delegated confinement lane needs bubblewrap
       # and an exclusive delegated cgroup v2 subtree carrying `cpu`, `memory` and `pids`; a hosted
       # runner has neither, so `gate.yml` reports that lane **absent — not executed, not passed**
@@ -411,7 +450,7 @@ jobs:
             evidence=$(git tag -l --format='%(contents)' "${TAG}" \
               | sed -n 's/^Confinement-lane:[[:space:]]*//p')
             carrier="the annotated tag's Confinement-lane trailer"
-            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            records=$(git tag -l --format='%(contents)' "${TAG}" | grep -c '^Confinement-lane:' || true)
             if [ "${records:-0}" -gt 1 ]; then
               echo "refused: ${TAG} carries ${records} Confinement-lane lines; a release records exactly one." >&2
               exit 1
@@ -506,7 +545,7 @@ jobs:
             evidence=$(git tag -l --format='%(contents)' "${TAG}" \
               | sed -n 's/^Quota-lane:[[:space:]]*//p')
             carrier="the annotated tag's Quota-lane trailer"
-            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            records=$(git tag -l --format='%(contents)' "${TAG}" | grep -c '^Quota-lane:' || true)
             if [ "${records:-0}" -gt 1 ]; then
               echo "refused: ${TAG} carries ${records} Quota-lane lines; a release records exactly one." >&2
               exit 1
@@ -595,6 +634,235 @@ jobs:
           echo "quota lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
           echo "evidence=${evidence}" >> "$GITHUB_OUTPUT"
 
+      - name: Require a recorded chart-lane run for this commit
+        id: chart-record
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          INPUT_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.chart_evidence || '' }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${SOURCE_SHA}:deploy/helm/substrate/Chart.yaml" 2>/dev/null; then
+            echo "the tagged source ${SOURCE_SHA} has no deploy/helm/substrate chart; no chart lane record applies"
+            exit 0
+          fi
+          evidence="${INPUT_EVIDENCE:-}"
+          carrier="the chart_evidence workflow input"
+          if [ -z "${evidence//[[:space:]]/}" ]; then
+            evidence=$(git tag -l --format='%(contents)' "${TAG}" \
+              | sed -n 's/^Chart-lane:[[:space:]]*//p')
+            carrier="the annotated tag's Chart-lane trailer"
+            records=$(git tag -l --format='%(contents)' "${TAG}" | grep -c '^Chart-lane:' || true)
+            if [ "${records:-0}" -gt 1 ]; then
+              echo "refused: ${TAG} carries ${records} Chart-lane lines; a release records exactly one." >&2
+              exit 1
+            fi
+          fi
+
+          if [ -z "${evidence//[[:space:]]/}" ]; then
+            echo "refused: no recorded chart lane run for ${SOURCE_SHA}." >&2
+            echo "The execution-enabled chart scenarios need Localhost seccomp and AppArmor profiles on the" >&2
+            echo "nodes, which no hosted runner has, so they are a release condition (ADR 0046, K9 C)." >&2
+            echo "Build the daemon image from ${SOURCE_SHA} with --build-arg SOURCE_SHA=${SOURCE_SHA}, run" >&2
+            echo "'cargo xtask chart-lane cluster --node-profiles' at that commit with a clean checkout, then" >&2
+            echo "record the line it prints either as" >&2
+            echo "  Chart-lane: ${SOURCE_SHA} <scenario-count> <RFC 3339 UTC>" >&2
+            echo "in the annotated tag's message, or as the chart_evidence input of a" >&2
+            echo "protected-main recovery dispatch. AGENTS.md, section \"Releases\"." >&2
+            exit 1
+          fi
+
+          case "$evidence" in
+            *$'\n'* | *$'\r'*)
+              echo "refused: ${carrier} spans more than one line; a record is one line of three fields." >&2
+              exit 1
+              ;;
+          esac
+          read -r -a fields <<<"${evidence}"
+          if [ "${#fields[@]}" -ne 3 ]; then
+            echo "refused: ${carrier} has ${#fields[@]} fields; a record is '<sha> <scenario-count> <RFC 3339 UTC>'." >&2
+            exit 1
+          fi
+          claimed_sha=${fields[0]}
+          claimed_cases=${fields[1]}
+          claimed_at=${fields[2]}
+          evidence="${claimed_sha} ${claimed_cases} ${claimed_at}"
+
+          if [ "$claimed_sha" != "$SOURCE_SHA" ]; then
+            echo "refused: ${carrier} records commit '${claimed_sha}', not ${SOURCE_SHA}." >&2
+            echo "A lane run against other bytes is not evidence about the tagged source." >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$claimed_cases" | grep -Eq '^[0-9]+$'; then
+            echo "refused: ${carrier} records '${claimed_cases}' where a chart-lane scenario count belongs." >&2
+            exit 1
+          fi
+
+          chart_source="xtask/src/chart_cluster.rs"
+          if ! source_text=$(git show "${SOURCE_SHA}:${chart_source}"); then
+            echo "refused: ${chart_source} is absent at ${SOURCE_SHA}." >&2
+            exit 1
+          fi
+          declared_cases=$(printf '%s\n' "$source_text" | awk '
+            /^pub const SCENARIOS: \[&str; [0-9]+\] = \[$/ {
+              if (seen) bad = 1
+              seen = 1
+              inside = 1
+              declared = $0
+              sub(/^pub const SCENARIOS: \[&str; /, "", declared)
+              sub(/\].*$/, "", declared)
+              next
+            }
+            inside && $0 == "];" { inside = 0; next }
+            inside && /^    "[^"]+",$/ { cases++; next }
+            inside { bad = 1 }
+            END {
+              if (!seen || inside || bad || cases + 0 == 0 || cases + 0 != declared + 0) print 0
+              else print cases + 0
+            }
+          ')
+          if [ "${declared_cases:-0}" -eq 0 ]; then
+            echo "refused: ${chart_source} at ${SOURCE_SHA} declares no SCENARIOS array of one quoted scenario per line." >&2
+            echo "Fix this check with the lane; a record of zero scenarios proves nothing." >&2
+            exit 1
+          fi
+          if [ "$claimed_cases" != "$declared_cases" ]; then
+            echo "refused: ${carrier} records ${claimed_cases} chart-lane scenarios; ${SOURCE_SHA} declares ${declared_cases}." >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+            || [ "$(date -u -d "$claimed_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" != "$claimed_at" ]; then
+            echo "refused: ${carrier} records '${claimed_at}' where an RFC 3339 UTC instant belongs." >&2
+            echo "Use the form 2026-09-15T08:30:00Z." >&2
+            exit 1
+          fi
+
+          echo "chart lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
+          echo "evidence=${evidence}" >> "$GITHUB_OUTPUT"
+
+      - name: Require a recorded namespace-lane run for this commit
+        id: namespace
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          INPUT_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.namespace_evidence || '' }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          namespace_source="xtask/src/namespace_lane.rs"
+          if ! source_text=$(git show "${SOURCE_SHA}:${namespace_source}" 2>/dev/null); then
+            if [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "refused: the tagged source ${SOURCE_SHA} has no ${namespace_source}; a tag push always carries the namespace lane." >&2
+              exit 1
+            fi
+            echo "the tagged source ${SOURCE_SHA} predates the namespace lane; no namespace lane record applies"
+            echo "lane=absent" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          evidence="${INPUT_EVIDENCE:-}"
+          carrier="the namespace_evidence workflow input"
+          if [ -z "${evidence//[[:space:]]/}" ]; then
+            evidence=$(git tag -l --format='%(contents)' "${TAG}" \
+              | sed -n 's/^Namespace-lane:[[:space:]]*//p')
+            carrier="the annotated tag's Namespace-lane trailer"
+            records=$(git tag -l --format='%(contents)' "${TAG}" | grep -c '^Namespace-lane:' || true)
+            if [ "${records:-0}" -gt 1 ]; then
+              echo "refused: ${TAG} carries ${records} Namespace-lane lines; a release records exactly one." >&2
+              exit 1
+            fi
+          fi
+
+          if [ -z "${evidence//[[:space:]]/}" ]; then
+            echo "refused: no recorded namespace lane run for ${SOURCE_SHA}." >&2
+            echo "The namespace kind lane runs on a workstation, not a hosted runner, and is a release" >&2
+            echo "condition (D182). Run 'cargo xtask namespace-lane observe' at ${SOURCE_SHA} with a clean" >&2
+            echo "checkout on a host where kind and Docker work, then record the line it prints either as" >&2
+            echo "  Namespace-lane: ${SOURCE_SHA} <observation-count> <RFC 3339 UTC>" >&2
+            echo "in the annotated tag's message, or as the namespace_evidence input of a" >&2
+            echo "protected-main recovery dispatch. AGENTS.md, section \"Releases\"." >&2
+            exit 1
+          fi
+
+          case "$evidence" in
+            *$'\n'* | *$'\r'*)
+              echo "refused: ${carrier} spans more than one line; a record is one line of three fields." >&2
+              exit 1
+              ;;
+          esac
+          read -r -a fields <<<"${evidence}"
+          if [ "${#fields[@]}" -ne 3 ]; then
+            echo "refused: ${carrier} has ${#fields[@]} fields; a record is '<sha> <observation-count> <RFC 3339 UTC>'." >&2
+            exit 1
+          fi
+          claimed_sha=${fields[0]}
+          claimed_cases=${fields[1]}
+          claimed_at=${fields[2]}
+          evidence="${claimed_sha} ${claimed_cases} ${claimed_at}"
+
+          if [ "$claimed_sha" != "$SOURCE_SHA" ]; then
+            echo "refused: ${carrier} records commit '${claimed_sha}', not ${SOURCE_SHA}." >&2
+            echo "A lane run against other bytes is not evidence about the tagged source." >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$claimed_cases" | grep -Eq '^[0-9]+$'; then
+            echo "refused: ${carrier} records '${claimed_cases}' where a namespace-lane observation count belongs." >&2
+            exit 1
+          fi
+
+          declared_cases=$(printf '%s\n' "$source_text" | awk '
+            /^pub const OBSERVATIONS: \[&str; [0-9]+\] = \[/ {
+              if (seen) bad = 1
+              seen = 1
+              inside = 1
+              text = ""
+            }
+            inside {
+              text = text " " $0
+              if ($0 ~ /\];[[:space:]]*$/) inside = 0
+              next
+            }
+            END {
+              if (!seen || inside || bad) { print 0; exit }
+              gsub(/[[:space:]]+/, " ", text)
+              sub(/^ /, "", text)
+              declared = text
+              sub(/^pub const OBSERVATIONS: \[&str; /, "", declared)
+              sub(/\].*$/, "", declared)
+              body = text
+              sub(/^pub const OBSERVATIONS: \[&str; [0-9]+\] = \[ ?/, "", body)
+              sub(/ ?\];$/, "", body)
+              if (body !~ /^("[A-Za-z0-9_.-]+", ?)*"[A-Za-z0-9_.-]+",?$/) { print 0; exit }
+              cases = gsub(/"[A-Za-z0-9_.-]+"/, "", body)
+              if (cases != declared + 0) print 0
+              else print cases
+            }
+          ')
+          if [ "${declared_cases:-0}" -eq 0 ]; then
+            echo "refused: ${namespace_source} at ${SOURCE_SHA} declares no OBSERVATIONS array of quoted observation names." >&2
+            echo "Fix this check with the lane; a record of zero observations proves nothing." >&2
+            exit 1
+          fi
+          if [ "$claimed_cases" != "$declared_cases" ]; then
+            echo "refused: ${carrier} records ${claimed_cases} namespace-lane observations; ${SOURCE_SHA} declares ${declared_cases}." >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+            || [ "$(date -u -d "$claimed_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" != "$claimed_at" ]; then
+            echo "refused: ${carrier} records '${claimed_at}' where an RFC 3339 UTC instant belongs." >&2
+            echo "Use the form 2026-09-15T08:30:00Z." >&2
+            exit 1
+          fi
+
+          echo "namespace lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
+          {
+            echo "lane=present"
+            echo "evidence=${evidence}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Preflight summary
         env:
           VERSION: ${{ steps.tag.outputs.version }}
@@ -602,8 +870,11 @@ jobs:
           GATE_RUN_URL: ${{ steps.gate.outputs.run-url }}
           CHART_LANE_RUN_URL: ${{ steps.chart-lane.outputs.run-url }}
           CHART_LANE_ABSENT: ${{ steps.chart-lane.outputs.absent }}
+          NAMESPACE_LANE_RUN_URL: ${{ steps.namespace-workflow.outputs.run-url }}
           CONFINEMENT_EVIDENCE: ${{ steps.confinement.outputs.evidence }}
           QUOTA_EVIDENCE: ${{ steps.quota.outputs.evidence }}
+          CHART_EVIDENCE: ${{ steps.chart-record.outputs.evidence }}
+          NAMESPACE_EVIDENCE: ${{ steps.namespace.outputs.evidence }}
         run: |
           {
             echo "### Release preflight"
@@ -615,12 +886,15 @@ jobs:
             echo "| gate run | ${GATE_RUN_URL} |"
             echo "| chart lane run | ${CHART_LANE_RUN_URL:-no chart in the tagged source} |"
             echo "| chart lane absent, not passed | ${CHART_LANE_ABSENT:-no chart in the tagged source} |"
+            echo "| namespace lane run | ${NAMESPACE_LANE_RUN_URL:-no namespace-lane.yml in the tagged source} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE}\` |"
             echo "| quota lane | \`${QUOTA_EVIDENCE}\` |"
+            echo "| chart lane record | \`${CHART_EVIDENCE:-no chart in the tagged source}\` |"
+            echo "| namespace lane | \`${NAMESPACE_EVIDENCE:-no namespace lane in the tagged source}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    name: Build, sign and publish daemon, MCP adapter, release binaries and development bundle
+    name: Build, sign and publish daemon, MCP adapter, executor, release binaries and development bundle
     needs: preflight
     runs-on: ubuntu-latest
     # A release build is cold with respect to earlier runs. Within this job, one pinned builder
@@ -644,6 +918,11 @@ jobs:
       CHART_LANE_ABSENT: ${{ needs.preflight.outputs.chart-lane-absent }}
       CONFINEMENT_EVIDENCE: ${{ needs.preflight.outputs.confinement-evidence }}
       QUOTA_EVIDENCE: ${{ needs.preflight.outputs.quota-evidence }}
+      CHART_EVIDENCE: ${{ needs.preflight.outputs.chart-evidence }}
+      NAMESPACE_LANE: ${{ needs.preflight.outputs.namespace-lane }}
+      NAMESPACE_EVIDENCE: ${{ needs.preflight.outputs.namespace-evidence }}
+      NAMESPACE_LANE_WORKFLOW: ${{ needs.preflight.outputs.namespace-lane-workflow }}
+      NAMESPACE_LANE_RUN_URL: ${{ needs.preflight.outputs.namespace-lane-run-url }}
 
     steps:
       - name: Check out the tagged source
@@ -715,6 +994,15 @@ jobs:
             echo "mcp-exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "mcp-exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          if docker manifest inspect "${EXECUTOR_IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            if [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "refused: ${EXECUTOR_IMAGE}:${VERSION} already exists; initial release runs never reuse image tags." >&2
+              exit 1
+            fi
+            echo "executor-exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "executor-exists=false" >> "$GITHUB_OUTPUT"
           fi
           if [ "$CHART" = present ]; then
             if chart_found=$(oras resolve "${CHART_IMAGE}:${VERSION}" 2>&1); then
@@ -921,6 +1209,26 @@ jobs:
             exit 1
           fi
 
+      - name: Find out whether the tagged source builds the executor image
+        id: executor-source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ ! -f Dockerfile ]; then
+            echo "refused: the tagged source has no Dockerfile." >&2
+            exit 1
+          fi
+          if grep -qx 'FROM scratch AS executor' Dockerfile; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = workflow_dispatch ]; then
+            echo "the tagged source predates the executor stage: this recovery publishes no executor image."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "refused: the tagged source's Dockerfile has no executor stage." >&2
+            exit 1
+          fi
+
       # The binaries come from the Dockerfile's pinned `builder` stage, the one the daemon and MCP
       # images copy from, so the toolchain is the image's and the daemon build below reuses this
       # exact stage. Every binary refusal runs before any image tag is mutated.
@@ -1096,6 +1404,94 @@ jobs:
           cat SHA256SUMS
           echo "sums-digest=sha256:$(sha256sum SHA256SUMS | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
+      - name: Build, smoke-test and push the executor image once
+        id: executor-build
+        if: steps.executor-source.outputs.present == 'true'
+        env:
+          EXISTS: ${{ steps.artifact-state.outputs.executor-exists }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --target executor \
+            --platform linux/amd64 \
+            --build-arg "SOURCE_SHA=${SOURCE_SHA}" \
+            --tag "${EXECUTOR_IMAGE}:${VERSION}" \
+            --provenance=false \
+            --sbom=false \
+            --metadata-file executor-image-metadata.json \
+            --load \
+            .
+
+          check_executor() {
+            local handshake entrypoint container headers
+            handshake=$(docker run --rm --network none --read-only --entrypoint /substrate-executor "${EXECUTOR_IMAGE}:${VERSION}" version)
+            if ! printf '%s\n' "$handshake" | jq -se \
+                --arg version "$VERSION" \
+                --arg source "$SOURCE_SHA" \
+                '. == [{"protocol": "substrate-executor/1", "version": $version, "source": $source}]' >/dev/null 2>&1; then
+              echo "refused: /substrate-executor in ${EXECUTOR_IMAGE}:${VERSION} answers the version handshake with '${handshake}', not substrate-executor/1 at ${VERSION} from ${SOURCE_SHA}." >&2
+              return 1
+            fi
+            entrypoint=$(docker image inspect --format '{{json .Config.Entrypoint}}' "${EXECUTOR_IMAGE}:${VERSION}")
+            if ! printf '%s\n' "$entrypoint" | jq -se '. == [["/substrate-executor"]]' >/dev/null 2>&1; then
+              echo "refused: ${EXECUTOR_IMAGE}:${VERSION} has the entrypoint '${entrypoint}', not [\"/substrate-executor\"]." >&2
+              return 1
+            fi
+            container=$(docker create "${EXECUTOR_IMAGE}:${VERSION}")
+            mkdir -p target/executor-image-under-test
+            docker cp \
+              "${container}:/substrate-executor" \
+              target/executor-image-under-test/substrate-executor
+            docker rm "${container}" >/dev/null
+            headers=$(readelf -lW target/executor-image-under-test/substrate-executor)
+            if ! printf '%s\n' "$headers" | grep -q '^Program Headers:' \
+              || printf '%s\n' "$headers" | grep -q INTERP; then
+              echo "refused: the substrate-executor in ${EXECUTOR_IMAGE}:${VERSION} is not a static executable." >&2
+              return 1
+            fi
+          }
+          check_executor
+
+          git fetch --force --no-tags origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
+          current_sha=$(git rev-parse "refs/tags/${VERSION}^{commit}")
+          if [ "$current_sha" != "$SOURCE_SHA" ]; then
+            echo "refused: release tag moved from ${SOURCE_SHA} to ${current_sha} before executor publication." >&2
+            exit 1
+          fi
+          case "$EXISTS" in
+            true)
+              docker pull "${EXECUTOR_IMAGE}:${VERSION}"
+              revision=$(docker image inspect "${EXECUTOR_IMAGE}:${VERSION}" \
+                --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+              if [ "$revision" != "$SOURCE_SHA" ]; then
+                echo "refused: existing ${EXECUTOR_IMAGE}:${VERSION} names source ${revision}, not ${SOURCE_SHA}." >&2
+                exit 1
+              fi
+              check_executor
+              echo "reusing ${EXECUTOR_IMAGE}:${VERSION} from the same tagged source ${SOURCE_SHA}"
+              ;;
+            false)
+              if docker manifest inspect "${EXECUTOR_IMAGE}:${VERSION}" >/dev/null 2>&1; then
+                echo "refused: ${EXECUTOR_IMAGE}:${VERSION} appeared before push; it will not be overwritten." >&2
+                exit 1
+              fi
+              docker push "${EXECUTOR_IMAGE}:${VERSION}"
+              ;;
+            *)
+              echo "refused: no answer on whether ${EXECUTOR_IMAGE}:${VERSION} already exists ('${EXISTS}')." >&2
+              exit 1
+              ;;
+          esac
+          digest=$(docker buildx imagetools inspect "${EXECUTOR_IMAGE}:${VERSION}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "refused: buildx reported no executor image digest ('${digest}')." >&2; exit 1 ;;
+          esac
+          echo "pushed ${EXECUTOR_IMAGE}:${VERSION} -> ${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
       - name: Push the daemon image once
         id: build
         env:
@@ -1217,6 +1613,14 @@ jobs:
           set -euo pipefail
           cosign sign --yes "${MCP_IMAGE}@${MCP_DIGEST}"
 
+      - name: Sign the executor image keylessly
+        if: steps.executor-source.outputs.present == 'true'
+        env:
+          EXECUTOR_DIGEST: ${{ steps.executor-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${EXECUTOR_IMAGE}@${EXECUTOR_DIGEST}"
+
       # The archives are covered through `SHA256SUMS`; the Sigstore bundle carries the certificate,
       # signature and transparency-log proof, so verifying needs no registry.
       - name: Sign the release-binary checksums keylessly
@@ -1261,6 +1665,22 @@ jobs:
           jq -e 'length > 0' mcp-cosign-verify.json >/dev/null
           echo "identity=${identity}" >> "$GITHUB_OUTPUT"
 
+      - name: Verify the executor signature with the workflow identity
+        id: executor-verify
+        if: steps.executor-source.outputs.present == 'true'
+        env:
+          EXECUTOR_DIGEST: ${{ steps.executor-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          echo "certificate identity: ${identity}"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${EXECUTOR_IMAGE}@${EXECUTOR_DIGEST}" > executor-cosign-verify.json
+          jq -e 'length > 0' executor-cosign-verify.json >/dev/null
+          echo "identity=${identity}" >> "$GITHUB_OUTPUT"
+
       - name: Verify the release-binary checksum signature with the workflow identity
         id: binaries-verify
         if: steps.binary-source.outputs.present == 'true'
@@ -1294,6 +1714,16 @@ jobs:
           set -euo pipefail
           anonymous_config=$(mktemp -d)
           DOCKER_CONFIG="$anonymous_config" docker pull "${MCP_IMAGE}@${MCP_DIGEST}"
+
+      - name: Prove the executor image is anonymously retrievable
+        id: executor-anonymous
+        if: steps.executor-source.outputs.present == 'true'
+        env:
+          EXECUTOR_DIGEST: ${{ steps.executor-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          anonymous_config=$(mktemp -d)
+          DOCKER_CONFIG="$anonymous_config" docker pull "${EXECUTOR_IMAGE}@${EXECUTOR_DIGEST}"
 
       - name: Install the pinned Helm release
         if: env.CHART == 'present'
@@ -1484,6 +1914,9 @@ jobs:
           BINARIES: ${{ steps.binary-source.outputs.present }}
           CHART_DIGEST: ${{ steps.chart.outputs.digest }}
           CHART_IDENTITY: ${{ steps.chart-verify.outputs.identity }}
+          EXECUTOR: ${{ steps.executor-source.outputs.present }}
+          EXECUTOR_DIGEST: ${{ steps.executor-build.outputs.digest }}
+          EXECUTOR_IDENTITY: ${{ steps.executor-verify.outputs.identity }}
         run: |
           set -euo pipefail
           cat > release-notes.md <<NOTES
@@ -1538,6 +1971,47 @@ jobs:
           \`\`\`
 
           NOTES
+          case "$EXECUTOR" in
+          true)
+          cat >> release-notes.md <<NOTES
+          ## Executor image
+
+          | | |
+          | --- | --- |
+          | image | \`${EXECUTOR_IMAGE}:${VERSION}\` |
+          | digest | \`${EXECUTOR_DIGEST}\` |
+          | revision label | \`${SOURCE_SHA}\` (\`org.opencontainers.image.revision\`) |
+          | platform | \`linux/amd64\` |
+
+          The static \`substrate-executor\` the Kubernetes namespace driver runs in its keeper and
+          exec Pods, on an empty base image. A daemon talks only to the executor of its own
+          release; before publication this workflow required the image's version handshake to
+          name \`substrate-executor/1\`, \`${VERSION}\` and \`${SOURCE_SHA}\`, and its executable to
+          be static. Pin it by digest and verify its signature:
+
+          \`\`\`console
+          cosign verify \\
+            --certificate-identity ${EXECUTOR_IDENTITY} \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            ${EXECUTOR_IMAGE}@${EXECUTOR_DIGEST}
+          \`\`\`
+
+          NOTES
+          ;;
+          false)
+          cat >> release-notes.md <<NOTES
+          ## Executor image
+
+          This release carries no executor image. It was published by a recovery run of a tag
+          whose source predates the Dockerfile's \`executor\` stage.
+
+          NOTES
+          ;;
+          *)
+          echo "refused: no answer on whether this release carries the executor image ('${EXECUTOR}')." >&2
+          exit 1
+          ;;
+          esac
           case "$BINARIES" in
           true)
           cat >> release-notes.md <<NOTES
@@ -1653,10 +2127,82 @@ jobs:
           the recorded line above, and that line must name this exact commit and the real-quota
           case count this source declares.
 
+          NOTES
+          if [ "$CHART" = present ]; then
+          cat >> release-notes.md <<NOTES
+          ## Chart lane
+
+          | | |
+          | --- | --- |
+          | local record | \`${CHART_EVIDENCE}\` |
+          | command | \`cargo xtask chart-lane cluster --node-profiles\` |
+          | where | a workstation kind cluster whose nodes load the Localhost seccomp and AppArmor profiles, not this runner |
+
+          The fields are the commit, the number of chart-lane scenarios and when the run finished.
+          The hosted chart lane (see *Kubernetes chart* above) cannot start the execution-enabled
+          pod, so it reports those scenarios absent. The local run installs the node profiles,
+          starts that pod, runs a confined exec through it and passes every scenario the source
+          declares; this workflow refuses to publish a chart without the recorded line above, and
+          that line must name this exact commit and that scenario count.
+
+          NOTES
+          fi
+          case "$NAMESPACE_LANE" in
+          present)
+          cat >> release-notes.md <<NOTES
+          ## Namespace lane
+
+          | | |
+          | --- | --- |
+          | recorded run | \`${NAMESPACE_EVIDENCE}\` |
+          | command | \`cargo xtask namespace-lane observe\` |
+          | where | a workstation kind cluster the lane creates and deletes, not this runner |
+
+          The fields are the commit, the number of namespace-lane observations and when the run
+          finished. The kind cluster those observations need outlasts what a hosted check may
+          take, so this workflow does not run them: it refuses to publish without the recorded
+          line above, and that line must name this exact commit and the observation count this
+          source declares.
+
+          NOTES
+          ;;
+          absent)
+          cat >> release-notes.md <<NOTES
+          ## Namespace lane
+
+          No record applies: this release was published by a recovery run of a tag whose source
+          predates the namespace lane.
+
+          NOTES
+          ;;
+          *)
+          echo "refused: no answer on whether the tagged source has the namespace lane ('${NAMESPACE_LANE}')." >&2
+          exit 1
+          ;;
+          esac
+          case "$NAMESPACE_LANE_WORKFLOW" in
+          present)
+          cat >> release-notes.md <<NOTES
+          The namespace lane's static checks ran in CI on this commit, and \`.github/workflows/namespace-lane.yml\` concluded \`success\` for it: ${NAMESPACE_LANE_RUN_URL}
+
+          NOTES
+          ;;
+          absent)
+          cat >> release-notes.md <<NOTES
+          No namespace-lane static run applies: the tagged source predates \`.github/workflows/namespace-lane.yml\`.
+
+          NOTES
+          ;;
+          *)
+          echo "refused: no answer on whether the tagged source has the namespace-lane workflow ('${NAMESPACE_LANE_WORKFLOW}')." >&2
+          exit 1
+          ;;
+          esac
+          cat >> release-notes.md <<NOTES
           ## Verify the signatures
 
           All three image and bundle artifacts are signed keylessly through Sigstore, and so are
-          any chart (see *Kubernetes chart* above) and any \`SHA256SUMS\` (see *Release binaries*). Each certificate identity is this workflow at the ref that
+          any executor image (see *Executor image* above), any chart (see *Kubernetes chart* above) and any \`SHA256SUMS\` (see *Release binaries*). Each certificate identity is this workflow at the ref that
           performed the release, so a signature from any other workflow, ref or repository fails:
 
           \`\`\`console
@@ -1759,6 +2305,8 @@ jobs:
           SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
           BINARIES: ${{ steps.binary-source.outputs.present }}
           CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          EXECUTOR: ${{ steps.executor-source.outputs.present }}
+          EXECUTOR_DIGEST: ${{ steps.executor-build.outputs.digest }}
         run: |
           {
             echo "CHANGELOG.md is protected by the Full gate and is not pushed directly."
@@ -1767,6 +2315,11 @@ jobs:
             echo "Image: \`${IMAGE}:${VERSION}\` at \`${DIGEST}\`, keyless-signed; verify with \`cosign verify\`."
             echo "Contract bundle: \`${BUNDLE_IMAGE}:${BUNDLE_VERSION}\` at \`${BUNDLE_DIGEST}\`, annotated \`development\`, keyless-signed; verify with \`cosign verify\`."
             echo "Disposable MCP image: \`${MCP_IMAGE}:${VERSION}\` at \`${MCP_DIGEST}\`, development-only and keyless-signed; verify with \`cosign verify\`."
+            if [ "$EXECUTOR" = true ]; then
+              echo "Executor image: \`${EXECUTOR_IMAGE}:${VERSION}\` at \`${EXECUTOR_DIGEST}\`, keyless-signed; verify with \`cosign verify\`."
+            else
+              echo "Executor image: not published: the tagged source has no executor stage."
+            fi
             if [ "$BINARIES" = true ]; then
               echo "Release binaries: \`substrate-daemon-${VERSION}-${BINARY_TARGET}.tar.gz\` and \`b10x-substrate-${VERSION}-${BINARY_TARGET}.tar.gz\` on the GitHub release, \`SHA256SUMS\` at \`${SUMS_DIGEST}\`, keyless-signed; verify with \`cosign verify-blob\`."
             else
@@ -1788,6 +2341,8 @@ jobs:
           SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
           BINARIES: ${{ steps.binary-source.outputs.present }}
           CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          EXECUTOR: ${{ steps.executor-source.outputs.present }}
+          EXECUTOR_DIGEST: ${{ steps.executor-build.outputs.digest }}
         run: |
           case "$BINARIES" in
             true) binaries_row="\`${BINARY_TARGET}\`, SHA256SUMS \`${SUMS_DIGEST:-<not built>}\`" ;;
@@ -1805,6 +2360,8 @@ jobs:
             echo "| bundle digest | \`${BUNDLE_DIGEST:-<not built>}\` |"
             echo "| disposable MCP image | \`${MCP_IMAGE}:${VERSION}\` |"
             echo "| MCP digest | \`${MCP_DIGEST:-<not built>}\` |"
+            echo "| executor image | \`${EXECUTOR_IMAGE}:${VERSION}\` (${EXECUTOR:-<undecided>}) |"
+            echo "| executor digest | \`${EXECUTOR_DIGEST:-<not built>}\` |"
             echo "| release binaries | ${binaries_row} |"
             echo "| Kubernetes chart | \`${CHART_IMAGE}:${VERSION}\` (${CHART:-<undecided>}) |"
             echo "| chart digest | \`${CHART_DIGEST:-<not built>}\` |"
@@ -1812,14 +2369,19 @@ jobs:
             echo "| gate run | ${GATE_RUN_URL} |"
             echo "| chart lane run | ${CHART_LANE_RUN_URL:-<none>} |"
             echo "| chart lane absent, not passed | ${CHART_LANE_ABSENT:-<none>} |"
+            echo "| namespace lane run | ${NAMESPACE_LANE_RUN_URL:-<none>} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE:-<none recorded>}\` |"
             echo "| quota lane | \`${QUOTA_EVIDENCE:-<none recorded>}\` |"
+            echo "| chart lane record | \`${CHART_EVIDENCE:-<none recorded>}\` |"
+            echo "| namespace lane | \`${NAMESPACE_EVIDENCE:-<none recorded>}\` |"
             echo "| daemon signature step | ${{ steps.verify.outcome }} |"
             echo "| bundle signature step | ${{ steps.bundle-verify.outcome }} |"
             echo "| MCP signature step | ${{ steps.mcp-verify.outcome }} |"
+            echo "| executor signature step | ${{ steps.executor-verify.outcome }} |"
             echo "| binaries signature step | ${{ steps.binaries-verify.outcome }} |"
             echo "| anonymous pull step | ${{ steps.anonymous.outcome }} |"
             echo "| MCP anonymous pull step | ${{ steps.mcp-anonymous.outcome }} |"
+            echo "| executor anonymous pull step | ${{ steps.executor-anonymous.outcome }} |"
             echo "| chart signature step | ${{ steps.chart-verify.outcome }} |"
             echo "| chart provenance step | ${{ steps.chart-provenance.outcome }} |"
             echo "| chart anonymous pull step | ${{ steps.chart-anonymous.outcome }} |"

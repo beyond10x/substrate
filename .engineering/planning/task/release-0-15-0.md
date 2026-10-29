@@ -2,11 +2,15 @@
 format: aep.planning-md/3
 id: task:release-0-15-0
 kind: task
-status: draft
+status: implemented
 title: Release 0.15.0
 relations:
 - delivers: epic:confinement-contract-family
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-29T04:06:58Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-10-29T04:06:59Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-29T04:06:59Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 Publish Substrate 0.15.0, the release of `wave/adapter-io`: design 32's piped standard input (`stdin_pipe`) and live output delivery (`output_live`) on the confinement adapters, design 33's host execution AppArmor profile name as a deployment parameter, the `pod` fix that keeps a run's NetworkPolicy until the API shows its container terminated when its Pod was force-deleted, and ADR 0047 accepted. Also released: everything else under `[Unreleased]` since 0.14.0 (CHANGELOG.md `[0.15.0]`), among it the host-process lifecycle events of ADR 0036 S12. The development bundle is `substrate-wire/0.24.0`, which the release workflow already pins.

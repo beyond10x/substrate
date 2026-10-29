@@ -94,7 +94,7 @@ other half.
    |---|---|---|
    | `pods` | `create`, `get`, `list`, `watch`, `delete` | keeper and exec Pods; `watch` for watch gaps and gone-Pod evidence (D173) |
    | `pods/log` | `get` | exec output (N10) |
-   | `pods/exec` | `create` | workspace file I/O in the keeper (N3) |
+   | `pods/exec` | `get`, `create` | workspace file I/O in the keeper (N3); `get` because the API server authorizes the exec WebSocket as `get` (addendum of 2026-10-29, below) |
    | `persistentvolumeclaims` | `create`, `get`, `list`, `delete` | workspaces |
    | `networkpolicies` | `get`, `list` | the namespace default-deny policy is read, never written (N5); `list` binds the digest of the namespace's whole policy set into the snapshot, so an added or changed policy moves `config_generation` (amendment of 2026-10-29, below) |
    | `leases.coordination.k8s.io` | `create`, `get`, `update` | the namespace claim |
@@ -205,6 +205,8 @@ other half.
     | scoped `workspace_access` | `exec.workspace-scoped-write-unserved` (501) | existing |
     | `measurements` | `exec.metrics-unserved` (501) | existing |
     | an inline capsule | `exec.inline-capsule-unserved` (501) | **new** |
+    | a signal outside the published `exec.signals` (`INT`) | `exec.signal-unserved` (501) | **new** (amendment of 2026-10-29: design 34 § 14 Q3 A) |
+    | `workspace.adopt` | `workspace.adopt-unserved` (501) | **new** (amendment of 2026-10-29: design 34 § 14 Q3 A) |
     | a raw-pipe or PTY session | `session.unserved`, `session.pty-unserved` (501) | existing |
     | the `process.*` family | `process.host-unserved` (501) | existing |
     | a Git or bundle workspace source | `workspace.git-unserved`, `workspace.source-unserved` (501) | existing |
@@ -212,9 +214,12 @@ other half.
     | a create refused by the namespace's ResourceQuota | `workspace.capacity`, `exec.capacity` (429, `exhausted`) | existing |
     | a member naming a Pod field | `request.schema-invalid` (422) | existing |
 
-    The order is the daemon's existing check order. The new code, the widened `driver` (N7) and the
+    The order is the daemon's existing check order. The new codes, the widened `driver` (N7) and the
     neutral facts (N6) arrive in a successor bundle with a vector each, cut by
-    `cargo xtask render-bundle`, its check added to `scripts/gate.sh` in the same change.
+    `cargo xtask render-bundle`, its check added to `scripts/gate.sh` in the same change. That
+    bundle is `0.25.0`, whose contents design 34 § 11 states. It carries the three new codes, the
+    widened `driver` and `confinement.no-egress`. Design 30's neutral families arrive in design 30's
+    own bundle.
 13. **Conformance, on a disposable kind cluster with its own kubeconfig only** (N11). The cluster is
     created by the lane with `kind create cluster --kubeconfig <lane file>`, as the `pod-lane` job
     does. The driver's credential is a namespaced ServiceAccount bound to exactly decision 3's Role,
@@ -364,7 +369,8 @@ size, and the executor truncates and marks output past it, as the host driver do
   dependencies stand: the node-bound profile, remote clean-room conformance and the driver-port
   story.
 - **Wire.** One successor bundle: `driver` widened (N7), `confinement.no-egress` (N5),
-  `exec.inline-capsule-unserved`, each with a vector. No route changes. Earlier bundles keep their
+  `exec.inline-capsule-unserved`, `exec.signal-unserved` and `workspace.adopt-unserved` (`0.25.0`,
+  design 34 § 11), each with a vector. No route changes. Earlier bundles keep their
   bytes.
 - **New surfaces.** The driver crate (N12), the executor binary and image (N4), the lane (N11) with
   a Rust runner (an `xtask` verb), and the release preflight for the new image and lane. AGENTS.md
@@ -391,3 +397,28 @@ size, and the executor truncates and marks output past it, as the host driver do
 - More than one namespace per daemon, scheduling across clusters, and product quotas.
 - In-cluster token loading (N1 B), and how a deployment packages this driver: a chart profile beside
   ADR 0046's or its own.
+
+## Addendum, 2026-10-29: `get` on `pods/exec`
+
+Decision 3's row for `pods/exec` grants `get` beside `create`. No other row changes
+(`decision-blocker:driver-role-needs-pods-exec-get`). The operator approved it on 2026-10-29.
+
+**Observation.** The namespace lane's recorded run (`Namespace-lane:
+425ab9c2709b54bc46c234b4646913d8f12f27a2 8 2026-10-29T05:19:33Z`, `kindest/node:v1.37.0`),
+design 34 § 10.3 O10: the driver's exec through `pods/exec` over WebSocket `v5.channel.k8s.io`
+is refused 403 `cannot get resource "pods/exec"`. The same exec with the lane's admin credentials
+returns all 200000 bytes and ends `Success`. With `create` alone, the keeper path (N3) is unserved.
+
+**The amended row.**
+
+| resource | verbs | for |
+|---|---|---|
+| `pods/exec` | `get`, `create` | workspace file I/O in the keeper (N3) |
+
+**Reach.** `pods/exec` is a subresource with no stored object to read or list. Its only operation
+is opening an exec stream into a Pod of the namespace, which the `create` already granted
+authorizes, and N3 names its cost: the credential can run a command in any Pod of the namespace.
+`get` adds no reach beyond that. The startup review (decision 3) still refuses every other grant,
+a wildcard and any verb on `secrets`. The rules it allows (`crates/substrate-kubernetes/src/rules.rs`),
+the Role the lane installs (`xtask/src/namespace_lane_render.rs`) and that Role's golden hold the
+amended row, and `cargo xtask namespace-lane check` holds the Role to the table above in decision 3.

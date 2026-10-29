@@ -1,0 +1,66 @@
+name: Namespace lane
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - crates/substrate-kubernetes*/**
+      - crates/substrate-executor/**
+      - crates/substrate-guarded/**
+      - crates/substrate-wire/**
+      - crates/substrate-daemon/**
+      - Dockerfile
+      - Cargo.lock
+      - rust-toolchain.toml
+      - xtask/Cargo.toml
+      - xtask/src/main.rs
+      - xtask/src/namespace_lane*.rs
+      - xtask/tests/golden/namespace-lane/**
+      - adr/0047-a-kubernetes-namespace-driver-serves-workspaces-on-pvcs-and-execs-as-pods.md
+      - .github/workflows/namespace-lane.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: namespace-lane-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  static:
+    name: Namespace lane static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+          cargo --version
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          prefix-key: substrate-namespace-lane-v1
+          shared-key: namespace-lane
+          cache-workspace-crates: "false"
+          cache-all-crates: "false"
+          cache-on-failure: "false"
+
+      - name: Namespace lane static check
+        run: cargo xtask namespace-lane check

@@ -14,29 +14,30 @@
 //! network family: a `NetworkPolicy`'s enforcement depends on the cluster's network plugin, which
 //! the API does not let a client prove.
 //!
-//! The adapter speaks to the API server itself over HTTP/1.1 and TLS with the workspace's own
-//! `hyper` and `rustls`; it admits no Kubernetes client crate and runs no `kubectl`.
+//! The adapter speaks to the API server itself over HTTP/1.1 and TLS through the workspace's own
+//! client, `b10x-substrate-kubernetes-client`, which holds design 28's kubeconfig loader and its
+//! refusals and the rule for a gone Pod; it admits no Kubernetes client crate and runs no
+//! `kubectl`.
 
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+#[cfg(test)]
 use base64::Engine as _;
-use bytes::Bytes;
-use http_body_util::{BodyExt as _, Full, Limited};
-use hyper::header::{self, HeaderValue};
-use hyper::{Method, Request};
-use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
-use rustls::ClientConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use serde_json::{Map, Value, json};
+#[cfg(test)]
+use substrate_kubernetes_client::JSON;
+use substrate_kubernetes_client::{
+    self as kubernetes, Method, Pacing, PodEnd, PodTrace, continuation, is_dns_label, kubeconfig,
+    list_items, pod_end,
+};
 use substrate_wire::Signal;
 use tokio::sync::watch;
-use tokio_rustls::TlsConnector;
-use zeroize::Zeroizing;
 
 use super::local::LOCAL_POLICY_ENV;
 use super::{
@@ -60,7 +61,7 @@ pub const MANAGED_BY: &str = "b10x-substrate";
 /// The label naming the run an object belongs to; its value is the run id.
 pub const RUN_LABEL: &str = "b10x-substrate/run";
 /// The one container of a run's Pod.
-pub const CONTAINER: &str = "run";
+pub const CONTAINER: &str = kubernetes::RUN_CONTAINER;
 /// Where the run's `emptyDir` workspace is mounted.
 pub const WORKSPACE_MOUNT: &str = "/workspace";
 /// The workspace's `sizeLimit` and the container's `ephemeral-storage` limit when the operator
@@ -84,16 +85,8 @@ const DEFAULT_BOUNDS: ProcessBounds = ProcessBounds {
     memory_bytes: 1 << 30,
     cpu_millis: 600_000,
 };
-const MAX_CLUSTER_FILE_BYTES: u64 = 1_048_576;
-const MAX_API_BODY_BYTES: usize = 4 * 1_048_576;
+const MAX_API_BODY_BYTES: usize = kubernetes::MAX_API_BODY_BYTES;
 const MAX_ARGV_BYTES: usize = 262_144;
-/// What a request asks the API server for.
-const JSON: &str = "application/json";
-/// What a sweep's list asks for: a `PartialObjectMetadataList`, whose items carry each object's
-/// `metadata` alone. The sweeps read only names, labels and creation times, and a full Pod of a run
-/// the adapter admits holds up to 256 KiB of argv and 256 KiB of environment, so a page of
-/// [`SWEEP_PAGE_ITEMS`] full Pods of ten such runs is past [`MAX_API_BODY_BYTES`].
-const METADATA_LIST: &str = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1";
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 /// What the open sweep adds to `start`'s two creates: whole-second `creationTimestamp` and `Date`
 /// values, and skew between API server members, one stamping the policy and another answering.
@@ -125,21 +118,11 @@ const REMOVE_ATTEMPTS: u32 = 60;
 const NOTICE: Duration = Duration::from_secs(2);
 /// How the adapter paces a removal: [`POLL`], [`REMOVE_ATTEMPTS`] and [`NOTICE`], which a unit
 /// case shortens.
-#[derive(Debug, Clone, Copy)]
-struct Pacing {
-    poll: Duration,
-    remove_attempts: u32,
-    notice: Duration,
-}
 const PACING: Pacing = Pacing {
     poll: POLL,
     remove_attempts: REMOVE_ATTEMPTS,
     notice: NOTICE,
 };
-/// How long a watch of one Pod may take to show how its container ended, once a read found the Pod
-/// gone. The API server replays the Pod's history from the `resourceVersion` the adapter last read
-/// at once; a watch that shows nothing within this keeps the run's policy.
-const WATCH_LIMIT: Duration = Duration::from_secs(5);
 /// Reads of a log before the adapter reports it unreadable.
 const LOG_ATTEMPTS: u32 = 5;
 const TERM_GRACE_SECONDS: u64 = 5;
@@ -244,9 +227,9 @@ pub fn open_pod_timed(
     let path = request
         .cluster
         .ok_or_else(|| unserved("no cluster configuration".to_owned()))?;
-    let bytes = read_bounded(&path).map_err(unserved)?;
+    let bytes = kubeconfig::read(&path).map_err(unserved)?;
     let (mut api, settings) = parse_cluster(&bytes).map_err(unserved)?;
-    api.timing = timing;
+    api.set_timing(timing);
     let api = Arc::new(api);
     let kept = probe(&api).map_err(unserved)?;
     let adapter = Arc::new(PodAdapter {
@@ -266,87 +249,51 @@ pub fn open_pod_timed(
     Ok(adapter)
 }
 
-fn read_bounded(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    use std::io::Read as _;
-    let file = std::fs::File::open(path)
-        .map_err(|error| format!("the cluster configuration cannot be opened: {error}"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("the cluster configuration cannot be inspected: {error}"))?;
-    if !metadata.is_file() || metadata.len() > MAX_CLUSTER_FILE_BYTES {
-        return Err("the cluster configuration must be one regular file of at most 1 MiB".into());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_CLUSTER_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("the cluster configuration cannot be read: {error}"))?;
-    Ok(bytes)
-}
-
 // --- the cluster configuration ---------------------------------------------------------------
 
-fn named<'a>(config: &'a Value, list: &str, name: &str, member: &str) -> Result<&'a Value, String> {
-    config[list]
-        .as_array()
-        .and_then(|entries| entries.iter().find(|entry| entry["name"] == name))
-        .map(|entry| &entry[member])
-        .filter(|value| value.is_object())
-        .ok_or_else(|| format!("the current context names no {member} {name:?}"))
+/// The cluster API as the adapter uses it: the shared client
+/// (`b10x-substrate-kubernetes-client`), and how long the API may stay unreachable, or a Pod's
+/// removal unconfirmed, before a run is reported `Unknown`.
+struct Api {
+    client: kubernetes::Api,
+    unreachable_limit: Duration,
 }
 
-fn text<'a>(object: &'a Value, member: &str) -> Result<Option<&'a str>, String> {
-    match &object[member] {
-        Value::Null => Ok(None),
-        Value::String(value) => Ok(Some(value)),
-        _ => Err(format!("{member} is not a string")),
+impl Deref for Api {
+    type Target = kubernetes::Api;
+
+    fn deref(&self) -> &kubernetes::Api {
+        &self.client
     }
 }
 
-fn decode(object: &Value, member: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-    text(object, member)?
-        .map(|data| {
-            base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .map(Zeroizing::new)
-                .map_err(|_| format!("{member} is not base64"))
-        })
-        .transpose()
+impl DerefMut for Api {
+    fn deref_mut(&mut self) -> &mut kubernetes::Api {
+        &mut self.client
+    }
 }
 
-/// A DNS-1123 label: what a namespace name must be.
-fn is_dns_label(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= 63
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
-        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+impl Api {
+    fn set_timing(&mut self, timing: PodTiming) {
+        self.client.timeout = timing.api_timeout;
+        self.unreachable_limit = timing.unreachable_limit;
+    }
 }
 
+/// Design 28's loader, with the adapter's own settings read from the current context.
 fn parse_cluster(bytes: &[u8]) -> Result<(Api, PodSettings), String> {
-    let config: Value = serde_json::from_slice(bytes)
-        .map_err(|_| "the cluster configuration is not the JSON form of a kubeconfig".to_owned())?;
-    let current = config["current-context"]
-        .as_str()
-        .ok_or("the cluster configuration names no current context")?;
-    let context = named(&config, "contexts", current, "context")?;
-    let namespace = text(context, "namespace")?
-        .ok_or("the current context names no namespace")?
-        .to_owned();
-    if !is_dns_label(&namespace) {
-        return Err("the context namespace is not a DNS-1123 label".into());
-    }
-    let settings = settings(context, namespace)?;
-    let cluster_name = text(context, "cluster")?.ok_or("the context names no cluster")?;
-    let user_name = text(context, "user")?.ok_or("the context names no user")?;
-    let cluster = named(&config, "clusters", cluster_name, "cluster")?;
-    let user = named(&config, "users", user_name, "user")?;
-    let api = Api::new(cluster, user, &settings.namespace)?;
+    let (mut client, settings) = kubeconfig::parse(bytes, settings)?;
+    client.user_agent = "b10x-substrate-pod";
+    client.pacing = PACING;
+    let api = Api {
+        client,
+        unreachable_limit: UNREACHABLE_LIMIT,
+    };
     Ok((api, settings))
 }
 
+/// The adapter's settings: the [`POD_SETTINGS_EXTENSION`] of the current context, over the
+/// defaults.
 fn settings(context: &Value, namespace: String) -> Result<PodSettings, String> {
     let mut settings = PodSettings {
         namespace,
@@ -391,480 +338,6 @@ fn settings(context: &Value, namespace: String) -> Result<PodSettings, String> {
     Ok(settings)
 }
 
-/// The kubeconfig members design 28 refuses, because each changes who the adapter is or whom it
-/// trusts.
-const REFUSED_CLUSTER_MEMBERS: [&str; 2] = ["proxy-url", "certificate-authority"];
-const REFUSED_USER_MEMBERS: [&str; 11] = [
-    "exec",
-    "auth-provider",
-    "username",
-    "password",
-    "tokenFile",
-    "client-certificate",
-    "client-key",
-    "as",
-    "as-uid",
-    "as-groups",
-    "as-user-extra",
-];
-
-/// The cluster API, reached as the operator's configuration says.
-struct Api {
-    host: String,
-    port: u16,
-    authority: String,
-    base_path: String,
-    server_name: ServerName<'static>,
-    connector: TlsConnector,
-    bearer: Option<Zeroizing<String>>,
-    namespace: String,
-    pacing: Pacing,
-    timing: PodTiming,
-}
-
-impl Api {
-    fn new(cluster: &Value, user: &Value, namespace: &str) -> Result<Self, String> {
-        if cluster["insecure-skip-tls-verify"] == json!(true) {
-            return Err("insecure-skip-tls-verify is refused".into());
-        }
-        for member in REFUSED_CLUSTER_MEMBERS {
-            if !cluster[member].is_null() {
-                return Err(format!("the cluster member {member} is refused"));
-            }
-        }
-        for member in REFUSED_USER_MEMBERS {
-            if !user[member].is_null() {
-                return Err(format!("the user member {member} is refused"));
-            }
-        }
-        let server =
-            url::Url::parse(text(cluster, "server")?.ok_or("the cluster names no server")?)
-                .map_err(|_| "the cluster server is not a URL".to_owned())?;
-        if server.scheme() != "https"
-            || !server.username().is_empty()
-            || server.password().is_some()
-            || server.query().is_some()
-            || server.fragment().is_some()
-        {
-            return Err("the cluster server must be a plain https URL".into());
-        }
-        let host = match server.host() {
-            Some(url::Host::Domain(domain)) => domain.to_owned(),
-            Some(url::Host::Ipv4(address)) => address.to_string(),
-            Some(url::Host::Ipv6(address)) => address.to_string(),
-            None => return Err("the cluster server names no host".into()),
-        };
-        let port = server
-            .port_or_known_default()
-            .ok_or("the cluster server names no port")?;
-        let name = text(cluster, "tls-server-name")?.map_or_else(|| host.clone(), str::to_owned);
-        let server_name = ServerName::try_from(name)
-            .map_err(|_| "the cluster server name is not a DNS name or an address".to_owned())?;
-        let authority = server[url::Position::BeforeHost..url::Position::AfterPort].to_owned();
-        let base_path = server.path().trim_end_matches('/').to_owned();
-        let bearer = text(user, "token")?
-            .filter(|token| !token.is_empty())
-            .map(|token| Zeroizing::new(token.to_owned()));
-        let connector = connector(cluster, user, bearer.is_some())?;
-        Ok(Self {
-            host,
-            port,
-            authority,
-            base_path,
-            server_name,
-            connector,
-            bearer,
-            namespace: namespace.to_owned(),
-            pacing: PACING,
-            timing: PodTiming::default(),
-        })
-    }
-
-    fn pods(&self) -> String {
-        format!("/api/v1/namespaces/{}/pods", self.namespace)
-    }
-
-    fn policies(&self) -> String {
-        format!(
-            "/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies",
-            self.namespace
-        )
-    }
-
-    /// One request on its own connection, bounded in time and in body size.
-    async fn call(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&Value>,
-        limit: usize,
-    ) -> Result<(u16, Bytes), String> {
-        let (status, _, bytes) = self.timed(method, path, body, JSON, limit).await?;
-        Ok((status, bytes))
-    }
-
-    /// A GET of one page of the list at `path`, its items' `metadata` alone ([`METADATA_LIST`]),
-    /// bounded at [`MAX_API_BODY_BYTES`], with the answer's `Date` header: the API server's clock.
-    async fn list_metadata(&self, path: &str) -> Result<(u16, Option<String>, Bytes), String> {
-        self.timed(Method::GET, path, None, METADATA_LIST, MAX_API_BODY_BYTES)
-            .await
-    }
-
-    async fn timed(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&Value>,
-        accept: &'static str,
-        limit: usize,
-    ) -> Result<(u16, Option<String>, Bytes), String> {
-        tokio::time::timeout(
-            self.timing.api_timeout,
-            self.exchange(method, path, body, accept, limit),
-        )
-        .await
-        .map_err(|_| "the cluster API did not answer in time".to_owned())?
-    }
-
-    async fn exchange(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&Value>,
-        accept: &'static str,
-        limit: usize,
-    ) -> Result<(u16, Option<String>, Bytes), String> {
-        let (response, driver) = self.send(method, path, body, accept).await?;
-        let status = response.status().as_u16();
-        let date = response
-            .headers()
-            .get(header::DATE)
-            .and_then(|date| date.to_str().ok())
-            .map(str::to_owned);
-        let bytes = Limited::new(response.into_body(), limit)
-            .collect()
-            .await
-            .map_err(|_| "the response body failed or exceeded its bound".to_owned())?
-            .to_bytes();
-        driver.abort();
-        Ok((status, date, bytes))
-    }
-
-    /// Sends one request on its own connection; the answer's head and body, and the task that
-    /// drives the connection.
-    async fn send(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&Value>,
-        accept: &'static str,
-    ) -> Result<
-        (
-            hyper::Response<hyper::body::Incoming>,
-            tokio::task::JoinHandle<Result<(), hyper::Error>>,
-        ),
-        String,
-    > {
-        let tcp = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
-            .await
-            .map_err(|error| format!("connect: {error}"))?;
-        let tls = self
-            .connector
-            .connect(self.server_name.clone(), tcp)
-            .await
-            .map_err(|error| format!("TLS: {error}"))?;
-        let (mut sender, connection) =
-            hyper::client::conn::http1::handshake::<_, Full<Bytes>>(TokioIo::new(tls))
-                .await
-                .map_err(|error| format!("HTTP: {error}"))?;
-        let driver = tokio::spawn(connection);
-        let mut request = Request::builder()
-            .method(method)
-            .uri(format!("{}{path}", self.base_path))
-            .header(header::HOST, &self.authority)
-            .header(header::ACCEPT, accept)
-            .header(header::USER_AGENT, "b10x-substrate-pod");
-        if body.is_some() {
-            request = request.header(header::CONTENT_TYPE, "application/json");
-        }
-        if let Some(token) = &self.bearer {
-            let line = Zeroizing::new(format!("Bearer {}", token.as_str()));
-            let mut value = HeaderValue::from_str(&line)
-                .map_err(|_| "the token is not a header value".to_owned())?;
-            value.set_sensitive(true);
-            request = request.header(header::AUTHORIZATION, value);
-        }
-        let payload = body
-            .map(serde_json::to_vec)
-            .transpose()
-            .map_err(|error| format!("encode: {error}"))?
-            .unwrap_or_default();
-        let request = request
-            .body(Full::new(Bytes::from(payload)))
-            .map_err(|error| format!("request: {error}"))?;
-        let response = sender
-            .send_request(request)
-            .await
-            .map_err(|error| format!("HTTP: {error}"))?;
-        Ok((response, driver))
-    }
-
-    /// What a watch of the Pod `name` from the `resourceVersion` `trace` last read shows of its
-    /// container within [`WATCH_LIMIT`]: the API server replays every change since, and the
-    /// deletion last. Only a container shown terminated is [`PodEnd::Stopped`].
-    async fn watch_pod(&self, name: &str, trace: &PodTrace, version: &str) -> PodEnd {
-        let version: String = url::form_urlencoded::byte_serialize(version.as_bytes()).collect();
-        let path = format!(
-            "{}?watch=1&fieldSelector=metadata.name%3D{name}&resourceVersion={version}\
-             &timeoutSeconds={}",
-            self.pods(),
-            WATCH_LIMIT.as_secs()
-        );
-        let mut trace = trace.clone();
-        tokio::time::timeout(WATCH_LIMIT, self.replay(&path, name, &mut trace))
-            .await
-            .unwrap_or_else(|_| {
-                PodEnd::Unproven(format!(
-                    "the watch showed no end of the container within {WATCH_LIMIT:?}"
-                ))
-            })
-    }
-
-    /// Reads the watch at `path` event by event until one decides [`PodEnd`], the stream ends, or
-    /// it passes [`MAX_API_BODY_BYTES`].
-    async fn replay(&self, path: &str, name: &str, trace: &mut PodTrace) -> PodEnd {
-        let (response, driver) = match self.send(Method::GET, path, None, JSON).await {
-            Ok(sent) => sent,
-            Err(error) => return PodEnd::Unanswered(error),
-        };
-        // The connection goes with this read, however the read ends.
-        let _driver = AbortOnDrop(driver);
-        match response.status().as_u16() {
-            200 => {}
-            410 => {
-                return PodEnd::Unproven(
-                    "the watch answered 410: the history after the last read is gone".to_owned(),
-                );
-            }
-            status @ (401 | 403) => {
-                return PodEnd::Unproven(format!(
-                    "the watch answered {status}: the credential may not watch pods"
-                ));
-            }
-            status => return PodEnd::Unanswered(format!("the watch answered {status}")),
-        }
-        let mut body = response.into_body();
-        let mut buffer = Vec::new();
-        let mut read = 0_usize;
-        while let Some(frame) = body.frame().await {
-            let Ok(frame) = frame else {
-                return PodEnd::Unanswered("the watch stream failed".to_owned());
-            };
-            let Ok(data) = frame.into_data() else {
-                continue;
-            };
-            read += data.len();
-            if read > MAX_API_BODY_BYTES {
-                return PodEnd::Unproven("the watch passed its byte bound".to_owned());
-            }
-            buffer.extend_from_slice(&data);
-            while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=end).collect();
-                if let Some(decided) = watch_event(&line, name, trace) {
-                    return decided;
-                }
-            }
-        }
-        watch_event(&buffer, name, trace).unwrap_or_else(|| {
-            PodEnd::Unproven("the watch ended without showing the Pod's deletion".to_owned())
-        })
-    }
-
-    /// Creates `object` in `collection` and returns the API's answer, `Null` when it is not JSON.
-    async fn create(&self, collection: &str, object: &Value) -> Result<Value, String> {
-        match self
-            .call(Method::POST, collection, Some(object), MAX_API_BODY_BYTES)
-            .await
-        {
-            Ok((200..=202, body)) => Ok(serde_json::from_slice(&body).unwrap_or(Value::Null)),
-            Ok((status, body)) => Err(format!(
-                "create answered {status}: {}",
-                status_message(&body)
-            )),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// The object at `path`, or `None` once it is gone.
-    async fn get(&self, path: &str) -> Result<Option<Value>, String> {
-        match self
-            .call(Method::GET, path, None, MAX_API_BODY_BYTES)
-            .await?
-        {
-            (200, body) => serde_json::from_slice(&body)
-                .map(Some)
-                .map_err(|_| "the API answered something other than JSON".to_owned()),
-            (404, _) => Ok(None),
-            (status, body) => Err(format!("get answered {status}: {}", status_message(&body))),
-        }
-    }
-
-    /// Asks the API to delete the object at `path`; `true` once it answers the object is gone.
-    async fn delete(&self, path: &str, grace_seconds: u64) -> Result<bool, String> {
-        let options = json!({
-            "apiVersion": "v1",
-            "kind": "DeleteOptions",
-            "gracePeriodSeconds": grace_seconds,
-            "propagationPolicy": "Background",
-        });
-        match self
-            .call(Method::DELETE, path, Some(&options), MAX_API_BODY_BYTES)
-            .await?
-        {
-            (404, _) => Ok(true),
-            (200 | 202, _) => Ok(false),
-            (status, body) => Err(format!(
-                "delete answered {status}: {}",
-                status_message(&body)
-            )),
-        }
-    }
-
-    /// Deletes the object at `path` with `grace_seconds` and polls until the API no longer has it.
-    /// A Pod is deleted with a grace of at least one second, never forced; its disappearance alone
-    /// is still no confirmation that its container stopped, because someone else may force-delete
-    /// it meanwhile ([`pod_end`] decides that).
-    async fn remove(&self, path: &str, grace_seconds: u64) -> bool {
-        self.remove_seen(path, grace_seconds, &mut PodTrace::default())
-            .await
-    }
-
-    /// [`Api::remove`], noting every object it reads in `seen`.
-    async fn remove_seen(&self, path: &str, grace_seconds: u64, seen: &mut PodTrace) -> bool {
-        for _ in 0..self.pacing.remove_attempts {
-            if self.remove_once(path, grace_seconds, seen).await {
-                return true;
-            }
-            tokio::time::sleep(self.pacing.poll).await;
-        }
-        false
-    }
-
-    /// Deletes and reads the object at `path` until the API no longer has it, with no bound on the
-    /// tries: the pause between two deletions doubles from one poll to one round of
-    /// `remove_attempts` polls (500 ms to 30 s), and in that pause the object is read every
-    /// `notice` (2 s), so its removal by the kubelet is seen within one `notice`, not at the next
-    /// deletion. An object that never goes costs a read every 2 seconds and a deletion every 30.
-    async fn remove_until_gone(&self, path: &str, grace_seconds: u64) {
-        self.remove_until_gone_seen(path, grace_seconds, &mut PodTrace::default())
-            .await;
-    }
-
-    /// [`Api::remove_until_gone`], noting every object it reads in `seen`.
-    async fn remove_until_gone_seen(&self, path: &str, grace_seconds: u64, seen: &mut PodTrace) {
-        let ceiling = self.pacing.poll * self.pacing.remove_attempts;
-        let mut pause = self.pacing.poll;
-        while !self.remove_once(path, grace_seconds, seen).await {
-            let next = tokio::time::Instant::now() + pause;
-            pause = (pause * 2).min(ceiling);
-            loop {
-                let wake = next.min(tokio::time::Instant::now() + self.pacing.notice);
-                tokio::time::sleep_until(wake).await;
-                if wake >= next {
-                    break;
-                }
-                match self.get(path).await {
-                    Ok(None) => return,
-                    Ok(Some(object)) => {
-                        seen.note(&object);
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-    }
-
-    /// One deletion of the object at `path` and one read of it, noted in `seen`; `true` once it is
-    /// gone.
-    async fn remove_once(&self, path: &str, grace_seconds: u64, seen: &mut PodTrace) -> bool {
-        if matches!(self.delete(path, grace_seconds).await, Ok(true)) {
-            return true;
-        }
-        match self.get(path).await {
-            Ok(None) => true,
-            Ok(Some(object)) => {
-                seen.note(&object);
-                false
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// The API's answer to a read of the container's log, at most `limit` bytes plus one.
-    async fn log(&self, name: &str, limit: usize) -> Result<(u16, Bytes), String> {
-        let path = format!(
-            "{}/{name}/log?container={CONTAINER}&limitBytes={}",
-            self.pods(),
-            limit + 1
-        );
-        self.call(Method::GET, &path, None, limit.max(MAX_API_BODY_BYTES) + 1)
-            .await
-    }
-}
-
-fn connector(cluster: &Value, user: &Value, bearer: bool) -> Result<TlsConnector, String> {
-    let authority = decode(cluster, "certificate-authority-data")?
-        .ok_or("the cluster names no certificate-authority-data")?;
-    let mut roots = rustls::RootCertStore::empty();
-    for certificate in rustls_pemfile::certs(&mut authority.as_slice()) {
-        roots
-            .add(certificate.map_err(|_| "certificate-authority-data is not PEM".to_owned())?)
-            .map_err(|_| "certificate-authority-data holds an invalid certificate".to_owned())?;
-    }
-    if roots.is_empty() {
-        return Err("certificate-authority-data holds no certificate".into());
-    }
-    let builder = ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|_| "no TLS protocol version is available".to_owned())?
-    .with_root_certificates(roots);
-    let certificate = decode(user, "client-certificate-data")?;
-    let key = decode(user, "client-key-data")?;
-    let mut config = match (certificate, key) {
-        (Some(certificate), Some(key)) => {
-            let chain: Vec<CertificateDer<'static>> =
-                rustls_pemfile::certs(&mut certificate.as_slice())
-                    .collect::<Result<_, _>>()
-                    .map_err(|_| "client-certificate-data is not PEM".to_owned())?;
-            let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key.as_slice())
-                .ok()
-                .flatten()
-                .ok_or("client-key-data holds no private key")?;
-            builder
-                .with_client_auth_cert(chain, key)
-                .map_err(|_| "the client certificate and key do not agree".to_owned())?
-        }
-        (None, None) if bearer => builder.with_no_client_auth(),
-        (None, None) => {
-            return Err("the user carries neither a client certificate nor a token".into());
-        }
-        _ => return Err("a client certificate needs both its certificate and its key".into()),
-    };
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(TlsConnector::from(Arc::new(config)))
-}
-
-/// The API's own `Status.message`, bounded, or nothing.
-fn status_message(body: &[u8]) -> String {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|status| status["message"].as_str().map(str::to_owned))
-        .map(|message| message.chars().take(300).collect())
-        .unwrap_or_default()
-}
-
 fn api_failed(detail: &str) -> ConfinementError {
     DriverError::failed(POD_API_FAILED, format!("pod: the cluster API: {detail}")).into()
 }
@@ -904,7 +377,7 @@ fn probe(api: &Arc<Api>) -> Result<Vec<Deferred>, String> {
                         (status, body) => {
                             return Err(format!(
                                 "the cluster answered the probe {status}: {}",
-                                status_message(&body)
+                                api.status_message(&body)
                             ));
                         }
                     }
@@ -920,13 +393,13 @@ fn probe(api: &Arc<Api>) -> Result<Vec<Deferred>, String> {
                             return Err(format!(
                                 "the credential may not read pods/log in the namespace, so no \
                                  run's output could be read ({status}: {})",
-                                status_message(&body)
+                                api.status_message(&body)
                             ));
                         }
                         (status, body) => {
                             return Err(format!(
                                 "the cluster answered the pods/log probe {status}: {}",
-                                status_message(&body)
+                                api.status_message(&body)
                             ));
                         }
                     }
@@ -952,10 +425,10 @@ fn owner_selector() -> String {
 /// run's Pod the API no longer has, in any phase, and whose container the API shows stopped
 /// ([`pod_end`]). A policy without the label is never a candidate.
 /// The list is read whole first, in at most [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`],
-/// each policy's metadata alone ([`METADATA_LIST`]) and each page bounded in bytes; every request
-/// is bounded by [`API_TIMEOUT`], a watch by [`WATCH_LIMIT`], and there are at most three per
-/// owned policy, so open stays bounded. Any failure of a list, a read or a deletion, a list longer
-/// than that included, fails the sweep, and with it the open.
+/// each policy's metadata alone ([`kubernetes::METADATA_LIST`]) and each page bounded in bytes;
+/// every request is bounded by [`API_TIMEOUT`], a watch by [`kubernetes::gone::WATCH_LIMIT`], and
+/// there are at most three per owned policy, so open stays bounded. Any failure of a list, a read
+/// or a deletion, a list longer than that included, fails the sweep, and with it the open.
 ///
 /// Returns the owned policies it kept, younger than the floor, with their Pod present, or whose
 /// watch went unanswered, each marked with whether the API showed its Pod; [`defer_sweep`] checks
@@ -1048,7 +521,7 @@ async fn sweep_page(
     if status != 200 {
         return Err(format!(
             "the policy list answered {status}: {}",
-            status_message(&body)
+            api.status_message(&body)
         ));
     }
     // The API server's clock, never this host's: a skewed host would read a young policy as old.
@@ -1068,178 +541,6 @@ async fn sweep_page(
         candidates.push((run.to_owned(), created, old, trace));
     }
     Ok(continuation(&list))
-}
-
-/// The items of a sweep's list answer: a `PartialObjectMetadataList`, or the `whole` list kind
-/// (`NetworkPolicyList`, `PodList`) a server that ignored [`METADATA_LIST`] sends. An API server
-/// answers an empty `PartialObjectMetadataList` without an items array, so `null` or absent items
-/// are none. Any other kind, or items that are neither an array nor `null`, is an error, so a body
-/// that is not that list never reads as an empty one and deletes nothing.
-fn list_items<'a>(list: &'a Value, whole: &str, what: &str) -> Result<&'a [Value], String> {
-    let kind = list["kind"].as_str();
-    if kind != Some("PartialObjectMetadataList") && kind != Some(whole) {
-        return Err(format!("the {what} list answered no list kind it reads"));
-    }
-    match &list["items"] {
-        Value::Array(items) => Ok(items),
-        Value::Null => Ok(&[]),
-        _ => Err(format!("the {what} list holds no items")),
-    }
-}
-
-/// A list's `continue` token, or `None` on its last page.
-fn continuation(list: &Value) -> Option<String> {
-    list["metadata"]["continue"]
-        .as_str()
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-}
-
-// --- whether a gone Pod's container stopped --------------------------------------------------
-
-/// What the adapter has read of one run's Pod, for [`pod_end`].
-#[derive(Debug, Clone, Default)]
-struct PodTrace {
-    /// The newest `resourceVersion` read for the run: its Pod's, or until a Pod object is read its
-    /// policy's. `start` creates the policy before the Pod, so a watch from the policy's replays
-    /// the Pod's whole history while the API server still holds it.
-    resource_version: Option<String>,
-    /// The Pod's `uid`, from the first object read that carries one; an object with another is a
-    /// different Pod and is not noted.
-    uid: Option<String>,
-    /// An object read showed the container terminated in a Pod whose own `spec.restartPolicy` is
-    /// `Never`. Only the kubelet writes that state, and the container of such a Pod does not run
-    /// again; a Pod an admission webhook gave another policy may restart it, so its terminated state
-    /// is not noted. A Pod's phase is no such evidence: the Pod garbage collector marks a Pod
-    /// `Failed` before it force-deletes it.
-    stopped: bool,
-}
-
-impl PodTrace {
-    /// A trace starting at the run's policy's `resourceVersion`.
-    fn since(policy_version: Option<&str>) -> Self {
-        Self {
-            resource_version: policy_version.map(str::to_owned),
-            ..Self::default()
-        }
-    }
-
-    /// A trace starting at the run's policy's `resourceVersion`, with the Pod its create stored.
-    fn created(policy: &Value, pod: &Value) -> Self {
-        let mut trace = Self::since(policy["metadata"]["resourceVersion"].as_str());
-        trace.note(pod);
-        trace
-    }
-
-    /// Notes one object read of the run's Pod: a whole Pod or its metadata alone. `false` when the
-    /// object is another Pod than the one first read, which is not noted.
-    fn note(&mut self, pod: &Value) -> bool {
-        let uid = pod["metadata"]["uid"].as_str();
-        if let (Some(seen), Some(uid)) = (&self.uid, uid)
-            && seen != uid
-        {
-            return false;
-        }
-        if self.uid.is_none() {
-            self.uid = uid.map(str::to_owned);
-        }
-        if let Some(version) = pod["metadata"]["resourceVersion"].as_str() {
-            self.resource_version = Some(version.to_owned());
-        }
-        if container(pod)["terminated"].is_object()
-            && pod["spec"]["restartPolicy"].as_str() == Some("Never")
-        {
-            self.stopped = true;
-        }
-        true
-    }
-}
-
-/// Whether `pod`, a whole Pod object, was never bound to a node. A binding sets `spec.nodeName`
-/// and nothing unsets it, so the object a deletion leaves without one was never held by a kubelet
-/// and no container of it ever ran. A read before the deletion is no such evidence: the Pod may be
-/// bound after it.
-fn never_bound(pod: &Value) -> bool {
-    pod["spec"].is_object() && pod["spec"]["nodeName"].as_str().is_none_or(str::is_empty)
-}
-
-/// What the API shows of the container of a Pod a read found gone.
-#[derive(Debug)]
-enum PodEnd {
-    /// The container stopped: the run's policy may go.
-    Stopped,
-    /// The API cannot show it stopped, and will not: the policy stays (design 28).
-    Unproven(String),
-    /// The API did not answer; asking again may tell.
-    Unanswered(String),
-}
-
-/// Aborts the task driving a connection when the read that uses it ends, however it ends.
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
-
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// One line of a watch of the Pod `name`: noted in `trace`, and the [`PodEnd`] it decides, if any:
-/// a container shown terminated, a deletion that showed none, or an `ERROR` event.
-fn watch_event(line: &[u8], name: &str, trace: &mut PodTrace) -> Option<PodEnd> {
-    if line.trim_ascii().is_empty() {
-        return None;
-    }
-    let Ok(event) = serde_json::from_slice::<Value>(line) else {
-        return Some(PodEnd::Unproven(
-            "the watch sent something other than JSON".to_owned(),
-        ));
-    };
-    let kind = event["type"].as_str();
-    if kind == Some("ERROR") {
-        return Some(PodEnd::Unproven(format!(
-            "the watch answered an error: {}",
-            event["object"]["message"].as_str().unwrap_or_default()
-        )));
-    }
-    let object = &event["object"];
-    if !matches!(kind, Some("ADDED" | "MODIFIED" | "DELETED"))
-        || object["metadata"]["name"].as_str() != Some(name)
-    {
-        return None;
-    }
-    if !trace.note(object) {
-        return None;
-    }
-    if trace.stopped {
-        return Some(PodEnd::Stopped);
-    }
-    if kind != Some("DELETED") {
-        return None;
-    }
-    Some(if never_bound(object) {
-        PodEnd::Stopped
-    } else {
-        PodEnd::Unproven("the Pod was deleted with its container not shown terminated".to_owned())
-    })
-}
-
-/// Whether the container of `run`'s Pod, which a read just found gone, is known to have stopped
-/// (`story:pod-force-deleted-keeps-its-policy`). A forced deletion, the Pod garbage collector's
-/// after a node stopped answering or an operator's, removes a Pod without its kubelet, so a 404
-/// alone says nothing of the container. The policy may go only when a read showed the container
-/// terminated, or a watch of the Pod from the last `resourceVersion` read replays a terminated
-/// container: the kubelet writes that state before it removes a Pod it was asked to delete. A
-/// deletion that leaves the Pod unbound to any node shows no container ever ran ([`never_bound`]).
-/// Without a `resourceVersion` to watch from, on a 410, a watch that shows nothing within
-/// [`WATCH_LIMIT`] or a deletion of a bound Pod's container not shown terminated, the policy stays.
-async fn pod_end(api: &Api, run: &str, trace: &PodTrace) -> PodEnd {
-    if trace.stopped {
-        return PodEnd::Stopped;
-    }
-    let Some(version) = &trace.resource_version else {
-        return PodEnd::Unproven("no resourceVersion of the run was read to watch from".to_owned());
-    };
-    api.watch_pod(run, trace, version).await
 }
 
 /// [`pod_end`] for the run's task, asked again every `notice` while the API does not answer:
@@ -1410,8 +711,8 @@ async fn resweep(api: &Api, deferred: &mut Vec<Deferred>) -> Result<(), String> 
 
 /// The namespace's Pods that carry the adapter's owner label, each name with its `uid` and
 /// `resourceVersion` for [`PodTrace::note`], read whole in at most [`SWEEP_MAX_PAGES`] pages of
-/// [`SWEEP_PAGE_ITEMS`], each Pod's metadata alone ([`METADATA_LIST`]), and the API server's clock
-/// on the first page.
+/// [`SWEEP_PAGE_ITEMS`], each Pod's metadata alone ([`kubernetes::METADATA_LIST`]), and the API
+/// server's clock on the first page.
 async fn owned_pods(
     api: &Api,
 ) -> Result<
@@ -1434,7 +735,7 @@ async fn owned_pods(
         if status != 200 {
             return Err(format!(
                 "the Pod list answered {status}: {}",
-                status_message(&body)
+                api.status_message(&body)
             ));
         }
         if page == 0 {
@@ -1920,7 +1221,7 @@ impl PodAdapter {
             Err(error) => {
                 // No Pod exists yet; a policy stored before its answer was lost is removed.
                 self.api.remove(&policy_path, 0).await;
-                return Err(api_failed(&error));
+                return Err(api_failed(&error.to_string()));
             }
         };
         let Some(uid) = created["metadata"]["uid"]
@@ -1947,7 +1248,7 @@ impl PodAdapter {
             Err(error) => {
                 // An answer lost after the API stored the Pod looks like a refusal.
                 let trace = PodTrace::since(created["metadata"]["resourceVersion"].as_str());
-                return Err(self.abandon(&name, &error, trace).await);
+                return Err(self.abandon(&name, &error.to_string(), trace).await);
             }
         };
         // What a watch of a Pod gone before the run's task first reads it starts from.
@@ -2032,7 +1333,7 @@ async fn read_log(api: &Api, run: &PodRun) -> Result<(Vec<u8>, bool), String> {
         if attempt > 0 {
             tokio::time::sleep(POLL).await;
         }
-        match api.log(run.id.as_str(), run.output_limit).await {
+        match api.log(run.id.as_str(), CONTAINER, run.output_limit).await {
             Ok((200, body)) => {
                 let mut log = body.to_vec();
                 let truncated = log.len() > run.output_limit;
@@ -2044,9 +1345,12 @@ async fn read_log(api: &Api, run: &PodRun) -> Result<(Vec<u8>, bool), String> {
                 return Ok((Vec::new(), false));
             }
             Ok((status, body)) => {
-                failure = format!("the log read answered {status}: {}", status_message(&body));
+                failure = format!(
+                    "the log read answered {status}: {}",
+                    api.status_message(&body)
+                );
             }
-            Err(error) => failure = error,
+            Err(error) => failure = error.to_string(),
         }
     }
     Err(failure)
@@ -2116,16 +1420,13 @@ async fn request_stop(
             if first {
                 *run.stop.lock() = None;
             }
-            Err(error)
+            Err(error.into())
         }
     }
 }
 
 fn container(pod: &Value) -> &Value {
-    pod["status"]["containerStatuses"]
-        .as_array()
-        .and_then(|containers| containers.iter().find(|c| c["name"] == CONTAINER))
-        .map_or(&Value::Null, |container| &container["state"])
+    kubernetes::container_state(pod, CONTAINER)
 }
 
 fn terminal(pod: &Value) -> bool {
@@ -2231,7 +1532,7 @@ async fn monitor(
                 };
             }
             Err(_) => {
-                if answered.elapsed() >= api.timing.unreachable_limit {
+                if answered.elapsed() >= api.unreachable_limit {
                     break Phase::Unknown;
                 }
             }
@@ -2245,7 +1546,7 @@ async fn monitor(
     // container stopped; a removal not confirmed within the limit reports the run `Unknown` while
     // the adapter keeps trying. A container the API cannot show stopped keeps the policy and
     // reports the run `Unknown`: a Pod force-deleted from a lost node may still run.
-    let deadline = tokio::time::Instant::from_std(Instant::now() + api.timing.unreachable_limit);
+    let deadline = tokio::time::Instant::from_std(Instant::now() + api.unreachable_limit);
     let removed = tokio::time::timeout_at(
         deadline,
         api.remove_seen(&pod_path, KILL_GRACE_SECONDS, &mut trace),

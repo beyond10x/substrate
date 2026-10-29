@@ -1,0 +1,65 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.25.0:result:workspace-tree-read-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "file",
+              "directory",
+              "symlink"
+            ]
+          },
+          "path": {
+            "$ref": "../common.json#/$defs/relative-path"
+          },
+          "size": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "kind",
+          "size"
+        ],
+        "type": "object"
+      },
+      "maxItems": 1000,
+      "type": "array"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    },
+    "truncated": {
+      "description": "True when the tree is incomplete: the walk reached limit_items with entries left, or it omitted an entry it cannot name, as since 0.10.0. The x-b10x-omitted-entries response header tells the two apart: true without the header means the limit only (ADR 0043).",
+      "type": "boolean"
+    },
+    "workspace": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "workspace",
+    "items",
+    "truncated",
+    "observed_at"
+  ],
+  "title": "workspace-tree-read-v2 operation result",
+  "type": "object",
+  "x-b10x-response-headers": {
+    "x-b10x-omitted-entries": {
+      "description": "Present only when the walked part of the tree holds entries no item lists (a FIFO, socket or device, or a name that is not UTF-8): their count. When the walk reached limit_items with entries left it is a lower bound, because the walk did not reach the rest. Absent means none was omitted in the walked part. Hidden entries a request excludes and a .git entry excluded by policy are not counted (ADR 0043).",
+      "minimum": 1,
+      "type": "integer"
+    }
+  }
+}

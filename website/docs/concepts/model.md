@@ -8,8 +8,9 @@ description: The implemented subsystems, resource and event coverage, and the bo
 Substrate has an explicit wire contract and implemented resource lifecycles. An initial ESS specification now describes the accepted-operation ledger lifecycle; it does not generate the entire service or replace the wire contract. Its definitions live in Rust types, versioned contract sources, route handlers and durable
 store transitions. Conformance checks connect those definitions; they do not replace them.
 
-This page describes the Linux host implementation in release `0.7.3`, which advertises the
-`substrate-wire/0.16.0` development contract. See [status](../status.md) for availability and
+This page describes the Linux host implementation in release `0.15.0`, which advertises the
+`substrate-wire/0.24.0` development contract. Current source adds a Kubernetes namespace driver
+behind the same daemon. See [status](../status.md) for availability and
 [the route reference](../reference/contract.md) for addresses.
 
 ## Subsystems and ownership
@@ -20,6 +21,7 @@ This page describes the Linux host implementation in release `0.7.3`, which adve
 | Daemon and SQLite | Reserve operations, record observations and events |
 | Daemon and host driver | Dispatch work and observe its outcome |
 | Host driver and kernel | Probe capabilities and enforce process confinement |
+| Namespace driver and API server | Probe capabilities; serve workspaces on PersistentVolumeClaims and keeper Pods (in source) |
 
 See the [security boundary diagram](https://beyond10x.github.io/substrate/#architecture).
 
@@ -33,11 +35,13 @@ confinement; SQLite retains the evidence needed after a disconnect or restart.
 | `substrate-daemon` | Transport authentication, route dispatch, admission and lifecycle coordination |
 | `substrate-store` | Durable reservations, subject-scoped resources, stored answers, event sequence and recovery views |
 | `substrate-host` | Linux probes, workspace I/O, process confinement, quotas and measured outcomes |
+| `substrate-guarded` | Guarded workspace I/O and the exec environment rule, shared by every driver (in source) |
+| `substrate-kubernetes` / `substrate-executor` | The namespace driver and the executor its Pods run (in source) |
 | `b10x-substrate-sdk` / `substrate-mcp` | Client handles and recovery; bounded MCP tools, resources and session translation |
 | `xtask` / `substrate-contract-check` | Bundle rendering, schema and compatibility checks, and contract conformance checks |
 
 These are source responsibilities, not separately deployed services. The implementation is in the
-public [workspace crates](https://github.com/beyond10x/substrate/tree/0.7.3/crates).
+public [workspace crates](https://github.com/beyond10x/substrate/tree/0.15.0/crates).
 
 ## Model coverage
 
@@ -60,11 +64,12 @@ There is one important limit to event coverage: sessions have typed resources, r
 lifecycles, but the public event vocabulary does **not** have a separate `session.*` branch.
 Session transitions publish an operation-ledger projection such as `operation.terminal` or
 `operation.unknown`. Inspect the session resource for its state. This behavior is explicit in the
-[store's event projection](https://github.com/beyond10x/substrate/blob/0.7.3/crates/substrate-store/src/events.rs)
-and the [wire event validator](https://github.com/beyond10x/substrate/blob/0.7.3/crates/substrate-wire/src/lib.rs).
+[store's event projection](https://github.com/beyond10x/substrate/blob/0.15.0/crates/substrate-store/src/events.rs)
+and the [wire event validator](https://github.com/beyond10x/substrate/blob/0.15.0/crates/substrate-wire/src/lib.rs).
 
 Workloads, images, volumes and endpoints are future resource families, not implemented route
-families in this host slice. Docker and Kubernetes drivers are also absent. A general architecture
+families in this host slice. A Docker driver is absent, and the Kubernetes namespace driver in
+source refuses every exec start. A general architecture
 goal therefore does not imply complete served domain coverage.
 
 ## What is derived, and what is authored?
@@ -82,15 +87,15 @@ flowchart TB
 ```
 
 Bundle source is authored under
-[`xtask/bundle-source`](https://github.com/beyond10x/substrate/tree/0.7.3/xtask/bundle-source).
+[`xtask/bundle-source`](https://github.com/beyond10x/substrate/tree/0.15.0/xtask/bundle-source).
 The renderer produces deterministic bundle bytes and digest manifests, using the wire crate's
 controlled hashing and bounds bindings. The JSON schemas are **not generated from Rust types**.
 Released trees under
-[`contracts/substrate-wire`](https://github.com/beyond10x/substrate/tree/0.7.3/contracts/substrate-wire)
+[`contracts/substrate-wire`](https://github.com/beyond10x/substrate/tree/0.15.0/contracts/substrate-wire)
 remain immutable and must reproduce byte for byte with their own renderer.
 
 The daemon's command-line parser is authored with `clap` in
-[`main.rs`](https://github.com/beyond10x/substrate/blob/0.7.3/crates/substrate-daemon/src/main.rs).
+[`main.rs`](https://github.com/beyond10x/substrate/blob/0.15.0/crates/substrate-daemon/src/main.rs).
 HTTP handlers and store transitions are authored Rust too. Neither the CLI nor its release changes
 are generated from an ESS or Entity Runtime model. Contract checks prove specific relationships
 between declarations and behavior; they do not establish whole-system derivation.

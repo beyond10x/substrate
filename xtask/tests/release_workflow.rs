@@ -69,7 +69,7 @@ fn current_bundle() -> String {
 fn release_pins_the_current_development_bundle_explicitly() {
     let current = current_bundle();
     assert_eq!(
-        current, "0.24.0",
+        current, "0.25.0",
         "update this assertion with the successor"
     );
     assert!(
@@ -124,7 +124,8 @@ fn a_partial_release_can_recover_only_an_existing_tag_from_protected_main() {
     position("[ \"$EVENT_NAME\" = \"push\" ] && [ \"$source_sha\" != \"$EVENT_SHA\" ]");
     position("daemon-exists=true");
     position("mcp-exists=true");
-    assert_eq!(occurrences("from the same tagged source ${SOURCE_SHA}"), 2);
+    position("executor-exists=true");
+    assert_eq!(occurrences("from the same tagged source ${SOURCE_SHA}"), 3);
     assert!(occurrences("org.opencontainers.image.revision") >= 2);
 }
 
@@ -211,12 +212,33 @@ fn mcp_image_is_stdio_only_and_its_exact_binary_is_smoke_tested() {
 
 #[test]
 fn release_compiles_both_runtime_binaries_once() {
+    let builder = DOCKERFILE
+        .split_once(" AS builder\n")
+        .expect("the shared builder stage")
+        .1
+        .split_once("\nFROM ")
+        .expect("a stage after the builder")
+        .0;
+    assert_eq!(builder.matches("cargo build --locked --release").count(), 1);
+    assert!(builder.contains("-p b10x-substrate-daemon --bin substrate-daemon"));
+    assert!(builder.contains("-p b10x-substrate-mcp --bin substrate-mcp"));
+    let executor = DOCKERFILE
+        .split_once(" AS executor-builder\n")
+        .expect("the executor's own musl stage")
+        .1
+        .split_once("\nFROM ")
+        .expect("a stage after the executor builder")
+        .0;
     assert_eq!(
-        DOCKERFILE.matches("cargo build --locked --release").count(),
+        executor.matches("cargo build --locked --release").count(),
         1
     );
-    assert!(DOCKERFILE.contains("-p b10x-substrate-daemon --bin substrate-daemon"));
-    assert!(DOCKERFILE.contains("-p b10x-substrate-mcp --bin substrate-mcp"));
+    assert!(executor.contains("--target x86_64-unknown-linux-musl -p b10x-substrate-executor"));
+    assert!(!executor.contains("b10x-substrate-daemon"));
+    assert_eq!(
+        DOCKERFILE.matches("cargo build --locked --release").count(),
+        2
+    );
     assert!(DOCKERFILE.contains(" AS daemon\n"));
     assert!(DOCKERFILE.contains(" AS mcp\n"));
     position("--target daemon");
@@ -524,12 +546,18 @@ impl TaggedSource {
     }
 
     fn run_step(&self, step: &str, input: &str) -> (bool, String, String) {
+        self.run_step_on(step, input, "push")
+    }
+
+    /// As [`Self::run_step`], for the named workflow event.
+    fn run_step_on(&self, step: &str, input: &str, event: &str) -> (bool, String, String) {
         let output_file = self.directory.path().join("github-output");
         fs::write(&output_file, "").expect("GITHUB_OUTPUT");
         let output = std::process::Command::new("bash")
             .current_dir(self.directory.path())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("EVENT_NAME", event)
             .env("TAG", TAG)
             .env("INPUT_EVIDENCE", input)
             .env("SOURCE_SHA", &self.sha)
@@ -734,8 +762,8 @@ type LaneStep = (
     fn(&str) -> TaggedSource,
 );
 
-/// Both lane steps, each with a source it accepts and the trailer name it reads.
-fn lane_steps() -> [LaneStep; 2] {
+/// Every lane-record step, each with a source it accepts and the trailer name it reads.
+fn lane_steps() -> [LaneStep; 4] {
     [
         (
             CONFINEMENT_STEP,
@@ -746,7 +774,432 @@ fn lane_steps() -> [LaneStep; 2] {
         (QUOTA_STEP, "Quota-lane", "7", |message| {
             TaggedSource::new(&quota_source(7), message)
         }),
+        (CHART_RECORD_STEP, "Chart-lane", "10", |message| {
+            chart_record_source(&chart_scenarios(10), message)
+        }),
+        (NAMESPACE_STEP, "Namespace-lane", "8", |message| {
+            namespace_source(&namespace_observations(8), message)
+        }),
     ]
+}
+
+const CHART_RECORD_STEP: &str = "Require a recorded chart-lane run for this commit";
+const CHART_LANE_SOURCE: &str = "xtask/src/chart_cluster.rs";
+const CHART_YAML: &str = "deploy/helm/substrate/Chart.yaml";
+
+/// A chart-lane source declaring `count` scenarios in the one literal array the step counts.
+fn chart_scenarios(count: usize) -> String {
+    chart_scenarios_declaring(count, count)
+}
+
+fn chart_scenarios_declaring(length: usize, entries: usize) -> String {
+    let mut source = String::from("const RELEASE: &str = \"lane\";\n\n");
+    writeln!(source, "pub const SCENARIOS: [&str; {length}] = [").expect("String");
+    for entry in 0..entries {
+        writeln!(source, "    \"scenario {entry}\",").expect("String");
+    }
+    source.push_str("];\n\nconst OTHER: [&str; 1] = [\n    \"not a scenario\",\n];\n");
+    source
+}
+
+/// A tagged source carrying the chart and `scenarios` as the chart lane's source.
+fn chart_record_source(scenarios: &str, message: &str) -> TaggedSource {
+    TaggedSource::with_files(
+        &[
+            (CHART_LANE_SOURCE, scenarios),
+            (CHART_YAML, "apiVersion: v2\nname: b10x-substrate\n"),
+        ],
+        message,
+    )
+}
+
+fn chart_refused(source: &TaggedSource, input: &str, reason: &str) {
+    refused_by(CHART_RECORD_STEP, source, input, reason);
+}
+
+#[test]
+fn a_release_refuses_without_a_recorded_chart_lane_run() {
+    let require = position(CHART_RECORD_STEP);
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(require < announce);
+    assert!(position("Require a green chart-lane run for this commit") < require);
+    position("chart_evidence:");
+    position("Chart-lane:");
+    position("refused: no recorded chart lane run for");
+    position("## Chart lane");
+    position("cargo xtask chart-lane cluster --node-profiles");
+    assert!(WORKFLOW.contains("chart-evidence: ${{ steps.chart-record.outputs.evidence }}"));
+    assert!(WORKFLOW.contains("CHART_EVIDENCE: ${{ steps.chart-record.outputs.evidence }}"));
+    assert!(WORKFLOW.contains("CHART_EVIDENCE: ${{ needs.preflight.outputs.chart-evidence }}"));
+    assert_eq!(occurrences("| chart lane record |"), 2);
+    assert_eq!(occurrences("| local record |"), 1);
+}
+
+#[test]
+fn the_chart_lane_record_naming_the_tagged_commit_and_its_scenario_count_is_accepted() {
+    let source = chart_record_source(
+        &chart_scenarios(10),
+        &format!("release\n\nChart-lane: {{sha}} 10 {AT}\n"),
+    );
+    let (success, stderr, output) = source.run_step(CHART_RECORD_STEP, "");
+    assert!(success, "{stderr}");
+    assert_eq!(output.trim(), format!("evidence={} 10 {AT}", source.sha));
+
+    let untrailed = chart_record_source(&chart_scenarios(10), "release\n");
+    let (success, stderr, output) =
+        untrailed.run_step(CHART_RECORD_STEP, &format!("{} 10 {AT}", untrailed.sha));
+    assert!(success, "{stderr}");
+    assert!(output.contains("evidence="), "{output}");
+}
+
+#[test]
+fn the_chart_lane_record_is_refused_when_absent_or_only_another_lanes_record() {
+    let absent = chart_record_source(&chart_scenarios(10), "release\n");
+    chart_refused(&absent, "", "refused: no recorded chart lane run for");
+    let others = chart_record_source(
+        &chart_scenarios(10),
+        &format!("release\n\nQuota-lane: {{sha}} 7 {AT}\nConfinement-lane: {{sha}} 167 {AT}\n"),
+    );
+    chart_refused(&others, "", "refused: no recorded chart lane run for");
+}
+
+#[test]
+fn the_chart_lane_record_for_another_commit_is_refused() {
+    let source = chart_record_source(
+        &chart_scenarios(10),
+        &format!("release\n\nChart-lane: 0123456789abcdef0123456789abcdef01234567 10 {AT}\n"),
+    );
+    chart_refused(
+        &source,
+        "",
+        "records commit '0123456789abcdef0123456789abcdef01234567'",
+    );
+}
+
+#[test]
+fn the_chart_lane_record_with_another_scenario_count_is_refused() {
+    let fewer = chart_record_source(
+        &chart_scenarios(10),
+        &format!("release\n\nChart-lane: {{sha}} 6 {AT}\n"),
+    );
+    chart_refused(&fewer, "", "records 6 chart-lane scenarios;");
+    let word = chart_record_source(
+        &chart_scenarios(10),
+        &format!("release\n\nChart-lane: {{sha}} ten {AT}\n"),
+    );
+    chart_refused(
+        &word,
+        "",
+        "records 'ten' where a chart-lane scenario count belongs",
+    );
+    let none_declared = chart_record_source(
+        "const RELEASE: &str = \"lane\";\n",
+        &format!("release\n\nChart-lane: {{sha}} 0 {AT}\n"),
+    );
+    chart_refused(&none_declared, "", "declares no SCENARIOS array");
+    let disagreeing = chart_record_source(
+        &chart_scenarios_declaring(11, 10),
+        &format!("release\n\nChart-lane: {{sha}} 10 {AT}\n"),
+    );
+    chart_refused(&disagreeing, "", "declares no SCENARIOS array");
+    let two_per_line = chart_record_source(
+        &chart_scenarios(10).replace("    \"scenario 9\",\n", "    \"scenario 9\", \"x\",\n"),
+        &format!("release\n\nChart-lane: {{sha}} 10 {AT}\n"),
+    );
+    chart_refused(&two_per_line, "", "declares no SCENARIOS array");
+}
+
+#[test]
+fn the_chart_lane_record_with_a_timestamp_that_is_not_rfc_3339_utc_is_refused() {
+    for instant in ["2026-10-23", "2026-10-23T10:00:00+02:00", "yesterday"] {
+        let source = chart_record_source(
+            &chart_scenarios(10),
+            &format!("release\n\nChart-lane: {{sha}} 10 {instant}\n"),
+        );
+        chart_refused(&source, "", "where an RFC 3339 UTC instant belongs");
+    }
+}
+
+#[test]
+fn a_tagged_source_without_the_chart_needs_no_chart_lane_record() {
+    let source = TaggedSource::with_files(&[("README.md", "no chart\n")], "release\n");
+    let (success, stderr, output) = source.run_step(CHART_RECORD_STEP, "");
+    assert!(success, "{stderr}");
+    assert!(!output.contains("evidence="), "{output}");
+    let forged = TaggedSource::with_files(
+        &[("README.md", "no chart\n")],
+        &format!("release\n\nChart-lane: {{sha}} 10 {AT}\n"),
+    );
+    let (success, stderr, output) = forged.run_step(CHART_RECORD_STEP, "");
+    assert!(success, "{stderr}");
+    assert!(!output.contains("evidence="), "{output}");
+}
+
+#[test]
+fn the_chart_record_step_counts_the_repositorys_own_scenarios() {
+    // The step counts the entries of one literal array in the *tagged* source; assert that count
+    // against the file it parses, so a reformatting cannot make every release refuse with a
+    // message about the check rather than about the release.
+    let real =
+        fs::read_to_string(repository_root().join(CHART_LANE_SOURCE)).expect("chart lane source");
+    let start = real
+        .lines()
+        .position(|line| line.starts_with("pub const SCENARIOS: [&str; "))
+        .expect("the SCENARIOS array");
+    let declared = real
+        .lines()
+        .skip(start + 1)
+        .take_while(|line| *line != "];")
+        .filter(|line| line.starts_with("    \"") && line.ends_with("\","))
+        .count();
+    // At least the four execution-enabled scenarios the hosted lane reports absent.
+    assert!(
+        declared >= 4,
+        "{CHART_LANE_SOURCE} declares {declared} scenarios"
+    );
+    let source = chart_record_source(
+        &real,
+        &format!("release\n\nChart-lane: {{sha}} {declared} {AT}\n"),
+    );
+    let (success, stderr, output) = source.run_step(CHART_RECORD_STEP, "");
+    assert!(success, "{stderr}");
+    assert!(output.contains(&format!(" {declared} ")), "{output}");
+    let off_by_one = chart_record_source(
+        &real,
+        &format!("release\n\nChart-lane: {{sha}} {} {AT}\n", declared - 1),
+    );
+    chart_refused(&off_by_one, "", "chart-lane scenarios;");
+}
+
+const NAMESPACE_STEP: &str = "Require a recorded namespace-lane run for this commit";
+const NAMESPACE_LANE_SOURCE: &str = "xtask/src/namespace_lane.rs";
+
+/// A namespace-lane source declaring `count` observations on one line, as the lane does today.
+fn namespace_observations(count: usize) -> String {
+    namespace_observations_declaring(count, count)
+}
+
+fn namespace_observations_declaring(length: usize, entries: usize) -> String {
+    let names: Vec<String> = (1..=entries).map(|entry| format!("\"O{entry}\"")).collect();
+    format!(
+        "const TRAILER: &str = \"Namespace-lane\";\n\n/// The observations.\npub const \
+         OBSERVATIONS: [&str; {length}] = [{}];\n\nconst OTHER: [&str; 1] = [\"O99\"];\n",
+        names.join(", ")
+    )
+}
+
+fn namespace_source(observations: &str, message: &str) -> TaggedSource {
+    TaggedSource::with_files(&[(NAMESPACE_LANE_SOURCE, observations)], message)
+}
+
+fn namespace_refused(source: &TaggedSource, input: &str, reason: &str) {
+    refused_by(NAMESPACE_STEP, source, input, reason);
+}
+
+#[test]
+fn a_release_refuses_without_a_recorded_namespace_lane_run() {
+    let require = position(&format!(
+        "- name: {NAMESPACE_STEP}\n        id: namespace\n"
+    ));
+    let release_job = position("\n  release:\n");
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(require < release_job && release_job < announce);
+    position("namespace_evidence:");
+    position("Namespace-lane:");
+    position("refused: no recorded namespace lane run for");
+    position("## Namespace lane");
+    position("cargo xtask namespace-lane observe");
+    assert!(WORKFLOW.contains("namespace-evidence: ${{ steps.namespace.outputs.evidence }}"));
+    assert!(WORKFLOW.contains("namespace-lane: ${{ steps.namespace.outputs.lane }}"));
+    assert!(WORKFLOW.contains("NAMESPACE_EVIDENCE: ${{ steps.namespace.outputs.evidence }}"));
+    assert!(
+        WORKFLOW.contains("NAMESPACE_EVIDENCE: ${{ needs.preflight.outputs.namespace-evidence }}")
+    );
+    assert_eq!(occurrences("| namespace lane |"), 2);
+    // The release notes say what the record is, or why a recovered older tag carries none.
+    let notes = &WORKFLOW[position("- name: Compose release notes\n")..announce];
+    assert!(notes.contains("${NAMESPACE_EVIDENCE}"), "{notes}");
+    assert!(notes.contains("predates the namespace lane"), "{notes}");
+}
+
+#[test]
+fn the_namespace_lane_record_naming_the_tagged_commit_and_its_observation_count_is_accepted() {
+    let source = namespace_source(
+        &namespace_observations(8),
+        &format!("release\n\nNamespace-lane: {{sha}} 8 {AT}\n"),
+    );
+    let (success, stderr, output) = source.run_step(NAMESPACE_STEP, "");
+    assert!(success, "{stderr}");
+    assert_eq!(
+        output.trim(),
+        format!("lane=present\nevidence={} 8 {AT}", source.sha)
+    );
+
+    // A recovery dispatch carries the same record as an input, for a tag annotated without it.
+    let untrailed = namespace_source(&namespace_observations(8), "release\n");
+    let (success, stderr, output) = untrailed.run_step_on(
+        NAMESPACE_STEP,
+        &format!("{} 8 {AT}", untrailed.sha),
+        "workflow_dispatch",
+    );
+    assert!(success, "{stderr}");
+    assert!(output.contains("evidence="), "{output}");
+}
+
+#[test]
+fn the_namespace_lane_record_is_refused_when_absent_or_only_another_lanes_record() {
+    let absent = namespace_source(&namespace_observations(8), "release\n");
+    namespace_refused(&absent, "", "refused: no recorded namespace lane run for");
+    for other in ["Confinement-lane", "Quota-lane", "Chart-lane"] {
+        let source = namespace_source(
+            &namespace_observations(8),
+            &format!("release\n\n{other}: {{sha}} 8 {AT}\n"),
+        );
+        namespace_refused(&source, "", "refused: no recorded namespace lane run for");
+    }
+}
+
+#[test]
+fn the_namespace_lane_record_for_another_commit_is_refused() {
+    let source = namespace_source(
+        &namespace_observations(8),
+        &format!("release\n\nNamespace-lane: 0123456789abcdef0123456789abcdef01234567 8 {AT}\n"),
+    );
+    namespace_refused(
+        &source,
+        "",
+        "records commit '0123456789abcdef0123456789abcdef01234567'",
+    );
+}
+
+#[test]
+fn the_namespace_lane_record_with_another_observation_count_is_refused() {
+    let fewer = namespace_source(
+        &namespace_observations(8),
+        &format!("release\n\nNamespace-lane: {{sha}} 7 {AT}\n"),
+    );
+    namespace_refused(&fewer, "", "records 7 namespace-lane observations;");
+    let word = namespace_source(
+        &namespace_observations(8),
+        &format!("release\n\nNamespace-lane: {{sha}} eight {AT}\n"),
+    );
+    namespace_refused(
+        &word,
+        "",
+        "records 'eight' where a namespace-lane observation count belongs",
+    );
+    for (name, observations) in [
+        (
+            "no array",
+            "const TRAILER: &str = \"Namespace-lane\";\n".to_owned(),
+        ),
+        (
+            "a disagreeing length",
+            namespace_observations_declaring(9, 8),
+        ),
+        ("an empty array", namespace_observations(0)),
+        (
+            "two arrays",
+            namespace_observations(8) + &namespace_observations(8),
+        ),
+        (
+            "an entry that is not a quoted name",
+            namespace_observations(8).replace("\"O8\"", "O8"),
+        ),
+    ] {
+        let source = namespace_source(
+            &observations,
+            &format!("release\n\nNamespace-lane: {{sha}} 8 {AT}\n"),
+        );
+        let (success, stderr, output) = source.run_step(NAMESPACE_STEP, "");
+        assert!(!success, "{name}: accepted {output}");
+        assert!(
+            stderr.contains("declares no OBSERVATIONS array"),
+            "{name}: {stderr}"
+        );
+        assert!(!output.contains("evidence="), "{name}: {output}");
+    }
+}
+
+#[test]
+fn the_namespace_step_counts_an_observations_array_rustfmt_wrapped() {
+    // rustfmt packs short names several to a line once the declaration outgrows one line.
+    let wrapped = "pub const OBSERVATIONS: [&str; 12] = [\n    \"O1\", \"O2\", \"O3\", \"O4\", \
+                   \"O5\", \"O6\", \"O7\", \"O8\", \"O9\", \"O10\",\n    \"O11\", \"O12\",\n];\n";
+    let source = namespace_source(
+        wrapped,
+        &format!("release\n\nNamespace-lane: {{sha}} 12 {AT}\n"),
+    );
+    let (success, stderr, _) = source.run_step(NAMESPACE_STEP, "");
+    assert!(success, "{stderr}");
+    let off = namespace_source(
+        wrapped,
+        &format!("release\n\nNamespace-lane: {{sha}} 11 {AT}\n"),
+    );
+    namespace_refused(&off, "", "records 11 namespace-lane observations;");
+}
+
+#[test]
+fn the_namespace_lane_record_with_a_timestamp_that_is_not_rfc_3339_utc_is_refused() {
+    for instant in ["2026-10-23", "2026-10-23T10:00:00+02:00", "yesterday"] {
+        let source = namespace_source(
+            &namespace_observations(8),
+            &format!("release\n\nNamespace-lane: {{sha}} 8 {instant}\n"),
+        );
+        namespace_refused(&source, "", "where an RFC 3339 UTC instant belongs");
+    }
+}
+
+#[test]
+fn only_a_recovered_tag_that_predates_the_namespace_lane_needs_no_namespace_record() {
+    let older = TaggedSource::with_files(&[("README.md", "before the lane\n")], "release\n");
+    let (success, stderr, output) = older.run_step_on(NAMESPACE_STEP, "", "workflow_dispatch");
+    assert!(success, "{stderr}");
+    assert_eq!(output.trim(), "lane=absent");
+    // A tag push runs this workflow from the tag itself, so the lane is always there; its absence
+    // there is a broken source, not an older one, even with a record that names the commit.
+    let forged = TaggedSource::with_files(
+        &[("README.md", "before the lane\n")],
+        &format!("release\n\nNamespace-lane: {{sha}} 8 {AT}\n"),
+    );
+    namespace_refused(&forged, "", "has no xtask/src/namespace_lane.rs");
+}
+
+#[test]
+fn the_namespace_step_counts_the_repositorys_own_observations() {
+    // The step counts the entries of one literal array in the *tagged* source, the array
+    // `cargo xtask namespace-lane observe` records the length of; assert that count against the
+    // file it parses, so a reformatting cannot make every release refuse with a message about the
+    // check rather than about the release.
+    let real = fs::read_to_string(repository_root().join(NAMESPACE_LANE_SOURCE))
+        .expect("namespace lane source");
+    assert!(
+        real.contains("Decision::Record(OBSERVATIONS.len())"),
+        "the lane no longer records the length of OBSERVATIONS"
+    );
+    let declaration = real
+        .lines()
+        .find(|line| line.starts_with("pub const OBSERVATIONS: [&str; "))
+        .expect("the OBSERVATIONS array");
+    let declared = declaration
+        .trim_start_matches("pub const OBSERVATIONS: [&str; ")
+        .split(']')
+        .next()
+        .and_then(|length| length.parse::<usize>().ok())
+        .expect("a declared length");
+    assert!(declared >= 8, "{NAMESPACE_LANE_SOURCE} declares {declared}");
+    let source = namespace_source(
+        &real,
+        &format!("release\n\nNamespace-lane: {{sha}} {declared} {AT}\n"),
+    );
+    let (success, stderr, output) = source.run_step(NAMESPACE_STEP, "");
+    assert!(success, "{stderr}");
+    assert!(output.contains(&format!(" {declared} ")), "{output}");
+    let off_by_one = namespace_source(
+        &real,
+        &format!("release\n\nNamespace-lane: {{sha}} {} {AT}\n", declared - 1),
+    );
+    namespace_refused(&off_by_one, "", "namespace-lane observations;");
 }
 
 #[test]
@@ -1052,6 +1505,258 @@ fn only_a_recovered_tag_that_predates_the_binaries_stage_publishes_without_binar
         );
     }
     assert!(position(&format!("- name: {SOURCE_STEP}\n")) < position(BINARY_STEPS[0]));
+}
+
+const EXECUTOR_SOURCE_STEP: &str = "Find out whether the tagged source builds the executor image";
+const EXECUTOR_BUILD_STEP: &str = "Build, smoke-test and push the executor image once";
+const EXECUTOR_STEPS: [&str; 4] = [
+    EXECUTOR_BUILD_STEP,
+    "Sign the executor image keylessly",
+    "Verify the executor signature with the workflow identity",
+    "Prove the executor image is anonymously retrievable",
+];
+
+#[test]
+fn the_executor_image_is_pushed_once_signed_verified_and_read_back_before_announcement() {
+    position("EXECUTOR_IMAGE: ghcr.io/beyond10x/b10x-substrate-executor\n");
+    assert!(DOCKERFILE.contains("\nFROM scratch AS executor\n"));
+    let write_once = position("- name: Resolve write-once image version tags\n");
+    let source = position(&format!(
+        "- name: {EXECUTOR_SOURCE_STEP}\n        id: executor-source\n"
+    ));
+    let build = position(&format!(
+        "- name: {EXECUTOR_BUILD_STEP}\n        id: executor-build\n"
+    ));
+    let push = position("docker push \"${EXECUTOR_IMAGE}:${VERSION}\"");
+    let sign = position("cosign sign --yes \"${EXECUTOR_IMAGE}@${EXECUTOR_DIGEST}\"");
+    let verify = position("\"${EXECUTOR_IMAGE}@${EXECUTOR_DIGEST}\" > executor-cosign-verify.json");
+    let anonymous = position(
+        "DOCKER_CONFIG=\"$anonymous_config\" docker pull \"${EXECUTOR_IMAGE}@${EXECUTOR_DIGEST}\"",
+    );
+    let notes = position("- name: Compose release notes\n");
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(write_once < source && source < build && build < push);
+    assert!(push < sign && sign < verify && verify < anonymous);
+    assert!(anonymous < notes && notes < announce);
+    assert_eq!(
+        occurrences("docker push \"${EXECUTOR_IMAGE}:${VERSION}\""),
+        1
+    );
+
+    let state = step_script("Resolve write-once image version tags");
+    assert!(
+        state.contains("if docker manifest inspect \"${EXECUTOR_IMAGE}:${VERSION}\""),
+        "{state}"
+    );
+    assert!(state.contains("executor-exists=true"), "{state}");
+    assert!(
+        state.contains(
+            "refused: ${EXECUTOR_IMAGE}:${VERSION} already exists; initial release runs never reuse image tags."
+        ),
+        "{state}"
+    );
+
+    let build_script = step_script(EXECUTOR_BUILD_STEP);
+    for argument in [
+        "--target executor",
+        "--platform linux/amd64",
+        "--build-arg \"SOURCE_SHA=${SOURCE_SHA}\"",
+        "--provenance=false",
+        "--sbom=false",
+    ] {
+        assert!(build_script.contains(argument), "{build_script}");
+    }
+    for step in EXECUTOR_STEPS {
+        assert!(
+            step_block(step).contains("if: steps.executor-source.outputs.present == 'true'\n"),
+            "step {step:?} is not conditional on the tagged source building the executor"
+        );
+    }
+    let verify_script = step_script("Verify the executor signature with the workflow identity");
+    assert!(
+        verify_script.contains(
+            "identity=\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}\""
+        ),
+        "{verify_script}"
+    );
+    assert!(
+        verify_script
+            .contains("--certificate-oidc-issuer 'https://token.actions.githubusercontent.com'"),
+        "{verify_script}"
+    );
+
+    // Recorded beside the other digests: the release notes, the changelog stanza and the summary.
+    let composed = &WORKFLOW[notes..announce];
+    assert!(composed.contains("## Executor image"), "{composed}");
+    assert!(composed.contains("| digest | \\`${EXECUTOR_DIGEST}\\` |"));
+    assert!(composed.contains("--certificate-identity ${EXECUTOR_IDENTITY} \\\\"));
+    assert!(composed.contains("predates the Dockerfile's \\`executor\\` stage"));
+    position(
+        "Executor image: \\`${EXECUTOR_IMAGE}:${VERSION}\\` at \\`${EXECUTOR_DIGEST}\\`, keyless-signed",
+    );
+    position("| executor digest | \\`${EXECUTOR_DIGEST:-<not built>}\\` |");
+    position("| executor signature step | ${{ steps.executor-verify.outcome }} |");
+    position("| executor anonymous pull step | ${{ steps.executor-anonymous.outcome }} |");
+}
+
+fn executor_source(dockerfile: &str, event: &str) -> (bool, String, String) {
+    let directory = tempfile::tempdir().expect("temporary checkout");
+    fs::write(directory.path().join("Dockerfile"), dockerfile).expect("Dockerfile");
+    run_release_step(
+        EXECUTOR_SOURCE_STEP,
+        directory.path(),
+        &[("EVENT_NAME", event)],
+        None,
+    )
+}
+
+#[test]
+fn only_a_recovered_tag_that_predates_the_executor_stage_publishes_no_executor_image() {
+    let old = "FROM rust:1 AS builder\nFROM builder AS daemon\nFROM daemon AS release\n";
+    let (success, output, outputs) = executor_source(old, "workflow_dispatch");
+    assert!(success, "{output}");
+    assert_eq!(outputs.trim(), "present=false");
+    assert!(output.contains("no executor image"), "{output}");
+    let (success, output, outputs) = executor_source(old, "push");
+    assert!(!success, "{output}");
+    assert!(output.contains("refused:"), "{output}");
+    assert!(!outputs.contains("present="), "{outputs}");
+    for event in ["push", "workflow_dispatch"] {
+        let (success, output, outputs) = executor_source(DOCKERFILE, event);
+        assert!(success, "{output}");
+        assert_eq!(outputs.trim(), "present=true");
+    }
+}
+
+/// Runs the executor build step against stub `docker`, `readelf` and `git`: the image answers
+/// `handshake` to `version`, carries `revision` as its source label, and `readelf` reports an
+/// interpreter when `dynamic`. Returns the step's success, log, output and every push it made.
+fn executor_build(
+    exists: &str,
+    handshake: &str,
+    revision: &str,
+    dynamic: bool,
+) -> (bool, String, String, String) {
+    let root = tempfile::tempdir().expect("runner directory");
+    let tools = tempfile::tempdir().expect("stub tools");
+    stub(
+        tools.path(),
+        "docker",
+        &format!(
+            "case \"$1\" in\n  buildx) [ \"$2\" = imagetools ] && echo '\"sha256:{}\"'; exit 0 ;;\n  run) printf '%s\\n' \"$HANDSHAKE\" ;;\n  create) echo container ;;\n  cp) printf 'executor' > \"$3\" ;;\n  rm) ;;\n  pull) ;;\n  image) case \"$*\" in *Entrypoint*) printf '%s\\n' '[\"/substrate-executor\"]' ;; *) printf '%s\\n' \"$REVISION\" ;; esac ;;\n  manifest) exit 1 ;;\n  push) echo \"$2\" >> \"$PUSH_LOG\" ;;\n  *) exit 2 ;;\nesac",
+            "e".repeat(64)
+        ),
+    );
+    stub(
+        tools.path(),
+        "readelf",
+        "printf 'Program Headers:\\n  LOAD 0x0\\n'\n[ -n \"$DYNAMIC\" ] && printf '  INTERP 0x0\\n'\nexit 0",
+    );
+    stub(
+        tools.path(),
+        "git",
+        "case \"$1\" in\n  fetch) ;;\n  rev-parse) echo \"$SOURCE_SHA\" ;;\n  *) exit 2 ;;\nesac",
+    );
+    let push_log = root.path().join("push.log");
+    fs::write(&push_log, "").expect("push log");
+    let push_log_path = push_log.display().to_string();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let (success, log, output) = run_release_step(
+        EXECUTOR_BUILD_STEP,
+        root.path(),
+        &[
+            ("EXISTS", exists),
+            ("EXECUTOR_IMAGE", "ghcr.io/example/executor"),
+            ("VERSION", TAG),
+            ("SOURCE_SHA", sha),
+            ("HANDSHAKE", &handshake.replace("{sha}", sha)),
+            ("REVISION", &revision.replace("{sha}", sha)),
+            ("DYNAMIC", if dynamic { "1" } else { "" }),
+            ("PUSH_LOG", &push_log_path),
+        ],
+        Some(tools.path()),
+    );
+    (
+        success,
+        log,
+        output,
+        fs::read_to_string(&push_log).expect("push log"),
+    )
+}
+
+const HANDSHAKE: &str =
+    "{\"protocol\":\"substrate-executor/1\",\"version\":\"9.9.9\",\"source\":\"{sha}\"}";
+
+#[test]
+fn the_executor_image_is_pushed_only_when_its_handshake_names_this_release_and_it_is_static() {
+    let (success, log, output, pushes) = executor_build("false", HANDSHAKE, "{sha}", false);
+    assert!(success, "{log}");
+    assert_eq!(pushes.trim(), format!("ghcr.io/example/executor:{TAG}"));
+    assert_eq!(output.trim(), format!("digest=sha256:{}", "e".repeat(64)));
+
+    for (name, handshake, dynamic, reason) in [
+        (
+            "another release",
+            HANDSHAKE.replace("9.9.9", "9.9.8"),
+            false,
+            "answers the version handshake",
+        ),
+        (
+            "an unstamped source",
+            HANDSHAKE.replace("{sha}", "unknown"),
+            false,
+            "answers the version handshake",
+        ),
+        (
+            "another protocol",
+            HANDSHAKE.replace("substrate-executor/1", "substrate-executor/2"),
+            false,
+            "answers the version handshake",
+        ),
+        (
+            "a second line",
+            format!("{HANDSHAKE}\n{HANDSHAKE}"),
+            false,
+            "answers the version handshake",
+        ),
+        (
+            "a dynamic executable",
+            HANDSHAKE.to_owned(),
+            true,
+            "is not a static executable",
+        ),
+    ] {
+        let (success, log, output, pushes) = executor_build("false", &handshake, "{sha}", dynamic);
+        assert!(!success, "{name}: accepted {log}");
+        assert!(log.contains(reason), "{name}: {log}");
+        assert_eq!(pushes, "", "{name}: pushed before refusing");
+        assert!(!output.contains("digest="), "{name}: {output}");
+    }
+
+    // Anything but an explicit answer about the image tag is refused, not read as `false`.
+    for exists in ["", "yes"] {
+        let (success, log, _, pushes) = executor_build(exists, HANDSHAKE, "{sha}", false);
+        assert!(!success, "accepted EXISTS={exists:?}: {log}");
+        assert_eq!(pushes, "");
+    }
+}
+
+#[test]
+fn a_recovery_reuses_an_executor_image_only_from_the_same_source_and_release() {
+    let (success, log, output, pushes) = executor_build("true", HANDSHAKE, "{sha}", false);
+    assert!(success, "{log}");
+    assert!(log.contains("reusing ghcr.io/example/executor:9.9.9 from the same tagged source"));
+    assert_eq!(pushes, "", "a reused image is not pushed again");
+    assert!(output.contains("digest=sha256:"), "{output}");
+    let (success, log, _, pushes) = executor_build(
+        "true",
+        HANDSHAKE,
+        "fedcba9876543210fedcba9876543210fedcba98",
+        false,
+    );
+    assert!(!success, "{log}");
+    assert!(log.contains("names source fedcba98"), "{log}");
+    assert_eq!(pushes, "");
 }
 
 /// Runs the publication step with a fake `gh` and returns its success, output and the argument
@@ -2284,4 +2989,399 @@ fn security_review_an_existing_chart_tag_is_refused_before_anything_is_published
         refusal < first_publication,
         "a tag push whose chart tag already exists publishes the bundle and daemon image before it is refused"
     );
+}
+
+#[test]
+fn security_review_the_release_requires_a_green_namespace_lane_workflow_for_the_tagged_commit() {
+    // Design 34 § 10.4: "`release.yml` refuses a tag whose commit has no successful
+    // `namespace-lane.yml`, as it does for `gate.yml`". D182 moved the kind cluster part to a
+    // workstation record; the `static` job stays in `namespace-lane.yml`, `scripts/gate.sh` does
+    // not run `cargo xtask namespace-lane check`, and no ruleset requires that workflow on `main`.
+    let release_job = position("\n  release:\n");
+    let preflight = &WORKFLOW[..release_job];
+    let via_env = WORKFLOW.lines().find_map(|line| {
+        line.trim()
+            .strip_suffix(": namespace-lane.yml")
+            .map(str::to_owned)
+    });
+    let queried = preflight.contains("actions/workflows/namespace-lane.yml/runs")
+        || via_env
+            .as_ref()
+            .is_some_and(|key| preflight.contains(&format!("actions/workflows/${{{key}}}/runs")));
+    assert!(
+        queried,
+        "the preflight never reads namespace-lane.yml's conclusion for the tagged commit, so a tag \
+         whose namespace-lane static check is red is released"
+    );
+}
+
+/// The executor build step against stubs where the image's entrypoint answers `entrypoint_answer`
+/// and `/substrate-executor`, the path the driver runs (`EXECUTOR_PATH`), answers `binary_answer`.
+/// Returns the step's success, its log and every push it made.
+fn executor_build_with_entrypoint(
+    entrypoint_answer: &str,
+    binary_answer: &str,
+) -> (bool, String, String) {
+    let root = tempfile::tempdir().expect("runner directory");
+    let tools = tempfile::tempdir().expect("stub tools");
+    stub(
+        tools.path(),
+        "docker",
+        &format!(
+            "case \"$1\" in\n  buildx) [ \"$2\" = imagetools ] && echo '\"sha256:{}\"'; exit 0 ;;\n  run) explicit=\"\"; prev=\"\"; for a in \"$@\"; do [ \"$prev\" = --entrypoint ] && [ \"$a\" = /substrate-executor ] && explicit=1; prev=\"$a\"; done\n       if [ -n \"$explicit\" ]; then printf '%s\\n' \"$BINARY_ANSWER\"; else printf '%s\\n' \"$ENTRYPOINT_ANSWER\"; fi ;;\n  create) echo container ;;\n  cp) printf 'executor' > \"$3\" ;;\n  rm) ;;\n  pull) ;;\n  image) case \"$*\" in *Entrypoint*) printf '%s\\n' '[\"/wrapper\"]' ;; *) printf '%s\\n' \"$SOURCE_SHA\" ;; esac ;;\n  manifest) exit 1 ;;\n  push) echo \"$2\" >> \"$PUSH_LOG\" ;;\n  *) exit 2 ;;\nesac",
+            "e".repeat(64)
+        ),
+    );
+    stub(
+        tools.path(),
+        "readelf",
+        "printf 'Program Headers:\\n  LOAD 0x0\\n'\nexit 0",
+    );
+    stub(
+        tools.path(),
+        "git",
+        "case \"$1\" in\n  fetch) ;;\n  rev-parse) echo \"$SOURCE_SHA\" ;;\n  *) exit 2 ;;\nesac",
+    );
+    let push_log = root.path().join("push.log");
+    fs::write(&push_log, "").expect("push log");
+    let push_log_path = push_log.display().to_string();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let (success, log, _) = run_release_step(
+        EXECUTOR_BUILD_STEP,
+        root.path(),
+        &[
+            ("EXISTS", "false"),
+            ("EXECUTOR_IMAGE", "ghcr.io/example/executor"),
+            ("VERSION", TAG),
+            ("SOURCE_SHA", sha),
+            (
+                "ENTRYPOINT_ANSWER",
+                &entrypoint_answer.replace("{sha}", sha),
+            ),
+            ("BINARY_ANSWER", &binary_answer.replace("{sha}", sha)),
+            ("PUSH_LOG", &push_log_path),
+        ],
+        Some(tools.path()),
+    );
+    (
+        success,
+        log,
+        fs::read_to_string(&push_log).expect("push log"),
+    )
+}
+
+#[test]
+fn security_review_the_executor_handshake_is_answered_by_the_binary_the_driver_runs() {
+    // The driver runs `/substrate-executor` by path (`EXECUTOR_PATH`, the keeper's command and
+    // every `pods/exec` call), never the image's entrypoint. The step's handshake runs the
+    // entrypoint and its static check reads `/substrate-executor`, so an image whose entrypoint
+    // is another program answers for a binary nobody checked the version of.
+    let (success, log, pushes) =
+        executor_build_with_entrypoint(HANDSHAKE, &HANDSHAKE.replace("9.9.9", "9.9.8"));
+    assert!(
+        !success && pushes.is_empty(),
+        "an executor image whose entrypoint answers the handshake while /substrate-executor is \
+         another release was pushed:\npushes: {pushes}\nlog: {log}"
+    );
+}
+
+#[test]
+fn security_review_a_tag_with_a_second_empty_namespace_lane_line_is_refused() {
+    // "a release records exactly one": the count of lines runs after command substitution has
+    // stripped trailing newlines, so a second, empty `Namespace-lane:` line after the record is
+    // not counted.
+    let source = namespace_source(
+        &namespace_observations(8),
+        &format!("release\n\nNamespace-lane: {{sha}} 8 {AT}\nNamespace-lane:\n"),
+    );
+    namespace_refused(&source, "", "Namespace-lane lines");
+}
+
+#[test]
+fn security_review_the_executor_binary_refusals_run_before_any_image_tag_moves() {
+    // "Every binary refusal runs before any image tag is mutated." The executor's handshake and
+    // static-executable refusals run after the daemon and MCP tags are pushed, so a refused
+    // executor leaves two unsigned write-once tags that only a recovery dispatch can go on from.
+    let executor_check = position("          check_executor\n");
+    let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
+    let mcp_push = position("docker push \"${MCP_IMAGE}:${VERSION}\"");
+    assert!(
+        executor_check < daemon_push && executor_check < mcp_push,
+        "the executor's binary refusals run at byte {executor_check}, after the daemon push at \
+         {daemon_push} and the MCP push at {mcp_push}"
+    );
+}
+
+#[test]
+fn security_review_the_namespace_lane_record_resists_carrier_and_shape_substitutions() {
+    let observations = namespace_observations(8);
+
+    // A record in the tagged commit's message, not the tag's, is not read.
+    let directory = tempfile::tempdir().expect("temporary repository");
+    let root = directory.path();
+    git(root, &["init", "--quiet"]);
+    let file = root.join(NAMESPACE_LANE_SOURCE);
+    fs::create_dir_all(file.parent().expect("parent")).expect("source tree");
+    fs::write(&file, &observations).expect("source");
+    git(root, &["add", "--all"]);
+    git(root, &["commit", "--quiet", "-m", "first"]);
+    let first = git(root, &["rev-parse", "HEAD"]);
+    git(
+        root,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            &format!("second\n\nNamespace-lane: {first} 8 {AT}\n"),
+        ],
+    );
+    let sha = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["tag", "--annotate", TAG, "-m", "release\n"]);
+    let commit_carrier = TaggedSource { directory, sha };
+    namespace_refused(
+        &commit_carrier,
+        "",
+        "refused: no recorded namespace lane run for",
+    );
+
+    // A record inside another line, or indented, is not a record.
+    for message in [
+        format!("release\n\nNote: Namespace-lane: {{sha}} 8 {AT}\n"),
+        format!("release\n\n  Namespace-lane: {{sha}} 8 {AT}\n"),
+        format!("release\n\nnamespace-lane: {{sha}} 8 {AT}\n"),
+    ] {
+        let source = namespace_source(&observations, &message);
+        namespace_refused(&source, "", "refused: no recorded namespace lane run for");
+    }
+
+    // A sha prefix or another spelling of the commit is not the commit.
+    let source = namespace_source(&observations, "release\n");
+    for claimed in [source.sha[..12].to_owned(), source.sha.to_uppercase()] {
+        let (success, stderr, output) = source.run_step_on(
+            NAMESPACE_STEP,
+            &format!("{claimed} 8 {AT}"),
+            "workflow_dispatch",
+        );
+        assert!(!success, "accepted {claimed}: {output}");
+        assert!(stderr.contains("records commit"), "{stderr}");
+    }
+    let (success, stderr, output) = source.run_step_on(
+        NAMESPACE_STEP,
+        &format!("{} 08 {AT}", source.sha),
+        "workflow_dispatch",
+    );
+    assert!(!success, "accepted a zero-padded count: {output}");
+    assert!(stderr.contains("namespace-lane observations;"), "{stderr}");
+
+    // Trailing whitespace is trimmed and never published.
+    let padded = namespace_source(
+        &observations,
+        &format!("release\n\nNamespace-lane: {{sha}} 8 {AT} \t \n"),
+    );
+    let (success, stderr, output) = padded.run_step(NAMESPACE_STEP, "");
+    assert!(success, "{stderr}");
+    assert_eq!(
+        output.trim(),
+        format!("lane=present\nevidence={} 8 {AT}", padded.sha)
+    );
+
+    // A commented-out entry or a commented-out second declaration does not move the count.
+    let commented_entry = observations.replace("\"O8\"];", "\"O8\",\n    // \"O9\",\n];");
+    let source = namespace_source(
+        &commented_entry,
+        &format!("release\n\nNamespace-lane: {{sha}} 9 {AT}\n"),
+    );
+    let (success, _, output) = source.run_step(NAMESPACE_STEP, "");
+    assert!(!success, "counted a commented-out entry: {output}");
+    let commented_declaration = format!(
+        "// pub const OBSERVATIONS: [&str; 9] = [\"O1\", \"O2\", \"O3\", \"O4\", \"O5\", \"O6\", \
+         \"O7\", \"O8\", \"O9\"];\n{observations}"
+    );
+    for (claimed, accepted) in [(9, false), (8, true)] {
+        let source = namespace_source(
+            &commented_declaration,
+            &format!("release\n\nNamespace-lane: {{sha}} {claimed} {AT}\n"),
+        );
+        let (success, stderr, _) = source.run_step(NAMESPACE_STEP, "");
+        assert_eq!(success, accepted, "claimed {claimed}: {stderr}");
+    }
+}
+
+const NAMESPACE_WORKFLOW_STEP: &str = "Require a green namespace-lane run for this commit";
+const NAMESPACE_WORKFLOW_SOURCE: &str = ".github/workflows/namespace-lane.yml";
+
+/// Runs the namespace-lane workflow preflight step offline against the routing `gh` stub; the
+/// tagged source either carries `namespace-lane.yml` or predates it. Returns the step's success,
+/// log, output and the API paths it read.
+fn namespace_workflow(
+    with_workflow: bool,
+    event: &str,
+    runs: &str,
+) -> (bool, String, String, String) {
+    let files: &[(&str, &str)] = if with_workflow {
+        &[(NAMESPACE_WORKFLOW_SOURCE, "name: Namespace lane\n")]
+    } else {
+        &[("README.md", "a source before the namespace lane workflow\n")]
+    };
+    let source = TaggedSource::with_files(files, "release {sha}");
+    let tools = routing_stub_tools();
+    let gh_log = tools.path().join("gh.log");
+    fs::write(&gh_log, "").expect("gh log");
+    let gh_log_path = gh_log.display().to_string();
+    let (success, log, output) = run_release_step(
+        NAMESPACE_WORKFLOW_STEP,
+        source.directory.path(),
+        &[
+            ("SOURCE_SHA", &source.sha),
+            ("EVENT_NAME", event),
+            ("STUB_JSON", runs),
+            ("STUB_JOBS", "{\"jobs\":[]}"),
+            ("STUB_ANNOTATIONS", "[]"),
+            ("GH_LOG", &gh_log_path),
+            ("NAMESPACE_WORKFLOW", "namespace-lane.yml"),
+            ("GITHUB_REPOSITORY", "example/substrate"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ],
+        Some(tools.path()),
+    );
+    (
+        success,
+        log,
+        output,
+        fs::read_to_string(&gh_log).expect("gh log"),
+    )
+}
+
+#[test]
+fn a_tag_with_a_green_namespace_lane_workflow_run_is_accepted_and_its_run_recorded() {
+    let (success, log, output, paths) = namespace_workflow(
+        true,
+        "push",
+        &main_runs(&[("completed", "failure"), ("completed", "success")]),
+    );
+    assert!(success, "{log}");
+    assert_eq!(
+        output,
+        "workflow=present\nrun-url=https://example.invalid/runs/1\n"
+    );
+    assert!(
+        paths.starts_with(
+            "repos/example/substrate/actions/workflows/namespace-lane.yml/runs?head_sha="
+        ),
+        "{paths}"
+    );
+    assert!(position(&format!("- name: {NAMESPACE_WORKFLOW_STEP}\n")) < position("\n  release:\n"));
+    assert!(WORKFLOW.contains("  NAMESPACE_WORKFLOW: namespace-lane.yml\n"));
+}
+
+#[test]
+fn a_tag_whose_namespace_lane_workflow_runs_all_failed_or_are_absent_is_refused() {
+    for runs in [
+        main_runs(&[("completed", "failure"), ("completed", "cancelled")]),
+        json_runs(&[("workflow_dispatch", "main", "someone/substrate")]),
+        json_runs(&[("push", "story/x", "example/substrate")]),
+        main_runs(&[]),
+    ] {
+        let (success, log, output, _) = namespace_workflow(true, "push", &runs);
+        assert!(!success, "accepted {runs}: {log}");
+        assert!(
+            log.contains("refused:") || log.contains("stub sleep"),
+            "{log}"
+        );
+        assert!(!output.contains("run-url="), "{output}");
+    }
+}
+
+#[test]
+fn a_tag_push_of_a_source_without_the_namespace_lane_workflow_is_refused() {
+    let (success, log, output, _) =
+        namespace_workflow(false, "push", &main_runs(&[("completed", "success")]));
+    assert!(!success, "{log}");
+    assert!(
+        log.contains("has no .github/workflows/namespace-lane.yml"),
+        "{log}"
+    );
+    assert!(!output.contains("workflow="), "{output}");
+}
+
+#[test]
+fn a_recovery_of_a_tag_that_predates_the_namespace_lane_workflow_needs_no_run_and_says_so() {
+    let (success, log, output, paths) = namespace_workflow(false, "workflow_dispatch", "");
+    assert!(success, "{log}");
+    assert_eq!(output, "workflow=absent\n");
+    assert_eq!(
+        paths, "",
+        "a source without the workflow has no run to read"
+    );
+    assert!(WORKFLOW.contains(
+        "      namespace-lane-workflow: ${{ steps.namespace-workflow.outputs.workflow }}\n"
+    ));
+    assert!(WORKFLOW.contains(
+        "      namespace-lane-run-url: ${{ steps.namespace-workflow.outputs.run-url }}\n"
+    ));
+    let notes = step_block("Compose release notes");
+    assert!(
+        notes.contains("\\`.github/workflows/namespace-lane.yml\\` concluded \\`success\\` for it: ${NAMESPACE_LANE_RUN_URL}"),
+        "{notes}"
+    );
+    assert!(
+        notes.contains("predates \\`.github/workflows/namespace-lane.yml\\`"),
+        "{notes}"
+    );
+    for summary in ["Preflight summary", "Release summary"] {
+        assert!(
+            step_block(summary).contains("| namespace lane run |"),
+            "{summary} omits the namespace-lane workflow run"
+        );
+    }
+}
+
+#[test]
+fn a_tag_with_a_second_empty_lane_line_is_refused_by_every_lane_step() {
+    // Command substitution strips trailing newlines, so a count taken from the extracted record
+    // misses an empty trailer after it. Every lane step counts the trailers in the tag itself.
+    for (step, trailer, count, make) in lane_steps() {
+        for message in [
+            format!("release\n\n{trailer}: {{sha}} {count} {AT}\n{trailer}:\n"),
+            format!("release\n\n{trailer}: {{sha}} {count} {AT}\n{trailer}:   \n"),
+            format!("release\n\n{trailer}:\n{trailer}: {{sha}} {count} {AT}\n"),
+        ] {
+            let source = make(&message);
+            refused_by(step, &source, "", &format!("carries 2 {trailer} lines"));
+        }
+    }
+}
+
+#[test]
+fn an_executor_image_whose_entrypoint_is_not_the_executor_is_refused() {
+    // The binary at /substrate-executor answers the handshake correctly; the image's entrypoint
+    // is another program, which a caller that runs the image rather than the path would reach.
+    let (success, log, pushes) = executor_build_with_entrypoint(HANDSHAKE, HANDSHAKE);
+    assert!(!success, "{log}");
+    assert!(log.contains("entrypoint"), "{log}");
+    assert_eq!(pushes, "", "pushed before refusing");
+    let script = step_script(EXECUTOR_BUILD_STEP);
+    assert!(
+        script
+            .contains("--entrypoint /substrate-executor \"${EXECUTOR_IMAGE}:${VERSION}\" version"),
+        "{script}"
+    );
+    assert!(script.contains("{{json .Config.Entrypoint}}"), "{script}");
+    // The refusal must accept the image the Dockerfile builds.
+    let executor_stage = &DOCKERFILE[DOCKERFILE
+        .find("\nFROM scratch AS executor\n")
+        .expect("executor stage")..];
+    assert!(
+        executor_stage.contains("\nENTRYPOINT [\"/substrate-executor\"]\n"),
+        "{executor_stage}"
+    );
+}
+
+#[test]
+fn the_header_comment_enumerates_no_images_or_refusals_that_can_go_stale() {
+    let header = &WORKFLOW[..position("\nname: Release\n")];
+    assert!(!header.contains("ghcr.io/"), "{header}");
+    assert!(!header.contains("What this workflow refuses"), "{header}");
 }

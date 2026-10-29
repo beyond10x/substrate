@@ -14,7 +14,7 @@
     "page:concepts/boundary": {
       "reading_load.max": {
         "tolerance": 0,
-        "value": 44.0
+        "value": 41.0
       },
       "reading_load.median": {
         "tolerance": 0,
@@ -89,7 +89,7 @@
       },
       "reading_load.median": {
         "tolerance": 0,
-        "value": 7.0
+        "value": 6.0
       }
     },
     "page:guides/mcp-adapter": {

@@ -7,6 +7,11 @@ use b10x_substrate_sdk::{
     RefusalClass, SdkError, TextMatchPolicy,
 };
 
+#[path = "../../../test-support/readiness.rs"]
+mod readiness;
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
 fn daemon_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("SUBSTRATE_TEST_DAEMON") {
         return path.into();
@@ -23,12 +28,13 @@ fn daemon_binary() -> PathBuf {
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // One clean-room SDK journey proves ordering across every API family.
 async fn managed_external_daemon_serves_the_typed_workspace_journey() {
-    let data = tempfile::tempdir().expect("temporary parent");
+    let data = unix_socket::tempdir("owned/substrate.sock");
     let root = data.path().join("owned");
     let mut managed = ManagedDaemon::builder()
         .data_dir(&root)
         .deployment("sdk_test")
         .external_binary(daemon_binary())
+        .startup_timeout(readiness::DAEMON_READINESS)
         .start()
         .await
         .expect("managed daemon starts");
@@ -233,12 +239,13 @@ async fn delegated_external_daemon_serves_pty_metrics_and_cleans_the_process_tre
         eprintln!("delegated SDK lane absent: SUBSTRATE_VECTORS_CGROUP_ROOT is not set");
         return;
     };
-    let data = tempfile::tempdir().expect("temporary parent");
+    let data = unix_socket::tempdir("delegated-owned/substrate.sock");
     let root = data.path().join("delegated-owned");
     let mut managed = ManagedDaemon::builder()
         .data_dir(&root)
         .deployment("sdk_delegated_test")
         .external_binary(daemon_binary())
+        .startup_timeout(readiness::DAEMON_READINESS)
         .cgroup_root(&cgroup_root)
         .start()
         .await
@@ -413,12 +420,13 @@ async fn delegated_external_daemon_serves_pty_metrics_and_cleans_the_process_tre
 /// `truncated: true` for the omission, as a consumer that reads it as "incomplete" relies on.
 #[tokio::test]
 async fn managed_listings_answer_the_omitted_entry_count() {
-    let data = tempfile::tempdir().expect("temporary parent");
+    let data = unix_socket::tempdir("owned/substrate.sock");
     let root = data.path().join("owned");
     let mut managed = ManagedDaemon::builder()
         .data_dir(&root)
         .deployment("sdk_omitted")
         .external_binary(daemon_binary())
+        .startup_timeout(readiness::DAEMON_READINESS)
         .start()
         .await
         .expect("managed daemon starts");
@@ -493,7 +501,7 @@ async fn managed_listings_answer_the_omitted_entry_count() {
 #[cfg(feature = "linked-daemon")]
 #[tokio::test]
 async fn linked_mode_reexecutes_a_separate_process() {
-    let data = tempfile::tempdir().expect("temporary parent");
+    let data = unix_socket::tempdir("substrate.sock");
     let status = tokio::process::Command::new(env!("CARGO_BIN_EXE_sdk-linked-fixture"))
         .arg(data.path())
         .status()

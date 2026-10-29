@@ -1,0 +1,56 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "annotations": {
+      "b10x-substrate/operation": "sha256:f39dac6cbaba535e2c207cd0cd8f154974223c848f727f98b3564cea569b41cf"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "b10x-substrate",
+      "b10x-substrate/deployment": "3ezejz5qqey66ehnufvaof3cor",
+      "b10x-substrate/probe": "abcdefghijklmnop",
+      "b10x-substrate/role": "pod"
+    },
+    "name": "sbx-pr-abcdefghijklmnop-pod",
+    "namespace": "substrate-namespace-lane"
+  },
+  "spec": {
+    "activeDeadlineSeconds": 600,
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "command": [
+          "sh",
+          "-c",
+          "true"
+        ],
+        "image": "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "run",
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "32Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "32Mi"
+          }
+        },
+        "securityContext": {
+          "privileged": true
+        }
+      }
+    ],
+    "restartPolicy": "Never",
+    "securityContext": {
+      "runAsGroup": 65532,
+      "runAsNonRoot": true,
+      "runAsUser": 65532,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "terminationGracePeriodSeconds": 1
+  }
+}

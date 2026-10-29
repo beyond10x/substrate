@@ -10,7 +10,16 @@ fn mcp_binary() -> std::path::PathBuf {
         .map_or_else(|| env!("CARGO_BIN_EXE_substrate-mcp").into(), Into::into)
 }
 
-fn mcp_command() -> Command {
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
+/// The `TMPDIR` a native adapter is started with: its daemon binds
+/// `$TMPDIR/b10x-substrate-XXXXXX/substrate.sock`, so the directory is sized for that socket.
+fn adapter_tmpdir() -> tempfile::TempDir {
+    unix_socket::tempdir("b10x-substrate-XXXXXX/substrate.sock")
+}
+
+fn mcp_command(tmpdir: &std::path::Path) -> Command {
     if let Some(image) = std::env::var_os("SUBSTRATE_MCP_DOCKER_IMAGE") {
         let mut command = Command::new("docker");
         command.args([
@@ -28,7 +37,9 @@ fn mcp_command() -> Command {
         command.arg(image);
         command
     } else {
-        Command::new(mcp_binary())
+        let mut command = Command::new(mcp_binary());
+        command.env("TMPDIR", tmpdir);
+        command
     }
 }
 
@@ -36,6 +47,7 @@ struct Session {
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     next_id: u64,
+    _tmpdir: tempfile::TempDir,
 }
 
 async fn initialized_native_session() -> Option<(tokio::process::Child, Session)> {
@@ -44,7 +56,9 @@ async fn initialized_native_session() -> Option<(tokio::process::Child, Session)
     {
         return None;
     }
+    let tmpdir = adapter_tmpdir();
     let mut child = Command::new(mcp_binary())
+        .env("TMPDIR", tmpdir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -55,6 +69,7 @@ async fn initialized_native_session() -> Option<(tokio::process::Child, Session)
         input: child.stdin.take().expect("MCP stdin"),
         output: BufReader::new(child.stdout.take().expect("MCP stdout")),
         next_id: 1,
+        _tmpdir: tmpdir,
     };
     let initialized = session
         .request(
@@ -180,7 +195,8 @@ async fn abrupt_parent_death_still_ends_the_linked_daemon() {
 #[allow(clippy::too_many_lines)] // One shipped-binary journey proves state and operation ordering.
 async fn stdio_adapter_serves_the_portable_or_delegated_clean_room_journey() {
     let delegated_root = std::env::var_os("SUBSTRATE_MCP_CGROUP_ROOT");
-    let mut child = mcp_command()
+    let tmpdir = adapter_tmpdir();
+    let mut child = mcp_command(tmpdir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -191,6 +207,7 @@ async fn stdio_adapter_serves_the_portable_or_delegated_clean_room_journey() {
         input: child.stdin.take().expect("MCP stdin"),
         output: BufReader::new(child.stdout.take().expect("MCP stdout")),
         next_id: 1,
+        _tmpdir: tmpdir,
     };
     let initialized = session
         .request(

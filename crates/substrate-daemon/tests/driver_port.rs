@@ -109,6 +109,35 @@ const PORT_ITEMS: &[(&str, &str)] = &[
          (crates/substrate-host/src/lib.rs:584)",
     ),
     (
+        "BackendLedger",
+        "the backend ledger port of design 34 § 4, which the daemon implements over the store \
+         (crates/substrate-host/src/backend.rs:72)",
+    ),
+    (
+        "BackendKind",
+        "the parameter of Driver::backend_names and BackendLedger::recorded \
+         (crates/substrate-host/src/lib.rs:527, crates/substrate-host/src/backend.rs:17, :78)",
+    ),
+    (
+        "BackendName",
+        "returned by Driver::backend_names and the parameter of BackendLedger::reserve_probe \
+         (crates/substrate-host/src/lib.rs:527, crates/substrate-host/src/backend.rs:33, :99)",
+    ),
+    (
+        "BackendRole",
+        "the public field BackendName::role and BackendRecord::role \
+         (crates/substrate-host/src/backend.rs:25, :33, :40)",
+    ),
+    (
+        "BackendRecord",
+        "returned by BackendLedger::recorded and BackendLedger::unsettled \
+         (crates/substrate-host/src/backend.rs:40, :78, :108)",
+    ),
+    (
+        "UidBinding",
+        "returned by BackendLedger::bind_uid (crates/substrate-host/src/backend.rs:58, :85)",
+    ),
+    (
         "ProcessSupervisor",
         "the host-process port trait itself (crates/substrate-host/src/host_process/mod.rs:1210)",
     ),

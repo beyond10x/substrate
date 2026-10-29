@@ -1,0 +1,20 @@
+{
+  "apiVersion": "rbac.authorization.k8s.io/v1",
+  "kind": "RoleBinding",
+  "metadata": {
+    "name": "substrate-driver",
+    "namespace": "substrate-namespace-lane"
+  },
+  "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "Role",
+    "name": "substrate-driver"
+  },
+  "subjects": [
+    {
+      "kind": "ServiceAccount",
+      "name": "substrate-driver",
+      "namespace": "substrate-namespace-lane"
+    }
+  ]
+}

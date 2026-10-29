@@ -15,6 +15,11 @@ use std::sync::OnceLock;
 use b10x_substrate_sdk::ManagedDaemon;
 use serde_json::Value;
 
+#[path = "../../../test-support/readiness.rs"]
+mod readiness;
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
 fn daemon_binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY
@@ -56,12 +61,13 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
-    let data = tempfile::tempdir().expect("temporary parent");
+    let data = unix_socket::tempdir("owned/substrate.sock");
     let root = data.path().join("owned");
     let mut builder = ManagedDaemon::builder()
         .data_dir(&root)
         .deployment("cli_adversary")
-        .external_binary(daemon_binary());
+        .external_binary(daemon_binary())
+        .startup_timeout(readiness::DAEMON_READINESS);
     if let Some(cgroup) = std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT") {
         builder = builder.cgroup_root(cgroup);
     }

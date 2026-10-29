@@ -160,14 +160,21 @@ pub(super) async fn exec_start(
         .iter()
         .map(|binding| binding.workspace.clone())
         .collect();
+    let backend = crate::backend_ledger::exec_reservation(
+        app.driver.as_ref(),
+        &id,
+        &scope.subject,
+        &operation,
+    );
     if let Some(response) = reservation_response(
         app.store_io(|| {
-            app.store.reserve_exec_start_binding(
+            app.store.reserve_exec_start_with_backend(
                 &new,
                 &provisional,
                 lease.as_ref(),
                 workspace_clock.as_ref(),
                 &bound,
+                &backend,
             )
         })
         .await,

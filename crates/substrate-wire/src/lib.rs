@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.24.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.25.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "1570cc116e9b38c105607fefde705416b0ac2e199eb157a004c1e9b63d205d34";
+    "853d7365a56f0d8dc97fe5feb87ce57285a34bbf7a0f6eb05616d6010fc4fc00";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -2450,7 +2450,7 @@ fn root_name_unchecked<'de, D: serde::Deserializer<'de>>(
 }
 
 // The root-name set and the workspace origin are generated from spec/workspaces, not transcribed
-// (ADR 0035). The ESS 0.75.0 decoder checks the root name's alphabet and length bound but not
+// (ADR 0035). The ESS 0.76.0 decoder checks the root name's alphabet and length bound but not
 // the leading-`-` rule, so [`is_root_name`] stays the full predicate (spec/workspaces/README.md).
 #[allow(dead_code, clippy::all, clippy::pedantic)]
 #[rustfmt::skip]
@@ -3501,7 +3501,68 @@ pub struct CapabilitySnapshot {
 pub enum HostDriverKind {
     #[serde(rename = "host")]
     Host,
+    /// One claimed Kubernetes namespace: workspaces on PVCs, execs as Pods (ADR 0047 N7).
+    /// Provenance only: a client chooses by facts, never by this word (invariant 4).
+    #[serde(rename = "kubernetes")]
+    Kubernetes,
 }
+
+impl HostDriverKind {
+    /// Every variant, in declaration order: exactly the words the bundle's `driver` enum
+    /// publishes from `0.25.0` on.
+    pub const ALL: [Self; 2] = [Self::Host, Self::Kubernetes];
+}
+
+/// The fact a driver publishes once a connection from inside a run was observed to fail (ADR 0047
+/// N5). Mechanism-neutral, beside the Linux `exec.no-egress`, whose meaning it does not change.
+pub const CONFINEMENT_NO_EGRESS_FACT: &str = "confinement.no-egress";
+/// An exec start with an inline capsule on a driver without the `exec.inline-capsule` fact
+/// (ADR 0047 decision 12).
+pub const EXEC_INLINE_CAPSULE_UNSERVED: &str = "exec.inline-capsule-unserved";
+/// A signal outside the driver's published `exec.signals` (design 34 § 14 Q3 A).
+pub const EXEC_SIGNAL_UNSERVED: &str = "exec.signal-unserved";
+/// `workspace.adopt` on a driver that adopts no operator directory (design 34 § 14 Q3 A).
+pub const WORKSPACE_ADOPT_UNSERVED: &str = "workspace.adopt-unserved";
+
+/// One refusal a driver answers for a request member or a route it does not serve: always
+/// [`UnservedRefusal::STATUS`] and [`UnservedRefusal::CLASS`], never retriable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnservedRefusal {
+    /// The operation that raises it.
+    pub operation: &'static str,
+    pub code: &'static str,
+    /// The request member it names, or `None` when the whole route is unserved.
+    pub address: Option<&'static str>,
+    pub message: &'static str,
+}
+
+impl UnservedRefusal {
+    pub const STATUS: u16 = 501;
+    pub const CLASS: &'static str = "unserved";
+}
+
+/// ADR 0047 decision 12's new code and design 34 § 14 Q3 A's two, as bundle `0.25.0` publishes
+/// them. The one place the set is written down: the bundle check holds each vector to its row.
+pub const DRIVER_UNSERVED_REFUSALS: [UnservedRefusal; 3] = [
+    UnservedRefusal {
+        operation: "exec.start",
+        code: EXEC_INLINE_CAPSULE_UNSERVED,
+        address: Some("capsule"),
+        message: "An inline execution capsule is not served by this driver.",
+    },
+    UnservedRefusal {
+        operation: "exec.signal",
+        code: EXEC_SIGNAL_UNSERVED,
+        address: Some("signal"),
+        message: "The requested signal is not one this driver delivers.",
+    },
+    UnservedRefusal {
+        operation: "workspace.adopt",
+        code: WORKSPACE_ADOPT_UNSERVED,
+        address: None,
+        message: "This driver adopts no operator directory as a workspace.",
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3578,6 +3639,15 @@ pub struct CapabilityFacts {
     pub exec_namespaces: Option<NamespaceFacts>,
     #[serde(rename = "exec.no-egress", skip_serializing_if = "Option::is_none")]
     pub exec_no_egress: Option<bool>,
+    /// [`CONFINEMENT_NO_EGRESS_FACT`]: a connection from inside a run was observed to fail (ADR
+    /// 0047 N5). Published only from that observation, never from configuration; absent otherwise,
+    /// never `false`.
+    #[serde(
+        rename = "confinement.no-egress",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_no_egress: Option<bool>,
     #[serde(
         rename = "exec.workspace-scoped-write",
         skip_serializing_if = "Option::is_none"
@@ -3759,6 +3829,7 @@ impl Default for CapabilityFacts {
             exec_argv_only: None,
             exec_namespaces: None,
             exec_no_egress: None,
+            confinement_no_egress: None,
             exec_workspace_scoped_write: None,
             exec_cgroup_limits: None,
             exec_cgroup_kill: None,
@@ -5920,8 +5991,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.24.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.24.0/bundle.json");
+        assert_eq!(version, "0.25.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.25.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
@@ -6500,6 +6571,9 @@ mod writable_root_tests;
 
 #[cfg(test)]
 mod stream_bounds_tests;
+
+#[cfg(test)]
+mod namespace_driver_tests;
 
 #[cfg(test)]
 mod adoption_tests {

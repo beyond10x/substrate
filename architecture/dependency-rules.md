@@ -14,6 +14,22 @@ host / Docker / Kubernetes adapters ──▶ substrate driver ports
 Protocol clients may be generated from a released substrate specification, but compatibility never
 relies on sibling checkout paths.
 
+The workspace edges of the Kubernetes namespace driver
+([design 34](../docs/design/34-kubernetes-namespace-driver.md) § 2):
+
+```text
+substrate-daemon ──▶ substrate-kubernetes            (named only in the composition root)
+substrate-kubernetes ──▶ substrate-host (the Driver port), substrate-kubernetes-client,
+                         substrate-executor (lib), substrate-guarded, substrate-wire
+substrate-host ──▶ substrate-kubernetes-client, substrate-guarded, substrate-wire
+substrate-executor ──▶ substrate-guarded, substrate-wire
+substrate-guarded ──▶ substrate-wire
+```
+
+`cargo xtask check-packages` refuses an edge from `substrate-executor` to the host driver, the
+store, the daemon, the Kubernetes client, `rustls` or `gix`, because the executor runs inside an
+operator's image. The client's `fake` feature is legal only as a development dependency.
+
 A product composition root may pin and compile the `substrate-daemon` crate solely to bootstrap a
 separate daemon child process from a single-file distribution. Product operations must still use
 the public Unix-socket contract; importing daemon application or host-driver APIs into product

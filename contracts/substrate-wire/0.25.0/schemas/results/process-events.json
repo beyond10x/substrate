@@ -1,0 +1,40 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.25.0:result:process-events",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The protocol an accepted upgrade speaks (ADR 0036 S12): one text frame per item, each a process-stream item, oldest first. The record's process.* events and its log lines arrive in one order, a gap item states log bytes the bound discarded before the reader reached them, and exactly one ended item closes the stream. A stream the daemon can no longer serve closes with WebSocket status 1011 and no ended item; the reader reconnects with its last cursor. A slow reader never blocks the program: the stream reads the log file, not the program's pipes. Concurrent streams are bounded per record (max_readers) and, over every record live or ended, per subject (max_subject_streams) and per deployment (max_deployment_streams); past any of them the next is process.events-readers-exceeded before the upgrade.",
+  "properties": {
+    "frame_schema": {
+      "const": "schemas/process-stream-item.json"
+    },
+    "max_deployment_streams": {
+      "const": 512
+    },
+    "max_line_bytes": {
+      "const": 16384
+    },
+    "max_readers": {
+      "const": 8
+    },
+    "max_subject_streams": {
+      "const": 512
+    },
+    "protocol": {
+      "const": "b10x.substrate-process-events.v1"
+    },
+    "terminal": {
+      "const": "ended-then-close"
+    }
+  },
+  "required": [
+    "protocol",
+    "frame_schema",
+    "max_readers",
+    "max_subject_streams",
+    "max_deployment_streams",
+    "max_line_bytes",
+    "terminal"
+  ],
+  "title": "process-events operation result",
+  "type": "object"
+}

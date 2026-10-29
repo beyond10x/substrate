@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-29T03:55:00Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-15-0",
+  "kind": "task",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "release.yml run 40813559560 (recovery dispatch) for tag 0.15.0 at 07396286: success; Confinement-lane 07396286 182 cases, Quota-lane 07396286 7 cases; workstation read-back: SHA256SUMS sha256 d19863a2 and both archives OK, daemon sha256:9bc33712, mcp sha256:7b1b0bf9, wire 0.24.0 sha256:3623da7d anonymously resolved; signatures verified by the workflow (cosign not installed locally)",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40813559560"
+  }
+}

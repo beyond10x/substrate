@@ -154,7 +154,7 @@
         },
         "appArmorProfile": {
           "type": "string",
-          "pattern": "^substrate-host-exec-v1(-[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?)?$"
+          "pattern": "^substrate-host-exec-v[12](-[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?)?$"
         },
         "projectQuotas": {
           "type": "object",

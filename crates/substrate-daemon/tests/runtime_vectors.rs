@@ -38,14 +38,19 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
+#[path = "../../../test-support/readiness.rs"]
+mod readiness;
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
 /// The shipped binary, built by cargo before this integration test runs.
 const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.24.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.25.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "1570cc116e9b38c105607fefde705416b0ac2e199eb157a004c1e9b63d205d34";
+    "853d7365a56f0d8dc97fe5feb87ce57285a34bbf7a0f6eb05616d6010fc4fc00";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -202,7 +207,6 @@ fn a_busy_per_test_cgroup_fails_teardown_naming_what_it_held() {
 const HANDSHAKE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 const HANDSHAKE_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
-const READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------------------------
@@ -555,7 +559,7 @@ impl SessionChannel {
 // ---------------------------------------------------------------------------------------------
 
 struct Daemon {
-    socket: PathBuf,
+    socket: unix_socket::SocketPath,
     workspaces: PathBuf,
     command: Vec<String>,
     child: Child,
@@ -619,7 +623,7 @@ impl Daemon {
         writable_roots: &[String],
         extra: &[String],
     ) -> Self {
-        let socket = root.join("substrate.sock");
+        let socket = unix_socket::socket_path(root, "substrate.sock");
         let workspaces = root.join("workspaces");
         let mut command = vec![
             daemon_binary().display().to_string(),
@@ -675,6 +679,38 @@ impl Daemon {
             wrapped.append(&mut command);
             command = wrapped;
         }
+        Self::spawn(command, socket, workspaces).await
+    }
+
+    /// The shipped daemon with `--driver kubernetes` and the driver's kubeconfig at `config`: no
+    /// host flag, because each conflicts with that driver (design 34 § 3), and the deployment the
+    /// namespace lane names.
+    async fn start_kubernetes(root: &Path, config: &Path) -> Self {
+        let socket = unix_socket::socket_path(root, "substrate.sock");
+        let command = vec![
+            daemon_binary().display().to_string(),
+            "--driver".to_owned(),
+            "kubernetes".to_owned(),
+            "--kubernetes-config".to_owned(),
+            config.display().to_string(),
+            "--socket".to_owned(),
+            socket.display().to_string(),
+            "--state".to_owned(),
+            root.join("state.db").display().to_string(),
+            "--deployment".to_owned(),
+            NAMESPACE_DEPLOYMENT.to_owned(),
+            "--allow-uid".to_owned(),
+            nix::unistd::getuid().as_raw().to_string(),
+        ];
+        Self::spawn(command, socket, root.join("workspaces")).await
+    }
+
+    /// Starts `command` and waits for its socket.
+    async fn spawn(
+        command: Vec<String>,
+        socket: unix_socket::SocketPath,
+        workspaces: PathBuf,
+    ) -> Self {
         let mut child = Command::new(&command[0])
             .args(&command[1..])
             .stdin(Stdio::null())
@@ -690,16 +726,23 @@ impl Daemon {
             let _ = pipe.read_to_string(&mut captured).await;
             captured
         });
-        let deadline = Instant::now() + READINESS_TIMEOUT;
+        let deadline = Instant::now() + readiness::DAEMON_READINESS;
         while !socket.exists() {
             if let Some(status) = child.try_wait().expect("daemon status") {
                 let error = (&mut stderr).await.unwrap_or_default();
                 panic!("substrate-daemon exited before readiness ({status}): {error}");
             }
-            assert!(
-                Instant::now() < deadline,
-                "substrate-daemon did not create its Unix socket"
-            );
+            if Instant::now() >= deadline {
+                let _ = child.start_kill();
+                let error = tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut stderr)
+                    .await
+                    .map(Result::unwrap_or_default)
+                    .unwrap_or_default();
+                panic!(
+                    "substrate-daemon did not create its Unix socket within {:?}: {error}",
+                    readiness::DAEMON_READINESS
+                );
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         Self {
@@ -2940,7 +2983,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.24.0/operations.json");
+            .join("contracts/substrate-wire/0.25.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -7291,6 +7334,266 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The namespace lane (design 34 § 10.2 step 5)
+// ---------------------------------------------------------------------------------------------
+
+/// Selects the namespace lane: the driver's JSON kubeconfig for a namespace `cargo xtask
+/// namespace-lane observe` provisioned, carrying the driver's extension.
+const KUBERNETES_CONFIG_VARIABLE: &str = "SUBSTRATE_VECTORS_KUBERNETES_CONFIG";
+/// The deployment the namespace lane's daemon claims its namespace for; the lane releases the
+/// claim after this case, because the driver's Role cannot delete its own Lease.
+const NAMESPACE_DEPLOYMENT: &str = "dep_namespace_vectors";
+/// How long the driver may take from start to a probed snapshot: Lease, policy, dry run, a PVC
+/// bound by first consumer, a keeper and a probe Pod, each image pulled once.
+const NAMESPACE_SERVING: Duration = Duration::from_mins(4);
+/// How long reconciliation may take to finish a destroy: its backoff reaches 30 s, and the PVC
+/// goes only after its keeper.
+const NAMESPACE_DESTROY: Duration = Duration::from_mins(3);
+/// The cases the namespace lane executes, selected by the facts the driver publishes. Its exec
+/// cases are absent, never counted: no exec is admitted while `confinement.no-egress` is absent,
+/// which it is on every cluster this lane has run on (design 34 § 10.3 O3).
+const NAMESPACE_CASES: usize = 56;
+
+/// The shipped daemon over the Kubernetes namespace driver, through its Unix socket: the same
+/// wire the other lanes assert, against a cluster. Unset, the lane is absent: nothing runs and
+/// nothing is counted or reported passed (invariant 3).
+#[tokio::test(flavor = "multi_thread")]
+async fn namespace_lane_drives_the_shipped_daemon_over_the_kubernetes_driver() {
+    let Some(config) = std::env::var_os(KUBERNETES_CONFIG_VARIABLE).map(PathBuf::from) else {
+        println!(
+            "runtime clean-room: namespace lane absent: {KUBERNETES_CONFIG_VARIABLE} is unset; \
+             no case ran"
+        );
+        return;
+    };
+    let temporary = TempDir::with_prefix("substrate-namespace-").expect("lane directory");
+    let root = temporary.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private lane directory");
+    let daemon = Daemon::start_kubernetes(root, &config).await;
+    let executed = check_namespace_journey(&daemon).await;
+    daemon.close().await;
+    assert_eq!(executed, NAMESPACE_CASES, "namespace lane case inventory");
+    println!("runtime clean-room: namespace lane executed {executed} cases");
+}
+
+/// The namespace lane's journey: a probed snapshot, the workspace and file routes, the promoted
+/// route inventory, and an exec refused by name while confinement is unproven.
+#[allow(clippy::too_many_lines)] // One journey, in the order its workspace lives.
+async fn check_namespace_journey(daemon: &Daemon) -> usize {
+    let mut executed = 0;
+    let deadline = Instant::now() + NAMESPACE_SERVING;
+    let machine = loop {
+        let (status, machine) = daemon
+            .call("GET", "/v1/machine", "req_namespace_machine", None)
+            .await;
+        assert_eq!(status, 200, "{machine}");
+        if machine["result"]["facts"]["workspace.guarded-io"] == true {
+            break machine;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the namespace driver published no probed snapshot within {NAMESPACE_SERVING:?}: \
+             {machine}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    assert_eq!(machine["result"]["driver"], "kubernetes", "{machine}");
+    let facts = &machine["result"]["facts"];
+    assert!(
+        facts["confinement.no-egress"].is_null(),
+        "confinement.no-egress published without an observed probe: {machine}"
+    );
+    let snapshot = text(&machine["result"]["snapshot"]);
+    executed += 1;
+
+    let operation = "01JNAMESPACELANECREATE01";
+    let create_input = json!({ "source": "empty", "labels": { "runner": "namespace" } });
+    let (status, created) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            "req_namespace_create",
+            Some(&mutation(operation, &create_input)),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let workspace = text(&created["result"]["id"]);
+    assert!(workspace.starts_with("ws_"), "{created}");
+    executed += 1;
+
+    executed += check_promoted_route_inventory(daemon, &workspace, false).await;
+
+    let (status, replay) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            "req_namespace_replay",
+            Some(&mutation(operation, &create_input)),
+        )
+        .await;
+    assert_eq!(status, 201, "{replay}");
+    assert_eq!(replay["result"]["id"], workspace);
+    executed += 1;
+
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/workspaces",
+                "req_namespace_conflict",
+                Some(&mutation(
+                    operation,
+                    &json!({ "source": "empty", "labels": { "changed": "yes" } }),
+                )),
+            )
+            .await,
+        409,
+        "operation.request-conflict",
+    );
+    executed += 1;
+
+    let (status, observed) = daemon
+        .call(
+            "GET",
+            &format!("/v1/workspaces/{workspace}"),
+            "req_namespace_get",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{observed}");
+    assert_eq!(observed["result"]["state"], "ready", "{observed}");
+    executed += 1;
+
+    let file_path = format!("/v1/workspaces/{workspace}/files/main.txt");
+    let (status, written) = daemon
+        .call(
+            "PUT",
+            &file_path,
+            "req_namespace_write",
+            Some(&mutation(
+                "01JNAMESPACELANEWRITE001",
+                &json!({ "content": { "encoding": "base64", "data": "aGVsbG8=" } }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{written}");
+    assert_eq!(written["result"]["atomic_replacement"], true, "{written}");
+    assert_eq!(
+        written["result"]["sha256"],
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+    executed += 1;
+
+    let deep_path = ["d"; 65].join("/");
+    expect_error(
+        &daemon
+            .call(
+                "DELETE",
+                &format!("/v1/workspaces/{workspace}/files/{deep_path}"),
+                "req_namespace_path_depth",
+                Some(&mutation("01JNAMESPACELANEDEPTH001", &json!({}))),
+            )
+            .await,
+        422,
+        "workspace.path-depth",
+    );
+    executed += 1;
+
+    let (status, read) = daemon
+        .call(
+            "GET",
+            &format!("{file_path}?mode=file&offset=0&limit_bytes=5"),
+            "req_namespace_read",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["result"]["content"]["data"], "aGVsbG8=", "{read}");
+    assert_eq!(read["result"]["eof"], true, "{read}");
+    executed += 1;
+
+    executed += check_path_escape(daemon, &workspace, WorkspaceOrigin::Created).await;
+
+    // Selected by the facts: without `confinement.no-egress` every start is refused by name
+    // before a Pod exists.
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_namespace_exec",
+                Some(&mutation(
+                    "01JNAMESPACELANEEXEC0001",
+                    &ExecInput::new(&workspace, &snapshot, &["/bin/true"], false).build(),
+                )),
+            )
+            .await,
+        501,
+        "exec.sandbox-unavailable",
+    );
+    executed += 1;
+
+    let (status, deleted) = daemon
+        .call(
+            "DELETE",
+            &file_path,
+            "req_namespace_file_delete",
+            Some(&mutation("01JNAMESPACELANEDELETE01", &json!({}))),
+        )
+        .await;
+    assert_eq!(status, 200, "{deleted}");
+    assert_eq!(deleted["result"]["absent"], true, "{deleted}");
+    executed += 1;
+
+    // The keeper and the PVC go one after the other, each once the one before reads absent: an
+    // answer before the PVC is gone is `operation.outcome-unknown` (retriable) and the daemon's
+    // reconciliation finishes the destroy, which the workspace then reads as.
+    let (status, destroyed) = daemon
+        .call(
+            "DELETE",
+            &format!("/v1/workspaces/{workspace}"),
+            "req_namespace_destroy",
+            Some(&mutation("01JNAMESPACELANEDESTROY1", &json!({}))),
+        )
+        .await;
+    if status == 200 {
+        assert_eq!(destroyed["result"]["absent"], true, "{destroyed}");
+    } else {
+        expect_error(
+            &(status, destroyed.clone()),
+            500,
+            "operation.outcome-unknown",
+        );
+        assert_eq!(destroyed["error"]["retriable"], true, "{destroyed}");
+        let deadline = Instant::now() + NAMESPACE_DESTROY;
+        loop {
+            let (status, observed) = daemon
+                .call(
+                    "GET",
+                    &format!("/v1/workspaces/{workspace}"),
+                    "req_namespace_destroyed",
+                    None,
+                )
+                .await;
+            if status == 404 {
+                break;
+            }
+            // Until then a read sees the frozen record, or the driver's retriable answer for a
+            // keeper already gone.
+            assert!(
+                Instant::now() < deadline,
+                "the destroyed workspace did not read absent within {NAMESPACE_DESTROY:?}: \
+                 {status} {observed}"
+            );
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    executed += 1;
+    executed
+}
+
+// ---------------------------------------------------------------------------------------------
 // Adversarial: the bound the observation does not name (ADR 0014)
 // ---------------------------------------------------------------------------------------------
 
@@ -7521,9 +7824,9 @@ async fn adversarial_adopt(daemon: &Daemon, name: &str, tag: &str) -> (String, S
 }
 
 /// ADR 0035 decision 5 refuses to adopt an entry that is not a directory, and the host opens a
-/// root name with `O_NOFOLLOW` (`crates/substrate-host/src/fs.rs`), so a symlink is never
+/// root name with `O_NOFOLLOW` (`crates/substrate-guarded/src/fs.rs`), so a symlink is never
 /// adopted and never read through. An exec start pins the same entry the same way
-/// (`pin_workspace_directory`, `crates/substrate-host/src/fs.rs`) and bubblewrap binds that
+/// (`pin_workspace_directory`, `crates/substrate-guarded/src/fs.rs`) and bubblewrap binds that
 /// descriptor (`--bind-fd`), never the path: once bound by path (`--bind <path> /workspace`), an
 /// entry the operator replaced with a symlink after adopt mounted the link target read-write,
 /// outside the workspace root. The exec is now `workspace.path-escape` before any mount, the
