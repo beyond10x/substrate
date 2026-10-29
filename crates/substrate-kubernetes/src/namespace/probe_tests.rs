@@ -10,6 +10,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use substrate_executor::Handshake;
 use substrate_executor::frame::{Applied, Control, ExitRecord, Frame, Stream};
+use substrate_executor::message::{Request, Response, read_request};
 use substrate_executor::serve::{open_workspace, serve};
 use substrate_executor::spec::RunSpec;
 use substrate_host::{BackendKind, BackendRole, Driver, DriverErrorClass};
@@ -64,6 +65,16 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// and handshake (or `handshake`, when a case states another line), and whose kubelet plays
 /// `child`.
 async fn rig(child: Child, handshake: Option<String>) -> Rig {
+    rig_with(child, handshake, None).await
+}
+
+/// [`rig`] whose keeper answers `check` with `check` instead of running the executor's proofs,
+/// as an executor that proves less, or answers in an older shape, would.
+async fn rig_answering_check(child: Child, check: Value) -> Rig {
+    rig_with(child, None, Some(check)).await
+}
+
+async fn rig_with(child: Child, handshake: Option<String>, check: Option<Value>) -> Rig {
     let fake = Arc::new(passing_fake());
     let clock = ManualClock::new();
     let (driver, ledger) = driver(&fake, &clock);
@@ -84,6 +95,23 @@ async fn rig(child: Child, handshake: Option<String>) -> Rig {
             }
             ["/substrate-executor", "fs"] => {
                 let mut stdout = Vec::new();
+                if let Some(value) = check.clone()
+                    && matches!(
+                        read_request(&mut request.stdin.as_slice()),
+                        Ok((Request::Check {}, _))
+                    )
+                {
+                    Response::Ok {
+                        value,
+                        omitted_entries: 0,
+                    }
+                    .write_to(&mut stdout)
+                    .expect("the stated check answer is written");
+                    return ExecAnswer {
+                        stdout,
+                        ..ExecAnswer::default()
+                    };
+                }
                 serve(&mut request.stdin.as_slice(), &mut stdout, || {
                     open_workspace(&directory)
                 })
@@ -610,4 +638,85 @@ async fn a_probe_in_flight_across_a_lost_and_retaken_lease_does_not_stand_for_st
         None,
         "a proof begun under the lost Lease is published under the retaken one"
     );
+}
+
+#[tokio::test]
+async fn a_probe_whose_check_proves_only_openat2_publishes_no_guarded_io_or_atomic_replace() {
+    // The answer the executor gave before its check made the other two proofs.
+    let rig = rig_answering_check(Child::Exact, json!({ "openat2_beneath": true })).await;
+    rig.driver.probe().await.expect("the probe runs");
+    let facts = rig.machine().facts;
+    assert_eq!(
+        facts.workspace_guarded_io, None,
+        "the keeper's check answers openat2 availability alone: no symlink escape is refused"
+    );
+    assert_eq!(
+        facts.workspace_atomic_replace, None,
+        "the keeper's check runs no renameat2 replacement"
+    );
+}
+
+/// The workspace facts a probe publishes when the keeper's check answers `check`.
+async fn workspace_facts_for(check: Value) -> [Option<bool>; 3] {
+    let rig = rig_answering_check(Child::Exact, check).await;
+    rig.driver.probe().await.expect("the probe runs");
+    let facts = rig.machine().facts;
+    let guarded = facts.workspace_guarded_io;
+    assert_eq!(
+        facts.workspace_max_file_bytes.is_some(),
+        guarded.is_some(),
+        "the file bounds are served exactly when guarded I/O is"
+    );
+    [
+        facts.workspace_openat2_beneath,
+        guarded,
+        facts.workspace_atomic_replace,
+    ]
+}
+
+#[tokio::test]
+async fn each_workspace_fact_is_published_from_its_own_proof_of_the_check() {
+    let all = json!({
+        "openat2_beneath": true,
+        "symlink_escape_refused": true,
+        "atomic_replace": true,
+    });
+    assert_eq!(
+        workspace_facts_for(all).await,
+        [Some(true), Some(true), Some(true)]
+    );
+    let no_openat2 = json!({
+        "openat2_beneath": false,
+        "symlink_escape_refused": true,
+        "atomic_replace": true,
+    });
+    assert_eq!(
+        workspace_facts_for(no_openat2).await,
+        [None, None, Some(true)],
+        "guarded I/O needs the openat2 proof as well as the escape proof"
+    );
+    let escape_followed = json!({
+        "openat2_beneath": true,
+        "symlink_escape_refused": false,
+        "atomic_replace": true,
+    });
+    assert_eq!(
+        workspace_facts_for(escape_followed).await,
+        [Some(true), None, Some(true)]
+    );
+    let no_replacement = json!({
+        "openat2_beneath": true,
+        "symlink_escape_refused": true,
+        "atomic_replace": false,
+    });
+    assert_eq!(
+        workspace_facts_for(no_replacement).await,
+        [Some(true), Some(true), None]
+    );
+    let not_booleans = json!({
+        "openat2_beneath": "true",
+        "symlink_escape_refused": 1,
+        "atomic_replace": null,
+    });
+    assert_eq!(workspace_facts_for(not_booleans).await, [None, None, None]);
 }
