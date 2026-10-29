@@ -19,6 +19,10 @@ use ulid::Ulid;
 
 use crate::{DriverError, Listed};
 
+mod check;
+
+pub use check::GuardedIoProofs;
+
 const RESOLVE_NO_XDEV: u64 = 0x01;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
@@ -797,10 +801,23 @@ fn openat2_cstr(
     flags: i32,
     mode: libc::mode_t,
 ) -> Result<OwnedFd, DriverError> {
+    openat2_resolved(directory, path, flags, mode, GUARDED_RESOLVE).map_err(classify_open_error)
+}
+
+/// `openat2` with the resolve flags `resolve`, answering the kernel's own error: the one place
+/// the syscall is made. Every served open passes [`GUARDED_RESOLVE`]; the keeper's check
+/// (`check`) reads the errno to tell a refused escape from any other failure.
+fn openat2_resolved(
+    directory: RawFd,
+    path: &CStr,
+    flags: i32,
+    mode: libc::mode_t,
+    resolve: u64,
+) -> std::io::Result<OwnedFd> {
     let how = OpenHow {
         flags: u64::try_from(flags).expect("open flags are non-negative"),
         mode: u64::from(mode),
-        resolve: GUARDED_RESOLVE,
+        resolve,
     };
     // SAFETY: syscall arguments point to initialized OpenHow and a NUL-terminated path.
     let fd = unsafe {
@@ -813,12 +830,14 @@ fn openat2_cstr(
         )
     };
     if fd < 0 {
-        return Err(classify_open_error(std::io::Error::last_os_error()));
+        return Err(std::io::Error::last_os_error());
     }
+    // A non-negative descriptor is always owned; owned_fd refuses only a negative one.
     owned_fd(
         i32::try_from(fd).expect("file descriptor fits i32"),
         "openat2",
     )
+    .map_err(|_| std::io::Error::from_raw_os_error(libc::EBADF))
 }
 
 /// The wire name and kind of one directory entry, or `None` for an entry the contract cannot

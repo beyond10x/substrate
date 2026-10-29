@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 
 use serde::Serialize;
-use substrate_guarded::fs::GuardedFilesystem;
+use substrate_guarded::fs::{GuardedFilesystem, GuardedIoProofs};
 use substrate_guarded::{DriverError, DriverErrorClass, Listed};
 use substrate_wire::{FileMode, FileReadQuery, MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS};
 
@@ -31,12 +31,25 @@ pub fn open_workspace(root: &Path) -> Result<GuardedFilesystem, DriverError> {
     GuardedFilesystem::open_single(root, MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS)
 }
 
-/// The answer to `check`: whether the guarded I/O is served here, from which the driver states
-/// `workspace.guarded-io`, `workspace.openat2-beneath` and `workspace.atomic-replace` as the host
-/// probe does.
+/// The answer to `check`: each proof of design 34 § 6.2 on its own, made in a scratch directory in
+/// the workspace that is gone before the answer is written. The driver states
+/// `workspace.openat2-beneath` from the first, `workspace.guarded-io` only from the first two, and
+/// `workspace.atomic-replace` from the third.
 #[derive(Serialize)]
 struct Check {
     openat2_beneath: bool,
+    symlink_escape_refused: bool,
+    atomic_replace: bool,
+}
+
+impl From<GuardedIoProofs> for Check {
+    fn from(proofs: GuardedIoProofs) -> Self {
+        Self {
+            openat2_beneath: proofs.openat2_beneath,
+            symlink_escape_refused: proofs.symlink_escape_refused,
+            atomic_replace: proofs.atomic_replace,
+        }
+    }
 }
 
 /// The answer to `stat`: a regular file's complete size and digest, or its absence.
@@ -142,9 +155,7 @@ pub fn handle(filesystem: &GuardedFilesystem, request: Request, content: &[u8]) 
             .patch_cas(&workspace, ROOT_NAME, &path, &input)
             .and_then(complete),
         Request::Stat { workspace, path } => stat(filesystem, &workspace, path),
-        Request::Check {} => complete(Check {
-            openat2_beneath: filesystem.openat2_available(),
-        }),
+        Request::Check {} => complete(Check::from(filesystem.prove_guarded_io())),
     };
     match result {
         Ok(response) => response,

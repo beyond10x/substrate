@@ -404,3 +404,67 @@ fn a_malformed_request_is_answered_as_a_protocol_failure() {
         PROTOCOL_FAILURE
     );
 }
+
+/// The names in `root`, sorted.
+fn names(root: &Path) -> Vec<std::ffi::OsString> {
+    let mut names: Vec<_> = std::fs::read_dir(root)
+        .expect("the root lists")
+        .map(|entry| entry.expect("an entry").file_name())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn the_check_answers_each_of_its_three_proofs_and_leaves_the_root_as_it_found_it() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path();
+    if !openat2_served(root) {
+        eprintln!("openat2 is unavailable on this kernel; the check's proofs are not exercised");
+        return;
+    }
+    std::fs::write(root.join("kept.txt"), b"kept").expect("a workspace file");
+    let (value, omitted) = ok::<serde_json::Value>(call(root, &Request::Check {}, b""));
+    assert_eq!(omitted, 0);
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "openat2_beneath": true,
+            "symlink_escape_refused": true,
+            "atomic_replace": true,
+        }),
+        "each proof of design 34 § 6.2 is answered on its own"
+    );
+    assert_eq!(
+        names(root),
+        ["kept.txt"],
+        "nothing the check created outlives it"
+    );
+    assert_eq!(std::fs::read(root.join("kept.txt")).expect("kept"), b"kept");
+}
+
+#[test]
+fn a_check_that_cannot_make_its_scratch_directory_proves_nothing() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500)).expect("read-only");
+    if std::fs::create_dir(root.join("probe")).is_ok() {
+        std::fs::remove_dir(root.join("probe")).expect("remove");
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).expect("restore");
+        eprintln!("this user writes a read-only directory; the unwritable case is not exercised");
+        return;
+    }
+    let (value, _) = ok::<serde_json::Value>(call(root, &Request::Check {}, b""));
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).expect("restore");
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "openat2_beneath": false,
+            "symlink_escape_refused": false,
+            "atomic_replace": false,
+        })
+    );
+    assert!(names(root).is_empty());
+}
