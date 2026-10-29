@@ -267,3 +267,37 @@ async fn an_unbound_create_is_failed_past_the_bound_and_a_landed_one_is_adopted(
     assert!(row.settled_at.is_some(), "the row is closed");
     assert!(rig.pod(&never_pod).is_none());
 }
+
+/// Security review, design 34 U11, invariant 3: the exec the daemon's restart pass recorded is
+/// `unknown` with `output_complete` set, and a restarted driver seeds its answer from it. A
+/// terminated Pod whose log is a protocol failure (§ 7.3) still has no output proven, so the
+/// recovered exec must not say its (empty) output is whole, exactly as
+/// `a_non_frame_line_or_an_overlong_log_is_a_protocol_failure` holds without a restart. The
+/// daemon stores what this answers and serves the stored bytes with `eof` from that flag.
+#[tokio::test]
+async fn a_protocol_failure_across_a_restart_is_not_whole_output() {
+    let mut rig = rig().await;
+    let id = "exec_restart_interloper";
+    let started = rig.started(id, &input(&["/bin/true"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    let log = [
+        applied_line(67_108_864, 500),
+        "hello from a sidecar\n".to_owned(),
+        exit_line(0),
+    ]
+    .concat();
+    rig.terminated(&name, 0, log.as_bytes()).await;
+    restart(&mut rig).await;
+
+    let recovered = rig
+        .driver
+        .recover_exec(&recorded_unknown(&started))
+        .await
+        .expect("reconciled");
+    assert_eq!(recovered.resource.exit.and_then(|exit| exit.code), Some(0));
+    assert!(recovered.stdout.is_empty());
+    assert!(
+        !recovered.output_complete,
+        "a recovered exec whose log is a protocol failure reports its empty output as whole"
+    );
+}
