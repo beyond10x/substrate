@@ -9,6 +9,7 @@ relations:
 - informed_by: story:node-bound-kubernetes-serving-profile
 - decomposes: epic:kubernetes-deployment-and-driver
 - depends_on: story:host-profile-name-is-a-deployment-parameter
+- depends_on: story:execution-profile-v2-admits-atime-remounts
 revision: 1
 ---
 # Story: a recorded local lane proves the execution-enabled serving pod

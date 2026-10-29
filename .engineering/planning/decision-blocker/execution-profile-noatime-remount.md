@@ -2,16 +2,18 @@
 format: aep.planning-md/3
 id: decision-blocker:execution-profile-noatime-remount
 kind: decision-blocker
-status: open
+status: cleared
 title: The execution profile refuses bubblewrap's read-only remount of a noatime bind
 relations:
 - blocks: story:chart-lane-local-execution-record
 withholds: test_result
-revision: 1
+revision: 3
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-29T02:06:53Z", actor: "human:timo", revision: 3}
 ---
 # The execution profile refuses bubblewrap's read-only remount of a noatime bind
 
-Decider: operator
+Decider: orchestrator (b10x-chef-orchestrator, under the grant), D180, 2026-10-29
 
 ## Finding
 
@@ -55,3 +57,27 @@ device, and A keeps every shipped profile's bytes.
 ## What clears it
 
 A chosen option, and for A the profile change merged. Until then PR 190 stays a draft.
+
+## Decided: A (D180, 2026-10-29)
+
+The coordinating session decided under the operator's grant, verbatim:
+
+> D180: I decide decision-blocker:execution-profile-noatime-remount under the grant: A.
+> - Why mine: a security trade-off inside an approved design, not a never-list item. Shipped v1
+>   bytes stay untouched, so no documented contract breaks; that is the D167 limit.
+> - A is right, not cheapest: noatime and nodiratime are mount flags that grant no path,
+>   capability or device. The remount stays read-only and bind-only.
+> - B rejected: it breaks the exact-bytes check on nodes that hold v1 from 0.10.0-0.14.0.
+> - C rejected: it pushes a storage constraint onto every operator, and the lane still cannot
+>   run here.
+>
+> Conditions:
+> 1. Write a profile-level test that v2 refuses every remount v1 refuses, except noatime and
+>    nodiratime: a mutation-style diff of the two rule sets.
+> 2. The CHANGELOG names v2 and the upgrade step (nodes load v2).
+> 3. The chart lane, once green, records the run under v2.
+>
+> Do it in the next wave, with PR 190's chart lane and the namespace driver. "Not verified:
+> production nodes noatime" stays as written in the guide.
+
+The work is `story:execution-profile-v2-admits-atime-remounts`, on `wave/k8s-namespace-1`.
