@@ -220,9 +220,14 @@ pub(crate) struct AdapterStart {
     /// Refuse a writable subtree that holds a submodule the workspace registers, as `.git`
     /// itself is refused: `confinement.writable-subtree-git` (§ 2).
     pub(crate) refuse_registered_submodules: bool,
-    /// Pipe the run's standard input for the adapter's writer (design 32 § 5): three pipes, no
-    /// live output sender, so the output is recorded as for any exec and never stalls.
+    /// Pipe the run's standard input for the adapter's writer (design 32 § 5): three pipes, and
+    /// without `live` no live output sender, so the output is recorded as for any exec and never
+    /// stalls.
     pub(crate) stdin: bool,
+    /// Queue the run's output for the adapter's reader, at most this many frames waiting (design
+    /// 32 § 5): the session path's drain, backpressure included, with no truncation marker in the
+    /// record, which then begins with exactly the bytes delivered.
+    pub(crate) live: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1399,21 +1404,32 @@ impl ProcessRuntime {
                     terminal: terminal.clone(),
                 }),
             )
-        } else if adapter.stdin {
-            let Some(stdin) = child.stdin.take() else {
-                let error = DriverError::failed(
-                    substrate_wire::SESSION_STDIN_MISSING,
-                    "The adapter's piped process did not expose stdin.",
-                );
-                return contain_spawned(child, cgroup, error).await;
+        } else if adapter.stdin || adapter.live.is_some() {
+            let stdin = if adapter.stdin {
+                let Some(stdin) = child.stdin.take() else {
+                    let error = DriverError::failed(
+                        substrate_wire::SESSION_STDIN_MISSING,
+                        "The adapter's piped process did not expose stdin.",
+                    );
+                    return contain_spawned(child, cgroup, error).await;
+                };
+                Some(stdin)
+            } else {
+                None
             };
-            // No live output: the receiver's sender is dropped here, so nothing is ever queued,
-            // and the output is recorded through `drain_capped` without a sender.
-            let (_, receiver) = mpsc::channel(1);
+            // Without live output the receiver's sender is dropped here, so nothing is ever
+            // queued, and the output is recorded through `drain_capped` without a sender.
+            let (sender, receiver) = match adapter.live {
+                Some(queued) => {
+                    let (sender, receiver) = mpsc::channel(queued.clamp(1, PIPE_QUEUED_FRAMES));
+                    (Some(sender), receiver)
+                }
+                None => (None, mpsc::channel(1).1),
+            };
             (
-                None,
+                sender,
                 Some(PipeState {
-                    stdin: tokio::sync::Mutex::new(Some(stdin)),
+                    stdin: tokio::sync::Mutex::new(stdin),
                     output: tokio::sync::Mutex::new(receiver),
                     input_bytes: AtomicU64::new(0),
                     input_limit: crate::confinement::MAX_STDIN_BYTES,
@@ -1455,6 +1471,9 @@ impl ProcessRuntime {
             output_bound,
             started_at,
             scratch,
+            // The adapter's live record begins with exactly the bytes it delivered (design 32
+            // § 3), so no marker replaces its last ones.
+            adapter.live.is_none(),
         ));
         if input.wait {
             if let Err(error) =
@@ -1681,6 +1700,15 @@ impl ProcessRuntime {
             }
             notified.await;
         }
+    }
+
+    /// Whether exec `id`'s live output stopped at the stall deadline: what the `linux` adapter
+    /// reports as `output_stalled` (design 32 § 3). `false` for an exec not tracked.
+    pub(crate) fn output_stalled(&self, id: &str) -> bool {
+        self.executions
+            .lock()
+            .get(id)
+            .is_some_and(|execution| execution.pipe_backpressure.load(Ordering::Acquire))
     }
 
     fn execution(&self, id: &str) -> Result<Arc<Execution>, DriverError> {
@@ -2961,6 +2989,7 @@ async fn run_child(
     output_bound: Arc<AtomicBool>,
     started_at: Instant,
     scratch: Option<PreparedScratch>,
+    mark_truncation: bool,
 ) {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -3018,7 +3047,7 @@ async fn run_child(
                     frame_limit,
                     stdout_execution,
                     Some(Arc::clone(&stdout_bound)),
-                    true,
+                    mark_truncation,
                 )
                 .await
             }),
@@ -3032,7 +3061,7 @@ async fn run_child(
                     frame_limit,
                     stderr_execution,
                     Some(stderr_bound),
-                    true,
+                    mark_truncation,
                 )
                 .await
             }),

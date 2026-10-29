@@ -115,6 +115,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   unchanged. `local`, `linux`, `macos` and `systemd` around either prove `stdin_pipe`; `oci`
   proves it only on a runtime its lane pinned (Docker 29.7.2), and `pod` refuses `Piped` naming
   the fact.
+- A confinement adapter run can deliver its output live while it runs (design 32). A profile asks
+  for it with `OutputDelivery::Live { queued_chunks }`, 1 to `MAX_QUEUED_CHUNKS` (16), and
+  requires the new fact `output_live`; the default, `OutputDelivery::Recorded`, is the recorded
+  output as before. `ConfinementAdapter::read_output` returns the next `OutputEvent`: a `Chunk`
+  with its stream and its offset in that stream's record, `Bounded` for a stream that reached its
+  output bound, `Stalled` once, then `None` after the run's end. Live output needs `Head`
+  retention on both streams: anything else is `confinement.live-output-retention-invalid` (422),
+  and a queue outside 1 to 16 is `session.limit-unserved` (429), both at admission. When the queue
+  stays full for one second the run is killed and `Stalled` follows the queued chunks;
+  `output_stalled` reports it. A zero read timeout is `session.timeout-invalid`, a read that
+  waited its timeout `session.read-timeout`, and a run whose output is recorded only
+  `session.not-pipe`, the trait's default, so an implementor outside the crate compiles
+  unchanged. `run_with_stdin` refuses a live profile `confinement.live-output-unread` before it
+  starts anything. `local`, `macos`, `oci` and `systemd` around `local` prove `output_live`;
+  `linux` and `systemd` around it prove it with the enforced isolation floor; `pod` refuses
+  `Live` naming the fact.
 - The host execution AppArmor profile name is a deployment parameter (design 33). The chart
   value `execution.appArmorProfile` (default `substrate-host-exec-v1`) and `--apparmor-profile`
   on `substrate-container-profiles` and `substrate-container-exec` accept `substrate-host-exec-v1`
@@ -142,6 +158,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **Breaking (`substrate-host` public API, design 32):** `ConfinementProfile` gains `stdin`, so a struct literal without `..ConfinementProfile::default()` and an exhaustive destructuring pattern break.
 - **Breaking (`substrate-host` public API, design 32):** the confinement `Fact` enum gains `OutputLive`, so an exhaustive `match` on it breaks and a consumer on an older revision cannot deserialize an `AdapterFacts` or an audit record that names `output_live`.
 - **Breaking (`substrate-host` public API, design 32):** `FACT_ORDER` changes type from `[Fact; 12]` to `[Fact; 13]`; code that names the array type or relies on its length breaks.
+- **Breaking (`substrate-host` public API, design 32):** `ConfinementProfile` gains `output_delivery`, so a struct literal without `..ConfinementProfile::default()` and an exhaustive destructuring pattern break.
 
 ### Fixed
 

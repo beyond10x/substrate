@@ -38,7 +38,10 @@
 //! It serves `process_run`, `process_watch`, `output_read`, `wait`, `workspace`,
 //! `filesystem_view`, `limits` and `audit`, and proves `image_digest_pinned`, and `stdin_pipe` on a
 //! runtime flavor and version in `OCI_STDIN_PINNED`: a piped run is created `--interactive` and
-//! started `start --attach --interactive` with the runtime client's stdin piped. It does not prove
+//! started `start --attach --interactive` with the runtime client's stdin piped. It proves
+//! `output_live` on every runtime: the run's output is the attached client's two pipes, which the
+//! adapter drains and queues as `local` does; a stall kills the container, and only `Kill` stops
+//! delivery, since `Int` and `Term` reach a command that may trap them. It does not prove
 //! `ipc_socket_allowlist`: a Unix socket beneath a bound root is reachable from the container.
 //! Whether the runtime is rootless has no `Fact` variant; [`probe`] reports it.
 //!
@@ -64,13 +67,14 @@ use substrate_wire::{
 };
 use tokio::sync::watch;
 
+use super::live::{self, LiveOutput};
 use super::stdin::{self, StdinWriter};
 use crate::output_retention::{Captured, drain};
 
 use super::{
     AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, ContractFamily, Fact, ProcessBounds, RenderedCommand, RunExit, RunId,
-    RunObservation, RunOutput, RunState,
+    ConfinementProfile, ContractFamily, Fact, OutputEvent, ProcessBounds, RenderedCommand, RunExit,
+    RunId, RunObservation, RunOutput, RunState,
 };
 use crate::{DeclaredWritableRoot, DriverError};
 
@@ -398,6 +402,7 @@ pub fn proof(runtime: &RuntimeProbe) -> AdapterFacts {
         &[
             (Fact::ImageDigestPinned, true),
             (Fact::StdinPipe, stdin_pinned(runtime)),
+            (Fact::OutputLive, true),
         ],
     )
 }
@@ -704,6 +709,8 @@ struct OciRun {
     /// The runtime client's standard input, which the runtime forwards to the container, when
     /// the profile asked for a pipe (design 32).
     stdin: Option<Arc<StdinWriter>>,
+    /// The run's live output, when its profile asked for it (design 32).
+    live: Option<Arc<LiveOutput>>,
 }
 
 /// A container's state as the runtime's `container inspect` reports it.
@@ -1198,15 +1205,24 @@ impl OciAdapter {
             admitted.profile().output_retention,
             limit,
         )));
+        // A stall ends the run as `signal(Kill)` does: `KILL` to the container, retried.
+        let (live, [stdout_feed, stderr_feed]) =
+            live::open(admitted.profile().output_delivery, || {
+                let program = program.clone();
+                let id = id.clone();
+                Box::new(move || {
+                    let program = program.clone();
+                    let id = id.clone();
+                    tokio::spawn(async move { kill_retried(&program, &id).await });
+                })
+            });
         let readers = [
-            child
-                .stdout
-                .take()
-                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true))),
-            child
-                .stderr
-                .take()
-                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false))),
+            child.stdout.take().map(|stream| {
+                tokio::spawn(drain(stream, Arc::clone(&captured), true, stdout_feed))
+            }),
+            child.stderr.take().map(|stream| {
+                tokio::spawn(drain(stream, Arc::clone(&captured), false, stderr_feed))
+            }),
         ];
         if !started(&program, &id, &mut child).await {
             let _ = child.start_kill();
@@ -1229,12 +1245,14 @@ impl OciAdapter {
             bounds.timeout,
             phase,
             writer.clone(),
+            live.clone(),
         ));
         self.runs.lock().push(Arc::new(OciRun {
             id: id.clone(),
             phase: observed,
             captured,
             stdin: writer,
+            live,
         }));
         admitted.audit_start(&id, &command.argv[0]);
         Ok(id)
@@ -1388,9 +1406,10 @@ async fn create(
     })
 }
 
-/// Watches one started run to its end: its timeout kills the container, then the output is
-/// drained, the container's state read and the container removed, and the run's standard input
-/// ended, before the phase is published.
+/// Watches one started run to its end: its timeout stops live delivery and kills the container,
+/// then the output is drained, the container's state read and the container removed, and the
+/// run's standard input ended, before the phase is published.
+#[allow(clippy::too_many_arguments)] // The run's client, readers, bound and every end it closes.
 async fn monitor(
     program: PathBuf,
     run: RunId,
@@ -1399,6 +1418,7 @@ async fn monitor(
     timeout: Duration,
     phase: watch::Sender<Phase>,
     writer: Option<Arc<StdinWriter>>,
+    live: Option<Arc<LiveOutput>>,
 ) {
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
@@ -1407,6 +1427,9 @@ async fn monitor(
         () = &mut deadline => None,
     };
     if ended.is_none() {
+        if let Some(live) = &live {
+            live.close();
+        }
         let grace = tokio::time::sleep(KILL_GRACE);
         tokio::pin!(grace);
         ended = loop {
@@ -1474,6 +1497,20 @@ async fn kill(program: &Path, run: &RunId, signal: i32) -> bool {
     )
     .await
     .0
+}
+
+/// `KILL` to the run's container, retried for [`SIGNAL_RETRY`] as `signal` retries it, until the
+/// runtime delivered it or the container is gone.
+async fn kill_retried(program: &Path, run: &RunId) {
+    let deadline = Instant::now() + SIGNAL_RETRY;
+    while !kill(program, run, Signal::Kill.number()).await
+        && inspect(program, run)
+            .await
+            .is_some_and(|state| state.running)
+        && Instant::now() < deadline
+    {
+        tokio::time::sleep(RETRY_PAUSE).await;
+    }
 }
 
 /// Removes the run's container if it is still there, then reports whether none with its label
@@ -1565,9 +1602,15 @@ impl ConfinementAdapter for OciAdapter {
         Ok(Self::observation(&run))
     }
 
-    /// Signals the container's init, which passes the signal to the command.
+    /// Signals the container's init, which passes the signal to the command. `Kill` stops live
+    /// delivery first; `Int` and `Term` close nothing (design 32 § 3).
     async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
         let run = self.run(run)?;
+        if signal == Signal::Kill
+            && let Some(live) = &run.live
+        {
+            live.close();
+        }
         let deadline = Instant::now() + SIGNAL_RETRY;
         loop {
             if !matches!(*run.phase.borrow(), Phase::Running) {
@@ -1592,6 +1635,22 @@ impl ConfinementAdapter for OciAdapter {
     async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {
         let run = self.run(run)?;
         stdin::piped(run.stdin.as_ref())?.write(bytes).await
+    }
+
+    async fn read_output(
+        &self,
+        run: &RunId,
+        timeout: Duration,
+    ) -> Result<Option<OutputEvent>, ConfinementError> {
+        let run = self.run(run)?;
+        live::live(run.live.as_ref())?
+            .read(timeout, || run.captured.lock().extent())
+            .await
+    }
+
+    fn output_stalled(&self, run: &RunId) -> bool {
+        self.run(run)
+            .is_ok_and(|run| run.live.as_ref().is_some_and(|live| live.stalled()))
     }
 
     async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {

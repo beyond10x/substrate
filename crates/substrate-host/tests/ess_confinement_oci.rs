@@ -346,7 +346,10 @@ fn open_reads_rootless_and_proves_image_digest_pinned() {
             "audit"
         ])
     );
-    assert_eq!(facts["facts"], serde_json::json!(["image_digest_pinned"]));
+    assert_eq!(
+        facts["facts"],
+        serde_json::json!(["image_digest_pinned", "output_live"])
+    );
 }
 
 #[test]
@@ -1270,5 +1273,50 @@ async fn an_oci_run_under_tail_keeps_the_last_bytes() {
         None,
     );
     assert!(output.stdout_truncated);
+    println!("{NAME}: executed");
+}
+
+// T16 of design 32: on the lane's pinned runtime a live run's chunks on both streams cross the
+// runtime client, are contiguous, and are exactly the record at its natural end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_oci_run_delivers_its_record_on_a_natural_end() {
+    const NAME: &str = "ESS confinement oci live natural end";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    support::live_natural_end(
+        NAME,
+        &adapter,
+        &ConfinementProfile {
+            image: Some(image()),
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 60_000,
+                processes: 8,
+                memory_bytes: 64 << 20,
+                cpu_millis: 30_000,
+            }),
+            ..ConfinementProfile::default()
+        },
+        &Command {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'out-one\\n'; printf 'err-one\\n' >&2; printf 'out-two\\n'; \
+                 printf 'err-two\\n' >&2"
+                    .into(),
+            ],
+            env: BTreeMap::new(),
+        },
+        b"out-one\nout-two\n",
+        b"err-one\nerr-two\n",
+    )
+    .await;
     println!("{NAME}: executed");
 }

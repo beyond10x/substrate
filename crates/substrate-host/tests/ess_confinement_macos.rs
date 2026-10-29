@@ -664,3 +664,27 @@ async fn a_run_under_tail_keeps_the_last_bytes() {
     );
     assert!(output.stdout_truncated);
 }
+
+// T14 of design 32: under Seatbelt a live run's chunks on both streams are contiguous and are
+// exactly the record at its natural end. Bash's own `printf`: only the program is executable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_macos_run_delivers_its_record_on_a_natural_end() {
+    let adapter = macos();
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::live_natural_end(
+        "macos live natural end",
+        &adapter,
+        &ConfinementProfile {
+            workspace: Some(workspace.path().to_path_buf()),
+            ..ConfinementProfile::default()
+        },
+        &bash(
+            "printf 'out-one\\n'; printf 'err-one\\n' >&2; printf 'out-two\\n'; \
+             printf 'err-two\\n' >&2",
+            &[],
+        ),
+        b"out-one\nout-two\n",
+        b"err-one\nerr-two\n",
+    )
+    .await;
+}

@@ -1007,3 +1007,160 @@ async fn a_piped_linux_run_with_unread_recorded_output_does_not_stall() {
     assert!(output.stdout_truncated, "{NAME}: 64 KiB is past the bound");
     println!("{NAME}: executed");
 }
+
+// ---- design 32 § 3, T12's output rows: live output under `linux` ----
+
+/// A `linux` profile in `workspace` whose output is recorded only, with the output bound
+/// lowered to `bound` when one is named.
+fn linux_recorded(workspace: &Path, bound: Option<usize>) -> ConfinementProfile {
+    ConfinementProfile {
+        workspace: Some(workspace.to_path_buf()),
+        io_bounds: bound.map(|bound| confinement::IoBounds {
+            output_bytes: bound as u64,
+        }),
+        ..ConfinementProfile::default()
+    }
+}
+
+// T12: T4.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_linux_run_delivers_its_record_on_a_natural_end() {
+    const NAME: &str = "ESS confinement linux live natural end";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::live_natural_end(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+        &support::sh(
+            "printf 'out-one\\n'; printf 'err-one\\n' >&2; printf 'out-two\\n'; \
+             printf 'err-two\\n' >&2",
+        ),
+        b"out-one\nout-two\n",
+        b"err-one\nerr-two\n",
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T12: T5, at the host's default output bound: a lower one would end the forwarding before the
+// queue filled, and nothing would stall.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_linux_run_never_read_stalls_and_ends() {
+    const NAME: &str = "ESS confinement linux live stall";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::live_stall(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+        &support::sh("exec yes"),
+        1,
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T12: T6.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_linux_run_past_its_bound_names_it_after_the_last_chunk() {
+    const NAME: &str = "ESS confinement linux live bounded";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::live_bounded(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, Some(LINUX_BOUND)),
+        &support::sh(&format!("yes | head -c {}", LINUX_BOUND + 64)),
+        LINUX_BOUND,
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T12: T11.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_linux_run_writing_both_streams_stalls_once() {
+    const NAME: &str = "ESS confinement linux live both streams";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::live_stall(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+        &support::sh("yes >&2 & exec yes"),
+        2,
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T12: T19.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_live_linux_run_delivers_a_prefix_without_a_stall() {
+    const NAME: &str = "ESS confinement linux live kill";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let gate = linux_gate(&workspace);
+    support::live_kill_is_a_prefix(
+        NAME,
+        &adapter,
+        &linux_recorded(&workspace, None),
+        &gate,
+        &workspace.join("written"),
+        &Path::new(substrate_wire::EXEC_WORKSPACE_MOUNT).join("written"),
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T12: T20. A read pending on a silent run does not hold a `Kill` back, and ends with `None`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kill_beside_a_pending_live_linux_read_ends_both() {
+    const NAME: &str = "ESS confinement linux live pending read";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&support::live(&linux_recorded(&workspace, None), 16))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exec sleep 60"))
+        .await
+        .expect("started");
+    let reading = {
+        let adapter = Arc::clone(&adapter);
+        let run = run.clone();
+        tokio::spawn(async move {
+            adapter
+                .read_output(&run, std::time::Duration::from_secs(30))
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !reading.is_finished(),
+        "{NAME}: the read waits on a silent run"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        adapter.signal(&run, substrate_wire::Signal::Kill),
+    )
+    .await
+    .expect("the kill is not held back by the pending read")
+    .expect("killed");
+    let read = tokio::time::timeout(std::time::Duration::from_secs(5), reading)
+        .await
+        .expect("the pending read ends")
+        .expect("joined")
+        .expect("read");
+    assert_eq!(read, None, "{NAME}");
+    adapter.wait(&run).await.expect("waited");
+    assert!(!adapter.output_stalled(&run), "{NAME}");
+    println!("{NAME}: executed");
+}
