@@ -1,0 +1,45 @@
+[package]
+name = "b10x-substrate-kubernetes-client"
+description = "The bounded Kubernetes API client the substrate pod adapter and namespace driver share"
+homepage = "https://beyond10x.github.io/substrate/"
+documentation = "https://beyond10x.github.io/substrate/docs/concepts/adapters"
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+keywords = ["sandbox", "kubernetes"]
+categories = ["api-bindings"]
+
+[lib]
+name = "substrate_kubernetes_client"
+
+[features]
+fake = ["dep:chrono", "dep:rcgen"]
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+chrono = { workspace = true, optional = true }
+futures-util.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"], optional = true }
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+
+[lints]
+workspace = true

@@ -7,11 +7,15 @@ use anyhow::{Context as _, Result};
 
 use crate::report::Report;
 
-const SOURCE_PACKAGES: [(&str, &str); 7] = [
+const SOURCE_PACKAGES: [(&str, &str); 8] = [
     ("crates/substrate-wire", "b10x-substrate-wire"),
     ("crates/substrate-store", "b10x-substrate-store"),
     ("crates/substrate-guarded", "b10x-substrate-guarded"),
     ("crates/substrate-host", "b10x-substrate-host"),
+    (
+        "crates/substrate-kubernetes-client",
+        "b10x-substrate-kubernetes-client",
+    ),
     ("crates/substrate-daemon", "b10x-substrate-daemon"),
     ("crates/b10x-substrate-sdk", "b10x-substrate-sdk"),
     ("crates/b10x-substrate-cli", "b10x-substrate-cli"),
@@ -24,7 +28,7 @@ pub fn check(root: &Path) -> Result<Report> {
 
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; {manifests} manifests declare no Flux dependency and no beyond10x Git dependency",
+            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature",
             packages.len()
         )))
     } else {
@@ -48,6 +52,7 @@ fn check_boundary_invariants(root: &Path, failures: &mut Vec<String>) -> Result<
 
     let mut manifests = 1;
     check_dependency_tables("Cargo.toml", &root_manifest, failures);
+    check_fake_features("Cargo.toml", &root_manifest, failures);
 
     let members = root_manifest
         .get("workspace")
@@ -66,8 +71,94 @@ fn check_boundary_invariants(root: &Path, failures: &mut Vec<String>) -> Result<
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         manifests += 1;
         check_dependency_tables(&relative, &manifest, failures);
+        check_fake_features(&relative, &manifest, failures);
     }
     Ok(manifests)
+}
+
+/// The Kubernetes client whose `fake` feature compiles an in-process API server.
+const KUBERNETES_CLIENT: &str = "b10x-substrate-kubernetes-client";
+
+/// Why an edge enabling the client's `fake` feature outside `[dev-dependencies]` is refused.
+const FAKE_FENCE: &str = "the fake feature of b10x-substrate-kubernetes-client is legal only under [dev-dependencies] (design 34 § 10.1)";
+
+/// Whether a dependency entry names the Kubernetes client, by its `package` key or by an alias
+/// that is the package name or the workspace's conventional alias for it. An entry inherited with
+/// `workspace = true` carries no `package` key, so the alias is all it has.
+fn names_kubernetes_client(alias: &str, dependency: &toml::Value) -> bool {
+    let name = dependency
+        .get("package")
+        .and_then(toml::Value::as_str)
+        .unwrap_or(alias);
+    name == KUBERNETES_CLIENT || alias == "substrate-kubernetes-client"
+}
+
+/// Whether a dependency entry turns the `fake` feature on.
+fn enables_fake(dependency: &toml::Value) -> bool {
+    dependency
+        .get("features")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("fake"))
+        })
+}
+
+/// The `[features]` half of the fence. Another manifest may not forward `<client>/fake` or
+/// `<client>?/fake` from a feature of its own, and the client may not turn `fake` on from any
+/// other feature of its own (`default` included), because either reaches a runtime edge without
+/// naming `fake` on it.
+fn check_fake_features(manifest_path: &str, manifest: &toml::Value, failures: &mut Vec<String>) {
+    let Some(features) = manifest.get("features").and_then(toml::Value::as_table) else {
+        return;
+    };
+    let is_client = manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        == Some(KUBERNETES_CLIENT);
+    let mut tables: Vec<&toml::Value> = ["dependencies", "dev-dependencies", "build-dependencies"]
+        .iter()
+        .filter_map(|kind| manifest.get(*kind))
+        .collect();
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for table in targets.values() {
+            tables.extend(
+                ["dependencies", "dev-dependencies", "build-dependencies"]
+                    .iter()
+                    .filter_map(|kind| table.get(*kind)),
+            );
+        }
+    }
+    let aliases: BTreeSet<&str> = tables
+        .iter()
+        .filter_map(|table| table.as_table())
+        .flat_map(|table| table.iter())
+        .filter(|(alias, dependency)| names_kubernetes_client(alias, dependency))
+        .map(|(alias, _)| alias.as_str())
+        .collect();
+
+    for (feature, enabled) in features {
+        let Some(enabled) = enabled.as_array() else {
+            continue;
+        };
+        for entry in enabled.iter().filter_map(toml::Value::as_str) {
+            let forwarded = entry
+                .strip_suffix("/fake")
+                .map(|alias| alias.trim_end_matches('?'))
+                .is_some_and(|alias| aliases.contains(alias));
+            if forwarded {
+                failures.push(format!(
+                    "{manifest_path}: features.{feature} enables {entry}; {FAKE_FENCE}"
+                ));
+            } else if is_client && feature != "fake" && entry == "fake" {
+                failures.push(format!(
+                    "{manifest_path}: features.{feature} enables fake; {FAKE_FENCE}"
+                ));
+            }
+        }
+    }
 }
 
 /// Every dependency table one manifest can carry, whatever its kind or target.
@@ -143,6 +234,17 @@ fn check_dependency_table(
         if git.is_some_and(|url| url_names(url, "beyond10x")) {
             failures.push(format!(
                 "{manifest_path}: {kind}.{alias} resolves from a beyond10x Git repository; substrate takes no sibling-component implementation dependency (invariant 2)"
+            ));
+        }
+        // A `[patch]` entry replaces a source and enables no feature, so only the dependency kinds
+        // can carry the fence's subject.
+        if !kind.ends_with("dev-dependencies")
+            && !kind.starts_with("patch.")
+            && names_kubernetes_client(alias, dependency)
+            && enables_fake(dependency)
+        {
+            failures.push(format!(
+                "{manifest_path}: {kind}.{alias} enables fake; {FAKE_FENCE}"
             ));
         }
     }
@@ -373,6 +475,86 @@ mod tests {
             report.failure_text(),
             "crates/substrate-daemon/Cargo.toml: dev-dependencies.harness resolves from a beyond10x Git repository; substrate takes no sibling-component implementation dependency (invariant 2)"
         );
+    }
+
+    /// Design 34 § 10.1: the client's `fake` feature compiles an in-process API server, so it is
+    /// legal only on a `[dev-dependencies]` edge. Every other way of enabling it is refused: a
+    /// runtime, build or target dependency edge, the workspace's dependency table every member
+    /// inherits from, a `[features]` entry naming `<alias>/fake`, and a feature of the client's own
+    /// that turns `fake` on for every edge.
+    #[test]
+    fn the_fake_feature_is_refused_on_every_edge_but_a_dev_dependency() {
+        const EDGE: &str = "substrate-kubernetes-client = { package = \"b10x-substrate-kubernetes-client\", path = \"../substrate-kubernetes-client\", version = \"=0.4.2\", features = [\"fake\"] }";
+        const FENCE: &str = "the fake feature of b10x-substrate-kubernetes-client is legal only under [dev-dependencies] (design 34 § 10.1)";
+        let cases = [
+            (
+                "crates/substrate-host",
+                format!("\n[dependencies]\n{EDGE}\n"),
+                format!(
+                    "crates/substrate-host/Cargo.toml: dependencies.substrate-kubernetes-client enables fake; {FENCE}"
+                ),
+            ),
+            (
+                "crates/substrate-daemon",
+                format!("\n[build-dependencies]\n{EDGE}\n"),
+                format!(
+                    "crates/substrate-daemon/Cargo.toml: build-dependencies.substrate-kubernetes-client enables fake; {FENCE}"
+                ),
+            ),
+            (
+                "crates/substrate-host",
+                format!("\n[target.'cfg(unix)'.dependencies]\n{EDGE}\n"),
+                format!(
+                    "crates/substrate-host/Cargo.toml: target.cfg(unix).dependencies.substrate-kubernetes-client enables fake; {FENCE}"
+                ),
+            ),
+            (
+                "crates/substrate-host",
+                format!(
+                    "\n[dependencies]\n{}\n\n[features]\ntesting = [\"substrate-kubernetes-client?/fake\"]\n",
+                    EDGE.replace(", features = [\"fake\"]", "")
+                ),
+                format!(
+                    "crates/substrate-host/Cargo.toml: features.testing enables substrate-kubernetes-client?/fake; {FENCE}"
+                ),
+            ),
+            (
+                "crates/substrate-kubernetes-client",
+                "\n[features]\nfake = []\ndefault = [\"fake\"]\n".to_owned(),
+                format!(
+                    "crates/substrate-kubernetes-client/Cargo.toml: features.default enables fake; {FENCE}"
+                ),
+            ),
+        ];
+        for (member, extra, refused) in cases {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            fixture(directory.path(), member, &extra);
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(report.failure_text(), refused, "{extra}");
+        }
+
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        fixture(directory.path(), "crates/substrate-host", "");
+        let root = directory.path().join("Cargo.toml");
+        let mut manifest = std::fs::read_to_string(&root).expect("workspace manifest");
+        write!(manifest, "\n[workspace.dependencies]\n{EDGE}\n").expect("workspace manifest");
+        std::fs::write(&root, manifest).expect("workspace manifest");
+        let report = check(directory.path()).expect("package check");
+        assert_eq!(
+            report.failure_text(),
+            format!(
+                "Cargo.toml: workspace.dependencies.substrate-kubernetes-client enables fake; {FENCE}"
+            )
+        );
+
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        fixture(
+            directory.path(),
+            "crates/substrate-host",
+            &format!("\n[dev-dependencies]\n{EDGE}\n"),
+        );
+        let report = check(directory.path()).expect("package check");
+        assert_eq!(report.failure_text(), "", "a dev-dependency edge is legal");
     }
 
     #[test]

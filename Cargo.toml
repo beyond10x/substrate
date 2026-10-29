@@ -4,6 +4,7 @@ members = [
     "crates/substrate-store",
     "crates/substrate-guarded",
     "crates/substrate-host",
+    "crates/substrate-kubernetes-client",
     "crates/substrate-daemon",
     "crates/substrate-contract-check",
     "crates/b10x-substrate-sdk",
