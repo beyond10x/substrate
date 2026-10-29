@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 use crate::confinement::RunOutput;
+use crate::confinement::live::Feed;
 
 /// Which bytes of one stream are kept within its bound.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -101,8 +102,9 @@ impl RetentionBuffer {
         }
     }
 
-    /// Adds the next bytes the stream produced.
-    pub(crate) fn push(&mut self, chunk: &[u8]) {
+    /// Adds the next bytes the stream produced, and returns how many of them, from its start,
+    /// went into the head.
+    pub(crate) fn push(&mut self, chunk: &[u8]) -> usize {
         self.observed = self.observed.saturating_add(chunk.len() as u64);
         let take = self
             .head_cap
@@ -117,7 +119,7 @@ impl RetentionBuffer {
         self.head.extend_from_slice(&chunk[..take]);
         let rest = &chunk[take..];
         if self.tail_cap == 0 || rest.is_empty() {
-            return;
+            return take;
         }
         // Trim before extending, so the ring never holds more than its cap, even for a moment.
         let rest = &rest[rest.len().saturating_sub(self.tail_cap)..];
@@ -130,6 +132,7 @@ impl RetentionBuffer {
             self.tail_cap,
         ));
         self.tail.extend(rest);
+        take
     }
 
     /// The stream ended at end of file: its total is known.
@@ -200,6 +203,17 @@ impl Captured {
         }
     }
 
+    /// Per stream, whether the record was truncated and how many bytes it holds: what live
+    /// delivery reads once its queue is over, without copying the record.
+    pub(crate) fn extent(&self) -> [(bool, u64); 2] {
+        [&self.stdout, &self.stderr].map(|stream| {
+            (
+                stream.truncated(),
+                (stream.head.len() + stream.tail.len()) as u64,
+            )
+        })
+    }
+
     /// What the run has produced so far, or in all once both streams ended.
     pub(crate) fn output(&self) -> RunOutput {
         let (stdout, stdout_kept) = self.stdout.snapshot();
@@ -216,10 +230,16 @@ impl Captured {
 }
 
 /// Reads one stream to its end into `captured`, keeping what its retention keeps.
+///
+/// With a `live` feed, each read's bytes that went into the head are then queued for the
+/// embedder (design 32 § 3): the record holds a chunk before it is delivered, and bytes past the
+/// bound are drained and not delivered. The feed waits at most the stall deadline for a slot, so
+/// the stream is read on whatever the reader does.
 pub(crate) async fn drain(
     mut stream: impl AsyncRead + Unpin,
     captured: Arc<Mutex<Captured>>,
     stdout: bool,
+    live: Option<Feed>,
 ) {
     let mut buffer = vec![0_u8; 16 * 1024];
     loop {
@@ -228,7 +248,12 @@ pub(crate) async fn drain(
                 captured.lock().stream(stdout).finish();
                 return;
             }
-            Ok(read) => captured.lock().stream(stdout).push(&buffer[..read]),
+            Ok(read) => {
+                let kept = captured.lock().stream(stdout).push(&buffer[..read]);
+                if let Some(live) = &live {
+                    live.forward(&buffer[..kept]).await;
+                }
+            }
             Err(_) => {
                 captured.lock().stream(stdout).fail();
                 return;

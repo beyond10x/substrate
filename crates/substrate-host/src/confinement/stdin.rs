@@ -19,6 +19,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::process::ChildStdin;
 use tokio::sync::watch;
 
+use super::live::{LIVE_OUTPUT_RETENTION_INVALID, LIVE_OUTPUT_UNREAD, MAX_QUEUED_CHUNKS};
 use super::profile::StdinMode;
 use super::{
     AdmittedProfile, Command, ConfinementAdapter, ConfinementError, RunId, RunObservation,
@@ -33,8 +34,9 @@ pub const MAX_STDIN_BYTES: u64 = 16 * 1_024 * 1_024;
 pub const STDIN_CHUNK_BYTES: usize = 64 * 1_024;
 
 /// The rules every adapter's `check` applies first to a profile's streams, so a caller's mistake
-/// gets the same answer on each: a piped standard input bounded at 1 to [`MAX_STDIN_BYTES`]
-/// (`session.limit-unserved`, 429).
+/// gets the same answer on each: a piped standard input bounded at 1 to [`MAX_STDIN_BYTES`] and a
+/// live queue of 1 to [`MAX_QUEUED_CHUNKS`] chunks (`session.limit-unserved`, 429), and a live
+/// record that keeps the head of both streams (`confinement.live-output-retention-invalid`, 422).
 pub(crate) fn check_streams(profile: &super::ConfinementProfile) -> Result<(), ConfinementError> {
     if let StdinMode::Piped { limit_bytes } = profile.stdin
         && !(1..=MAX_STDIN_BYTES).contains(&limit_bytes)
@@ -45,6 +47,25 @@ pub(crate) fn check_streams(profile: &super::ConfinementProfile) -> Result<(), C
             "stdin",
         )
         .into());
+    }
+    if let Some(queued_chunks) = profile.output_delivery.queued_chunks() {
+        if !(1..=MAX_QUEUED_CHUNKS).contains(&queued_chunks) {
+            return Err(DriverError::exhausted(
+                substrate_wire::SESSION_LIMIT_UNSERVED,
+                format!("A live output queue holds 1 to {MAX_QUEUED_CHUNKS} chunks."),
+                "output_delivery",
+            )
+            .into());
+        }
+        if !profile.output_retention.is_head() {
+            return Err(DriverError::refused(
+                LIVE_OUTPUT_RETENTION_INVALID,
+                "Live output keeps the head of each stream: its record begins with the bytes \
+                 delivered.",
+                "output_retention",
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -313,8 +334,10 @@ impl StdinWriter {
 /// # Errors
 ///
 /// Before anything starts, and with no start record: `session.not-pipe` (422) for a profile
-/// admitted without [`StdinMode::Piped`], and `session.input-limit` (429) for an `input` longer
-/// than its `limit_bytes`. Then any refusal of the start, or of the adapter's calls.
+/// admitted without [`StdinMode::Piped`], `session.input-limit` (429) for an `input` longer than
+/// its `limit_bytes`, and `confinement.live-output-unread` (422) for a profile admitted with
+/// [`OutputDelivery::Live`](super::OutputDelivery), whose events this helper would not read.
+/// Then any refusal of the start, or of the adapter's calls.
 pub async fn run_with_stdin(
     adapter: &Arc<dyn ConfinementAdapter>,
     admitted: &AdmittedProfile,
@@ -329,6 +352,14 @@ pub async fn run_with_stdin(
             substrate_wire::SESSION_INPUT_LIMIT,
             format!("The input is longer than the run's {limit_bytes}-byte standard input bound."),
             "stdin",
+        )
+        .into());
+    }
+    if admitted.profile().output_delivery.queued_chunks().is_some() {
+        return Err(DriverError::refused(
+            LIVE_OUTPUT_UNREAD,
+            "run_with_stdin reads no live output, so the run would stall; admit it Recorded.",
+            "output_delivery",
         )
         .into());
     }
@@ -471,6 +502,48 @@ mod tests {
             check_streams(&profile(StdinMode::Piped { limit_bytes })).expect("in range");
         }
         check_streams(&profile(StdinMode::Null)).expect("no pipe, no bound");
+    }
+
+    // T1b, the rule itself: a live queue holds 1 to 16 chunks, and a live record keeps its head.
+    #[test]
+    fn check_streams_bounds_a_live_queue_and_refuses_it_beside_a_tail() {
+        use super::super::{OutputDelivery, OutputRetention, Retention};
+        let profile = |queued_chunks, output_retention| ConfinementProfile {
+            output_delivery: OutputDelivery::Live { queued_chunks },
+            output_retention,
+            ..ConfinementProfile::default()
+        };
+        for queued_chunks in [0, MAX_QUEUED_CHUNKS + 1] {
+            let error = check_streams(&profile(queued_chunks, OutputRetention::default()))
+                .expect_err("out of range");
+            assert_refused(&error, substrate_wire::SESSION_LIMIT_UNSERVED, 429);
+        }
+        for retention in [Retention::Tail, Retention::HeadAndTail] {
+            for output_retention in [
+                OutputRetention {
+                    stdout: retention,
+                    stderr: Retention::Head,
+                },
+                OutputRetention {
+                    stdout: Retention::Head,
+                    stderr: retention,
+                },
+            ] {
+                let error = check_streams(&profile(1, output_retention)).expect_err("not the head");
+                assert_refused(&error, super::super::LIVE_OUTPUT_RETENTION_INVALID, 422);
+            }
+        }
+        for queued_chunks in [1, MAX_QUEUED_CHUNKS] {
+            check_streams(&profile(queued_chunks, OutputRetention::default())).expect("in range");
+        }
+        check_streams(&ConfinementProfile {
+            output_retention: OutputRetention {
+                stdout: Retention::Tail,
+                stderr: Retention::Tail,
+            },
+            ..ConfinementProfile::default()
+        })
+        .expect("a recorded run keeps any retention");
     }
 
     // § 2 *Bounded*: each write 1 to 64 KiB, the total at most the limit, counted as given.
@@ -706,6 +779,59 @@ mod tests {
             fake.starts.load(Ordering::Acquire),
             1,
             "within the limit, it starts"
+        );
+    }
+
+    // T7b: `run_with_stdin` would leave a `Live` run's events unread until it stalled, so it
+    // refuses the profile before it starts anything, and no start record is written.
+    #[tokio::test]
+    async fn run_with_stdin_refuses_live_output_before_starting() {
+        let fake = Arc::new(Fake {
+            facts: AdapterFacts::new(
+                AdapterName::Linux,
+                None,
+                &[
+                    (ContractFamily::ProcessRun, true),
+                    (ContractFamily::OutputRead, true),
+                    (ContractFamily::Audit, true),
+                ],
+                &[(Fact::StdinPipe, true), (Fact::OutputLive, true)],
+            ),
+            starts: AtomicUsize::new(0),
+        });
+        let adapter: Arc<dyn ConfinementAdapter> = fake.clone();
+        let records = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink_records = Arc::clone(&records);
+        let live = adapter
+            .admit(&ConfinementProfile {
+                stdin: StdinMode::Piped { limit_bytes: 4 },
+                output_delivery: super::super::OutputDelivery::Live { queued_chunks: 1 },
+                audit: Some(super::super::AuditSink::new(
+                    move |record: &super::super::AuditRecord| {
+                        sink_records
+                            .lock()
+                            .push(serde_json::to_value(record).expect("record"));
+                    },
+                )),
+                ..ConfinementProfile::default()
+            })
+            .expect("admitted");
+        let command = Command {
+            argv: vec!["/bin/cat".into()],
+            env: std::collections::BTreeMap::new(),
+        };
+        let error = run_with_stdin(&adapter, &live, &command, b"abc")
+            .await
+            .expect_err("live output would go unread");
+        assert_refused(&error, super::super::LIVE_OUTPUT_UNREAD, 422);
+        assert_eq!(fake.starts.load(Ordering::Acquire), 0, "nothing started");
+        assert!(
+            records
+                .lock()
+                .iter()
+                .all(|record| record["event"] != "run_started"),
+            "no start record: {:?}",
+            records.lock()
         );
     }
 }

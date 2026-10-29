@@ -1573,9 +1573,11 @@ fn resolve(
 /// `confinement.output-retention-unserved` for a stream kept by its tail,
 /// `confinement.family-unserved` for a host path or a network policy, `exec.secret-slots-unserved`,
 /// `exec.workdir-invalid`, `exec.limit-unserved` and `confinement.pod-processes-unserved`; first
-/// of all `session.limit-unserved` for a piped stdin bound outside 1 to 16 MiB, then
+/// of all `session.limit-unserved` for a piped stdin bound outside 1 to 16 MiB or a live queue
+/// outside 1 to 16 chunks and `confinement.live-output-retention-invalid` for a live tail, then
 /// `confinement.fact-unserved` naming `stdin_pipe` for any piped stdin (design 32: a Pod is
-/// rendered `"stdin": false`, and attaching to it is authority the adapter does not hold).
+/// rendered `"stdin": false`, and attaching to it is authority the adapter does not hold) and
+/// naming `output_live` for any live output (the log endpoint merges the two streams).
 pub fn check_profile(
     settings: &PodSettings,
     profile: &ConfinementProfile,
@@ -1589,6 +1591,14 @@ pub fn check_profile(
         return Err(ConfinementError::FactUnserved {
             adapter: AdapterName::Pod,
             fact: Fact::StdinPipe,
+        });
+    }
+    // The log endpoint merges stdout and stderr into one stream, so no chunk could name its true
+    // stream (design 32 § 5): live output waits for a design that states merged delivery.
+    if profile.output_delivery.queued_chunks().is_some() {
+        return Err(ConfinementError::FactUnserved {
+            adapter: AdapterName::Pod,
+            fact: Fact::OutputLive,
         });
     }
     // Its workspace is an `emptyDir` the adapter creates, so no part of it can be held read-only.
@@ -2497,6 +2507,42 @@ mod tests {
             &settings(),
             &ConfinementProfile {
                 stdin: super::super::StdinMode::Piped { limit_bytes: 0 },
+                ..profile()
+            },
+        )
+        .expect_err("refused");
+        assert_eq!(
+            error.code(),
+            substrate_wire::SESSION_LIMIT_UNSERVED,
+            "{error}"
+        );
+    }
+
+    // T17 of design 32: the log endpoint merges stdout and stderr, so no chunk could name its
+    // true stream, and `Live` is refused naming `output_live` by `check_profile` itself; an
+    // out-of-range queue is refused first, as on every adapter.
+    #[test]
+    fn live_output_is_refused_naming_output_live() {
+        let error = check_profile(
+            &settings(),
+            &ConfinementProfile {
+                output_delivery: super::super::OutputDelivery::Live { queued_chunks: 4 },
+                ..profile()
+            },
+        )
+        .expect_err("refused");
+        match &error {
+            ConfinementError::FactUnserved { adapter, fact } => {
+                assert_eq!(*adapter, AdapterName::Pod);
+                assert_eq!(*fact, Fact::OutputLive);
+            }
+            other => panic!("expected output_live unserved, got {other:?}"),
+        }
+        assert_eq!(error.status(), 501);
+        let error = check_profile(
+            &settings(),
+            &ConfinementProfile {
+                output_delivery: super::super::OutputDelivery::Live { queued_chunks: 0 },
                 ..profile()
             },
         )

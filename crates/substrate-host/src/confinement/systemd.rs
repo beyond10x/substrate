@@ -160,11 +160,13 @@ mod imp {
     use substrate_wire::Signal;
     use tokio::sync::watch;
 
+    use super::super::live::{self, LiveOutput};
     use super::super::stdin::{self, StdinWriter};
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
         ConfinementProfile, ContractFamily, FACT_ORDER, FAMILY_ORDER, Fact, InnerAdapter,
-        ProcessBounds, RenderedCommand, RunExit, RunId, RunObservation, RunOutput, RunState,
+        OutputEvent, ProcessBounds, RenderedCommand, RunExit, RunId, RunObservation, RunOutput,
+        RunState,
     };
     use super::{
         InnerRequest, SESSION_BUS_ENV, SYSTEMD_MAX_TRACKED_RUNS, SYSTEMD_OUTPUT_LIMIT_BYTES,
@@ -734,6 +736,18 @@ mod imp {
         async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {
             self.inner.close_stdin(run).await
         }
+
+        async fn read_output(
+            &self,
+            run: &RunId,
+            timeout: Duration,
+        ) -> Result<Option<OutputEvent>, ConfinementError> {
+            self.inner.read_output(run, timeout).await
+        }
+
+        fn output_stalled(&self, run: &RunId) -> bool {
+            self.inner.output_stalled(run)
+        }
     }
 
     // ---- around `local` ----
@@ -774,6 +788,8 @@ mod imp {
         captured: Arc<Mutex<Captured>>,
         /// The run's standard input, when its profile piped it (design 32).
         stdin: Option<Arc<StdinWriter>>,
+        /// The run's live output, when its profile asked for it (design 32).
+        live: Option<Arc<LiveOutput>>,
     }
 
     struct SystemdLocal {
@@ -1127,12 +1143,13 @@ mod imp {
         }
 
         /// Ends the tree, its cgroup and its leader's process group, at the run's timeout or once
-        /// its cumulative CPU passes its budget.
+        /// its cumulative CPU passes its budget: an imposed end, which stops live delivery first.
         fn watch(
             cgroup: PathBuf,
             leader: Leader,
             bounds: ProcessBounds,
             mut phase: watch::Receiver<Phase>,
+            live: Option<Arc<LiveOutput>>,
         ) {
             let deadline = Instant::now() + Duration::from_millis(bounds.timeout_ms);
             let budget = bounds.cpu_millis.saturating_mul(1_000);
@@ -1149,6 +1166,9 @@ mod imp {
                     if Instant::now() >= deadline
                         || cpu_usage_micros(&cgroup).is_some_and(|used| used >= budget)
                     {
+                        if let Some(live) = &live {
+                            live.close();
+                        }
                         let _ = kill_tree(&cgroup);
                         leader.kill();
                         return;
@@ -1216,11 +1236,15 @@ mod imp {
             Ok(Self::observation(&run))
         }
 
-        /// `KILL` ends the whole tree through `cgroup.kill`, and the leader's process group;
-        /// another signal reaches the run's process group, as under `local`.
+        /// `KILL` stops live delivery, then ends the whole tree through `cgroup.kill`, and the
+        /// leader's process group; another signal reaches the run's process group, as under
+        /// `local`, and closes nothing.
         async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
             let run = self.run(run)?;
             if signal == Signal::Kill {
+                if let Some(live) = &run.live {
+                    live.close();
+                }
                 let killed = kill_tree(&run.cgroup);
                 run.leader.kill();
                 return killed.map_err(|error| {
@@ -1257,6 +1281,22 @@ mod imp {
             let run = self.run(run)?;
             stdin::piped(run.stdin.as_ref())?.close().await;
             Ok(())
+        }
+
+        async fn read_output(
+            &self,
+            run: &RunId,
+            timeout: Duration,
+        ) -> Result<Option<OutputEvent>, ConfinementError> {
+            let run = self.run(run)?;
+            live::live(run.live.as_ref())?
+                .read(timeout, || run.captured.lock().extent())
+                .await
+        }
+
+        fn output_stalled(&self, run: &RunId) -> bool {
+            self.run(run)
+                .is_ok_and(|run| run.live.as_ref().is_some_and(|live| live.stalled()))
         }
     }
 
@@ -1299,18 +1339,26 @@ mod imp {
                 output_limit,
             )));
             let (phase, observed) = watch::channel(Phase::Running);
-            let stdout = child
-                .stdout
-                .take()
-                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true)));
-            let stderr = child
-                .stderr
-                .take()
-                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false)));
             let leader = Leader {
                 pid,
                 exited: Arc::new(Mutex::new(false)),
             };
+            // A stall ends the run as `signal(Kill)` does: the whole tree and the leader's group.
+            let (live, [stdout_feed, stderr_feed]) =
+                live::open(admitted.profile().output_delivery, || {
+                    let cgroup = cgroup.clone();
+                    let leader = leader.clone();
+                    Box::new(move || {
+                        let _ = kill_tree(&cgroup);
+                        leader.kill();
+                    })
+                });
+            let stdout = child.stdout.take().map(|stream| {
+                tokio::spawn(drain(stream, Arc::clone(&captured), true, stdout_feed))
+            });
+            let stderr = child.stderr.take().map(|stream| {
+                tokio::spawn(drain(stream, Arc::clone(&captured), false, stderr_feed))
+            });
             let exited = Arc::clone(&leader.exited);
             let tree = cgroup.clone();
             tokio::spawn(async move {
@@ -1347,7 +1395,13 @@ mod imp {
                     _ => Phase::Unknown,
                 });
             });
-            Self::watch(cgroup.clone(), leader.clone(), bounds, observed.clone());
+            Self::watch(
+                cgroup.clone(),
+                leader.clone(),
+                bounds,
+                observed.clone(),
+                live.clone(),
+            );
             self.runs.lock().push(Arc::new(LocalRun {
                 id: id.clone(),
                 leader,
@@ -1356,6 +1410,7 @@ mod imp {
                 phase: observed,
                 captured,
                 stdin: writer,
+                live,
             }));
             admitted.audit_start(&id, &command.argv[0]);
             Ok(id)
@@ -1398,6 +1453,7 @@ mod imp {
                     Fact::LocalPermitted,
                     Fact::HostNetwork,
                     Fact::StdinPipe,
+                    Fact::OutputLive,
                 ]
             );
             assert!(super::super::super::check_open(&facts).is_ok());

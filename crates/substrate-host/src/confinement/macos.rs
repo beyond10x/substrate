@@ -13,7 +13,9 @@
 //! no egress forwarder and no ingress, so `limits`, `network_egress` and `network_ingress` are not
 //! served; a child can leave the process group with `setsid`, so `whole_tree_kill` is not proved.
 //! It proves `stdin_pipe`: a run whose profile asks for it reads a pipe the embedder writes
-//! (design 32), the child's own descriptor 0 and nothing Seatbelt has to allow.
+//! (design 32), the child's own descriptor 0 and nothing Seatbelt has to allow. It proves
+//! `output_live` the same way: the run's output is the two pipes the adapter already drains, and
+//! a live run's chunks are queued from that drain, as under `local`.
 //!
 //! Since `story:macos-seatbelt-policy-runs-cargo-test` (ADR 0109 S2) it also proves the three
 //! facts a Rust build needs, each only when [`seatbelt::probe_build`] saw Seatbelt enforce it at
@@ -60,6 +62,7 @@ use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -69,11 +72,12 @@ use substrate_wire::{
 };
 use tokio::sync::watch;
 
+use super::live::{self, LiveOutput};
 use super::stdin::{self, StdinWriter};
 use super::{
     AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, ContractFamily, Fact, RenderedCommand, RunExit, RunId, RunObservation,
-    RunOutput, RunState,
+    ConfinementProfile, ContractFamily, Fact, OutputEvent, RenderedCommand, RunExit, RunId,
+    RunObservation, RunOutput, RunState,
 };
 use crate::DriverError;
 use crate::output_retention::{Captured, drain};
@@ -419,6 +423,7 @@ fn proved(build: BuildProof) -> AdapterFacts {
             (Fact::ExecSubpaths, build.exec_subpaths),
             (Fact::PrivateTmpdir, build.private_tmpdir),
             (Fact::StdinPipe, true),
+            (Fact::OutputLive, true),
         ],
     )
 }
@@ -441,6 +446,8 @@ struct MacosRun {
     reaped: Arc<Mutex<bool>>,
     /// The run's standard input, when its profile asked for a pipe (design 32).
     stdin: Option<Arc<StdinWriter>>,
+    /// The run's live output, when its profile asked for it (design 32).
+    live: Option<Arc<LiveOutput>>,
 }
 
 /// Blocks until `pid` has exited, without reaping it.
@@ -904,15 +911,19 @@ impl MacosAdapter {
             MACOS_OUTPUT_LIMIT_BYTES,
         )));
         let (phase, observed) = watch::channel(Phase::Running);
+        let reaped = Arc::new(Mutex::new(false));
+        let (live, [stdout_feed, stderr_feed]) =
+            live::open(admitted.profile().output_delivery, || {
+                live::group_kill(pid, Arc::clone(&reaped))
+            });
         let stdout = child
             .stdout
             .take()
-            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true)));
+            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true, stdout_feed)));
         let stderr = child
             .stderr
             .take()
-            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false)));
-        let reaped = Arc::new(Mutex::new(false));
+            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false, stderr_feed)));
         let reaping = Arc::clone(&reaped);
         let ending_profile = admitted.clone();
         let ending_id = id.clone();
@@ -959,6 +970,7 @@ impl MacosAdapter {
             captured,
             reaped,
             stdin: writer,
+            live,
         }));
         admitted.audit_start(&id, &command.argv[0]);
         Ok(id)
@@ -1102,9 +1114,15 @@ impl ConfinementAdapter for MacosAdapter {
     }
 
     /// Signals the run's process group. This is not whole-tree kill, which `macos` does not
-    /// prove: a child that called `setsid` is not in the group.
+    /// prove: a child that called `setsid` is not in the group. `Kill` stops live delivery
+    /// first; `Int` and `Term` close nothing (design 32 § 3).
     async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
         let run = self.run(run)?;
+        if signal == Signal::Kill
+            && let Some(live) = &run.live
+        {
+            live.close();
+        }
         // Held across `kill`: the run's task cannot reap the leader meanwhile, so the group id
         // cannot have been reused by another process. Until it is reaped the run is `Running`,
         // and the signal goes to every member of the group, the leader exited or not.
@@ -1135,6 +1153,22 @@ impl ConfinementAdapter for MacosAdapter {
         let run = self.run(run)?;
         stdin::piped(run.stdin.as_ref())?.close().await;
         Ok(())
+    }
+
+    async fn read_output(
+        &self,
+        run: &RunId,
+        timeout: Duration,
+    ) -> Result<Option<OutputEvent>, ConfinementError> {
+        let run = self.run(run)?;
+        live::live(run.live.as_ref())?
+            .read(timeout, || run.captured.lock().extent())
+            .await
+    }
+
+    fn output_stalled(&self, run: &RunId) -> bool {
+        self.run(run)
+            .is_ok_and(|run| run.live.as_ref().is_some_and(|live| live.stalled()))
     }
 }
 
@@ -1200,6 +1234,7 @@ mod tests {
                 Fact::ExecSubpaths,
                 Fact::PrivateTmpdir,
                 Fact::StdinPipe,
+                Fact::OutputLive,
             ]
         );
         assert!(!facts.declared_insecure());
@@ -1249,7 +1284,7 @@ mod tests {
         ];
         for (adapter, profile, missing) in cases {
             assert!(!adapter.facts().proves(&missing), "{missing:?}");
-            assert_eq!(adapter.facts().facts.len(), 5, "{missing:?}");
+            assert_eq!(adapter.facts().facts.len(), 6, "{missing:?}");
             match adapter.admit(&profile) {
                 Err(ConfinementError::FactUnserved { fact, .. }) => assert_eq!(fact, missing),
                 other => panic!("{missing:?}: expected confinement.fact-unserved, got {other:?}"),

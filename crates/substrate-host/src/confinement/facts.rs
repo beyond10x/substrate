@@ -25,7 +25,7 @@ pub const FAMILY_ORDER: [ContractFamily; 10] = [
 
 /// The facts in the model's `Fact` order. A refusal names the first fact in this order that a
 /// profile requires and the adapter did not prove.
-pub const FACT_ORDER: [Fact; 12] = [
+pub const FACT_ORDER: [Fact; 13] = [
     Fact::DeclaredInsecure,
     Fact::PathsAreHostPaths,
     Fact::WholeTreeKill,
@@ -38,6 +38,7 @@ pub const FACT_ORDER: [Fact; 12] = [
     Fact::HostNetwork,
     Fact::ImageDigestPinned,
     Fact::StdinPipe,
+    Fact::OutputLive,
 ];
 
 /// The adapter `systemd` wraps (ADR 0109 decision 3).

@@ -21,7 +21,8 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 use substrate_host::confinement::{
     self, AdapterFacts, AdapterName, AuditRecord, AuditSink, Command, ConfinementAdapter,
-    ConfinementError, ConfinementProfile, ContractFamily, Fact, InnerAdapter, RunId,
+    ConfinementError, ConfinementProfile, ContractFamily, Fact, InnerAdapter, OutputDelivery,
+    OutputEvent, PipeStream, RunId, RunOutput,
 };
 
 pub const SUITE: &str = include_str!("../../../../spec/confinement-suite.json");
@@ -909,4 +910,288 @@ pub async fn stdin_echoes_through(
         chunks.concat(),
         "every byte crossed the pipe"
     );
+}
+
+// ---- design 32 § 3: live output, the cases every adapter that proves `output_live` runs ----
+
+/// How long one read of a live case waits; no case comes near it.
+const READ_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `profile` with its output delivered live, at most `queued_chunks` chunks waiting.
+pub fn live(profile: &ConfinementProfile, queued_chunks: u32) -> ConfinementProfile {
+    ConfinementProfile {
+        output_delivery: OutputDelivery::Live { queued_chunks },
+        ..profile.clone()
+    }
+}
+
+/// Every event of a live run until `None`.
+pub async fn read_events(adapter: &Arc<dyn ConfinementAdapter>, run: &RunId) -> Vec<OutputEvent> {
+    let mut events = Vec::new();
+    while let Some(event) = adapter
+        .read_output(run, READ_WAIT)
+        .await
+        .expect("read_output")
+    {
+        events.push(event);
+        assert!(events.len() < 100_000, "a live run delivered no end");
+    }
+    assert_eq!(
+        adapter.read_output(run, READ_WAIT).await.expect("read"),
+        None,
+        "None from then on"
+    );
+    events
+}
+
+const fn stream_index(stream: PipeStream) -> usize {
+    match stream {
+        PipeStream::Stdout => 0,
+        PipeStream::Stderr => 1,
+    }
+}
+
+/// The bytes `events` delivered on stdout and stderr, and the loss events after the last chunk.
+/// Asserts design 32's ordering: each stream's chunks contiguous from offset 0, each 1 to 64 KiB,
+/// no chunk after a loss event, and no loss event twice.
+pub fn delivered(events: &[OutputEvent]) -> ([Vec<u8>; 2], Vec<OutputEvent>) {
+    let mut streams = [Vec::new(), Vec::new()];
+    let mut losses: Vec<OutputEvent> = Vec::new();
+    for event in events {
+        if let OutputEvent::Chunk {
+            stream,
+            offset,
+            bytes,
+        } = event
+        {
+            assert!(losses.is_empty(), "a chunk after {losses:?}");
+            assert!(
+                (1..=64 * 1024).contains(&bytes.len()),
+                "a chunk of {} bytes",
+                bytes.len()
+            );
+            let delivered = &mut streams[stream_index(*stream)];
+            assert_eq!(
+                *offset,
+                delivered.len() as u64,
+                "{stream:?}: offsets are contiguous"
+            );
+            delivered.extend_from_slice(bytes);
+        } else {
+            assert!(!losses.contains(event), "{event:?} twice");
+            losses.push(event.clone());
+        }
+    }
+    (streams, losses)
+}
+
+/// The record begins with exactly the bytes delivered, on each stream.
+pub fn assert_prefix(name: &str, output: &RunOutput, streams: &[Vec<u8>; 2]) {
+    assert!(
+        output.stdout.starts_with(&streams[0]),
+        "{name}: the delivered stdout is not a prefix of the record"
+    );
+    assert!(
+        output.stderr.starts_with(&streams[1]),
+        "{name}: the delivered stderr is not a prefix of the record"
+    );
+}
+
+/// T4 of design 32 on any adapter: `command` writes `stdout` and `stderr` and exits 0. Each
+/// stream's chunks are contiguous, the record equals the delivered bytes, then `None`, and
+/// nothing stalled.
+pub async fn live_natural_end(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    command: &Command,
+    stdout: &[u8],
+    stderr: &[u8],
+) {
+    let admitted = adapter
+        .admit(&live(profile, 16))
+        .expect("a live profile is admitted");
+    let run = adapter.start(&admitted, command).await.expect("started");
+    let events = read_events(adapter, &run).await;
+    let ended = tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    let (streams, losses) = delivered(&events);
+    assert!(losses.is_empty(), "{name}: {losses:?}");
+    assert_eq!(streams[0], stdout, "{name}: stdout delivered");
+    assert_eq!(streams[1], stderr, "{name}: stderr delivered");
+    assert_eq!(
+        output.stdout, streams[0],
+        "{name}: the record is what was delivered"
+    );
+    assert_eq!(
+        output.stderr, streams[1],
+        "{name}: the record is what was delivered"
+    );
+    assert!(!adapter.output_stalled(&run), "{name}");
+}
+
+/// T5 (and T11) of design 32 on any adapter: `command` writes without end and nothing reads.
+/// The run ends no sooner than 1 s and within 3 s after its start returned; the queued chunks are
+/// readable, then `Stalled` once, then `None`; `output_stalled` is true; the record begins with
+/// the delivered bytes. Returns the delivered bytes per stream.
+pub async fn live_stall(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    command: &Command,
+    queued_chunks: u32,
+) -> [Vec<u8>; 2] {
+    let admitted = adapter
+        .admit(&live(profile, queued_chunks))
+        .expect("a live profile is admitted");
+    let run = adapter.start(&admitted, command).await.expect("started");
+    let began = std::time::Instant::now();
+    tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the stall ends the run")
+        .expect("waited");
+    let took = began.elapsed();
+    assert!(
+        took >= std::time::Duration::from_secs(1),
+        "{name}: ended after {took:?}, before the stall deadline"
+    );
+    assert!(
+        took <= std::time::Duration::from_secs(3),
+        "{name}: ended {took:?} after its start"
+    );
+    assert!(adapter.output_stalled(&run), "{name}: output_stalled");
+    let events = read_events(adapter, &run).await;
+    let (streams, losses) = delivered(&events);
+    assert_eq!(losses, [OutputEvent::Stalled], "{name}");
+    assert!(
+        !streams[0].is_empty() || !streams[1].is_empty(),
+        "{name}: the queued chunks are readable"
+    );
+    let output = adapter.output(&run).await.expect("output");
+    assert_prefix(name, &output, &streams);
+    streams
+}
+
+/// T6 of design 32 on any adapter: `command` writes more than `bound` bytes of `y\n` to stdout and
+/// exits. `Bounded { Stdout }` follows the last chunk, then `None`; the record is truncated, holds
+/// exactly the bound, equals the delivered bytes and carries no marker.
+pub async fn live_bounded(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    command: &Command,
+    bound: usize,
+) {
+    let admitted = adapter
+        .admit(&live(profile, 16))
+        .expect("a live profile is admitted");
+    let run = adapter.start(&admitted, command).await.expect("started");
+    let events = read_events(adapter, &run).await;
+    let ended = tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    let (streams, losses) = delivered(&events);
+    assert_eq!(
+        losses,
+        [OutputEvent::Bounded {
+            stream: PipeStream::Stdout
+        }],
+        "{name}"
+    );
+    assert!(output.stdout_truncated, "{name}");
+    assert_eq!(streams[0].len(), bound, "{name}: delivered up to the bound");
+    assert_eq!(
+        output.stdout, streams[0],
+        "{name}: the record is what was delivered"
+    );
+    assert!(
+        output
+            .stdout
+            .chunks(2)
+            .all(|pair| pair == b"y\n" || pair == b"y"),
+        "{name}: the record carries no truncation marker"
+    );
+    assert!(!adapter.output_stalled(&run), "{name}");
+}
+
+/// Waits up to 10 s for `path` to exist.
+pub async fn appears(path: &std::path::Path) {
+    let deadline = tokio::time::Instant::now() + READ_WAIT;
+    while !path.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} did not appear",
+            path.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// T19 of design 32 on any adapter: a gated child writes `one\n`, waits for the gate, writes
+/// `two\n` and `three\n`, creates `marker` and sleeps without end. After the first chunk the test
+/// opens the gate, waits for the marker and sends `signal(Kill)`: the remaining queued chunks,
+/// then `None`, no `Stalled`; `output_stalled` is false; the chunks are a prefix of the record.
+/// `marker` is the host's path, `seen` the child's.
+pub async fn live_kill_is_a_prefix(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    gate: &Gate,
+    marker: &std::path::Path,
+    seen: &std::path::Path,
+) {
+    let admitted = adapter
+        .admit(&live(profile, 16))
+        .expect("a live profile is admitted");
+    let script = format!(
+        "printf 'one\\n'; {}; printf 'two\\n'; printf 'three\\n'; touch '{}'; \
+         while :; do sleep 0.05; done",
+        gate.line(),
+        seen.display()
+    );
+    let run = adapter
+        .start(&admitted, &sh(&script))
+        .await
+        .expect("started");
+    let first = adapter
+        .read_output(&run, READ_WAIT)
+        .await
+        .expect("read")
+        .expect("a first chunk");
+    assert_eq!(
+        first,
+        OutputEvent::Chunk {
+            stream: PipeStream::Stdout,
+            offset: 0,
+            bytes: b"one\n".to_vec()
+        },
+        "{name}"
+    );
+    gate.open();
+    appears(marker).await;
+    adapter
+        .signal(&run, substrate_wire::Signal::Kill)
+        .await
+        .expect("killed");
+    let mut events = vec![first];
+    events.extend(read_events(adapter, &run).await);
+    tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+        .await
+        .expect("the kill ends the run")
+        .expect("waited");
+    let (streams, losses) = delivered(&events);
+    assert!(
+        losses.is_empty(),
+        "{name}: an imposed end names no loss: {losses:?}"
+    );
+    assert!(!adapter.output_stalled(&run), "{name}");
+    let output = adapter.output(&run).await.expect("output");
+    assert_prefix(name, &output, &streams);
 }

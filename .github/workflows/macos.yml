@@ -62,7 +62,7 @@ jobs:
       - name: Run the macos confinement lane
         run: |
           cargo test -p b10x-substrate-host --locked --test ess_confinement_macos -- --nocapture 2>&1 | tee "$RUNNER_TEMP/confinement.txt"
-          grep -q 'test result: ok. 16 passed; 0 failed' "$RUNNER_TEMP/confinement.txt"
+          grep -q 'test result: ok. 17 passed; 0 failed' "$RUNNER_TEMP/confinement.txt"
           grep 'ESS confinement macos lane:' "$RUNNER_TEMP/confinement.txt"
 
       - name: Show sandbox denials

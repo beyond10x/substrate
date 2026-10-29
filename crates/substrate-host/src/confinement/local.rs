@@ -2,8 +2,10 @@
 //!
 //! It serves `process_run`, `process_watch`, `output_read`, `wait`, `workspace` (a host directory)
 //! and `audit`, and nothing that would claim confinement. It proves `declared_insecure`,
-//! `paths_are_host_paths`, `host_network` and `stdin_pipe` (a pipe, not confinement: design 32),
-//! and `local_permitted` unless the host's policy forbids it (F3 A). It is opened only by name, a
+//! `paths_are_host_paths`, `host_network`, `stdin_pipe` and `output_live` (pipes, not
+//! confinement: design 32), and `local_permitted` unless the host's policy forbids it (F3 A).
+//! Of the embedder's signals only `Kill` stops live delivery; a child that traps `Int` or `Term`
+//! keeps delivering until it ends or stalls. It is opened only by name, a
 //! profile on it needs a reason, and every observation carries that reason. Nothing falls back to
 //! it.
 //!
@@ -24,17 +26,19 @@ use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use substrate_wire::Signal;
 use tokio::sync::watch;
 
+use super::live::{self, LiveOutput};
 use super::stdin::{self, StdinWriter};
 use super::{
     AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, ContractFamily, Fact, RenderedCommand, RunExit, RunId, RunObservation,
-    RunOutput, RunState,
+    ConfinementProfile, ContractFamily, Fact, OutputEvent, RenderedCommand, RunExit, RunId,
+    RunObservation, RunOutput, RunState,
 };
 use crate::DriverError;
 use crate::output_retention::{Captured, drain};
@@ -113,6 +117,7 @@ pub fn proof(permitted: bool) -> AdapterFacts {
             (Fact::LocalPermitted, permitted),
             (Fact::HostNetwork, true),
             (Fact::StdinPipe, true),
+            (Fact::OutputLive, true),
         ],
     )
 }
@@ -136,6 +141,8 @@ struct LocalRun {
     reaped: Arc<Mutex<bool>>,
     /// The run's standard input, when its profile piped it (design 32).
     stdin: Option<Arc<StdinWriter>>,
+    /// The run's live output, when its profile asked for it (design 32).
+    live: Option<Arc<LiveOutput>>,
 }
 
 /// Blocks until `pid` has exited, without reaping it.
@@ -288,15 +295,19 @@ impl LocalAdapter {
             LOCAL_OUTPUT_LIMIT_BYTES,
         )));
         let (phase, observed) = watch::channel(Phase::Running);
+        let reaped = Arc::new(Mutex::new(false));
+        let (live, [stdout_feed, stderr_feed]) =
+            live::open(admitted.profile().output_delivery, || {
+                live::group_kill(pid, Arc::clone(&reaped))
+            });
         let stdout = child
             .stdout
             .take()
-            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true)));
+            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true, stdout_feed)));
         let stderr = child
             .stderr
             .take()
-            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false)));
-        let reaped = Arc::new(Mutex::new(false));
+            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false, stderr_feed)));
         let reaping = Arc::clone(&reaped);
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
@@ -335,6 +346,7 @@ impl LocalAdapter {
             captured,
             reaped,
             stdin: writer,
+            live,
         }));
         admitted.audit_start(&id, &command.argv[0]);
         Ok(id)
@@ -410,8 +422,15 @@ impl ConfinementAdapter for LocalAdapter {
         Ok(Self::observation(&run))
     }
 
+    /// `Kill` is an imposed end and stops live delivery first; `Int` and `Term` close nothing,
+    /// since the child may trap them (design 32 § 3).
     async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
         let run = self.run(run)?;
+        if signal == Signal::Kill
+            && let Some(live) = &run.live
+        {
+            live.close();
+        }
         // Held across `kill`: the run's task cannot reap the leader meanwhile, so the group id
         // cannot have been reused by another process. Until it is reaped the run is `Running`,
         // and the signal goes to every member of the group, the leader exited or not.
@@ -442,5 +461,21 @@ impl ConfinementAdapter for LocalAdapter {
         let run = self.run(run)?;
         stdin::piped(run.stdin.as_ref())?.close().await;
         Ok(())
+    }
+
+    async fn read_output(
+        &self,
+        run: &RunId,
+        timeout: Duration,
+    ) -> Result<Option<OutputEvent>, ConfinementError> {
+        let run = self.run(run)?;
+        live::live(run.live.as_ref())?
+            .read(timeout, || run.captured.lock().extent())
+            .await
+    }
+
+    fn output_stalled(&self, run: &RunId) -> bool {
+        self.run(run)
+            .is_ok_and(|run| run.live.as_ref().is_some_and(|live| live.stalled()))
     }
 }

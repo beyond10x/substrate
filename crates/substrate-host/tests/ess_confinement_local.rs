@@ -70,7 +70,7 @@ fn open_portable(
 
 /// The authored `-on-portable` scenarios `spec/confinement-suite.json` holds. Pinned, so a
 /// scenario lost or renamed out of the lane fails here instead of shrinking what runs.
-const PORTABLE_DECLARED: usize = 19;
+const PORTABLE_DECLARED: usize = 20;
 
 /// The portable scenarios this host cannot execute, by name: an `absent-<adapter>-*` scenario on
 /// the platform where that adapter is present.
@@ -82,9 +82,9 @@ const NOT_EXECUTABLE_HERE: &[&str] = &[];
 
 /// What this host executes of the portable lane.
 #[cfg(target_os = "macos")]
-const PORTABLE_EXECUTED: usize = 18;
-#[cfg(not(target_os = "macos"))]
 const PORTABLE_EXECUTED: usize = 19;
+#[cfg(not(target_os = "macos"))]
+const PORTABLE_EXECUTED: usize = 20;
 
 #[test]
 fn ess_confinement_portable_lane_executes_every_authored_portable_scenario() {
@@ -1165,6 +1165,193 @@ async fn local_the_runs_end_fails_a_write_a_descendant_outside_the_group_still_b
         substrate_wire::SESSION_WRITE_FAILED,
         500,
     );
+}
+
+// ---- design 32 § 3: live output on `local` ----
+
+/// A `local` profile in `workspace` whose output is recorded only.
+fn recorded(workspace: &std::path::Path) -> ConfinementProfile {
+    ConfinementProfile {
+        local_reason: Some(REASON.into()),
+        workspace: Some(workspace.to_path_buf()),
+        ..ConfinementProfile::default()
+    }
+}
+
+/// What T4 writes: two lines on each stream, interleaved.
+const BOTH_STREAMS: &str =
+    "printf 'out-one\\n'; printf 'err-one\\n' >&2; printf 'out-two\\n'; printf 'err-two\\n' >&2";
+
+// T4.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_live_output_on_a_natural_end_is_the_record() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::live_natural_end(
+        "local T4",
+        &local(),
+        &recorded(workspace.path()),
+        &support::sh(BOTH_STREAMS),
+        b"out-one\nout-two\n",
+        b"err-one\nerr-two\n",
+    )
+    .await;
+}
+
+// T5.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_live_output_never_read_stalls_and_ends_the_run() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let streams = support::live_stall(
+        "local T5",
+        &local(),
+        &recorded(workspace.path()),
+        &support::sh("exec yes"),
+        1,
+    )
+    .await;
+    assert!(!streams[0].is_empty(), "the one queued chunk was delivered");
+}
+
+// T6.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_live_output_past_the_bound_names_it_after_the_last_chunk() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let bound = confinement::local::LOCAL_OUTPUT_LIMIT_BYTES;
+    support::live_bounded(
+        "local T6",
+        &local(),
+        &recorded(workspace.path()),
+        &support::sh(&format!("yes | head -c {}", bound + 64)),
+        bound,
+    )
+    .await;
+}
+
+// T11.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_live_output_on_both_streams_stalls_once() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::live_stall(
+        "local T11",
+        &local(),
+        &recorded(workspace.path()),
+        &support::sh("yes >&2 & exec yes"),
+        2,
+    )
+    .await;
+}
+
+// T19.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_live_output_after_kill_is_a_prefix_without_a_stall() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let gate = support::Gate::new(workspace.path());
+    let marker = workspace.path().join("written");
+    support::live_kill_is_a_prefix(
+        "local T19",
+        &local(),
+        &recorded(workspace.path()),
+        &gate,
+        &marker,
+        &marker,
+    )
+    .await;
+}
+
+// T21: `Term` closes nothing under `local`; a child that traps it keeps delivering to its end.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_live_output_continues_through_a_trapped_term() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let ready = workspace.path().join("ready");
+    let admitted = adapter
+        .admit(&support::live(&recorded(workspace.path()), 16))
+        .expect("admitted");
+    let script = format!(
+        "trap 'printf after; exit 3' TERM; printf before; touch '{}'; \
+         while :; do sleep 0.05; done",
+        ready.display()
+    );
+    let run = adapter
+        .start(&admitted, &support::sh(&script))
+        .await
+        .expect("started");
+    support::appears(&ready).await;
+    adapter
+        .signal(&run, substrate_wire::Signal::Term)
+        .await
+        .expect("signalled");
+    let events = support::read_events(&adapter, &run).await;
+    let ended = adapter.wait(&run).await.expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(3));
+    let (streams, losses) = support::delivered(&events);
+    assert!(losses.is_empty(), "{losses:?}");
+    assert_eq!(streams[0], b"beforeafter", "delivery continued past TERM");
+    let output = adapter.output(&run).await.expect("output");
+    assert_eq!(
+        output.stdout, streams[0],
+        "the record is what was delivered"
+    );
+    assert!(!adapter.output_stalled(&run));
+}
+
+// § 3 *Timeouts*: a `Recorded` run has no live output, a zero timeout is invalid, and a silent
+// run's read times out without ending it.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_live_reads_refuse_a_recorded_run_and_a_zero_timeout() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let gate = support::Gate::new(workspace.path());
+    let admitted = adapter
+        .admit(&recorded(workspace.path()))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exec true"))
+        .await
+        .expect("started");
+    support::assert_refused(
+        &adapter
+            .read_output(&run, std::time::Duration::from_secs(1))
+            .await
+            .expect_err("recorded"),
+        substrate_wire::SESSION_NOT_PIPE,
+        422,
+    );
+    assert!(!adapter.output_stalled(&run));
+    adapter.wait(&run).await.expect("waited");
+    let live = adapter
+        .admit(&support::live(&recorded(workspace.path()), 1))
+        .expect("admitted");
+    let run = adapter
+        .start(&live, &support::sh(&gate.line()))
+        .await
+        .expect("started");
+    support::assert_refused(
+        &adapter
+            .read_output(&run, std::time::Duration::ZERO)
+            .await
+            .expect_err("zero"),
+        substrate_wire::SESSION_TIMEOUT_INVALID,
+        422,
+    );
+    support::assert_refused(
+        &adapter
+            .read_output(&run, std::time::Duration::from_millis(50))
+            .await
+            .expect_err("silent"),
+        substrate_wire::SESSION_READ_TIMEOUT,
+        500,
+    );
+    gate.open();
+    assert_eq!(
+        adapter
+            .read_output(&run, std::time::Duration::from_secs(10))
+            .await
+            .expect("read"),
+        None,
+        "the run wrote nothing and ended"
+    );
+    adapter.wait(&run).await.expect("waited");
 }
 
 // ---- adversary pass on `story:adapter-stdin-pipe` ----
