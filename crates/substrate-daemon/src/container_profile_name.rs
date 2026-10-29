@@ -1,36 +1,79 @@
 //! The host execution `AppArmor` profile's name, a deployment parameter (design 33).
 //!
-//! A name is the default or the default followed by `-` and a suffix of 1 to 40 characters from
-//! `[a-z0-9-]` that starts and ends with a letter or digit. The grammar admits no character the
-//! policy parser, YAML or a shell treats specially, so a name substituted into the policy cannot
-//! add a rule, and it can never select a profile outside this family.
+//! A name is a policy version's base name, or that base followed by `-` and a suffix of 1 to 40
+//! characters from `[a-z0-9-]` that starts and ends with a letter or digit. The grammar admits no
+//! character the policy parser, YAML or a shell treats specially, so a name substituted into the
+//! policy cannot add a rule, and it can never select a profile outside these families.
+//!
+//! Each version is its own policy text (design 33 § 10). `v1` is the policy shipped since
+//! `0.10.0`, kept byte for byte; `v2` is `v1` with `noatime` and `nodiratime` admitted on a
+//! remount (D180). A suffix tells two loaded copies of one version apart; it never names another.
 
 use std::fmt;
 use std::str::FromStr;
 
+/// The base name of the `v1` policy.
+pub const V1: &str = "substrate-host-exec-v1";
+/// The base name of the `v2` policy.
+pub const V2: &str = "substrate-host-exec-v2";
 /// The name every deployment uses unless it states another.
-pub const DEFAULT: &str = "substrate-host-exec-v1";
+pub const DEFAULT: &str = V2;
+
+/// A policy version: which committed policy text a name renders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Version {
+    V1,
+    V2,
+}
+
+impl Version {
+    /// Every version, oldest first.
+    pub const ALL: [Self; 2] = [Self::V1, Self::V2];
+
+    /// The version's base name, the token its policy text names itself by.
+    pub const fn base(self) -> &'static str {
+        match self {
+            Self::V1 => V1,
+            Self::V2 => V2,
+        }
+    }
+}
 
 /// A validated profile name.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProfileName(String);
+pub struct ProfileName {
+    version: Version,
+    name: String,
+}
 
 impl ProfileName {
     /// The label the kernel reports for a process this profile confines in enforce mode.
     pub fn enforced_label(&self) -> String {
-        format!("{} (enforce)", self.0)
+        format!("{} (enforce)", self.name)
+    }
+
+    /// The policy version this name renders.
+    #[allow(
+        dead_code,
+        reason = "the installer selects a template by it; the bootstrap compares only labels"
+    )]
+    pub fn version(&self) -> Version {
+        self.version
     }
 }
 
 impl Default for ProfileName {
     fn default() -> Self {
-        Self(DEFAULT.to_owned())
+        Self {
+            version: Version::V2,
+            name: DEFAULT.to_owned(),
+        }
     }
 }
 
 impl fmt::Display for ProfileName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.name)
     }
 }
 
@@ -38,18 +81,23 @@ impl FromStr for ProfileName {
     type Err = String;
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
-        let admitted = name == DEFAULT
-            || name
-                .strip_prefix(DEFAULT)
-                .and_then(|rest| rest.strip_prefix('-'))
-                .is_some_and(suffix);
-        if admitted {
-            Ok(Self(name.to_owned()))
-        } else {
-            Err(format!(
-                "{name:?} is neither {DEFAULT} nor {DEFAULT}-<suffix>, a suffix of 1 to \
+        let version = Version::ALL.into_iter().find(|version| {
+            let base = version.base();
+            name == base
+                || name
+                    .strip_prefix(base)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                    .is_some_and(suffix)
+        });
+        match version {
+            Some(version) => Ok(Self {
+                version,
+                name: name.to_owned(),
+            }),
+            None => Err(format!(
+                "{name:?} is none of {V1}, {V2}, {V1}-<suffix> or {V2}-<suffix>, a suffix of 1 to \
                  {MAX_SUFFIX} characters from [a-z0-9-] that starts and ends with a letter or digit"
-            ))
+            )),
         }
     }
 }
@@ -71,31 +119,50 @@ mod tests {
 
     #[test]
     fn the_default_and_its_suffixed_family_are_names() {
-        let longest = format!("{DEFAULT}-{}", "a".repeat(40));
-        for name in [
-            DEFAULT,
-            "substrate-host-exec-v1-lane-01k8xyz",
-            "substrate-host-exec-v1-0",
-            "substrate-host-exec-v1-a--b",
-            longest.as_str(),
-        ] {
-            assert_eq!(
-                name.parse::<ProfileName>().map(|name| name.to_string()),
-                Ok(name.to_owned())
-            );
+        for (version, base) in [(Version::V1, V1), (Version::V2, V2)] {
+            assert_eq!(version.base(), base);
+            let longest = format!("{base}-{}", "a".repeat(40));
+            let names = [
+                base.to_owned(),
+                format!("{base}-lane-01k8xyz"),
+                format!("{base}-0"),
+                format!("{base}-a--b"),
+                longest.clone(),
+            ];
+            for name in &names {
+                let parsed = name.parse::<ProfileName>();
+                assert_eq!(
+                    parsed.as_ref().map(ToString::to_string),
+                    Ok(name.clone()),
+                    "{name}"
+                );
+                assert_eq!(parsed.unwrap().version(), version, "{name}");
+            }
+            assert_eq!(longest.len(), 63);
         }
-        assert_eq!(longest.len(), 63);
+        assert_eq!(DEFAULT, V2);
         assert_eq!(ProfileName::default().to_string(), DEFAULT);
+        assert_eq!(ProfileName::default().version(), Version::V2);
+        assert_eq!(Version::ALL, [Version::V1, Version::V2]);
     }
 
     #[test]
     fn a_name_outside_the_family_or_carrying_policy_syntax_is_refused() {
         let too_long = format!("{DEFAULT}-{}", "a".repeat(41));
+        let too_long_v1 = format!("{V1}-{}", "a".repeat(41));
         for name in [
             "",
             "unconfined",
             "docker-default",
-            "substrate-host-exec-v2",
+            "substrate-host-exec-v0",
+            "substrate-host-exec-v3",
+            "substrate-host-exec-v10",
+            "substrate-host-exec-v12",
+            "substrate-host-exec-v",
+            "substrate-host-exec-v2x",
+            "substrate-host-exec-v2-",
+            "substrate-host-exec-v2-A",
+            too_long_v1.as_str(),
             "substrate-host-exec-v1x",
             "substrate-host-exec-v1-",
             "substrate-host-exec-v1--a",
@@ -166,10 +233,13 @@ mod tests {
             "substrate-host-exec-v1=a",
             "substrate-host-exec-v1_a",
         ] {
-            assert!(
-                name.parse::<ProfileName>().is_err(),
-                "{name:?} was admitted"
-            );
+            // Each lookalike is refused in both versions' spelling.
+            for spelled in [name.to_owned(), name.replace(V1, V2).replace("-V1", "-V2")] {
+                assert!(
+                    spelled.parse::<ProfileName>().is_err(),
+                    "{spelled:?} was admitted"
+                );
+            }
         }
     }
 
@@ -177,6 +247,10 @@ mod tests {
     fn the_enforced_label_is_the_name_in_enforce_mode() {
         assert_eq!(
             ProfileName::default().enforced_label(),
+            "substrate-host-exec-v2 (enforce)"
+        );
+        assert_eq!(
+            V1.parse::<ProfileName>().unwrap().enforced_label(),
             "substrate-host-exec-v1 (enforce)"
         );
         let lane: ProfileName = "substrate-host-exec-v1-lane-a".parse().unwrap();

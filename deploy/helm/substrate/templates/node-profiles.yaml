@@ -1,7 +1,7 @@
 {{- if .Values.nodeProfiles.enabled }}
 {{- $name := printf "%s-node-profiles" (include "substrate.name" .) -}}
 {{- $profile := toString .Values.execution.appArmorProfile -}}
-{{- $namedProfile := ne $profile "substrate-host-exec-v1" -}}
+{{- $namedProfile := ne $profile "substrate-host-exec-v2" -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:

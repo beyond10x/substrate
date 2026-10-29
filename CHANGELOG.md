@@ -7,6 +7,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The host execution AppArmor profile `substrate-host-exec-v2`
+  (`deploy/apparmor/substrate-host-execution-v2`): `v1`'s rules with `noatime` and `nodiratime`
+  added to the `remount options in (…) /**` set, and nothing else changed. Bubblewrap keeps a
+  source mount's `noatime` when it remounts a bind read-only. `v1` refuses that remount, so on a
+  node whose filesystems are mounted `noatime` the confinement probe failed and the daemon
+  published no `exec.*` fact. A test checks every remount flag combination against both
+  policies: `v2` refuses everything `v1` refuses except a remount that adds `noatime` or
+  `nodiratime`.
+
+### Changed
+
+- `execution.appArmorProfile` in the chart, and `--apparmor-profile` on
+  `substrate-container-profiles` and `substrate-container-exec`, default to
+  `substrate-host-exec-v2`. They accept `substrate-host-exec-v1`, `substrate-host-exec-v2` and
+  either followed by `-<suffix>`. `v1` stays byte for byte as released since `0.10.0` and is
+  still installed and checked when named.
+- **Upgrade: nodes load `v2`.** With `nodeProfiles.enabled`, the installer DaemonSet loads it
+  during `helm upgrade`. A node image that carries the profiles itself must add
+  `substrate-host-exec-v2` before the daemon restarts under it, or set
+  `execution.appArmorProfile: substrate-host-exec-v1` to stay on `v1`. The installer removes
+  nothing, so a loaded `v1` stays loaded.
+- `cargo xtask chart-lane cluster --node-profiles` names its profile
+  `substrate-host-exec-v2-lane-<ulid>`.
+
 ## [0.15.0] — 2026-10-29
 
 ### Added

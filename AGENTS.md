@@ -580,10 +580,10 @@ node's own Debian snapshot, its boot unit masked so the node never loads its dis
 profiles. The image is tagged `b10x-substrate-chart-lab:<key>` per checkout and never pushed. The
 cluster has one worker, because every kind node shares the host kernel and a second node's
 installer would find the first one's profile loaded without its own source. The worker gets the
-host's securityfs. Each run names its own AppArmor profile `substrate-host-exec-v1-lane-<ulid>`,
+host's securityfs. Each run names its own AppArmor profile `substrate-host-exec-v2-lane-<ulid>`,
 a fresh lowercased ULID
 ([design 33](docs/design/33-host-profile-name-parameter.md) § 7),
-so it never loads, selects or removes a profile it does not own; a `substrate-host-exec-v1` another
+so it never loads, selects or removes a profile it does not own; a `substrate-host-exec-v2` another
 workload holds in the shared kernel does not stop it. The chart is installed with one pod,
 `execution.enabled`, that name as `execution.appArmorProfile` and `nodeProfiles.enabled` in
 `privileged` namespaces, and the verb runs every scenario in the literal

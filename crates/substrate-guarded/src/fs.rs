@@ -33,11 +33,11 @@ const FILE_READ_FLAGS: i32 = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW
 const MAX_DIRECTORY_SCAN_ITEMS: usize = 100_000;
 const MAX_DIFF_LINES: usize = 200;
 const MAX_PATCH_EDITS: usize = 128;
-pub(super) const DESTROY_BATCH_ITEMS: usize = 4_096;
+pub const DESTROY_BATCH_ITEMS: usize = 4_096;
 type RawDirectoryEntry = (CString, libc::mode_t, Option<u64>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WorkspaceDestroyBatch {
+pub enum WorkspaceDestroyBatch {
     Pending { removed_items: u64 },
     Absent,
 }
@@ -108,13 +108,13 @@ impl GuardedFilesystem {
 
     /// A duplicate of the workspaces-root descriptor pinned at open, for the exec path to resolve
     /// workspaces beneath, so exec and the file routes name one root.
-    pub(super) fn root_descriptor(&self) -> Result<OwnedFd, DriverError> {
+    pub fn root_descriptor(&self) -> Result<OwnedFd, DriverError> {
         // SAFETY: duplicates the live root descriptor; the result is owned immediately.
         let fd = unsafe { libc::fcntl(self.root.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
         owned_fd(fd, "workspace root")
     }
 
-    pub(super) fn root_identity(&self) -> Result<(libc::dev_t, libc::ino_t), DriverError> {
+    pub fn root_identity(&self) -> Result<(libc::dev_t, libc::ino_t), DriverError> {
         let metadata = fstat(self.root.as_raw_fd())?;
         Ok((metadata.st_dev, metadata.st_ino))
     }
@@ -1364,7 +1364,7 @@ fn split_parent(path: &str) -> Result<(&str, &str), DriverError> {
 /// the ones adoption and the file routes give for the same entry (`classify_open_error`): absent
 /// is `resource.not-found`; a symlink, a regular file or another mount in its place is
 /// `workspace.path-escape`; a kernel without `openat2` is `workspace.openat2-unavailable`.
-pub(crate) fn pin_workspace_directory_beneath(
+pub fn pin_workspace_directory_beneath(
     root: &OwnedFd,
     workspace: &Path,
 ) -> Result<OwnedFd, DriverError> {
@@ -1382,7 +1382,7 @@ pub(crate) fn pin_workspace_directory_beneath(
 
 /// Opens one component of a writable subtree beneath the pinned directory `directory`, without
 /// following a link, and reports what it is.
-pub(crate) fn open_component_beneath(
+pub fn open_component_beneath(
     directory: &OwnedFd,
     component: &str,
 ) -> Result<OwnedFd, DriverError> {
@@ -1397,7 +1397,7 @@ pub(crate) fn open_component_beneath(
 /// Reads the regular file `name` directly beneath the pinned directory `directory`, opened with
 /// `openat2` beneath it without following any link, and at most `max_bytes` of it. An absent file
 /// is `Ok(None)`; a symlink, another kind of file, or one over the bound is an error.
-pub(crate) fn read_regular_beneath(
+pub fn read_regular_beneath(
     directory: &OwnedFd,
     name: &str,
     max_bytes: u64,
@@ -1424,7 +1424,7 @@ pub(crate) fn read_regular_beneath(
 
 /// [`pin_workspace_directory_beneath`] for a directory the caller has just created and holds by
 /// path, as the capability probe does: the parent is opened by path, following links.
-pub(crate) fn pin_workspace_directory(workspace: &Path) -> Result<OwnedFd, DriverError> {
+pub fn pin_workspace_directory(workspace: &Path) -> Result<OwnedFd, DriverError> {
     let Some(parent) = workspace.parent() else {
         return Err(path_escape());
     };
@@ -1461,7 +1461,7 @@ pub(crate) fn pin_workspace_directory(workspace: &Path) -> Result<OwnedFd, Drive
 /// The set is `substrate_wire::is_root_name`, the one predicate the adopt admission also uses.
 /// It adds the `NAME_MAX` length bound, and refuses a leading `-` because such a name is
 /// indistinguishable from an option to any tool that is ever handed it as an argv element.
-pub(crate) fn validate_root_name(name: &str) -> Result<(), DriverError> {
+pub fn validate_root_name(name: &str) -> Result<(), DriverError> {
     if substrate_wire::is_root_name(name) {
         Ok(())
     } else {

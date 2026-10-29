@@ -81,8 +81,8 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 {{- end -}}
 {{- end -}}
 {{- $profile := toString .Values.execution.appArmorProfile -}}
-{{- if not (regexMatch "^substrate-host-exec-v1(-[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?)?$" $profile) -}}
-{{- fail (printf "execution.appArmorProfile %q is neither substrate-host-exec-v1 nor substrate-host-exec-v1-SUFFIX, a suffix of 1 to 40 characters from [a-z0-9-] that starts and ends with a letter or digit" $profile) -}}
+{{- if not (regexMatch "^substrate-host-exec-v[12](-[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?)?$" $profile) -}}
+{{- fail (printf "execution.appArmorProfile %q is none of substrate-host-exec-v1, substrate-host-exec-v2 or either followed by -SUFFIX, a suffix of 1 to 40 characters from [a-z0-9-] that starts and ends with a letter or digit" $profile) -}}
 {{- end -}}
 {{- if and .Values.execution.projectQuotas.enabled (not .Values.execution.enabled) -}}
 {{- fail "execution.projectQuotas.enabled requires execution.enabled: the quota executable is selected only by the execution bootstrap" -}}

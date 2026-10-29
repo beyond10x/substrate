@@ -187,3 +187,25 @@ Tests are written before code, and each runs its scenario once:
 - A parameterised seccomp file name. The seccomp profile lives in a kubelet directory, not in
   the shared kernel, so the lane's kind node has its own copy.
 - A second policy version. A `v2` policy is a new template and a new default, not a suffix.
+
+## 11. Addendum, 2026-10-29: the `v2` policy (D180)
+
+`decision-blocker:execution-profile-noatime-remount`, option A, adds the second policy version
+§ 10 left open, in the shape § 10 names: a new template and a new default.
+
+- **Two templates.** `deploy/apparmor/substrate-host-execution` stays `v1`, byte for byte (SHA-256
+  `e3ff9b10…843a`). `deploy/apparmor/substrate-host-execution-v2` is `v1` with `noatime` and
+  `nodiratime` added to `remount options in (…) /**` and its own name in its declaration and its
+  two self-peers. Each template's token is its own base name, so a `v2` profile never names a
+  `v1` profile as a peer.
+- **The grammar of § 2 has two bases.** A name is `substrate-host-exec-v1` or
+  `substrate-host-exec-v2`, or either followed by `-` and the same suffix. The base decides the
+  template; a suffix still only tells two loaded copies of one version apart. The schema
+  pattern and the template check are `^substrate-host-exec-v[12](…)?$`.
+- **The default is `v2`** for the chart value and both executables' `--apparmor-profile`. The chart
+  renders both flags only when the value is not `substrate-host-exec-v2`. `v1` is still
+  rendered, installed, checked and required exactly as before when it is named.
+- **The lane** names its profile `substrate-host-exec-v2-lane-<ulid>`.
+- **Verification** adds a policy-level diff (`container_profile_remount.rs`). It asks every
+  combination of the mount flags `AppArmor` names of both policies' remount rules, and holds every
+  other line identical by text.
