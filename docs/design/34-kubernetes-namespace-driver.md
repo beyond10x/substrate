@@ -39,12 +39,12 @@ curl and OpenSSL stack. Four packages follow:
 
 | directory | package | depends on (workspace) | holds |
 |---|---|---|---|
-| `crates/substrate-kubernetes-api` | `b10x-substrate-kubernetes-api` | none | design 28's kubeconfig loader and refusals; the HTTPS client (`Api`), bounded bodies, paging, metadata lists, watch streams, `DELETE` with `preconditions.uid`, `dryRun=All`, `pods/log`, `pods/exec` over WebSocket `v5.channel.k8s.io`, `Lease` read and update, `SelfSubjectRulesReview`; the gone-Pod evidence (`PodTrace`, `watch_event`, `replay`, `never_bound`) |
+| `crates/substrate-kubernetes-client` | `b10x-substrate-kubernetes-client` | none | design 28's kubeconfig loader and refusals; the HTTPS client (`Api`), bounded bodies, paging, metadata lists, watch streams, `DELETE` with `preconditions.uid`, `dryRun=All`, `pods/log`, `pods/exec` over WebSocket `v5.channel.k8s.io`, `Lease` read and update, `SelfSubjectRulesReview`; the gone-Pod evidence (`PodTrace`, `watch_event`, `replay`, `never_bound`) |
 | `crates/substrate-guarded` | `b10x-substrate-guarded` | `substrate-wire` | `fs.rs` moved whole; `DriverError`, `DriverErrorClass` and `Listed` moved with it and re-exported by `substrate-host`, so every existing path compiles; the environment rule (`check`, `baseline_value`) |
 | `crates/substrate-executor` | `b10x-substrate-executor`, binary `substrate-executor` | `substrate-wire`, `substrate-guarded` | the protocol types and frame codec (lib); the executor (bin) |
-| `crates/substrate-kubernetes` | `b10x-substrate-kubernetes` | `substrate-host`, `substrate-kubernetes-api`, `substrate-executor` (lib), `substrate-wire` | `NamespaceDriver: Driver` |
+| `crates/substrate-kubernetes` | `b10x-substrate-kubernetes` | `substrate-host`, `substrate-kubernetes-client`, `substrate-executor` (lib), `substrate-wire` | `NamespaceDriver: Driver` |
 
-`substrate-host` gains edges to `substrate-kubernetes-api` and `substrate-guarded`.
+`substrate-host` gains edges to `substrate-kubernetes-client` and `substrate-guarded`.
 `substrate-daemon` gains an edge to `substrate-kubernetes`. The extraction is a move: `pod.rs` keeps
 its constants, its rendering and its run task, and calls the client. Its golden manifest
 (`crates/substrate-host/tests/golden/pod-manifest.json`), its unit tests and the pod lane stay
@@ -56,12 +56,12 @@ third-party package, so `THIRD_PARTY_LICENSES.html` changes only if a feature do
 `cargo xtask check-packages` gains:
 
 - the four packages in `SOURCE_PACKAGES` (`xtask/src/packages.rs`), each with README, inherited
-  SPDX metadata and a documentation target. `substrate-kubernetes-api` and `substrate-guarded`
+  SPDX metadata and a documentation target. `substrate-kubernetes-client` and `substrate-guarded`
   name `website/docs/concepts/adapters.md`, and the other two name `website/docs/guides/deployment.md`,
   which gains its section in U10;
 - a `cargo tree --locked -p b10x-substrate-executor -e normal` rule refusing any line naming
-  `b10x-substrate-host`, `-store`, `-daemon`, `-kubernetes-api`, `rustls` or `gix`;
-- a refusal of the `fake` feature of `b10x-substrate-kubernetes-api` on any `[dependencies]` edge
+  `b10x-substrate-host`, `-store`, `-daemon`, `-kubernetes-client`, `rustls` or `gix`;
+- a refusal of the `fake` feature of `b10x-substrate-kubernetes-client` on any `[dependencies]` edge
   (§ 10.1). It is legal only under `[dev-dependencies]`.
 
 `crates/substrate-daemon/tests/driver_port.rs` stays as it is: `NamespaceDriver` is named only in
@@ -395,7 +395,7 @@ successor-bundle section confirms whether the error schema constrains failure co
 
 ### 10.1 The fake API: what runs in seconds, in gate step 1
 
-`b10x-substrate-kubernetes-api` has a module `fake`, compiled under `cfg(any(test, feature =
+`b10x-substrate-kubernetes-client` has a module `fake`, compiled under `cfg(any(test, feature =
 "fake"))`. The feature is fenced to dev-dependencies (§ 2). It is an in-process HTTPS server (an
 `rcgen` CA) serving the namespace subset the driver uses, from an in-memory store with real uids and
 `resourceVersion`s:
@@ -519,7 +519,7 @@ tests named are the unit's own, each run once.
 
 **Wave 1: foundations, no behaviour change**
 
-- **U1 client extraction.** `substrate-kubernetes-api` from `pod.rs`; WebSocket `pods/exec`,
+- **U1 client extraction.** `substrate-kubernetes-client` from `pod.rs`; WebSocket `pods/exec`,
   preconditioned delete, `dryRun`, Lease and rules review added; the `fake` module and its feature
   fence. Tests: client cases against the fake (paging bound, 410 relist, precondition 409, lost
   answer, credential never in an error); `pod.rs` unit tests and the golden manifest unchanged; the
@@ -596,6 +596,7 @@ Each is reversible and inside ADR 0047.
 | D10 | an unanswered file call is resolved once by `stat` and digest, never resent | no fabricated "not written" |
 | D11 | workspace create waits 60 s for the handshake, then `OutcomeUnknown` | first-consumer binding and pulls can be slow; the provisional loop finishes it |
 | D12 | dispatch absence is recognised by an unbound `pod` row | N9's `failed` without changing the host driver's `unknown` |
+| D13 | the client package is `b10x-substrate-kubernetes-client`, not `-kubernetes-api` | the `-api` name in `Cargo.lock` trips Gitleaks' `generic-api-key` rule; the allowlist is not widened |
 
 ## 14. Decisions for the operator
 

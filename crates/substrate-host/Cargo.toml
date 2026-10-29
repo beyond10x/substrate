@@ -26,23 +26,18 @@ curl.workspace = true
 hex.workspace = true
 git2.workspace = true
 gix.workspace = true
-http-body-util.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
 libc.workspace = true
 nix.workspace = true
 parking_lot.workspace = true
-rustls.workspace = true
-rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 substrate-guarded = { package = "b10x-substrate-guarded", path = "../substrate-guarded", version = "=0.15.0" }
+substrate-kubernetes-client = { package = "b10x-substrate-kubernetes-client", path = "../substrate-kubernetes-client", version = "=0.15.0" }
 substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.15.0" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-rustls.workspace = true
 tracing.workspace = true
 ulid.workspace = true
 url.workspace = true
@@ -51,6 +46,7 @@ zeroize.workspace = true
 [dev-dependencies]
 b10x-substrate-cli = { path = "../b10x-substrate-cli", version = "=0.15.0" }
 rcgen = "0.14"
+rustls.workspace = true
 
 [lints]
 workspace = true
