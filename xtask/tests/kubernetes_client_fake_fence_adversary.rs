@@ -149,3 +149,57 @@ fn a_feature_forwarding_fake_through_an_inherited_renamed_edge_is_refused() {
     });
     assert_refused(scratch.path(), "[features] testing = [\"k8s/fake\"]");
 }
+
+/// A manifest that enables `fake` on its own runtime edge, for the path-dependency cases below.
+const SHIM: &str = "[package]\nname = \"shim\"\nversion = \"0.15.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nsubstrate-kubernetes-client = { package = \"b10x-substrate-kubernetes-client\", path = \"../crates/substrate-kubernetes-client\", version = \"=0.15.0\", features = [\"fake\"] }\n";
+
+/// The host's runtime dependencies gain `dependency`, a path dependency written as `entry`.
+fn add_host_dependency(root: &Path, entry: &str) {
+    edit(root, HOST, |text| {
+        text.replacen("[dependencies]\n", &format!("[dependencies]\n{entry}\n"), 1)
+    });
+}
+
+/// Cargo adds a path dependency that resides in the workspace directory to the workspace, so a
+/// manifest beneath the root that no `members` entry lists is still a workspace member. The fence
+/// reads only the listed members, so a runtime shim that enables `fake` on its own edge is never
+/// read, and the host's runtime edge to the shim reaches the fake.
+#[test]
+fn a_fake_edge_in_an_unlisted_path_member_is_refused() {
+    let scratch = copy_manifests();
+    let shim = scratch.path().join("shim");
+    std::fs::create_dir_all(&shim).expect("shim directory");
+    std::fs::write(shim.join("Cargo.toml"), SHIM).expect("shim manifest");
+    add_host_dependency(scratch.path(), "shim = { path = \"../../shim\" }");
+    assert_refused(
+        scratch.path(),
+        "crates/substrate-host -> shim (an unlisted path member) -> fake",
+    );
+}
+
+/// A path dependency outside the workspace directory is not a member at all. The fence never reads
+/// its manifest, so its runtime edge to the fake passes unexamined.
+#[test]
+fn a_fake_edge_in_a_path_manifest_outside_the_root_is_refused() {
+    let scratch = copy_manifests();
+    let outside = tempfile::tempdir().expect("outside directory");
+    std::fs::write(
+        outside.path().join("Cargo.toml"),
+        SHIM.replace(
+            "../crates/substrate-kubernetes-client",
+            &repo()
+                .join("crates/substrate-kubernetes-client")
+                .display()
+                .to_string(),
+        ),
+    )
+    .expect("outside manifest");
+    add_host_dependency(
+        scratch.path(),
+        &format!("shim = {{ path = \"{}\" }}", outside.path().display()),
+    );
+    assert_refused(
+        scratch.path(),
+        "crates/substrate-host -> shim (a path manifest outside the root) -> fake",
+    );
+}
