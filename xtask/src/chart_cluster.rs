@@ -1472,23 +1472,48 @@ fn exec_diagnosis(lane: &Lane<'_>, pod: &DaemonProcess, machine: &Value) -> Stri
         "/sys/fs/cgroup/cgroup.subtree_control",
     ]);
     let controllers = inside(&["cat", "/sys/fs/cgroup/cgroup.controllers"]);
-    let sandbox = inside(&[
-        "/usr/bin/bwrap",
-        "--unshare-all",
-        "--unshare-user",
-        "--disable-userns",
-        "--die-with-parent",
-        "--ro-bind",
-        "/",
-        "/",
-        "/usr/bin/true",
-    ]);
+    let sandbox = inside(&DIAGNOSIS_SANDBOX);
+    let denials = answer(on_node(lane, &pod.node, &["dmesg"]).map(|log| {
+        let lines = apparmor_denials(&log, &lane.profile);
+        lines[lines.len().saturating_sub(8)..].join("\n")
+    }));
     format!(
         "diagnosis of {}: published facts {facts}; daemon cgroup {cgroup:?}; delegated root \
-         {root:?} with controllers {controllers:?}; a bubblewrap sandbox in its container: \
-         {sandbox:?}",
-        pod.name()
+         {root:?} with controllers {controllers:?}; a bubblewrap sandbox in its container as the \
+         daemon runs it: {sandbox:?}; kernel AppArmor denials under {}: {denials:?}",
+        pod.name(),
+        lane.profile
     )
+}
+
+/// The confinement probe's sandbox, started the way the daemon starts it: uid and gid 65532, no
+/// capability, `no_new_privs`, and a read-only bind of a fresh directory under `/tmp`, where the
+/// probe's sentinel lives. Run as the container's root with its capabilities instead, bubblewrap
+/// fails on steps the daemon never takes.
+const DIAGNOSIS_SANDBOX: [&str; 11] = [
+    "setpriv",
+    "--reuid=65532",
+    "--regid=65532",
+    "--clear-groups",
+    "--inh-caps=-all",
+    "--bounding-set=-all",
+    "--no-new-privs",
+    "--",
+    "/bin/sh",
+    "-c",
+    "d=$(mktemp -d) && /usr/bin/bwrap --unshare-user --disable-userns --unshare-ipc \
+     --unshare-pid --unshare-net --unshare-uts --new-session --die-with-parent --clearenv \
+     --ro-bind /usr /usr --ro-bind-try /bin /bin --ro-bind-try /lib /lib --ro-bind-try /lib64 \
+     /lib64 --proc /proc --dev /dev --tmpfs /tmp --assert-userns-disabled --dir /runtime \
+     --ro-bind \"$d\" /runtime/sentinel -- /usr/bin/true; s=$?; rmdir \"$d\"; exit $s",
+];
+
+/// The kernel's `AppArmor` denials of exactly `profile`, in log order.
+fn apparmor_denials<'a>(log: &'a str, profile: &str) -> Vec<&'a str> {
+    let label = format!("profile=\"{profile}\"");
+    log.lines()
+        .filter(|line| line.contains("apparmor=\"DENIED\"") && line.contains(&label))
+        .collect()
 }
 
 /// The syscall names of a seccomp document, profile or OCI runtime spec alike.
@@ -2471,6 +2496,50 @@ fn uninstall(lane: &Lane<'_>) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_diagnosis_sandbox_runs_as_the_daemon_and_binds_a_tmp_directory() {
+        let uid = format!("--reuid={DAEMON_UID}");
+        let gid = format!("--regid={DAEMON_UID}");
+        for wanted in [
+            uid.as_str(),
+            gid.as_str(),
+            "--clear-groups",
+            "--inh-caps=-all",
+            "--bounding-set=-all",
+            "--no-new-privs",
+        ] {
+            assert!(DIAGNOSIS_SANDBOX.contains(&wanted), "{wanted}");
+        }
+        let script = DIAGNOSIS_SANDBOX[DIAGNOSIS_SANDBOX.len() - 1];
+        for wanted in [
+            "d=$(mktemp -d)",
+            "--unshare-user --disable-userns",
+            "--assert-userns-disabled",
+            "--ro-bind \"$d\" /runtime/sentinel",
+        ] {
+            assert!(script.contains(wanted), "{wanted} not in {script}");
+        }
+    }
+
+    #[test]
+    fn only_the_runs_own_profile_denials_are_reported() {
+        let profile = "substrate-host-exec-v1-lane-01m62nkn5vqh7jba8ym0z7js91";
+        let denied = format!(
+            "[4279684.727023] audit: type=1400 audit(1793238653.480:570): apparmor=\"DENIED\" \
+             operation=\"mount\" class=\"mount\" info=\"failed flags match\" error=-13 \
+             profile=\"{profile}\" name=\"/newroot/runtime/sentinel/\" pid=789774 comm=\"bwrap\" \
+             flags=\"ro, nosuid, nodev, remount, noatime, bind, silent\""
+        );
+        let log = [
+            denied.clone(),
+            denied.replace(profile, &format!("{profile}x")),
+            denied.replace("DENIED", "ALLOWED"),
+            "[1.0] unrelated".to_owned(),
+        ]
+        .join("\n");
+        assert_eq!(apparmor_denials(&log, profile), [denied.as_str()]);
+    }
 
     #[test]
     fn every_execution_enabled_scenario_is_reported_absent_by_name_on_every_run() {
