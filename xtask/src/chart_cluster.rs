@@ -26,8 +26,8 @@
 //! not built on `--node-image`, and a worker without `AppArmor`, without the parser, already
 //! holding this run's own profile name in the shared kernel, or without a cgroup v2 hierarchy
 //! carrying `cpu`, `memory` and `pids`. Each run names its profile
-//! `substrate-host-exec-v1-lane-<ulid>`, fresh and lowercased (design 33 § 7), so it never loads,
-//! selects or removes a profile it does not own, the default `substrate-host-exec-v1` included. It
+//! `substrate-host-exec-v2-lane-<ulid>`, fresh and lowercased (design 33 § 7), so it never loads,
+//! selects or removes a profile it does not own, the default `substrate-host-exec-v2` included. It
 //! installs the chart with one pod, `execution.enabled`, `execution.appArmorProfile` set to that
 //! name and `nodeProfiles.enabled` in `privileged` namespaces and runs the four:
 //!
@@ -88,7 +88,7 @@ const TRAILER: &str = "Chart-lane";
 /// This file, relative to the workspace root: the release step counts its `SCENARIOS`.
 const SOURCE: &str = "xtask/src/chart_cluster.rs";
 /// The chart's default host execution profile; every name the lane chooses extends it.
-const APPARMOR_PROFILE: &str = "substrate-host-exec-v1";
+const APPARMOR_PROFILE: &str = "substrate-host-exec-v2";
 const SECCOMP_PROFILE: &str = "b10x-substrate/host-exec-v1-amd64.json";
 const SECCOMP_SOURCE: &str = "deploy/seccomp/host-exec-v1-amd64.json";
 const DAEMON_UID: &str = "65532";
@@ -144,7 +144,7 @@ pub const EXECUTION_ABSENT: [(&str, &str); 4] = [
     ),
     (
         "Localhost AppArmor profile",
-        "the daemon under the substrate-host-exec-v1 Localhost AppArmor profile is not run on kind",
+        "the daemon under the substrate-host-exec-v2 Localhost AppArmor profile is not run on kind",
     ),
     (
         "TLS key after the uid drop",
@@ -331,7 +331,7 @@ fn lab_image(root: &Path) -> String {
     format!("{LAB_REPOSITORY}:{}", hex::encode(&digest[..8]))
 }
 
-/// This run's own profile name, `substrate-host-exec-v1-lane-<ulid>` with a fresh lowercased ULID
+/// This run's own profile name, `substrate-host-exec-v2-lane-<ulid>` with a fresh lowercased ULID
 /// (design 33 § 7): a 31-character suffix of `[a-z0-9-]`, within the chart's grammar, and a name
 /// no other workload and no other run of the lane holds.
 fn lane_profile() -> String {
@@ -360,7 +360,7 @@ fn removal_argv(profile: &str) -> [String; 3] {
 
 /// Whether the shared kernel's `listing` lets this run load `profile`: refused only when that
 /// exact name is already loaded, by something this run did not start. Any other profile, the
-/// default `substrate-host-exec-v1` included, is not the lane's and decides nothing.
+/// default `substrate-host-exec-v2` and `v1` included, is not the lane's and decides nothing.
 fn own_profile_verdict(
     listing: &str,
     profile: &str,
@@ -2709,10 +2709,10 @@ mod tests {
 
     #[test]
     fn a_profile_already_in_the_shared_kernel_is_found_by_its_exact_name() {
-        let listing = "docker-default (enforce)\nsubstrate-host-exec-v1 (enforce)\n";
+        let listing = "docker-default (enforce)\nsubstrate-host-exec-v2 (enforce)\n";
         assert!(profile_loaded(listing, APPARMOR_PROFILE));
         assert!(profile_loaded(
-            "substrate-host-exec-v1 (complain)\n",
+            "substrate-host-exec-v2 (complain)\n",
             APPARMOR_PROFILE
         ));
         assert!(!profile_loaded(
@@ -2720,8 +2720,16 @@ mod tests {
             APPARMOR_PROFILE
         ));
         assert!(!profile_loaded(
-            "substrate-host-exec-v10 (enforce)\nx//substrate-host-exec-v1 (enforce)\n",
+            "substrate-host-exec-v20 (enforce)\nx//substrate-host-exec-v2 (enforce)\n",
             APPARMOR_PROFILE
+        ));
+        assert!(!profile_loaded(
+            "substrate-host-exec-v1 (enforce)\n",
+            APPARMOR_PROFILE
+        ));
+        assert!(profile_loaded(
+            "substrate-host-exec-v1 (enforce)\n",
+            "substrate-host-exec-v1"
         ));
         assert!(!profile_loaded("", APPARMOR_PROFILE));
     }
@@ -2792,7 +2800,7 @@ mod tests {
         // The pattern is the chart's grammar, not a pattern that admits anything.
         for refused in [
             "unconfined",
-            "substrate-host-exec-v2",
+            "substrate-host-exec-v3",
             "substrate-host-exec-v1-",
             "substrate-host-exec-v1-LANE",
         ] {
@@ -2805,7 +2813,7 @@ mod tests {
         let own = "substrate-host-exec-v1-lane-01k8xyz";
         // Another workload's default profile, a sibling run's lane profile and an unrelated one
         // are not the lane's and decide nothing.
-        let others = "docker-default (enforce)\nsubstrate-host-exec-v1 (enforce)\n\
+        let others = "docker-default (enforce)\nsubstrate-host-exec-v1 (enforce)\nsubstrate-host-exec-v2 (enforce)\n\
                       substrate-host-exec-v1-lane-01k8abc (enforce)\n";
         assert_eq!(own_profile_verdict(others, own, "worker"), Ok(()));
         assert_eq!(own_profile_verdict("", own, "worker"), Ok(()));

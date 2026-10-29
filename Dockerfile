@@ -57,6 +57,7 @@ RUN apt-get update && \
 COPY --from=sandbox-builder /out/bwrap /usr/bin/bwrap
 COPY --from=sandbox-builder /out/bubblewrap-COPYING /usr/share/licenses/bubblewrap/COPYING
 COPY deploy/apparmor/substrate-host-execution /usr/share/substrate/apparmor/substrate-host-execution
+COPY deploy/apparmor/substrate-host-execution-v2 /usr/share/substrate/apparmor/substrate-host-execution-v2
 
 FROM execution-prerequisites AS daemon
 ARG SOURCE_SHA=unknown

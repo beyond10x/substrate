@@ -278,7 +278,7 @@ permitted/effective capabilities. `PR_SET_NO_NEW_PRIVS` alone does not clear cap
 
 The daemon image includes `/usr/local/bin/substrate-container-exec` for an explicit container
 execution profile. It requires Linux amd64, private PID/mount/cgroup namespaces, finite enclosing
-CPU and memory limits, the enforced `substrate-host-exec-v1` AppArmor profile and the matching
+CPU and memory limits, the enforced `substrate-host-exec-v2` AppArmor profile and the matching
 versioned [seccomp profile](deploy/seccomp/README.md). The application receives no host paths or
 host namespaces. Start the bootstrap as container PID 1 and UID/GID 0 with exactly CHOWN, SETGID,
 SETUID, SETPCAP and SYS_ADMIN after dropping all other capabilities. Supply a writable temporary
@@ -300,10 +300,12 @@ receive these mounts or installation authority.
 
 The profile name is a deployment parameter
 ([design 33](docs/design/33-host-profile-name-parameter.md)). `--apparmor-profile <name>` on both
-executables, and `execution.appArmorProfile` in the chart, name `substrate-host-exec-v1` or
-`substrate-host-exec-v1-<suffix>`. The installer renders the same policy under that name, loads it
-from `<name>.apparmor` and holds it to those exact bytes; the bootstrap requires
-`<name> (enforce)`. Unset, every byte is as before.
+executables, and `execution.appArmorProfile` in the chart, name `substrate-host-exec-v2` (the
+default), `substrate-host-exec-v1`, or either followed by `-<suffix>`. The installer renders that
+version's policy under the name, loads it from `<name>.apparmor` and holds it to those exact
+bytes; the bootstrap requires `<name> (enforce)`. `v2` is `v1` with `noatime` and `nodiratime`
+admitted on a remount, which bubblewrap needs on a node whose filesystems are mounted `noatime`;
+`v1` is unchanged since `0.10.0`.
 
 The `container-checker` Docker build target contains a public-SDK example for final-image
 acceptance. Run its `container-pty-check SOCKET` executable as the admitted non-root UID inside

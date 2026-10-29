@@ -229,6 +229,11 @@ and selects the seccomp and AppArmor profiles from each node. `nodeProfiles.enab
 profiles with a DaemonSet in its own `privileged` namespace. Otherwise the node image must carry
 them.
 
+The AppArmor profile is `substrate-host-exec-v2` unless `execution.appArmorProfile` names
+`substrate-host-exec-v1`. `v2` also admits the `noatime` and `nodiratime` remount flags, which
+bubblewrap keeps when the node mounts its filesystems `noatime`. On upgrade, nodes load `v2`.
+Not verified: whether production nodes mount `noatime`.
+
 ### Operate it
 
 | Task | How |
