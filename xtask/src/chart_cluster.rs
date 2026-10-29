@@ -1475,6 +1475,7 @@ fn exec_diagnosis(lane: &Lane<'_>, pod: &DaemonProcess, machine: &Value) -> Stri
     let sandbox = inside(&[
         "/usr/bin/bwrap",
         "--unshare-all",
+        "--unshare-user",
         "--disable-userns",
         "--die-with-parent",
         "--ro-bind",
