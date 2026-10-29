@@ -1,5 +1,5 @@
-//! `pods/exec` over WebSocket `v5.channel.k8s.io`: one bounded call that sends its whole input,
-//! closes it, and reads both output streams and the API's `Status` until the server closes.
+//! `pods/exec` over WebSocket `v5.channel.k8s.io`: one bounded call that sends its whole input and
+//! closes it while it reads both output streams and the API's `Status` until the server closes.
 //!
 //! Every binary message carries its channel in its first byte: 0 stdin, 1 stdout, 2 stderr, 3 the
 //! final `Status`. Version 5 adds 255, whose one-byte payload names the channel it closes, so the
@@ -13,7 +13,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 
 use crate::MAX_API_BODY_BYTES;
-use crate::api::{Api, ApiError};
+use crate::api::{Api, ApiError, container_name, pod_name};
 
 /// The one subprotocol the client offers. A server that does not choose it is refused.
 pub const EXEC_PROTOCOL: &str = "v5.channel.k8s.io";
@@ -67,11 +67,16 @@ impl Api {
     /// whole input, and reads at most `limit` bytes of each output stream, within the client's
     /// call bound.
     ///
+    /// The input is written while the output is read, so a command that writes while it reads
+    /// completes, and a command that ends before it read all of its input keeps its `Status`.
+    ///
     /// # Errors
     ///
-    /// [`ApiError::Answered`] when the API refuses the upgrade; [`ApiError::Unanswered`] when no
-    /// answer came, the server chose no `v5.channel.k8s.io`, or the stream failed or outlasted
-    /// the call bound before the server closed it: the command may have run.
+    /// [`ApiError::Invalid`], before any request, for a `pod` that is not a DNS-1123 subdomain
+    /// or a `container` that is not a DNS-1123 label; [`ApiError::Answered`] when the API refuses
+    /// the upgrade; [`ApiError::Unanswered`] when no answer came, the server chose no
+    /// `v5.channel.k8s.io`, or the stream failed or outlasted the call bound before the server
+    /// sent its `Status`: the command may have run.
     pub async fn exec(
         &self,
         pod: &str,
@@ -130,12 +135,14 @@ impl Api {
         stdin: &[u8],
         limit: usize,
     ) -> Result<ExecOutput, ApiError> {
+        pod_name(pod)?;
+        container_name(container)?;
         let request = self.exec_request(pod, container, command)?;
         let tls = self.connect().await.map_err(ApiError::Unanswered)?;
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_API_BODY_BYTES))
             .max_frame_size(Some(MAX_API_BODY_BYTES));
-        let (mut socket, _) =
+        let (socket, _) =
             match tokio_tungstenite::client_async_with_config(request, tls, Some(config)).await {
                 Ok(connected) => connected,
                 Err(tungstenite::Error::Http(response)) => {
@@ -153,57 +160,77 @@ impl Api {
         let unanswered = |error: tungstenite::Error| {
             ApiError::Unanswered(self.redact(&format!("exec: {error}")))
         };
-        for chunk in stdin.chunks(STDIN_CHUNK) {
-            let mut message = Vec::with_capacity(chunk.len() + 1);
-            message.push(STDIN);
-            message.extend_from_slice(chunk);
-            socket
-                .feed(Message::binary(message))
-                .await
-                .map_err(unanswered)?;
-        }
-        socket
-            .send(Message::binary(vec![CLOSE, STDIN]))
-            .await
-            .map_err(unanswered)?;
-        let mut output = ExecOutput::default();
-        while let Some(message) = socket.next().await {
-            let data = match message {
-                Ok(Message::Binary(data)) => data,
-                Ok(Message::Close(_)) => break,
-                Ok(_) => continue,
-                Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
-                    break;
-                }
-                Err(error) => return Err(unanswered(error)),
-            };
-            let Some((channel, payload)) = data.split_first() else {
-                continue;
-            };
-            match *channel {
-                STDOUT => keep(
-                    &mut output.stdout,
-                    &mut output.stdout_truncated,
-                    payload,
-                    limit,
-                ),
-                STDERR => keep(
-                    &mut output.stderr,
-                    &mut output.stderr_truncated,
-                    payload,
-                    limit,
-                ),
-                STATUS => {
-                    output.status = Some(serde_json::from_slice(payload).map_err(|_| {
-                        ApiError::Invalid("exec sent a status that is not JSON".to_owned())
-                    })?);
-                }
-                _ => {}
+        // The input is written while the output is read, never before it: a command that writes
+        // while it reads would otherwise stall both sides on full socket buffers.
+        let (mut sink, mut stream) = socket.split();
+        let write = async {
+            for chunk in stdin.chunks(STDIN_CHUNK) {
+                let mut message = Vec::with_capacity(chunk.len() + 1);
+                message.push(STDIN);
+                message.extend_from_slice(chunk);
+                sink.feed(Message::binary(message)).await?;
             }
-        }
+            sink.send(Message::binary(vec![CLOSE, STDIN])).await
+        };
+        let read = async {
+            let mut output = ExecOutput::default();
+            while let Some(message) = stream.next().await {
+                let data = match message {
+                    Ok(Message::Binary(data)) => data,
+                    Ok(Message::Close(_))
+                    | Err(
+                        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed,
+                    ) => break,
+                    Ok(_) => continue,
+                    // The status is the server's last message: a stream that fails after it has
+                    // nothing more to say.
+                    Err(error) if output.status.is_none() => return Err(unanswered(error)),
+                    Err(_) => break,
+                };
+                let Some((channel, payload)) = data.split_first() else {
+                    continue;
+                };
+                match *channel {
+                    STDOUT => keep(
+                        &mut output.stdout,
+                        &mut output.stdout_truncated,
+                        payload,
+                        limit,
+                    ),
+                    STDERR => keep(
+                        &mut output.stderr,
+                        &mut output.stderr_truncated,
+                        payload,
+                        limit,
+                    ),
+                    STATUS => {
+                        output.status = Some(serde_json::from_slice(payload).map_err(|_| {
+                            ApiError::Invalid("exec sent a status that is not JSON".to_owned())
+                        })?);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(output)
+        };
+        tokio::pin!(write, read);
+        let mut writing = true;
+        let mut write_failure = None;
+        let output = loop {
+            tokio::select! {
+                written = &mut write, if writing => {
+                    writing = false;
+                    write_failure = written.err();
+                }
+                output = &mut read => break output?,
+            }
+        };
+        // A command that ended without reading all of its input still sent its status; only
+        // without one does a failed write explain anything.
         if output.status.is_none() {
-            return Err(ApiError::Unanswered(
-                "exec ended without a status".to_owned(),
+            return Err(write_failure.map_or_else(
+                || ApiError::Unanswered("exec ended without a status".to_owned()),
+                unanswered,
             ));
         }
         Ok(output)

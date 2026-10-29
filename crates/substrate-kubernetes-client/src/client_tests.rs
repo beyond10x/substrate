@@ -547,3 +547,406 @@ async fn an_exec_whose_command_writes_while_it_reads_completes_its_echo() {
         input.len()
     );
 }
+
+/// A loopback TLS listener under its own CA, and the kubeconfig that names it with [`CREDENTIAL`].
+async fn tls_endpoint() -> (tokio_rustls::TlsAcceptor, tokio::net::TcpListener, Value) {
+    let ca_key = rcgen::KeyPair::generate().expect("a CA key");
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA parameters");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "raw cluster CA");
+    let ca = ca_params.self_signed(&ca_key).expect("the CA");
+    let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+    let server_key = rcgen::KeyPair::generate().expect("a server key");
+    let server = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()])
+        .and_then(|params| params.signed_by(&server_key, &issuer))
+        .expect("the server certificate");
+    let mut tls = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![server.der().clone()],
+        rustls::pki_types::PrivatePkcs8KeyDer::from(server_key.serialize_der()).into(),
+    )
+    .expect("the server identity");
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback port");
+    let address = listener.local_addr().expect("the port");
+    let config = json!({
+        "current-context": "raw",
+        "clusters": [{"name": "raw", "cluster": {
+            "server": format!("https://{address}"),
+            "certificate-authority-data":
+                base64::engine::general_purpose::STANDARD.encode(ca.pem()),
+        }}],
+        "contexts": [{"name": "raw", "context": {
+            "cluster": "raw", "user": "raw", "namespace": NAMESPACE,
+        }}],
+        "users": [{"name": "raw", "user": {"token": CREDENTIAL}}],
+    });
+    (
+        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls)),
+        listener,
+        config,
+    )
+}
+
+/// An HTTPS server that reads each request head, writes `answer` verbatim (or nothing), and then
+/// reads until the client closes the connection, which it reports on the returned channel.
+async fn raw_http_server(
+    answer: Option<&'static [u8]>,
+) -> (Value, tokio::sync::mpsc::UnboundedReceiver<()>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (acceptor, listener, config) = tls_endpoint().await;
+    let (closed, notices) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            let acceptor = acceptor.clone();
+            let closed = closed.clone();
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let mut head = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match tls.read(&mut buffer).await {
+                        Ok(0) | Err(_) => {
+                            let _ = closed.send(());
+                            return;
+                        }
+                        Ok(read) => head.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                if let Some(answer) = answer
+                    && (tls.write_all(answer).await.is_err() || tls.flush().await.is_err())
+                {
+                    return;
+                }
+                while matches!(tls.read(&mut buffer).await, Ok(read) if read > 0) {}
+                let _ = closed.send(());
+            });
+        }
+    });
+    (config, notices)
+}
+
+/// A call that outlasts its bound takes its connection with it, whether the bound passed before
+/// the answer's head or in the middle of its body: the task that drives it is aborted, as a
+/// watch's is, never left holding the connection open.
+#[tokio::test]
+async fn a_call_that_outlasts_its_bound_closes_its_connection() {
+    const PARTIAL: &[u8] =
+        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1000\r\n\r\n{";
+    for answer in [None, Some(PARTIAL)] {
+        let (config, mut closed) = raw_http_server(answer).await;
+        let mut api = client(&config);
+        api.timeout = std::time::Duration::from_millis(300);
+
+        let error = api
+            .get(&format!("{}/silent", api.pods()))
+            .await
+            .expect_err("the server never answers whole");
+        assert!(matches!(error, ApiError::Unanswered(_)), "{error:?}");
+        let notice = tokio::time::timeout(std::time::Duration::from_secs(2), closed.recv()).await;
+        assert!(
+            matches!(notice, Ok(Some(()))),
+            "the connection outlived its call: {notice:?}"
+        );
+    }
+}
+
+/// A 2xx answer to a create, an update or a read whose body is not the object is
+/// [`ApiError::Invalid`], never a `Null` the caller then reads as an object.
+#[tokio::test]
+async fn a_success_whose_body_is_not_the_object_is_invalid() {
+    let (config, _closed) = raw_http_server(Some(
+        b"HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: 3\r\n\r\nabc",
+    ))
+    .await;
+    let api = client(&config);
+    let created = api.create(&api.pods(), &pod("garbled")).await;
+    assert!(matches!(created, Err(ApiError::Invalid(_))), "{created:?}");
+    let lease = json!({
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
+        "metadata": {"name": "garbled", "resourceVersion": "7"},
+        "spec": {},
+    });
+    let updated = api
+        .update(&format!("{}/garbled", api.leases()), &lease)
+        .await;
+    assert!(matches!(updated, Err(ApiError::Invalid(_))), "{updated:?}");
+
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    fake.fault(Fault::Answer {
+        method: Method::POST,
+        path: api.pods(),
+        status: 201,
+        body: json!(["not", "a", "pod"]),
+    });
+    let created = api.create(&api.pods(), &pod("listed")).await;
+    assert!(matches!(created, Err(ApiError::Invalid(_))), "{created:?}");
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: format!("{}/scalar", api.pods()),
+        status: 200,
+        body: json!("scalar"),
+    });
+    let read = api.get(&format!("{}/scalar", api.pods())).await;
+    assert!(matches!(read, Err(ApiError::Invalid(_))), "{read:?}");
+}
+
+/// An update is conditional or it is not sent: an object without a `metadata.resourceVersion`
+/// would replace whatever the API holds, so it is refused before any request.
+#[tokio::test]
+async fn an_update_without_a_resource_version_is_refused_before_any_request() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let path = format!("{}/b10x-substrate-driver", api.leases());
+    for metadata in [
+        json!({"name": "b10x-substrate-driver"}),
+        json!({"name": "b10x-substrate-driver", "resourceVersion": ""}),
+        json!({"name": "b10x-substrate-driver", "resourceVersion": 7}),
+    ] {
+        let lease = json!({
+            "apiVersion": "coordination.k8s.io/v1",
+            "kind": "Lease",
+            "metadata": metadata,
+            "spec": {"holderIdentity": "deployment-a/one"},
+        });
+        let error = api.update(&path, &lease).await.expect_err("refused");
+        assert!(matches!(error, ApiError::Invalid(_)), "{error:?}");
+    }
+    assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+}
+
+/// A Pod or container name the client puts into a path, a query or a field selector is a
+/// DNS-1123 name or it is refused before any request: no name reaches another path or another
+/// query member.
+#[tokio::test]
+async fn a_name_that_is_not_dns_1123_is_refused_before_any_request() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let long = "a".repeat(254);
+    for name in [
+        "",
+        "Upper",
+        "a/b",
+        "../x",
+        "x?watch=1",
+        "x&container=y",
+        "x%2Fy",
+        "x,metadata.namespace=y",
+        "-x",
+        "x-",
+        "x..y",
+        long.as_str(),
+    ] {
+        let error = api.log(name, "run", 16).await.expect_err("refused");
+        assert!(matches!(error, ApiError::Invalid(_)), "{name:?}: {error:?}");
+        let error = api
+            .exec(name, "run", &["true"], b"", 16)
+            .await
+            .expect_err("refused");
+        assert!(matches!(error, ApiError::Invalid(_)), "{name:?}: {error:?}");
+        let end = pod_end(&api, name, &PodTrace::since(Some("1"))).await;
+        assert!(matches!(end, PodEnd::Unproven(_)), "{name:?}: {end:?}");
+    }
+    let long = "a".repeat(64);
+    for container in ["", "Run", "run&limitBytes=1", "run/x", "a.b", long.as_str()] {
+        let error = api.log("pod", container, 16).await.expect_err("refused");
+        assert!(
+            matches!(error, ApiError::Invalid(_)),
+            "{container:?}: {error:?}"
+        );
+        let error = api
+            .exec("pod", container, &["true"], b"", 16)
+            .await
+            .expect_err("refused");
+        assert!(
+            matches!(error, ApiError::Invalid(_)),
+            "{container:?}: {error:?}"
+        );
+    }
+    assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+}
+
+/// A list whose pages hold more items than `page_items` × `max_pages` is refused, whatever each
+/// page's own size: a server that ignores `limit` cannot hand the caller more than it asked for.
+#[tokio::test]
+async fn a_list_holding_more_items_than_its_pages_allow_is_refused() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let items: Vec<Value> = (0..5)
+        .map(|number| json!({"metadata": {"name": format!("unpaged-{number}")}}))
+        .collect();
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: format!("{}?limit=2", api.pods()),
+        status: 200,
+        body: json!({"kind": "PodList", "metadata": {"resourceVersion": "9"}, "items": items}),
+    });
+
+    let error = api
+        .list(&api.pods(), "PodList", ListForm::Whole, 2, 2)
+        .await
+        .expect_err("five items do not fit two pages of two");
+    assert!(matches!(error, ApiError::Invalid(_)), "{error:?}");
+}
+
+/// A command that exits without reading its input still has its `Status`: the server sends it and
+/// closes, the client's input has nowhere to go, and the exec answers the exit code it was sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exec_whose_command_exits_before_reading_its_input_keeps_its_status() {
+    let (acceptor, listener, config) = tls_endpoint().await;
+    tokio::spawn(async move {
+        let Ok((tcp, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(tls) = acceptor.accept(tcp).await else {
+            return;
+        };
+        #[allow(
+            clippy::result_large_err,
+            reason = "the handshake callback's error type is fixed by tungstenite"
+        )]
+        let choose = |_: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+            response.headers_mut().insert(
+                header::SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_static("v5.channel.k8s.io"),
+            );
+            Ok(response)
+        };
+        let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(tls, choose).await else {
+            return;
+        };
+        let status = json!({
+            "metadata": {},
+            "status": "Failure",
+            "reason": "NonZeroExitCode",
+            "details": {"causes": [{"reason": "ExitCode", "message": "7"}]},
+        });
+        let mut frame = vec![3_u8];
+        frame.extend_from_slice(&serde_json::to_vec(&status).unwrap_or_default());
+        let _ = socket.send(Message::binary(frame)).await;
+        let _ = socket.close(None).await;
+    });
+    let mut api = client(&config);
+    api.timeout = std::time::Duration::from_secs(5);
+
+    let input = vec![b'x'; 16 * 1024 * 1024];
+    let output = api
+        .exec("keeper", "run", &["true"], &input, 16)
+        .await
+        .expect("the status the server sent is kept");
+    assert_eq!(output.exit_code(), Some(7));
+}
+
+/// A kubeconfig path that names a FIFO is refused at once: the loader inspects the path before it
+/// opens it, so an open that waits for a writer never happens.
+#[test]
+fn a_kubeconfig_path_naming_a_fifo_is_refused_without_blocking() {
+    let directory = std::env::temp_dir().join(format!("client-fifo-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let fifo = directory.join("kubeconfig");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo made the FIFO");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let path = fifo.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(kubeconfig::read(&path));
+    });
+    let answer = receiver.recv_timeout(std::time::Duration::from_secs(2));
+    if answer.is_err() {
+        // Pairs with the blocked open so that its thread ends.
+        let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+    let read = answer.expect("the read returns without a writer on the FIFO");
+    assert!(read.is_err(), "a FIFO is no regular file: {read:?}");
+}
+
+/// The loader keeps at most [`kubeconfig::MAX_KUBECONFIG_BYTES`] whatever the file's inspected
+/// length said: a file that grew between the inspection and the read is refused, not returned
+/// one byte past the bound.
+#[test]
+fn a_kubeconfig_that_grows_past_its_bound_while_read_is_refused() {
+    use std::io::Read as _;
+    let bound = kubeconfig::MAX_KUBECONFIG_BYTES;
+    let grown = kubeconfig::read_at_most(std::io::repeat(b' ').take(bound + 1));
+    assert!(grown.is_err(), "{:?}", grown.map(|bytes| bytes.len()));
+    let whole = kubeconfig::read_at_most(std::io::repeat(b' ').take(bound));
+    assert_eq!(
+        whole.map(|bytes| bytes.len() as u64),
+        Ok(bound),
+        "a file of exactly the bound is read"
+    );
+}
+
+/// Every member design 28 refuses is refused by name, each on its own: the two cluster file
+/// members, `insecure-skip-tls-verify`, and the eleven user members. The list is design 28's,
+/// written out here, so a member dropped from the loader's own constants fails this case.
+#[tokio::test]
+async fn every_member_design_28_refuses_is_refused_by_name() {
+    let fake = start();
+    let config = fake.kubeconfig();
+    let refusal = |config: &Value| {
+        kubeconfig::parse(config.to_string().as_bytes(), |_, _| Ok(())).expect_err("refused")
+    };
+
+    let mut insecure = config.clone();
+    insecure["clusters"][0]["cluster"]["insecure-skip-tls-verify"] = json!(true);
+    assert_eq!(refusal(&insecure), "insecure-skip-tls-verify is refused");
+    let cluster = [
+        ("proxy-url", json!("http://127.0.0.1:3128")),
+        ("certificate-authority", json!("/etc/kubernetes/ca.crt")),
+    ];
+    for (member, value) in &cluster {
+        let mut refused = config.clone();
+        refused["clusters"][0]["cluster"][member] = value.clone();
+        assert_eq!(
+            refusal(&refused),
+            format!("the cluster member {member} is refused")
+        );
+    }
+    let user = [
+        ("exec", json!({"command": "credential-helper"})),
+        ("auth-provider", json!({"name": "oidc"})),
+        ("username", json!("operator")),
+        ("password", json!("not-a-password")),
+        ("tokenFile", json!("/var/run/token")),
+        ("client-certificate", json!("/etc/kubernetes/client.crt")),
+        ("client-key", json!("/etc/kubernetes/client.key")),
+        ("as", json!("system:admin")),
+        ("as-uid", json!("0")),
+        ("as-groups", json!(["system:masters"])),
+        ("as-user-extra", json!({"scopes": ["all"]})),
+    ];
+    for (member, value) in &user {
+        let mut refused = config.clone();
+        refused["users"][0]["user"][member] = value.clone();
+        assert_eq!(
+            refusal(&refused),
+            format!("the user member {member} is refused")
+        );
+    }
+    assert_eq!(
+        kubeconfig::REFUSED_CLUSTER_MEMBERS.len() + kubeconfig::REFUSED_USER_MEMBERS.len(),
+        cluster.len() + user.len(),
+        "the loader refuses exactly design 28's members"
+    );
+}

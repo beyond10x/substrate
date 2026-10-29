@@ -52,11 +52,22 @@ pub const RUN_CONTAINER: &str = "run";
 /// The user agent a client sends when its owner names none.
 pub const USER_AGENT: &str = "b10x-substrate";
 
-/// Whether `name` is a DNS-1123 label: what a namespace name must be.
+/// Whether `name` is a DNS-1123 label: what a namespace or container name must be.
 pub fn is_dns_label(name: &str) -> bool {
+    name.len() <= 63 && is_label_form(name)
+}
+
+/// Whether `name` is a DNS-1123 subdomain: what a Pod name must be. At most 253 characters of
+/// dot-separated label forms, so it holds no `/`, `?`, `&`, `%`, `,` or `=` and cannot reach
+/// another path, query member or field selector term.
+pub fn is_dns_subdomain(name: &str) -> bool {
+    name.len() <= 253 && name.split('.').all(is_label_form)
+}
+
+/// Lowercase letters, digits and `-`, at least one, beginning and ending with a letter or digit.
+fn is_label_form(name: &str) -> bool {
     let bytes = name.as_bytes();
     !bytes.is_empty()
-        && bytes.len() <= 63
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')

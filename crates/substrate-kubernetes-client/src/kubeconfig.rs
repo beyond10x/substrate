@@ -36,23 +36,49 @@ pub const REFUSED_USER_MEMBERS: [&str; 11] = [
 
 /// Reads the kubeconfig at `path`: one regular file of at most [`MAX_KUBECONFIG_BYTES`].
 ///
+/// The path is inspected before it is opened, because opening a FIFO waits for a writer; the
+/// opened file is inspected again and must be the same regular file, and the read itself keeps
+/// the bound whatever either inspection said.
+///
 /// # Errors
 ///
 /// Why the file cannot be opened, inspected or read, or that it is not one bounded regular file.
 pub fn read(path: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let inspect =
+        |error: std::io::Error| format!("the cluster configuration cannot be inspected: {error}");
+    let regular = |metadata: &std::fs::Metadata| {
+        if metadata.is_file() && metadata.len() <= MAX_KUBECONFIG_BYTES {
+            Ok(())
+        } else {
+            Err(String::from(
+                "the cluster configuration must be one regular file of at most 1 MiB",
+            ))
+        }
+    };
+    let named = std::fs::metadata(path).map_err(inspect)?;
+    regular(&named)?;
     let file = std::fs::File::open(path)
         .map_err(|error| format!("the cluster configuration cannot be opened: {error}"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("the cluster configuration cannot be inspected: {error}"))?;
-    if !metadata.is_file() || metadata.len() > MAX_KUBECONFIG_BYTES {
-        return Err("the cluster configuration must be one regular file of at most 1 MiB".into());
+    let opened = file.metadata().map_err(inspect)?;
+    regular(&opened)?;
+    if (opened.dev(), opened.ino()) != (named.dev(), named.ino()) {
+        return Err("the cluster configuration changed while it was opened".into());
     }
+    read_at_most(file)
+}
+
+/// At most [`MAX_KUBECONFIG_BYTES`] from `reader`; a reader holding more is refused, never cut.
+pub(crate) fn read_at_most(reader: impl std::io::Read) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
     let mut bytes = Vec::new();
-    file.take(MAX_KUBECONFIG_BYTES + 1)
+    reader
+        .take(MAX_KUBECONFIG_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("the cluster configuration cannot be read: {error}"))?;
+    if bytes.len() as u64 > MAX_KUBECONFIG_BYTES {
+        return Err("the cluster configuration grew past 1 MiB while it was read".into());
+    }
     Ok(bytes)
 }
 
