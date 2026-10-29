@@ -15,6 +15,12 @@ The operator's answer, verbatim: "A". § *Decision* stands as written. The four 
 § *Consequences* lists as unobserved are checked on the kind lane before the implementation relies
 on them, and the implementation's own design comes before code (invariant 8).
 
+**Amended** by the operator on 2026-10-29 through design 34 § 14 Q1, answer B: decision 3's table
+adds `list` on `networkpolicies`, so the driver binds the namespace's whole policy set into the
+capability snapshot rather than only the named default-deny policy
+(`approval-record:design-34-accepted`). The operator's answer, verbatim: "accept all if it s the
+right and not the cheapest low effort choice".
+
 The operator made the track *Kubernetes deployment and driver* part of the definition of done on
 2026-10-29 ([ROADMAP.md](../ROADMAP.md) § *Definition of done*, item 2). Its node-bound half is
 [ADR 0046](0046-kubernetes-serves-one-node-bound-daemon-per-stable-pod-address.md). This is the
@@ -90,7 +96,7 @@ other half.
    | `pods/log` | `get` | exec output (N10) |
    | `pods/exec` | `create` | workspace file I/O in the keeper (N3) |
    | `persistentvolumeclaims` | `create`, `get`, `list`, `delete` | workspaces |
-   | `networkpolicies` | `get` | the namespace default-deny policy is read, never written (N5) |
+   | `networkpolicies` | `get`, `list` | the namespace default-deny policy is read, never written (N5); `list` binds the digest of the namespace's whole policy set into the snapshot, so an added or changed policy moves `config_generation` (amendment of 2026-10-29, below) |
    | `leases.coordination.k8s.io` | `create`, `get`, `update` | the namespace claim |
 
    No `secrets`, `configmaps`, `serviceaccounts`, `services`, `nodes`, `namespaces`,

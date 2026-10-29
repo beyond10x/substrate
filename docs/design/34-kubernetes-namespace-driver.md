@@ -1,6 +1,7 @@
 # Design 34: the Kubernetes namespace driver, implemented
 
-Status: proposed, 2026-10-29. Owned by `story:kubernetes-namespace-workspace-and-exec-slice`
+Status: accepted for implementation, 2026-10-29, with § 14's answers (Q1 B, Q2 A with the O11
+observation, Q3 A; `approval-record:design-34-accepted`). Owned by `story:kubernetes-namespace-workspace-and-exec-slice`
 (`epic:kubernetes-deployment-and-driver`). It implements
 [ADR 0047](../../adr/0047-a-kubernetes-namespace-driver-serves-workspaces-on-pvcs-and-execs-as-pods.md),
 accepted 2026-10-29 with N1 to N12 as recommended. Invariant 8 requires this design before code.
@@ -482,13 +483,15 @@ and the client before any driver code relies on them. O5 to O10 are what this de
 | O8 | the rules review of the driver's ServiceAccount is decision 3's table plus the fixed default set | the pinned default set is corrected from the observation |
 | O9 | base64 frame lines of 8202 bytes round-trip through `pods/log` byte-exactly, both streams interleaved | the chunk size halves |
 | O10 | `pods/exec` accepts `v5.channel.k8s.io` and its close channel on v1.37 | `v4.channel.k8s.io`, with stdin closed by the request frame's own length |
+| O11 | an exec Pod under `podPidsLimit` spawns processes until `fork` fails; the lane records the count reached against `pod_pids_limit`, and the count does not exceed it (§ 14 Q2) | the stated bound does not hold: the driver ships no `limits` fact, and the result goes to the coordinating session before anything else |
 
 ### 10.4 Release
 
 `ghcr.io/beyond10x/b10x-substrate-executor:<version>` from the `executor` target, keyless-signed,
 verified and anonymously read back before anything is announced (ADR 0006's pattern, with
 `GITHUB_TOKEN` and no secret). `release.yml` refuses a tag whose commit has no successful
-`namespace-lane.yml`, as it does for `gate.yml` (ADR 0046 K9 B). `xtask/tests/release_workflow.rs`
+`namespace-lane.yml`, as it does for `gate.yml` (ADR 0046 K9 B); that lane asserts O11, so the
+process bound is observed once per release on the real kubelet path. `xtask/tests/release_workflow.rs`
 gains both refusals. AGENTS.md § *Releases* names the image and the condition.
 
 ## 11. Wire: one successor bundle
@@ -597,6 +600,18 @@ Each is reversible and inside ADR 0047.
 ## 14. Decisions for the operator
 
 Only questions ADR 0047 does not settle.
+
+**Answered** by the operator on 2026-10-29, verbatim: "accept all if it s the right and not the
+cheapest low effort choice". Read against that condition by the coordinating session:
+
+- **Q1: B.** The more thorough option: one read-only verb, and every policy change moves
+  `config_generation`. ADR 0047 decision 3's table is amended with it.
+- **Q2: A, with O11** (§ 10.3). A alone states a bound without observing it. The lane spawns
+  processes in an exec Pod until `fork` fails and records the count against `pod_pids_limit`, and
+  the release asserts it. At runtime `limits` still publishes the operator's value; the guide names
+  O11 as its proof. If O11 shows the bound does not hold, A does not ship.
+- **Q3: A.** B calls a valid request malformed.
+- C of Q2 stays rejected: a per-uid count is the wrong bound.
 
 ### Q1 — additive NetworkPolicies
 
