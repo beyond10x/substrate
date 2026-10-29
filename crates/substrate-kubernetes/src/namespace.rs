@@ -499,6 +499,11 @@ impl NamespaceDriver {
             .is_ok_and(|elapsed| elapsed > self.dispatch_bound())
     }
 
+    /// Now, on the driver's wall clock: what an exec's wall bound is measured on (§ 9).
+    pub(crate) fn wall_now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.clock.wall()
+    }
+
     fn collection(&self, role: BackendRole) -> String {
         match role {
             BackendRole::Pvc => self.api.claims(),
