@@ -21,15 +21,20 @@
 
 pub mod binding;
 pub mod config;
+mod exec;
 pub mod lease;
+pub mod logs;
 pub mod names;
 mod namespace;
 pub mod ownership;
+pub mod pod;
 pub mod policy;
 pub mod rules;
 
 #[cfg(test)]
 mod driver_tests;
+#[cfg(test)]
+mod exec_tests;
 
 pub use binding::Binding;
 pub use config::NamespaceConfig;
