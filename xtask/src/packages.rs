@@ -73,10 +73,13 @@ const EXECUTOR_REFUSED: [&str; 6] = [
 /// Runs `cargo tree --locked -p b10x-substrate-executor -e normal --target all` in `root` and
 /// refuses each line that names a fenced package. Every target, not the host's alone: the executor
 /// ships as an `x86_64-unknown-linux-musl` build, so a musl-only edge is as linked as any other.
+/// Colour is off whatever `CARGO_TERM_COLOR` says: a coloured tree wraps its drawing characters in
+/// escape codes, and no package line would then be read by name.
 fn check_executor_tree(root: &Path) -> Result<Vec<String>> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let output = std::process::Command::new(cargo)
         .current_dir(root)
+        .env("CARGO_TERM_COLOR", "never")
         .args([
             "tree", "--locked", "-p", EXECUTOR, "-e", "normal", "--target", "all",
         ])
@@ -253,6 +256,7 @@ fn cargo_stdout(root: &Path, args: &[&str]) -> Result<Result<String, String>> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let output = std::process::Command::new(cargo)
         .current_dir(root)
+        .env("CARGO_TERM_COLOR", "never")
         .args(args)
         .output()
         .with_context(|| format!("running cargo {}", args.join(" ")))?;
