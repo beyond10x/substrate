@@ -611,3 +611,18 @@ async fn a_probe_in_flight_across_a_lost_and_retaken_lease_does_not_stand_for_st
         "a proof begun under the lost Lease is published under the retaken one"
     );
 }
+
+#[tokio::test]
+async fn a_probe_whose_check_proves_only_openat2_publishes_no_guarded_io_or_atomic_replace() {
+    let rig = rig(Child::Exact, None).await;
+    rig.driver.probe().await.expect("the probe runs");
+    let facts = rig.machine().facts;
+    assert_eq!(
+        facts.workspace_guarded_io, None,
+        "the keeper's check answers openat2 availability alone: no symlink escape is refused"
+    );
+    assert_eq!(
+        facts.workspace_atomic_replace, None,
+        "the keeper's check runs no renameat2 replacement"
+    );
+}
