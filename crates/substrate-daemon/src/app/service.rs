@@ -88,9 +88,11 @@ fn exec_absence(
     now: DateTime<Utc>,
     open: bool,
 ) -> ExecAbsence {
-    let unbound = rows.iter().find(|row| {
-        row.role == BackendObjectRole::Pod && row.uid.is_none() && row.settled_at.is_none()
-    });
+    // Keyed on the uid alone (design 34 § 5.1): a row the driver closed with `settle` after
+    // reading its object absent still never had a create answered.
+    let unbound = rows
+        .iter()
+        .find(|row| row.role == BackendObjectRole::Pod && row.uid.is_none());
     match (unbound, bound) {
         (Some(row), Some(bound)) if open => {
             let past = chrono::Duration::from_std(bound)
@@ -345,6 +347,17 @@ impl App {
             #[cfg(test)]
             refusal_before_record: ParkingMutex::new(None),
         })
+    }
+
+    /// The `BackendLedger` port over this daemon's store and deployment, handed to a driver at
+    /// open (design 34 § 4). It stamps rows from this daemon's authority clock.
+    #[must_use]
+    pub fn backend_ledger(&self) -> crate::StoreBackendLedger {
+        crate::StoreBackendLedger::new(
+            Arc::clone(&self.store),
+            self.deployment.clone(),
+            Arc::clone(&self.authority),
+        )
     }
 
     pub(super) fn scope(&self, identity: &Identity) -> Scope {

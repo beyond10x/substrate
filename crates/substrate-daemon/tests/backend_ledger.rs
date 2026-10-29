@@ -8,14 +8,16 @@
 //! absence and fails; a bound uid, or no row at all, keeps today's physical-absence reading
 //! (§ 5.1).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Extension;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
+use chrono::{DateTime, TimeZone as _, Utc};
 use serde_json::{Value, json};
-use substrate_daemon::{App, Identity, StoreBackendLedger, operation_digest, router};
+use substrate_daemon::{App, Authority, Identity, SystemAuthority, operation_digest, router};
 use substrate_host::{
     BackendKind, BackendLedger as _, BackendName, BackendRole, DispatchOutcome, Driver,
     DriverError, ExecObservation, HostConfig, HostDriver, UidBinding, WorkspaceDestroyProgress,
@@ -56,11 +58,47 @@ struct Fixture {
     rows_at_dispatch: Mutex<Vec<usize>>,
     /// The dispatch bound the fixture states, changed between maintenance rounds.
     bound: Mutex<Option<Duration>>,
+    /// When set, every start is refused before anything is created (`NotDispatched`).
+    refuse: AtomicBool,
 }
 
 impl Fixture {
     fn state_bound(&self, bound: Option<Duration>) {
         *self.bound.lock().expect("fixture lock") = bound;
+    }
+}
+
+/// The system authority with its clock stopped at one instant, so every timestamp the daemon
+/// takes from it is recognisable.
+struct StoppedClock(DateTime<Utc>);
+
+impl Authority for StoppedClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.0
+    }
+
+    fn request_id(&self) -> String {
+        SystemAuthority.request_id()
+    }
+
+    fn workspace_id(&self) -> String {
+        SystemAuthority.workspace_id()
+    }
+
+    fn exec_id(&self) -> String {
+        SystemAuthority.exec_id()
+    }
+
+    fn session_id(&self) -> String {
+        SystemAuthority.session_id()
+    }
+
+    fn snapshot_id(&self) -> String {
+        SystemAuthority.snapshot_id()
+    }
+
+    fn lease_clock(&self) -> Result<substrate_store::LeaseClock, String> {
+        SystemAuthority.lease_clock()
     }
 }
 
@@ -205,6 +243,13 @@ impl Driver for Fixture {
             .lock()
             .expect("fixture lock")
             .push(rows.len());
+        if self.refuse.load(Ordering::SeqCst) {
+            return DispatchOutcome::NotDispatched(DriverError::refused(
+                "exec.sandbox-unavailable",
+                "The fixture refuses the start before creating anything.",
+                "exec",
+            ));
+        }
         DispatchOutcome::OutcomeUnknown(DriverError::failed(
             "exec.containment-unproven",
             "The fixture cannot prove whether the exec runs.",
@@ -268,6 +313,7 @@ impl Harness {
             names,
             rows_at_dispatch: Mutex::new(Vec::new()),
             bound: Mutex::new(None),
+            refuse: AtomicBool::new(false),
         });
         let app = App::new(Arc::clone(&store), driver.clone(), DEPLOYMENT);
         (
@@ -572,7 +618,7 @@ async fn a_bound_pod_row_reads_restart_absence_as_physical_absence() {
     assert!(!status.is_success(), "{status} {started}");
     let exec = exec_id(&harness, "01JBACKENDBINDEXEC000001");
 
-    let ledger = StoreBackendLedger::new(Arc::clone(&harness.store), DEPLOYMENT);
+    let ledger = harness.app.backend_ledger();
     let recorded = ledger
         .recorded(BackendKind::Exec, &exec)
         .expect("recorded rows");
@@ -616,7 +662,7 @@ async fn a_settled_unbound_pod_row_still_reads_restart_absence_as_dispatch_absen
     assert!(!status.is_success(), "{status} {started}");
     let exec = exec_id(&harness, "01JBACKENDSETTLEEXEC000001");
 
-    let ledger = StoreBackendLedger::new(Arc::clone(&harness.store), DEPLOYMENT);
+    let ledger = harness.app.backend_ledger();
     assert!(
         ledger
             .settle(&pod_name(&exec))
@@ -627,6 +673,8 @@ async fn a_settled_unbound_pod_row_still_reads_restart_absence_as_dispatch_absen
         UidBinding::Settled
     );
 
+    // Past the dispatch bound, which every dispatch-absence reading needs (§ 5.1).
+    driver.state_bound(Some(Duration::ZERO));
     let restarted = harness.restart(driver);
     restarted.sweep_expired().await;
     let record = harness.operation("01JBACKENDSETTLEEXEC000001");
@@ -643,4 +691,138 @@ async fn a_settled_unbound_pod_row_still_reads_restart_absence_as_dispatch_absen
             .expect("exec read")
             .is_none()
     );
+}
+
+fn pod_row(harness: &Harness, exec: &str) -> substrate_store::BackendObject {
+    let rows = harness
+        .store
+        .backend_objects(DEPLOYMENT, BackendObjectKind::Exec, exec)
+        .expect("pod row");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    rows.into_iter().next().expect("one pod row")
+}
+
+/// The running daemon's own maintenance round, with no restart (§ 5.1): a start that answered
+/// `OutcomeUnknown` is reconciled live. Inside the bound the unbound row stays open and the exec
+/// `unknown`, unmarked; past it the start fails, the exec row is gone, and the Pod row is settled
+/// in the same commit, at the operation's terminal instant.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_sweep_reads_an_unbound_pod_row_as_dispatch_absence_and_settles_it() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDLIVECREATE00001").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    let (status, started) = harness
+        .start_exec("01JBACKENDLIVEEXEC0000001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    let exec = exec_id(&harness, "01JBACKENDLIVEEXEC0000001");
+
+    driver.state_bound(Some(Duration::from_hours(1)));
+    harness.app.sweep_expired().await;
+    let record = harness.operation("01JBACKENDLIVEEXEC0000001");
+    assert_eq!(record.state, OperationState::Unknown);
+    assert_eq!(harness.physically_absent(&exec), Some(false));
+    let open = pod_row(&harness, &exec);
+    assert_eq!((open.uid.as_deref(), open.settled_at), (None, None));
+
+    driver.state_bound(Some(Duration::ZERO));
+    harness.app.sweep_expired().await;
+    let record = harness.operation("01JBACKENDLIVEEXEC0000001");
+    assert_eq!(record.state, OperationState::Terminal, "{record:?}");
+    assert!(
+        matches!(&record.outcome, Some(OperationOutcome::Error { error }) if !error.retriable),
+        "{:?}",
+        record.outcome
+    );
+    assert!(
+        harness
+            .store
+            .exec(&scope(), &exec)
+            .expect("exec read")
+            .is_none()
+    );
+    let settled = pod_row(&harness, &exec);
+    assert_eq!(settled.uid, None);
+    assert!(settled.settled_at.is_some(), "{settled:?}");
+    assert_eq!(settled.settled_at, record.terminal_at);
+}
+
+/// A start the driver refuses before creating anything is dispatch absence at once: the exec row
+/// is gone and its reserved Pod row is settled in the transaction that records the refusal, so no
+/// sweep of unsettled rows ever looks for an object that was never created.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_start_settles_its_pod_row_with_the_refusal() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDREFUSECREATE001").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    driver.refuse.store(true, Ordering::SeqCst);
+    let (status, started) = harness
+        .start_exec("01JBACKENDREFUSEEXEC00001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    assert_eq!(started["error"]["code"], "exec.sandbox-unavailable");
+    assert_eq!(*driver.rows_at_dispatch.lock().expect("fixture lock"), [1]);
+    let record = harness.operation("01JBACKENDREFUSEEXEC00001");
+    assert_eq!(record.state, OperationState::Terminal, "{record:?}");
+    let exec = record.resource.clone().expect("exec resource");
+    assert!(
+        harness
+            .store
+            .exec(&scope(), &exec)
+            .expect("exec read")
+            .is_none()
+    );
+    let settled = pod_row(&harness, &exec);
+    assert_eq!(settled.uid, None);
+    assert!(settled.settled_at.is_some(), "{settled:?}");
+    assert_eq!(settled.settled_at, record.terminal_at);
+    let unsettled = harness
+        .store
+        .unsettled_backend_objects(DEPLOYMENT, None, 16)
+        .expect("unsettled rows");
+    assert!(
+        unsettled
+            .iter()
+            .all(|row| row.kind != BackendObjectKind::Exec),
+        "{unsettled:?}"
+    );
+}
+
+/// Every ledger timestamp the daemon writes is read from its own authority, the clock its dispatch
+/// bound is measured against, never from the system clock beside it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ledger_port_stamps_rows_with_the_daemon_authority_clock() {
+    let directory = tempfile::tempdir().expect("temporary harness");
+    let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
+    let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+        .expect("host driver");
+    let at = Utc
+        .with_ymd_and_hms(2001, 2, 3, 4, 5, 6)
+        .single()
+        .expect("instant");
+    let app = App::with_authority(
+        Arc::clone(&store),
+        driver,
+        DEPLOYMENT,
+        Arc::new(StoppedClock(at)),
+    );
+    let ledger = app.backend_ledger();
+    let name = "sbx-pr-aaaaaaaaaaaaaaaa-pod";
+    ledger
+        .reserve_probe(
+            "aaaaaaaaaaaaaaaa",
+            &[BackendName {
+                role: BackendRole::Pod,
+                name: name.to_owned(),
+            }],
+        )
+        .expect("reserve probe");
+    assert!(ledger.settle(name).expect("settle probe row"));
+    let rows = store
+        .backend_objects(DEPLOYMENT, BackendObjectKind::Probe, "aaaaaaaaaaaaaaaa")
+        .expect("probe rows");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].created_at, rows[0].settled_at), (at, Some(at)));
 }
