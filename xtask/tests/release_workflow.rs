@@ -2990,3 +2990,220 @@ fn security_review_an_existing_chart_tag_is_refused_before_anything_is_published
         "a tag push whose chart tag already exists publishes the bundle and daemon image before it is refused"
     );
 }
+
+#[test]
+fn security_review_the_release_requires_a_green_namespace_lane_workflow_for_the_tagged_commit() {
+    // Design 34 § 10.4: "`release.yml` refuses a tag whose commit has no successful
+    // `namespace-lane.yml`, as it does for `gate.yml`". D182 moved the kind cluster part to a
+    // workstation record; the `static` job stays in `namespace-lane.yml`, `scripts/gate.sh` does
+    // not run `cargo xtask namespace-lane check`, and no ruleset requires that workflow on `main`.
+    let release_job = position("\n  release:\n");
+    let preflight = &WORKFLOW[..release_job];
+    let via_env = WORKFLOW.lines().find_map(|line| {
+        line.trim()
+            .strip_suffix(": namespace-lane.yml")
+            .map(str::to_owned)
+    });
+    let queried = preflight.contains("actions/workflows/namespace-lane.yml/runs")
+        || via_env
+            .as_ref()
+            .is_some_and(|key| preflight.contains(&format!("actions/workflows/${{{key}}}/runs")));
+    assert!(
+        queried,
+        "the preflight never reads namespace-lane.yml's conclusion for the tagged commit, so a tag \
+         whose namespace-lane static check is red is released"
+    );
+}
+
+/// The executor build step against stubs where the image's entrypoint answers `entrypoint_answer`
+/// and `/substrate-executor`, the path the driver runs (`EXECUTOR_PATH`), answers `binary_answer`.
+/// Returns the step's success, its log and every push it made.
+fn executor_build_with_entrypoint(
+    entrypoint_answer: &str,
+    binary_answer: &str,
+) -> (bool, String, String) {
+    let root = tempfile::tempdir().expect("runner directory");
+    let tools = tempfile::tempdir().expect("stub tools");
+    stub(
+        tools.path(),
+        "docker",
+        &format!(
+            "case \"$1\" in\n  buildx) [ \"$2\" = imagetools ] && echo '\"sha256:{}\"'; exit 0 ;;\n  run) explicit=\"\"; prev=\"\"; for a in \"$@\"; do [ \"$prev\" = --entrypoint ] && [ \"$a\" = /substrate-executor ] && explicit=1; prev=\"$a\"; done\n       if [ -n \"$explicit\" ]; then printf '%s\\n' \"$BINARY_ANSWER\"; else printf '%s\\n' \"$ENTRYPOINT_ANSWER\"; fi ;;\n  create) echo container ;;\n  cp) printf 'executor' > \"$3\" ;;\n  rm) ;;\n  pull) ;;\n  image) case \"$*\" in *Entrypoint*) printf '%s\\n' '[\"/wrapper\"]' ;; *) printf '%s\\n' \"$SOURCE_SHA\" ;; esac ;;\n  manifest) exit 1 ;;\n  push) echo \"$2\" >> \"$PUSH_LOG\" ;;\n  *) exit 2 ;;\nesac",
+            "e".repeat(64)
+        ),
+    );
+    stub(
+        tools.path(),
+        "readelf",
+        "printf 'Program Headers:\\n  LOAD 0x0\\n'\nexit 0",
+    );
+    stub(
+        tools.path(),
+        "git",
+        "case \"$1\" in\n  fetch) ;;\n  rev-parse) echo \"$SOURCE_SHA\" ;;\n  *) exit 2 ;;\nesac",
+    );
+    let push_log = root.path().join("push.log");
+    fs::write(&push_log, "").expect("push log");
+    let push_log_path = push_log.display().to_string();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let (success, log, _) = run_release_step(
+        EXECUTOR_BUILD_STEP,
+        root.path(),
+        &[
+            ("EXISTS", "false"),
+            ("EXECUTOR_IMAGE", "ghcr.io/example/executor"),
+            ("VERSION", TAG),
+            ("SOURCE_SHA", sha),
+            (
+                "ENTRYPOINT_ANSWER",
+                &entrypoint_answer.replace("{sha}", sha),
+            ),
+            ("BINARY_ANSWER", &binary_answer.replace("{sha}", sha)),
+            ("PUSH_LOG", &push_log_path),
+        ],
+        Some(tools.path()),
+    );
+    (
+        success,
+        log,
+        fs::read_to_string(&push_log).expect("push log"),
+    )
+}
+
+#[test]
+fn security_review_the_executor_handshake_is_answered_by_the_binary_the_driver_runs() {
+    // The driver runs `/substrate-executor` by path (`EXECUTOR_PATH`, the keeper's command and
+    // every `pods/exec` call), never the image's entrypoint. The step's handshake runs the
+    // entrypoint and its static check reads `/substrate-executor`, so an image whose entrypoint
+    // is another program answers for a binary nobody checked the version of.
+    let (success, log, pushes) =
+        executor_build_with_entrypoint(HANDSHAKE, &HANDSHAKE.replace("9.9.9", "9.9.8"));
+    assert!(
+        !success && pushes.is_empty(),
+        "an executor image whose entrypoint answers the handshake while /substrate-executor is \
+         another release was pushed:\npushes: {pushes}\nlog: {log}"
+    );
+}
+
+#[test]
+fn security_review_a_tag_with_a_second_empty_namespace_lane_line_is_refused() {
+    // "a release records exactly one": the count of lines runs after command substitution has
+    // stripped trailing newlines, so a second, empty `Namespace-lane:` line after the record is
+    // not counted.
+    let source = namespace_source(
+        &namespace_observations(8),
+        &format!("release\n\nNamespace-lane: {{sha}} 8 {AT}\nNamespace-lane:\n"),
+    );
+    namespace_refused(&source, "", "Namespace-lane lines");
+}
+
+#[test]
+fn security_review_the_executor_binary_refusals_run_before_any_image_tag_moves() {
+    // "Every binary refusal runs before any image tag is mutated." The executor's handshake and
+    // static-executable refusals run after the daemon and MCP tags are pushed, so a refused
+    // executor leaves two unsigned write-once tags that only a recovery dispatch can go on from.
+    let executor_check = position("          check_executor\n");
+    let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
+    let mcp_push = position("docker push \"${MCP_IMAGE}:${VERSION}\"");
+    assert!(
+        executor_check < daemon_push && executor_check < mcp_push,
+        "the executor's binary refusals run at byte {executor_check}, after the daemon push at \
+         {daemon_push} and the MCP push at {mcp_push}"
+    );
+}
+
+#[test]
+fn security_review_the_namespace_lane_record_resists_carrier_and_shape_substitutions() {
+    let observations = namespace_observations(8);
+
+    // A record in the tagged commit's message, not the tag's, is not read.
+    let directory = tempfile::tempdir().expect("temporary repository");
+    let root = directory.path();
+    git(root, &["init", "--quiet"]);
+    let file = root.join(NAMESPACE_LANE_SOURCE);
+    fs::create_dir_all(file.parent().expect("parent")).expect("source tree");
+    fs::write(&file, &observations).expect("source");
+    git(root, &["add", "--all"]);
+    git(root, &["commit", "--quiet", "-m", "first"]);
+    let first = git(root, &["rev-parse", "HEAD"]);
+    git(
+        root,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            &format!("second\n\nNamespace-lane: {first} 8 {AT}\n"),
+        ],
+    );
+    let sha = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["tag", "--annotate", TAG, "-m", "release\n"]);
+    let commit_carrier = TaggedSource { directory, sha };
+    namespace_refused(
+        &commit_carrier,
+        "",
+        "refused: no recorded namespace lane run for",
+    );
+
+    // A record inside another line, or indented, is not a record.
+    for message in [
+        format!("release\n\nNote: Namespace-lane: {{sha}} 8 {AT}\n"),
+        format!("release\n\n  Namespace-lane: {{sha}} 8 {AT}\n"),
+        format!("release\n\nnamespace-lane: {{sha}} 8 {AT}\n"),
+    ] {
+        let source = namespace_source(&observations, &message);
+        namespace_refused(&source, "", "refused: no recorded namespace lane run for");
+    }
+
+    // A sha prefix or another spelling of the commit is not the commit.
+    let source = namespace_source(&observations, "release\n");
+    for claimed in [source.sha[..12].to_owned(), source.sha.to_uppercase()] {
+        let (success, stderr, output) = source.run_step_on(
+            NAMESPACE_STEP,
+            &format!("{claimed} 8 {AT}"),
+            "workflow_dispatch",
+        );
+        assert!(!success, "accepted {claimed}: {output}");
+        assert!(stderr.contains("records commit"), "{stderr}");
+    }
+    let (success, stderr, output) = source.run_step_on(
+        NAMESPACE_STEP,
+        &format!("{} 08 {AT}", source.sha),
+        "workflow_dispatch",
+    );
+    assert!(!success, "accepted a zero-padded count: {output}");
+    assert!(stderr.contains("namespace-lane observations;"), "{stderr}");
+
+    // Trailing whitespace is trimmed and never published.
+    let padded = namespace_source(
+        &observations,
+        &format!("release\n\nNamespace-lane: {{sha}} 8 {AT} \t \n"),
+    );
+    let (success, stderr, output) = padded.run_step(NAMESPACE_STEP, "");
+    assert!(success, "{stderr}");
+    assert_eq!(
+        output.trim(),
+        format!("lane=present\nevidence={} 8 {AT}", padded.sha)
+    );
+
+    // A commented-out entry or a commented-out second declaration does not move the count.
+    let commented_entry = observations.replace("\"O8\"];", "\"O8\",\n    // \"O9\",\n];");
+    let source = namespace_source(
+        &commented_entry,
+        &format!("release\n\nNamespace-lane: {{sha}} 9 {AT}\n"),
+    );
+    let (success, _, output) = source.run_step(NAMESPACE_STEP, "");
+    assert!(!success, "counted a commented-out entry: {output}");
+    let commented_declaration = format!(
+        "// pub const OBSERVATIONS: [&str; 9] = [\"O1\", \"O2\", \"O3\", \"O4\", \"O5\", \"O6\", \
+         \"O7\", \"O8\", \"O9\"];\n{observations}"
+    );
+    for (claimed, accepted) in [(9, false), (8, true)] {
+        let source = namespace_source(
+            &commented_declaration,
+            &format!("release\n\nNamespace-lane: {{sha}} {claimed} {AT}\n"),
+        );
+        let (success, stderr, _) = source.run_step(NAMESPACE_STEP, "");
+        assert_eq!(success, accepted, "claimed {claimed}: {stderr}");
+    }
+}
