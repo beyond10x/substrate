@@ -155,7 +155,7 @@ trust this page.
   (`snapshot_gc_bounds_materialized_rows_and_preserves_expired_posture` in
   `crates/substrate-store/src/tests.rs`).
 - Workspace cleanup advances in descriptor-relative 4,096-item batches
-  (`DESTROY_BATCH_ITEMS` in `crates/substrate-host/src/fs.rs`) without a total depth or item
+  (`DESTROY_BATCH_ITEMS` in `crates/substrate-guarded/src/fs.rs`) without a total depth or item
   ceiling. Durable
   `destroying` blocks exec start and is automatically resumed after restart under fixed,
   subject-scoped lock stripes until the original destroy operation terminalizes

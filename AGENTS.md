@@ -224,6 +224,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 
 | verb | what it refuses, or produces | in `gate.sh`? |
 |---|---|---|
+| `check-ess` | an ESS specification under `spec/` that the pinned `ess` does not validate with `--strict-requires`, a scenario of the workspace, host-process or confinement projection that fails against the interpreted reference, or a committed projection that is not what the pinned `ess` regenerates: `spec/operations-suite.json`, the workspace, host-process and confinement suites, their generated Rust types, the capture type and the CLI contract under `spec/generated/cli` (§ *Executable specification*) | yes |
+| `check-docs` | a public page missing from `PAGES` or from `website/sidebars.ts`, or out of their order or grouping; a release-notes page that does not end with the newest released `CHANGELOG.md` section; a start-page link that does not resolve; a derived site table that disagrees with `spec/`; a reading load above `website/ux/baseline.json`; or a `website/ux/findings/` record that breaks its rules (§ *Public website*) | yes |
 | `check-toolchain [--root <dir>]` | a Rust version the three pinning files disagree on | yes |
 | `check-links` | a machine-local Markdown link, or a repository-relative target that is not there | yes |
 | `check-mcp-boundary` | a publishable MCP crate, a Substrate implementation dependency, an unpinned/featured MCP stack, or a built-in unbounded/remote transport | yes |

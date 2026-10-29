@@ -27,8 +27,11 @@
 //! that crate too.
 //!
 //! `substrate-guarded` is read as part of the host crate, beneath [`GUARDED`]: the host crate
-//! re-exports its `DriverError`, `DriverErrorClass` and `Listed` at its root (design 34 § 2), so
-//! their shapes stay held wherever they are declared.
+//! re-exports its `DriverError`, `DriverErrorClass` and `Listed` at its root (design 34 § 2), so a
+//! type of theirs that the module reaches stays held wherever it is declared. That is `DriverError`,
+//! which `ConfinementError::Driver` names, and `DriverErrorClass`, its `class` field. `Listed` is
+//! not held here: nothing in `src/confinement/` names it, so it is absent from the list and this
+//! test does not see a change to its shape.
 //!
 //! Every type a recorded item names — in a public field, a variant, a signature or a constant's
 //! type — is recorded the same way when the host crate or `substrate-wire` defines it, and so on

@@ -7521,9 +7521,9 @@ async fn adversarial_adopt(daemon: &Daemon, name: &str, tag: &str) -> (String, S
 }
 
 /// ADR 0035 decision 5 refuses to adopt an entry that is not a directory, and the host opens a
-/// root name with `O_NOFOLLOW` (`crates/substrate-host/src/fs.rs`), so a symlink is never
+/// root name with `O_NOFOLLOW` (`crates/substrate-guarded/src/fs.rs`), so a symlink is never
 /// adopted and never read through. An exec start pins the same entry the same way
-/// (`pin_workspace_directory`, `crates/substrate-host/src/fs.rs`) and bubblewrap binds that
+/// (`pin_workspace_directory`, `crates/substrate-guarded/src/fs.rs`) and bubblewrap binds that
 /// descriptor (`--bind-fd`), never the path: once bound by path (`--bind <path> /workspace`), an
 /// entry the operator replaced with a symlink after adopt mounted the link target read-write,
 /// outside the workspace root. The exec is now `workspace.path-escape` before any mount, the
