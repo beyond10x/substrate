@@ -304,6 +304,26 @@ pub fn named_codes(log: &str) -> BTreeSet<String> {
     codes
 }
 
+/// The reason codes the daemon named for a pending destroy of `workspace`: the `code=` fields of
+/// `WARN` lines written after the first `since` bytes of its log that carry `workspace=<id>`, as
+/// the destroy's first answer and every reconciliation round write them. A code is counted each
+/// time it is written, so one the log already held, such as the probe's own teardown naming
+/// `kubernetes.api-failed` for its PVC, does not hide the destroy's.
+pub fn pending_destroy_codes(log: &str, since: usize, workspace: &str) -> BTreeSet<String> {
+    let after = String::from_utf8_lossy(&log.as_bytes()[since.min(log.len())..]).into_owned();
+    let field = format!("workspace={workspace}");
+    let lines: Vec<String> = after
+        .lines()
+        .filter(|line| {
+            without_escapes(line)
+                .split_whitespace()
+                .any(|word| word == field)
+        })
+        .map(str::to_owned)
+        .collect();
+    named_codes(&lines.join("\n"))
+}
+
 /// The facts a daemon's log says, on a `WARN` line, were `<fact> was not proved`: the probe's
 /// own statement for `exec.argv-only`, which carries the API's answer as `why=` and no code.
 pub fn unproved_facts(log: &str) -> BTreeSet<String> {
@@ -1376,7 +1396,7 @@ impl Steps<'_> {
                 ));
             }
         };
-        let before = named_codes(&daemon.log());
+        let since = daemon.log().len();
         match daemon.destroy(&workspace).await? {
             Ok(()) => Ok((None, None)),
             // Pending is the daemon's ordinary answer while the keeper terminates, not a refusal:
@@ -1387,10 +1407,7 @@ impl Steps<'_> {
                     if daemon.absent(&workspace).await? {
                         return Ok((None, None));
                     }
-                    let named: Vec<String> = named_codes(&daemon.log())
-                        .difference(&before)
-                        .cloned()
-                        .collect();
+                    let named = pending_destroy_codes(&daemon.log(), since, &workspace);
                     if !named.is_empty() {
                         return Ok((
                             Some(format!(
@@ -1711,6 +1728,40 @@ mod tests {
         assert_eq!(
             named_codes(coloured),
             BTreeSet::from(["kubernetes.api-failed".to_owned()])
+        );
+    }
+
+    /// The PVC-delete Role case: the probe's teardown named `kubernetes.api-failed` before the
+    /// destroy, and reconciliation names the same code again for the workspace afterwards. That
+    /// second naming is the refusal; a code the log held before the destroy, or a line about
+    /// another object, is not.
+    #[test]
+    fn a_pending_destroy_is_named_by_a_warn_for_its_workspace_written_after_it() {
+        let before = "2026-10-29T12:30:00Z  WARN substrate_kubernetes::namespace::probe: a probe \
+                      object could not be removed code=\"kubernetes.api-failed\" \
+                      name=\"sbx-pr-x-pvc\"\n";
+        let since = before.len();
+        let other = "2026-10-29T12:30:05Z  WARN substrate_daemon::app::service: workspace destroy \
+                     reconciliation will retry workspace=ws_other code=\"kubernetes.other\"\n";
+        let ours = "2026-10-29T12:30:06Z  WARN substrate_daemon::app::service: workspace destroy \
+                    reconciliation will retry workspace=ws_one code=\"kubernetes.api-failed\"\n";
+        assert!(pending_destroy_codes(before, since, "ws_one").is_empty());
+        assert_eq!(
+            pending_destroy_codes(&format!("{before}{other}{ours}"), since, "ws_one"),
+            BTreeSet::from(["kubernetes.api-failed".to_owned()])
+        );
+        assert!(pending_destroy_codes(&format!("{before}{other}"), since, "ws_one").is_empty());
+        let coloured = "\u{1b}[33m WARN\u{1b}[0m \u{1b}[2msubstrate_daemon\u{1b}[0m: workspace \
+                        destroy reconciliation will retry \u{1b}[3mworkspace\u{1b}[0m\u{1b}[2m=\
+                        \u{1b}[0mws_one \u{1b}[3mcode\u{1b}[0m\u{1b}[2m=\u{1b}[0m\
+                        \"kubernetes.api-failed\"";
+        assert_eq!(
+            pending_destroy_codes(&format!("{before}{coloured}"), since, "ws_one"),
+            BTreeSet::from(["kubernetes.api-failed".to_owned()])
+        );
+        assert!(
+            pending_destroy_codes(&format!("{before}{coloured}"), since, "ws_on").is_empty(),
+            "a prefix of the id is another workspace"
         );
     }
 

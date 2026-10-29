@@ -921,6 +921,52 @@ async fn destroy_removes_exec_pods_then_the_keeper_then_the_pvc_and_is_pending_u
     }
 }
 
+/// A destroy whose first call was `Pending` on a stopping keeper names the API's refusal when a
+/// later call reaches the PVC and the Role does not grant its deletion: `kubernetes.api-failed`,
+/// the code the first call would have answered, and the PVC's row stays open (invariant 3).
+#[tokio::test]
+async fn a_pending_destroy_names_a_forbidden_pvc_deletion_on_the_call_that_reaches_it() {
+    let s = setup();
+    s.created().await;
+    let keeper = s.fake.object("pods", &keeper_name()).expect("the keeper");
+    s.fake.fault(Fault::Answer {
+        method: Method::DELETE,
+        path: format!("{PODS}/{}", keeper_name()),
+        status: 200,
+        body: keeper,
+    });
+    let first = Driver::destroy_workspace(&s.driver, WORKSPACE, &pvc_name())
+        .await
+        .expect("destroying");
+    assert!(
+        matches!(
+            first,
+            WorkspaceDestroyProgress::Pending { removed_items: 0 }
+        ),
+        "{first:?}"
+    );
+    s.fake.fault(Fault::Answer {
+        method: Method::DELETE,
+        path: format!("{CLAIMS}/{}", pvc_name()),
+        status: 403,
+        body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "Forbidden", "code": 403,
+            "message": "persistentvolumeclaims is forbidden: cannot delete"}),
+    });
+
+    let second = Driver::destroy_workspace(&s.driver, WORKSPACE, &pvc_name()).await;
+    let error = second.expect_err("a forbidden PVC deletion is a named refusal, never pending");
+    assert_eq!(error.code, API_FAILED);
+    assert!(s.fake.object("pods", &keeper_name()).is_none());
+    assert!(
+        s.fake
+            .object("persistentvolumeclaims", &pvc_name())
+            .is_some()
+    );
+    assert!(s.ledger.row(&keeper_name()).settled_at.is_some());
+    assert!(s.ledger.row(&pvc_name()).settled_at.is_none());
+}
+
 #[tokio::test]
 async fn a_requested_storage_quota_is_unserved_before_anything_is_sent() {
     let s = setup();
