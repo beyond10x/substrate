@@ -544,3 +544,47 @@ async fn a_bound_pod_row_reads_restart_absence_as_physical_absence() {
     assert_eq!(record.state, OperationState::Unknown);
     assert_eq!(harness.physically_absent(&exec), Some(true));
 }
+
+/// Design 34 § 5.1 and ADR 0047 decision 8: an exec whose `pod` row holds no uid is dispatch
+/// absence once its object is absent. A driver that read the Pod absent and closed its row with
+/// `settle` before it answered `NotFound` must get the same answer as one that did not settle.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settled_unbound_pod_row_still_reads_restart_absence_as_dispatch_absence() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDSETTLECREATE0001").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    let (status, started) = harness
+        .start_exec("01JBACKENDSETTLEEXEC000001", &workspace)
+        .await;
+    assert!(!status.is_success(), "{status} {started}");
+    let exec = exec_id(&harness, "01JBACKENDSETTLEEXEC000001");
+
+    let ledger = StoreBackendLedger::new(Arc::clone(&harness.store), DEPLOYMENT);
+    assert!(
+        ledger
+            .settle(&pod_name(&exec))
+            .expect("settle the absent Pod row")
+    );
+    assert_eq!(
+        ledger.bind_uid(&pod_name(&exec), "uid-late").expect("bind"),
+        UidBinding::Settled
+    );
+
+    let restarted = harness.restart(driver);
+    restarted.sweep_expired().await;
+    let record = harness.operation("01JBACKENDSETTLEEXEC000001");
+    assert_eq!(record.state, OperationState::Terminal, "{record:?}");
+    assert!(
+        matches!(&record.outcome, Some(OperationOutcome::Error { error }) if !error.retriable),
+        "{:?}",
+        record.outcome
+    );
+    assert!(
+        harness
+            .store
+            .exec(&scope(), &exec)
+            .expect("exec read")
+            .is_none()
+    );
+}
