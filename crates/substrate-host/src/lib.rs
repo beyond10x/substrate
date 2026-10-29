@@ -26,6 +26,9 @@ mod observation;
 // Which bytes of a bounded output stream a run keeps (design 29). Published through `confinement`,
 // which re-exports its public types.
 mod output_retention;
+// The probe's sentinel socket, on a path `bind(2)` accepts under any TMPDIR.
+#[cfg(target_os = "linux")]
+mod private_socket;
 #[cfg(target_os = "linux")]
 mod probe;
 #[cfg(target_os = "linux")]
