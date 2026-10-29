@@ -3003,4 +3003,58 @@ mod tests {
             Err(std::io::Error::from(ErrorKind::ConnectionRefused).into());
         assert!(dial_stage(&refused).is_err());
     }
+
+    #[test]
+    fn a_create_refused_for_a_name_already_taken_deletes_nothing() {
+        // A second run started while the first is still creating its cluster finds the name free,
+        // then `kind create` refuses it because the first run holds it. The guard built before the
+        // create deletes by that name on drop, which would delete the first run's cluster.
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let log = directory.path().join("kind.log");
+        let kind = directory.path().join("kind");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = create ]; then\necho 'ERROR: node(s) already exist for a cluster with the name \"substrate-chart-lane\"' >&2\nexit 1\nfi\nexit 0\n",
+            log.display()
+        );
+        fs::write(&kind, script).expect("the stand-in kind");
+        fs::set_permissions(&kind, fs::Permissions::from_mode(0o755)).expect("executable");
+        let args = Args {
+            image: "b10x-substrate-daemon:9.9.9".to_owned(),
+            node_image: "kindest/node:v1.37.0".to_owned(),
+            kind,
+            kubectl: PathBuf::from("kubectl-not-used"),
+            helm: PathBuf::from("helm-not-used"),
+            docker: PathBuf::from("docker-not-used"),
+            cluster: "substrate-chart-lane".to_owned(),
+            node_profiles: false,
+        };
+        assert!(
+            run(&args).is_err(),
+            "kind refused the create, so the run must fail"
+        );
+        let calls = fs::read_to_string(&log).expect("the stand-in kind was called");
+        assert!(
+            calls.lines().all(|call| !call.starts_with("delete ")),
+            "a refused create deleted a cluster by its name: {calls}"
+        );
+    }
+
+    #[test]
+    fn a_recipe_with_a_second_stage_in_any_spelling_of_from_is_refused() {
+        // Docker reads the instruction word without regard to case and after leading white space
+        // or a tab, so the image a recipe builds is its last stage, whatever its first `FROM` says.
+        let node = "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5";
+        for second in [
+            "from alpine:3.20",
+            "  FROM alpine:3.20",
+            "FROM\talpine:3.20",
+        ] {
+            let recipe = format!("FROM {node}\nRUN true\n{second}\n");
+            assert!(
+                lab_base_verdict(&recipe, node).is_err(),
+                "a recipe whose last stage is `{second}` passes as built on {node}"
+            );
+        }
+    }
 }
