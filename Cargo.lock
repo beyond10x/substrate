@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-cli"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "b10x-substrate-host",
  "b10x-substrate-sdk",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-daemon"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-executor"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "b10x-substrate-guarded",
  "b10x-substrate-wire",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-guarded"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "b10x-substrate-wire",
  "base64 0.23.1",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-host"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "async-trait",
  "b10x-substrate-cli",
@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-kubernetes"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "async-trait",
  "b10x-substrate-executor",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-kubernetes-client"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-mcp"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "b10x-substrate-sdk",
  "base64 0.23.1",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-sdk"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "b10x-substrate-daemon",
  "b10x-substrate-wire",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-store"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "b10x-substrate-wire",
  "chrono",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-wire"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -2594,9 +2594,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.29"
+version = "1.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
 dependencies = [
  "cc",
  "libc",
@@ -3563,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-contract-check"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "jsonschema",
  "serde_json",
@@ -4355,7 +4355,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "b10x-substrate-kubernetes-client",

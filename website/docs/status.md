@@ -12,7 +12,8 @@ because stability is a separate compatibility decision.
 Release [0.15.0](https://github.com/beyond10x/substrate/releases/tag/0.15.0), published on
 29 October 2026, ships the daemon and disposable MCP images, the Helm chart and the signed
 `substrate-wire/0.24.0` development bundle. [Release notes](./releases.md) lists what changed.
-Release 0.16.0 is upcoming, not released.
+Release 0.16.1 is upcoming, not released. Tag 0.16.0 was not published: the gate on its commit
+failed a dependency advisory check, and release tags are write-once.
 
 The released implementation is a Linux host slice. Treat every capability as deployment-specific
 and verify it through `GET /v1/machine`.
@@ -39,7 +40,7 @@ and verify it through `GET /v1/machine`.
 | capsules | digest-verified read-only runtime material beside a writable workspace |
 | distribution | Apache-2.0 source plus keyless-signed 0.15.0 daemon and MCP images, chart and binaries, and the signed 0.24.0 development bundle |
 
-## Coming in 0.16.0
+## Coming in 0.16.1
 
 Implemented in source and not yet released:
 

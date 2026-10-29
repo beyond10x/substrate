@@ -96,6 +96,32 @@ fn shown(output: &Output) -> String {
     )
 }
 
+/// The offset of the first list item under the first `###` heading of the newest released
+/// section, the one the Release notes page publishes. A release with no `### Added` list (a patch
+/// release with only `### Security`) still has one such list, and the offset is asserted to lie
+/// inside that section, so the mutation can never land in an older, unpublished one.
+fn first_list_of_the_newest_release(text: &str) -> usize {
+    let section = text.find("\n## [0.").expect("a released section") + 1;
+    let end = text[section..]
+        .find("\n## [")
+        .map_or(text.len(), |next| section + next);
+    let heading = section
+        + text[section..end]
+            .find("\n### ")
+            .expect("a subsection in the newest released section")
+        + 1;
+    let list = heading
+        + text[heading..end]
+            .find("\n\n- ")
+            .expect("a list under that subsection")
+        + 2;
+    assert!(
+        list < end,
+        "the mutation lands in the newest released section"
+    );
+    list
+}
+
 fn check_docs_passes(root: &Path) {
     let control = xtask(root, &["check-docs"]);
     assert!(
@@ -116,12 +142,7 @@ fn raw_html_in_the_changelog_section_is_refused_on_the_release_notes_page() {
     check_docs_passes(root.path());
     let changelog = root.path().join("CHANGELOG.md");
     let text = fs::read_to_string(&changelog).unwrap();
-    let section = text.find("\n## [0.").expect("a released section");
-    let added = section
-        + text[section..]
-            .find("### Added\n\n")
-            .expect("an Added list")
-        + "### Added\n\n".len();
+    let added = first_list_of_the_newest_release(&text);
     let mutated = format!(
         "{}- <img src=x onerror=alert(document.domain)> published as HTML.\n{}",
         &text[..added],
@@ -151,12 +172,7 @@ fn an_image_in_the_changelog_section_is_refused_on_the_release_notes_page() {
     check_docs_passes(root.path());
     let changelog = root.path().join("CHANGELOG.md");
     let text = fs::read_to_string(&changelog).unwrap();
-    let section = text.find("\n## [0.").expect("a released section");
-    let added = section
-        + text[section..]
-            .find("### Added\n\n")
-            .expect("an Added list")
-        + "### Added\n\n".len();
+    let added = first_list_of_the_newest_release(&text);
     let mutated = format!(
         "{}- ![tracking pixel](https://example.invalid/pixel.png) published as an image.\n{}",
         &text[..added],

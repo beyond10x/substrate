@@ -351,7 +351,8 @@ Its limits, stated plainly:
   observe` runs design 34's observations and steps 3 and 5 to 7 on a kind cluster of its own, and
   reports step 4 absent.
 
-From 0.16.0, each release publishes the executor image
+From 0.16.1, the first published release of the driver (tag `0.16.0` was not published), each
+release publishes the executor image
 `ghcr.io/beyond10x/b10x-substrate-executor:<version>` and requires a `Namespace-lane:` record for
 the tagged commit ([AGENTS.md](AGENTS.md) § *Releases*). The
 [deployment guide](website/docs/guides/deployment.md#kubernetes-namespace-driver) lists the
