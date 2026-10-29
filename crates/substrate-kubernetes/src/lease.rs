@@ -7,14 +7,15 @@
 //! - a Lease another instance of the same deployment holds is taken over only once its
 //!   `resourceVersion` has stayed unchanged for [`TAKEOVER_AFTER`] of this process's own
 //!   observation (client-go's rule);
-//! - a Lease another deployment holds is never taken over, however old: two deployments would
-//!   split one namespace's objects between two ledgers;
+//! - a Lease another deployment holds, or that is labelled for another deployment, is never taken
+//!   over, however old and whatever its holder: two deployments would split one namespace's
+//!   objects between two ledgers;
 //! - the claim is **held** while the last successful renewal is under [`HELD_FOR`] old, and is
 //!   renewed every [`RENEW_EVERY`].
 
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use substrate_kubernetes_client::{Api, ApiError};
 
@@ -31,19 +32,28 @@ pub const RENEW_EVERY: Duration = Duration::from_secs(10);
 /// How long after its last successful renewal the claim is still held.
 pub const HELD_FOR: Duration = Duration::from_secs(20);
 
-/// A monotonic clock. The shipped driver reads [`MonotonicClock`]; a test steps its own.
+/// The driver's clocks. The shipped driver reads [`MonotonicClock`]; a test steps its own.
 pub trait Clock: Send + Sync {
-    /// Now, on this process's monotonic clock.
+    /// Now, on this process's monotonic clock: what every Lease rule reads.
     fn now(&self) -> Instant;
+
+    /// Now, on the wall clock the daemon stamps a ledger row's `created_at` with: what the N9
+    /// bound of a durable row is read against (design 34 § 5.1), because a row outlives the
+    /// process whose monotonic clock would otherwise measure it.
+    fn wall(&self) -> DateTime<Utc>;
 }
 
-/// [`Instant::now`].
+/// [`Instant::now`] and [`Utc::now`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MonotonicClock;
 
 impl Clock for MonotonicClock {
     fn now(&self) -> Instant {
         Instant::now()
+    }
+
+    fn wall(&self) -> DateTime<Utc> {
+        Utc::now()
     }
 }
 
@@ -98,7 +108,9 @@ impl LeaseClaim {
 
     /// One attempt to hold the Lease at `now`: created when absent, renewed when this claim
     /// holds it, taken when free, or when another instance of this deployment left its
-    /// `resourceVersion` unchanged for [`TAKEOVER_AFTER`].
+    /// `resourceVersion` unchanged for [`TAKEOVER_AFTER`]. A Lease whose deployment label names
+    /// another deployment is that deployment's, whatever its holder, and is never taken; a Lease
+    /// this claim writes carries this deployment's labels.
     ///
     /// # Errors
     ///
@@ -117,6 +129,13 @@ impl LeaseClaim {
             self.held = Some((created, now));
             return Ok(());
         };
+        let label = &lease["metadata"]["labels"][DEPLOYMENT_LABEL];
+        if !label.is_null() && *label != names::deployment_label(&self.deployment).as_str() {
+            self.observed = None;
+            return Err(Refused::Foreign(format!(
+                "the Lease {LEASE_NAME} is labelled for another deployment, as {label}"
+            )));
+        }
         let holder = lease["spec"]["holderIdentity"].as_str().unwrap_or_default();
         let transitions = lease["spec"]["leaseTransitions"].as_u64().unwrap_or(0);
         if holder == self.holder {
@@ -186,6 +205,9 @@ impl LeaseClaim {
     ) -> Result<(), Refused> {
         let mut replacement = lease.clone();
         let stamp = micro_time();
+        replacement["metadata"]["labels"][MANAGED_BY_LABEL] = json!(MANAGED_BY);
+        replacement["metadata"]["labels"][DEPLOYMENT_LABEL] =
+            json!(names::deployment_label(&self.deployment));
         replacement["spec"]["holderIdentity"] = json!(self.holder);
         replacement["spec"]["leaseDurationSeconds"] = json!(LEASE_DURATION_SECONDS);
         replacement["spec"]["renewTime"] = json!(stamp);
