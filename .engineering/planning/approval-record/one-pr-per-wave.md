@@ -2,14 +2,16 @@
 format: aep.planning-md/3
 id: approval-record:one-pr-per-wave
 kind: approval-record
-status: draft
+status: active
 title: One pull request to main per wave (D169)
 relations:
 - decides: story:adapter-stdin-pipe
 - decides: story:adapter-live-output
 - decides: story:host-profile-name-is-a-deployment-parameter
 - decides: story:pod-force-deleted-keeps-its-policy
-revision: 2
+revision: 3
+transitions:
+- {from: "draft", to: "active", at: "2026-10-29T01:51:53Z", actor: "human:timo", revision: 3}
 ---
 # Decision: one pull request to main per wave
 

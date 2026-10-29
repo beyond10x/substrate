@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: approval-record:kubernetes-namespace-driver-accepted
 kind: approval-record
-status: draft
+status: active
 title: Operator accepts ADR 0047 with every recommended answer
 relations:
 - decides: story:kubernetes-namespace-driver-entry-gate
-revision: 1
+revision: 2
+transitions:
+- {from: "draft", to: "active", at: "2026-10-29T01:51:53Z", actor: "human:timo", revision: 2}
 ---
 # Decision: ADR 0047 accepted with every recommended answer
 

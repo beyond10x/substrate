@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: approval-record:design-31-accepted
 kind: approval-record
-status: draft
+status: active
 title: Accept design 31 as recommended (D172)
 relations:
 - decides: story:remote-clean-room-conformance
-revision: 1
+revision: 2
+transitions:
+- {from: "draft", to: "active", at: "2026-10-29T01:51:52Z", actor: "human:timo", revision: 2}
 ---
 # Decision: accept design 31 as recommended (D172)
 

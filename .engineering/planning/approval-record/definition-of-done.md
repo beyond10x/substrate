@@ -2,9 +2,11 @@
 format: aep.planning-md/3
 id: approval-record:definition-of-done
 kind: approval-record
-status: draft
+status: active
 title: Substrate is done with remote serving, Kubernetes and one adopter
-revision: 1
+revision: 2
+transitions:
+- {from: "draft", to: "active", at: "2026-10-29T01:51:52Z", actor: "human:timo", revision: 2}
 ---
 # Decision: what makes Substrate done
 
