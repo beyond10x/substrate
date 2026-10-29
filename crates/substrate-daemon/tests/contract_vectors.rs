@@ -138,6 +138,9 @@ struct VectorDriver {
     start_count: AtomicUsize,
     destroy_count: AtomicUsize,
     destroy_pending_remaining: AtomicUsize,
+    /// Once the pending answers are spent, destroy fails `kubernetes.api-failed` instead of
+    /// reading absent: a Role that does not grant the PVC's deletion.
+    destroy_forbidden_after_pending: AtomicBool,
     dispatch_count: AtomicUsize,
     observed_exec: StdMutex<Option<ExecObservation>>,
     output_result: StdMutex<Option<OutputSlice>>,
@@ -395,6 +398,12 @@ impl Driver for VectorDriver {
         {
             return Ok(WorkspaceDestroyProgress::Pending { removed_items: 7 });
         }
+        if self.destroy_forbidden_after_pending.load(Ordering::SeqCst) {
+            return Err(DriverError::failed(
+                "kubernetes.api-failed",
+                "the cluster API: delete answered 403: persistentvolumeclaims is forbidden",
+            ));
+        }
         Err(DriverError::not_found())
     }
 
@@ -578,6 +587,7 @@ impl Harness {
             start_count: AtomicUsize::new(0),
             destroy_count: AtomicUsize::new(0),
             destroy_pending_remaining: AtomicUsize::new(0),
+            destroy_forbidden_after_pending: AtomicBool::new(false),
             dispatch_count: AtomicUsize::new(0),
             observed_exec: StdMutex::new(None),
             output_result: StdMutex::new(None),
@@ -2079,6 +2089,79 @@ async fn bounded_destroy_pending_progress_remains_durable_until_absence_is_prove
         substrate_wire::OperationState::Terminal
     );
     assert_eq!(harness.driver.destroy_count.load(Ordering::SeqCst), 2);
+}
+
+/// A destroy answered pending whose next round the driver refuses (a Role without the PVC's
+/// `delete`) names that refusal as the first call would: `workspace.cleanup-failed` with the
+/// driver's code, the workspace still `destroying` and its operation still open for retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pending_destroy_whose_next_round_is_refused_names_the_drivers_code() {
+    let harness = Harness::open(false);
+    seed_workspace(&harness.store);
+    harness
+        .driver
+        .destroy_pending_remaining
+        .store(1, Ordering::SeqCst);
+    harness
+        .driver
+        .destroy_forbidden_after_pending
+        .store(true, Ordering::SeqCst);
+    let request = json!({
+        "action": {
+            "kind": "http",
+            "request": {
+                "body": { "op": "01JPHASE3FORBIDDESTROY01", "input": {} },
+                "headers": { "x-request-id": "req_forbidden_destroy" },
+                "method": "DELETE",
+                "path": "/v1/workspaces/ws_vector",
+                "query": {}
+            }
+        },
+        "context": { "subject": "local:1000" }
+    });
+    let response = harness.execute(&request).await;
+    assert_eq!(response["status"], 500);
+    assert_eq!(
+        response["body"]["error"]["code"],
+        "operation.outcome-unknown"
+    );
+
+    harness.app.reconcile_destroying_workspaces().await;
+    assert_eq!(harness.driver.destroy_count.load(Ordering::SeqCst), 2);
+    let scope = vector_scope();
+    let page = harness
+        .store
+        .events(&scope, None, 100)
+        .expect("event page store")
+        .expect("event page");
+    let failed: Vec<&Value> = page
+        .items
+        .iter()
+        .filter(|event| event.transition == "workspace.cleanup-failed")
+        .map(|event| &event.observation)
+        .collect();
+    assert_eq!(failed.len(), 1, "{:?}", page.items);
+    assert_eq!(failed[0]["code"], "kubernetes.api-failed");
+    assert_eq!(failed[0]["operation"], "01JPHASE3FORBIDDESTROY01");
+    assert_eq!(
+        harness
+            .store
+            .workspace(&scope, "ws_vector")
+            .expect("workspace lookup")
+            .expect("destroying workspace")
+            .1
+            .state,
+        WorkspaceState::Destroying
+    );
+    assert_eq!(
+        harness
+            .store
+            .operation(&scope, "01JPHASE3FORBIDDESTROY01")
+            .expect("operation lookup")
+            .expect("destroy operation")
+            .state,
+        substrate_wire::OperationState::Accepted
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
