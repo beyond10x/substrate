@@ -642,8 +642,12 @@ verb records; the declared length must equal the entries), and applies the same 
 and three-field rules; another lane's line does not satisfy it. The line is written into the GitHub
 release under *Namespace lane* and into both job summaries, and a recovery dispatch may pass it as
 the `namespace_evidence` input instead. A tag push whose source has no `xtask/src/namespace_lane.rs`
-is refused; only a recovery of an older tag needs no record, and its notes say so. The step's
-refusals are executed offline by `xtask/tests/release_workflow.rs`.
+is refused; only a recovery of an older tag needs no record, and its notes say so. The preflight
+also waits for `.github/workflows/namespace-lane.yml`'s own recorded `success` for that exact
+commit, as it does for `gate.yml` and counting the same runs, and refuses a tag without one; a tag
+push whose source has no `namespace-lane.yml` is refused, and only a recovery of such a tag needs
+no run, which its notes say. Both steps' refusals are executed offline by
+`xtask/tests/release_workflow.rs`.
 
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
