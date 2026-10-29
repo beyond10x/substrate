@@ -72,6 +72,7 @@ pub struct NamespaceDriver {
     binding: Mutex<Option<Binding>>,
     collisions: AtomicU64,
     incomplete_reviews: AtomicU64,
+    execs: crate::exec::Execs,
 }
 
 impl std::fmt::Debug for NamespaceDriver {
@@ -149,6 +150,7 @@ impl NamespaceDriver {
             binding: Mutex::new(None),
             collisions: AtomicU64::new(0),
             incomplete_reviews: AtomicU64::new(0),
+            execs: crate::exec::Execs::default(),
         })
     }
 
@@ -511,6 +513,20 @@ impl NamespaceDriver {
     /// The deployment this driver serves.
     pub fn deployment(&self) -> &str {
         &self.deployment
+    }
+
+    /// The ledger the driver records its backend objects in.
+    pub(crate) fn ledger(&self) -> &Arc<dyn BackendLedger> {
+        &self.ledger
+    }
+
+    /// The value of the deployment label on every object this driver creates.
+    pub(crate) fn deployment_label(&self) -> &str {
+        &self.deployment_label
+    }
+
+    pub(crate) fn execs(&self) -> &crate::exec::Execs {
+        &self.execs
     }
 }
 

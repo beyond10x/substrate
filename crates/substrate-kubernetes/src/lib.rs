@@ -21,15 +21,20 @@
 
 pub mod binding;
 pub mod config;
+mod exec;
 pub mod lease;
+pub mod logs;
 pub mod names;
 mod namespace;
 pub mod ownership;
+pub mod pod;
 pub mod policy;
 pub mod rules;
 
 #[cfg(test)]
 mod driver_tests;
+#[cfg(test)]
+mod exec_tests;
 
 pub use binding::Binding;
 pub use config::NamespaceConfig;
@@ -77,15 +82,17 @@ impl std::fmt::Display for StartupRefusal {
 
 impl std::error::Error for StartupRefusal {}
 
-/// The driver port (design 34 § 1). The workspace and file routes are design 34 U8's; the exec
-/// routes and the capability snapshot belong to U9 and U10, and until they land each answers
-/// what an unproved capability answers: absent facts, an unserved start and no exec.
+/// The driver port (design 34 § 1). The workspace and file routes are design 34 U8's and the
+/// exec routes U9's; the capability probe belongs to U10, and until it lands the snapshot
+/// answers what an unproved capability answers: every driver fact absent.
 #[async_trait::async_trait]
 impl substrate_host::Driver for NamespaceDriver {
-    // --- the snapshot and the exec routes (U9, U10) --------------------------------------
+    // --- the snapshot (U10) and the exec routes (U9) -------------------------------------
 
     fn machine(&self) -> substrate_wire::CapabilitySnapshot {
-        self.unprobed_snapshot()
+        let snapshot = self.unprobed_snapshot();
+        self.publish_exec_snapshot(&snapshot.snapshot, snapshot.config_generation);
+        snapshot
     }
 
     async fn shutdown(&self) -> Result<(), substrate_host::DriverError> {
@@ -94,49 +101,51 @@ impl substrate_host::Driver for NamespaceDriver {
 
     async fn start_exec(
         &self,
-        _id: &str,
-        _workspace_root_name: &str,
-        _input: &substrate_wire::ExecStartInput,
+        id: &str,
+        workspace_root_name: &str,
+        input: &substrate_wire::ExecStartInput,
     ) -> substrate_host::DispatchOutcome<substrate_host::ExecObservation> {
-        substrate_host::DispatchOutcome::NotDispatched(substrate_host::DriverError::unserved(
-            "exec.sandbox-unavailable",
-            "The namespace driver has not proved a confinement set an exec needs.",
-            "exec",
-        ))
+        self.exec_start(id, workspace_root_name, input).await
     }
 
     async fn observe_exec(
         &self,
-        _id: &str,
+        id: &str,
     ) -> Result<substrate_host::ExecObservation, substrate_host::DriverError> {
-        Err(substrate_host::DriverError::not_found())
+        self.exec_observe(id).await
     }
 
     async fn output(
         &self,
-        _id: &str,
-        _query: &substrate_wire::ExecOutputQuery,
+        id: &str,
+        query: &substrate_wire::ExecOutputQuery,
     ) -> Result<substrate_wire::OutputSlice, substrate_host::DriverError> {
-        Err(substrate_host::DriverError::not_found())
+        self.exec_output(id, query)
     }
 
     async fn signal(
         &self,
-        _id: &str,
-        _input: &substrate_wire::ExecSignalInput,
+        id: &str,
+        input: &substrate_wire::ExecSignalInput,
     ) -> Result<substrate_host::ExecObservation, substrate_host::DriverError> {
-        Err(substrate_host::DriverError::not_found())
+        self.exec_signal(id, input).await
     }
 
     fn completed_execs(&self) -> Vec<substrate_host::ExecObservation> {
-        Vec::new()
+        self.exec_completed()
     }
 
-    fn set_exec_lease(&self, _id: &str, _lease: Option<substrate_wire::LeaseObservation>) {}
+    fn set_exec_lease(&self, id: &str, lease: Option<substrate_wire::LeaseObservation>) {
+        self.exec_set_lease(id, lease);
+    }
 
-    fn acknowledge_exec(&self, _persisted: &substrate_host::ExecObservation) {}
+    fn acknowledge_exec(&self, persisted: &substrate_host::ExecObservation) {
+        self.exec_acknowledge(persisted);
+    }
 
-    fn discard_superseded_exec(&self, _id: &str) {}
+    fn discard_superseded_exec(&self, id: &str) {
+        self.exec_discard(id);
+    }
 
     // --- names and the dispatch bound (U6) -----------------------------------------------
 

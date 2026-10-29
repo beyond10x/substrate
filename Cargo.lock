@@ -368,6 +368,7 @@ version = "0.15.0"
 dependencies = [
  "async-trait",
  "b10x-substrate-executor",
+ "b10x-substrate-guarded",
  "b10x-substrate-host",
  "b10x-substrate-kubernetes-client",
  "b10x-substrate-wire",
