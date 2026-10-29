@@ -52,4 +52,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0044](0044-confinement-is-a-contract-family-served-by-declared-adapters.md) | Confinement is a contract family served by declared adapters | accepted |
 | [0045](0045-operational-health-and-metrics-use-a-separate-listener.md) | Operational health and metrics use a separate listener outside the wire contract | accepted |
 | [0046](0046-kubernetes-serves-one-node-bound-daemon-per-stable-pod-address.md) | Kubernetes serves one node-bound daemon per stable pod address | accepted |
-| [0047](0047-a-kubernetes-namespace-driver-serves-workspaces-on-pvcs-and-execs-as-pods.md) | A Kubernetes namespace driver serves workspaces on PVCs and execs as Pods in one claimed namespace | proposed |
+| [0047](0047-a-kubernetes-namespace-driver-serves-workspaces-on-pvcs-and-execs-as-pods.md) | A Kubernetes namespace driver serves workspaces on PVCs and execs as Pods in one claimed namespace | accepted |

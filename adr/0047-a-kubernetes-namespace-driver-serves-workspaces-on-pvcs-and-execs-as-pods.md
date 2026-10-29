@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-29
 ---
 
@@ -8,10 +8,12 @@ date: 2026-10-29
 Decider: operator.
 
 Decides `story:kubernetes-namespace-driver-entry-gate`, the authority gate in front of
-`story:kubernetes-namespace-workspace-and-exec-slice`. **Proposed, not accepted.** Twelve questions
-in § *Decisions for the operator* need the operator's answer before acceptance and before any code
-(invariant 8). § *Decision* is written with the recommended option of each. Where the operator
-chooses differently, that sentence is rewritten at acceptance.
+`story:kubernetes-namespace-workspace-and-exec-slice`. **Accepted** by the operator on 2026-10-29
+with the recommended option of each of the twelve questions in § *Decisions for the operator*, N1
+to N12, as written at commit `ce3fb77c` (`approval-record:kubernetes-namespace-driver-accepted`).
+The operator's answer, verbatim: "A". § *Decision* stands as written. The four behaviours
+§ *Consequences* lists as unobserved are checked on the kind lane before the implementation relies
+on them, and the implementation's own design comes before code (invariant 8).
 
 The operator made the track *Kubernetes deployment and driver* part of the definition of done on
 2026-10-29 ([ROADMAP.md](../ROADMAP.md) § *Definition of done*, item 2). Its node-bound half is
