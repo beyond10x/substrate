@@ -13,7 +13,7 @@ use serde_json::Value;
 pub const ROLE_RULES: [(&str, &str, &[&str]); 6] = [
     ("", "pods", &["create", "get", "list", "watch", "delete"]),
     ("", "pods/log", &["get"]),
-    ("", "pods/exec", &["create"]),
+    ("", "pods/exec", &["get", "create"]),
     (
         "",
         "persistentvolumeclaims",
@@ -267,6 +267,28 @@ mod tests {
             assert!(!read.excess.is_empty(), "{rule} is excess");
         }
         assert!(!review(&json!({"resourceRules": {}})).excess.is_empty());
+    }
+
+    /// The API server authorizes the driver's `pods/exec` WebSocket as `get` (O10, ADR 0047's
+    /// addendum of 2026-10-29), so decision 3 holds `get` beside `create` there: a review that
+    /// states both on `pods/exec` shows no excess.
+    #[test]
+    fn get_and_create_on_pods_exec_are_both_held() {
+        let status = json!({
+            "resourceRules": [
+                {"verbs": ["get", "create"], "apiGroups": [""], "resources": ["pods/exec"]},
+            ],
+        });
+        let read = review(&status);
+        assert!(read.excess.is_empty(), "{:?}", read.excess);
+        assert_eq!(read.excess_total, 0);
+        let widened = review(&json!({
+            "resourceRules": [
+                {"verbs": ["get", "create", "list"], "apiGroups": [""], "resources": ["pods/exec"]},
+            ],
+        }));
+        assert_eq!(widened.excess, ["list /pods/exec"]);
+        assert_eq!(widened.excess_total, 1);
     }
 
     /// A rule of a few thousand short strings states a product of billions of grants. The review

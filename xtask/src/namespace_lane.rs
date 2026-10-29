@@ -927,6 +927,33 @@ mod tests {
         assert_eq!(failures.len(), 1, "{failures:?}");
     }
 
+    /// O10: the driver's `pods/exec` WebSocket is refused 403 without `get` on `pods/exec`, so the
+    /// Role the lane installs and decision 3's table both hold `get` beside `create` there
+    /// (ADR 0047's addendum of 2026-10-29), and a table with only `create` is refused.
+    #[test]
+    fn the_role_holds_get_and_create_on_pods_exec_and_create_alone_is_refused() {
+        let exec = |grants: &[render::Grant]| {
+            grants
+                .iter()
+                .find(|grant| grant.group.is_empty() && grant.resource == "pods/exec")
+                .map(|grant| grant.verbs.clone())
+        };
+        let both = Some(vec!["get".to_owned(), "create".to_owned()]);
+        assert_eq!(exec(&render::role_grants()), both);
+        let root = crate::repo::root().expect("root");
+        let adr = fs::read_to_string(root.join(ADR)).expect("ADR");
+        assert_eq!(exec(&render::adr_role_table(&adr).expect("table")), both);
+        assert!(role_failures(&adr).is_empty());
+        let narrowed = adr.replacen(
+            "| `pods/exec` | `get`, `create` |",
+            "| `pods/exec` | `create` |",
+            1,
+        );
+        assert_ne!(narrowed, adr);
+        let failures = role_failures(&narrowed);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+    }
+
     #[test]
     fn a_driver_object_without_an_ownership_key_or_of_a_cluster_kind_is_refused() {
         let mut rendered = render::goldens();
