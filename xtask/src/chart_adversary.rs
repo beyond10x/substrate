@@ -5,8 +5,8 @@
 use serde_json::{Value, json};
 
 use super::{
-    Expect, base_values, check_network_policy, check_services, check_statefulset, merged,
-    pod_posture,
+    Expect, base_values, bootstrap_profile, check_network_policy, check_services,
+    check_statefulset, merged, pod_posture, profile_flag,
 };
 use crate::chart_yaml;
 
@@ -234,5 +234,131 @@ fn adversary_a_service_selecting_by_a_controller_label_is_refused() {
             .iter()
             .any(|failure| failure.contains("lane-0-api")),
         "a ClusterIP Service selecting a daemon pod is admitted: {failures:?}"
+    );
+}
+
+/// Design 33 § 6: the lane requires `--apparmor-profile` to be absent at the default and stated
+/// once, with the value, for a named profile, and never after the bootstrap's `--`. Both binaries
+/// parse with clap, which also reads the one-word `--apparmor-profile=<name>` spelling (held by
+/// `the_profile_flag_is_read_in_its_one_word_spelling_too` in each binary). `profile_flag` and
+/// `bootstrap_profile` compare whole words against `--apparmor-profile`, so that spelling is never
+/// counted: an installer told another name at the default, or a daemon passed the flag, passes.
+#[test]
+fn adversary_a_profile_flag_in_its_one_word_spelling_is_counted() {
+    const DEFAULT: &str = "substrate-host-exec-v1";
+    const NAMED: &str = "substrate-host-exec-v1-lane-a";
+    const OTHER: &str = "--apparmor-profile=substrate-host-exec-v1-lane-b";
+    let mut admitted = Vec::new();
+    for (words, profile) in [
+        (vec!["--hold", OTHER], DEFAULT),
+        (vec!["--check", OTHER], DEFAULT),
+        (vec!["--hold", "--apparmor-profile", NAMED, OTHER], NAMED),
+    ] {
+        if profile_flag(&words, profile).is_empty() {
+            admitted.push(format!("installer {words:?} for {profile}"));
+        }
+    }
+    for (words, profile) in [
+        (vec![OTHER, "--", "--socket", "s"], DEFAULT),
+        (vec!["--", OTHER, "--socket", "s"], DEFAULT),
+        (
+            vec!["--apparmor-profile", NAMED, "--", OTHER, "--socket", "s"],
+            NAMED,
+        ),
+    ] {
+        let args: Vec<Value> = words.iter().map(|word| json!(word)).collect();
+        if bootstrap_profile(&args, profile).is_empty() {
+            admitted.push(format!("bootstrap {words:?} for {profile}"));
+        }
+    }
+    assert!(
+        admitted.is_empty(),
+        "the one-word flag spelling passes the lane: {admitted:#?}"
+    );
+}
+
+/// The binaries' own grammar (design 33 § 2), compiled here so the chart's copies are held to it.
+#[allow(dead_code)]
+#[path = "../../crates/substrate-daemon/src/container_profile_name.rs"]
+mod profile_name;
+
+/// Design 33 § 2 and § 6: the schema pattern, the template's `--skip-schema-validation` check and
+/// the binaries' parser are three copies of one grammar. The two chart copies are the same
+/// pattern, and the schema agrees with the binaries on a fixed-seed corpus near every edge.
+#[test]
+fn adversary_the_chart_and_the_binaries_admit_the_same_profile_names() {
+    const ALPHABET: &[u8] = b"az09-----";
+    const NOISE: &[u8] = b"A_. \n/{";
+    let schema: Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{ROOT}/values.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let pattern = schema
+        .pointer("/properties/execution/properties/appArmorProfile/pattern")
+        .and_then(Value::as_str)
+        .unwrap();
+    let helpers = std::fs::read_to_string(format!("{ROOT}/templates/_helpers.tpl")).unwrap();
+    let template: Vec<&str> = helpers
+        .lines()
+        .filter(|line| line.contains("appArmorProfile") || line.contains("regexMatch \"^substrate"))
+        .filter_map(|line| line.split("regexMatch \"").nth(1))
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert_eq!(
+        template,
+        [pattern],
+        "the template's check is not the schema's pattern"
+    );
+
+    let validator =
+        jsonschema::validator_for(&json!({"type": "string", "pattern": pattern})).unwrap();
+    let mut state: u64 = 0x5eed_0033;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(state >> 33).unwrap()
+    };
+    let mut names = vec![
+        String::new(),
+        profile_name::DEFAULT.to_owned(),
+        format!("{}-", profile_name::DEFAULT),
+        format!("{}\n", profile_name::DEFAULT),
+        format!("{}-a\n", profile_name::DEFAULT),
+        "unconfined".to_owned(),
+    ];
+    for _ in 0..4000 {
+        let length = next() % 45;
+        let suffix: String = (0..length)
+            .map(|_| {
+                let pick = next();
+                char::from(if pick % 50 == 0 {
+                    NOISE[pick % NOISE.len()]
+                } else {
+                    ALPHABET[pick % ALPHABET.len()]
+                })
+            })
+            .collect();
+        let joint = ["-", "-", "-", "", "x", "--"][next() % 6];
+        names.push(format!("{}{joint}{suffix}", profile_name::DEFAULT));
+    }
+    let disagree: Vec<(&String, bool, bool)> = names
+        .iter()
+        .map(|name| {
+            let binary = name.parse::<profile_name::ProfileName>().is_ok();
+            (name, binary, validator.is_valid(&json!(name)))
+        })
+        .filter(|(_, binary, chart)| binary != chart)
+        .collect();
+    assert!(
+        disagree.is_empty(),
+        "(name, binary admits, chart admits): {disagree:#?}"
+    );
+    assert!(
+        names
+            .iter()
+            .filter(|name| validator.is_valid(&json!(name)))
+            .count()
+            > 100
     );
 }

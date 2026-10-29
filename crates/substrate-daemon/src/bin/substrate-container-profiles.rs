@@ -66,4 +66,39 @@ mod tests {
         );
         assert!(Args::try_parse_from(["profiles", "--apparmor-profile", "unconfined"]).is_err());
     }
+
+    /// Adversary: clap reads `--apparmor-profile=<name>` as the flag, the spelling the chart
+    /// lane's word comparison does not count (`chart_adversary.rs`).
+    #[test]
+    fn the_profile_flag_is_read_in_its_one_word_spelling_too() {
+        let args = Args::try_parse_from([
+            "profiles",
+            "--hold",
+            "--apparmor-profile=substrate-host-exec-v1-lane-b",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.apparmor_profile.to_string(),
+            "substrate-host-exec-v1-lane-b"
+        );
+    }
+
+    /// Adversary: a second flag, an abbreviation or an empty value never selects a profile.
+    #[test]
+    fn adversary_a_repeated_abbreviated_or_empty_profile_flag_is_refused() {
+        for argv in [
+            vec![
+                "profiles",
+                "--apparmor-profile",
+                "substrate-host-exec-v1-lane-a",
+                "--apparmor-profile",
+                "substrate-host-exec-v1-lane-b",
+            ],
+            vec!["profiles", "--apparmor", "substrate-host-exec-v1-lane-a"],
+            vec!["profiles", "--apparmor-profile="],
+            vec!["profiles", "--check", "--apparmor-profile"],
+        ] {
+            assert!(Args::try_parse_from(&argv).is_err(), "{argv:?} admitted");
+        }
+    }
 }

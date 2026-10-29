@@ -116,6 +116,63 @@ mod tests {
         }
     }
 
+    /// Adversary: the grammar is bytes, so no Unicode lookalike, case fold, control byte, path
+    /// separator or length edge reaches the policy text or `localhostProfile`.
+    #[test]
+    fn adversary_lookalikes_controls_paths_and_length_edges_are_refused() {
+        let suffix_39 = format!("{DEFAULT}-{}", "0".repeat(39));
+        let suffix_40 = format!("{DEFAULT}-a{}z", "-".repeat(38));
+        for name in [suffix_39.as_str(), suffix_40.as_str()] {
+            assert_eq!(
+                name.parse::<ProfileName>().map(|n| n.to_string()),
+                Ok(name.to_owned())
+            );
+        }
+        assert_eq!(suffix_40.len(), 63);
+        let suffix_41 = format!("{DEFAULT}-a{}z", "-".repeat(39));
+        let suffix_1000 = format!("{DEFAULT}-{}", "a".repeat(1000));
+        for name in [
+            suffix_41.as_str(),
+            suffix_1000.as_str(),
+            "substrate-host-exec-v1\n",
+            "substrate-host-exec-v1\0",
+            "substrate-host-exec-v1-a\0",
+            "substrate-host-exec-v1-a\r",
+            "substrate-host-exec-v1-a\t",
+            "substrate-host-exec-v1-a\u{a0}",
+            "substrate-host-exec-v1-a\u{200b}",
+            "substrate-host-exec-v1 ",
+            "substrate-host-exec-v1-\u{ff41}",
+            "substrate-host-exec-v1-\u{e9}",
+            "substrate-host-exec-v1-\u{131}",
+            "substrate-host-exec-v1-K",
+            "substrate-host-exec-v1-\u{212a}",
+            "SUBSTRATE-HOST-EXEC-V1",
+            "substrate-host-exec-v1\u{2010}a",
+            "substrate-host-exec-v1-..",
+            "substrate-host-exec-v1-a..b",
+            "substrate-host-exec-v1-a.b",
+            "substrate-host-exec-v1//a",
+            "substrate-host-exec-v1-a//b",
+            "substrate-host-exec-v1-a//&unconfined",
+            "substrate-host-exec-v1-a:b",
+            ":ns:substrate-host-exec-v1",
+            "substrate-host-exec-v1-a*",
+            "substrate-host-exec-v1-a?",
+            "substrate-host-exec-v1-@{x}",
+            "substrate-host-exec-v1-a#b",
+            "substrate-host-exec-v1-a\"",
+            "substrate-host-exec-v1-a (enforce)",
+            "substrate-host-exec-v1=a",
+            "substrate-host-exec-v1_a",
+        ] {
+            assert!(
+                name.parse::<ProfileName>().is_err(),
+                "{name:?} was admitted"
+            );
+        }
+    }
+
     #[test]
     fn the_enforced_label_is_the_name_in_enforce_mode() {
         assert_eq!(
