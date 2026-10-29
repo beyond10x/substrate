@@ -16,7 +16,10 @@ use zeroize::Zeroizing;
 
 use crate::gone::PodTrace;
 use crate::kubeconfig::{connector, refuse_members, text};
-use crate::{API_TIMEOUT, JSON, MAX_API_BODY_BYTES, METADATA_LIST, USER_AGENT};
+use crate::{
+    API_TIMEOUT, JSON, MAX_API_BODY_BYTES, METADATA_LIST, USER_AGENT, is_dns_label,
+    is_dns_subdomain,
+};
 
 /// How a removal is paced: the pause between two tries, the tries in one round, and how often an
 /// object whose removal is not confirmed is read again. A unit case shortens them.
@@ -228,7 +231,13 @@ impl Api {
     /// nothing. Clearing comes first: a bound that split the token would leave a prefix no
     /// longer equal to it, which the clearing could not find.
     pub fn status_message(&self, body: &[u8]) -> String {
-        bounded(&self.redact(&status_message(body)))
+        self.quote(&status_message(body))
+    }
+
+    /// `text`, a message the API echoed, as an error quotes it: cleared of the bearer token, then
+    /// bounded to [`MAX_MESSAGE_CHARS`], in that order.
+    pub(crate) fn quote(&self, text: &str) -> String {
+        bounded(&self.redact(text))
     }
 
     /// `text` with every occurrence of the bearer token replaced, so an API server that echoes the
@@ -294,7 +303,9 @@ impl Api {
         accept: &'static str,
         limit: usize,
     ) -> Result<(u16, Option<String>, Bytes), String> {
-        let (response, driver) = self.send(method, path, body, accept).await?;
+        // The connection goes with the call, however the call ends: answered, failed, or dropped
+        // at its time bound.
+        let (response, _driver) = self.send(method, path, body, accept).await?;
         let status = response.status().as_u16();
         let date = response
             .headers()
@@ -306,7 +317,6 @@ impl Api {
             .await
             .map_err(|_| "the response body failed or exceeded its bound".to_owned())?
             .to_bytes();
-        driver.abort();
         Ok((status, date, bytes))
     }
 
@@ -344,7 +354,8 @@ impl Api {
     }
 
     /// Sends one request on its own connection; the answer's head and body, and the task that
-    /// drives the connection.
+    /// drives the connection, aborted when it is dropped: by the caller once the read ends, or
+    /// here when this call fails or is dropped before an answer.
     pub(crate) async fn send(
         &self,
         method: Method,
@@ -354,7 +365,7 @@ impl Api {
     ) -> Result<
         (
             hyper::Response<hyper::body::Incoming>,
-            tokio::task::JoinHandle<Result<(), hyper::Error>>,
+            AbortOnDrop<Result<(), hyper::Error>>,
         ),
         String,
     > {
@@ -363,7 +374,7 @@ impl Api {
             hyper::client::conn::http1::handshake::<_, Full<Bytes>>(TokioIo::new(tls))
                 .await
                 .map_err(|error| format!("HTTP: {error}"))?;
-        let driver = tokio::spawn(connection);
+        let driver = AbortOnDrop(tokio::spawn(connection));
         let mut request = Request::builder()
             .method(method)
             .uri(self.target(path))
@@ -391,11 +402,11 @@ impl Api {
         Ok((response, driver))
     }
 
-    /// Creates `object` in `collection` and returns the API's answer, `Null` when it is not JSON.
+    /// Creates `object` in `collection` and returns the object the API answered.
     ///
     /// # Errors
     ///
-    /// No answer, or any answer but 200 to 202.
+    /// No answer, any answer but 200 to 202, or one whose body is not a JSON object.
     pub async fn create(&self, collection: &str, object: &Value) -> Result<Value, ApiError> {
         self.post(collection, object, "create").await
     }
@@ -425,7 +436,7 @@ impl Api {
             .call(Method::POST, path, Some(object), MAX_API_BODY_BYTES)
             .await
         {
-            Ok((200..=202, body)) => Ok(serde_json::from_slice(&body).unwrap_or(Value::Null)),
+            Ok((200..=202, body)) => answered_object(&body, what),
             Ok((status, body)) => Err(ApiError::Answered {
                 status,
                 detail: format!("{what} answered {status}: {}", self.status_message(&body)),
@@ -438,16 +449,14 @@ impl Api {
     ///
     /// # Errors
     ///
-    /// No answer, an answer but 200 or 404, or a body that is not JSON.
+    /// No answer, an answer but 200 or 404, or a body that is not a JSON object.
     pub async fn get(&self, path: &str) -> Result<Option<Value>, ApiError> {
         match self
             .call(Method::GET, path, None, MAX_API_BODY_BYTES)
             .await
             .map_err(ApiError::Unanswered)?
         {
-            (200, body) => serde_json::from_slice(&body).map(Some).map_err(|_| {
-                ApiError::Invalid("the API answered something other than JSON".to_owned())
-            }),
+            (200, body) => answered_object(&body, "get").map(Some),
             (404, _) => Ok(None),
             (status, body) => Err(ApiError::Answered {
                 status,
@@ -456,18 +465,31 @@ impl Api {
         }
     }
 
-    /// Replaces the object at `path` with `object`, which carries the `metadata.resourceVersion`
-    /// it was read at: the API refuses it 409 when the object changed since.
+    /// Replaces the object at `path` with `replacement`, which carries the
+    /// `metadata.resourceVersion` it was read at: the API refuses it 409 when the object changed
+    /// since. A replacement without one would be stored over whatever the API holds, so it is
+    /// never sent.
     ///
     /// # Errors
     ///
-    /// No answer, or any answer but 200 or 201; a changed object is [`ApiError::Answered`] 409.
-    pub async fn update(&self, path: &str, object: &Value) -> Result<Value, ApiError> {
+    /// [`ApiError::Invalid`], before any request, for a replacement without a non-empty
+    /// `metadata.resourceVersion` string; no answer, any answer but 200 or 201, or one whose body
+    /// is not a JSON object; a changed object is [`ApiError::Answered`] 409.
+    pub async fn update(&self, path: &str, replacement: &Value) -> Result<Value, ApiError> {
+        if replacement["metadata"]["resourceVersion"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        {
+            return Err(ApiError::Invalid(
+                "an update names no metadata.resourceVersion: it would not be conditional"
+                    .to_owned(),
+            ));
+        }
         match self
-            .call(Method::PUT, path, Some(object), MAX_API_BODY_BYTES)
+            .call(Method::PUT, path, Some(replacement), MAX_API_BODY_BYTES)
             .await
         {
-            Ok((200 | 201, body)) => Ok(serde_json::from_slice(&body).unwrap_or(Value::Null)),
+            Ok((200 | 201, body)) => answered_object(&body, "update"),
             Ok((status, body)) => Err(ApiError::Answered {
                 status,
                 detail: format!("update answered {status}: {}", self.status_message(&body)),
@@ -608,13 +630,17 @@ impl Api {
     ///
     /// # Errors
     ///
-    /// Why no answer came.
+    /// [`ApiError::Invalid`], before any request, for a `name` that is not a DNS-1123 subdomain
+    /// or a `container` that is not a DNS-1123 label; [`ApiError::Unanswered`] when no answer
+    /// came.
     pub async fn log(
         &self,
         name: &str,
         container: &str,
         limit: usize,
-    ) -> Result<(u16, Bytes), String> {
+    ) -> Result<(u16, Bytes), ApiError> {
+        pod_name(name)?;
+        container_name(container)?;
         let path = format!(
             "{}/{name}/log?container={container}&limitBytes={}",
             self.pods(),
@@ -622,6 +648,7 @@ impl Api {
         );
         self.call(Method::GET, &path, None, limit.max(MAX_API_BODY_BYTES) + 1)
             .await
+            .map_err(ApiError::Unanswered)
     }
 
     /// The API's `SelfSubjectRulesReview` of this client's credential in its namespace: the
@@ -655,13 +682,16 @@ impl Api {
     }
 
     /// Reads the list at `path` (which may carry a selector) whole, in pages of `page_items`, at
-    /// most `max_pages` of them, each bounded at [`MAX_API_BODY_BYTES`]. `kind` is the list kind a
-    /// server that ignores [`METADATA_LIST`] answers (`PodList`).
+    /// most `max_pages` of them, each bounded at [`MAX_API_BODY_BYTES`], and at most
+    /// `page_items` × `max_pages` items across them all, whether or not the server honours
+    /// `limit`. `kind` is the list kind a server that ignores [`METADATA_LIST`] answers
+    /// (`PodList`).
     ///
     /// # Errors
     ///
-    /// No answer, an answer but 200, a body that is not the list, or a list that does not end
-    /// within `max_pages`: never a short list read as whole.
+    /// No answer, an answer but 200, a body that is not the list, a list that does not end
+    /// within `max_pages`, or one whose pages hold more items than the pages allow: never a short
+    /// list read as whole.
     pub async fn list(
         &self,
         path: &str,
@@ -682,6 +712,7 @@ impl Api {
             resource_version: None,
             date: None,
         };
+        let capacity = page_items.saturating_mul(max_pages);
         let mut page_path = first.clone();
         for page in 0..max_pages {
             let (status, date, body) = self
@@ -706,9 +737,14 @@ impl Api {
                     .as_str()
                     .map(str::to_owned);
             }
-            listed
-                .items
-                .extend_from_slice(list_items(&list, kind, what).map_err(ApiError::Invalid)?);
+            let items = list_items(&list, kind, what).map_err(ApiError::Invalid)?;
+            if listed.items.len().saturating_add(items.len()) > capacity {
+                return Err(ApiError::Invalid(format!(
+                    "the {what} list holds more than the {capacity} items of {max_pages} pages \
+                     of {page_items}"
+                )));
+            }
+            listed.items.extend_from_slice(items);
             let Some(next) = continuation(&list) else {
                 return Ok(listed);
             };
@@ -737,7 +773,6 @@ impl Api {
                     WatchError::Unanswered("the cluster API did not answer in time".to_owned())
                 })?
                 .map_err(WatchError::Unanswered)?;
-        let driver = AbortOnDrop(driver);
         match response.status().as_u16() {
             200 => {}
             410 => return Err(WatchError::Expired),
@@ -909,9 +944,44 @@ impl<T> Drop for AbortOnDrop<T> {
 const MAX_MESSAGE_CHARS: usize = 300;
 
 /// `message` cut to [`MAX_MESSAGE_CHARS`]. Only ever applied to text already cleared of the
-/// credential.
-fn bounded(message: &str) -> String {
+/// credential, or quoted where no credential is known.
+pub(crate) fn bounded(message: &str) -> String {
     message.chars().take(MAX_MESSAGE_CHARS).collect()
+}
+
+/// The object a 2xx answer to `what` carries, or [`ApiError::Invalid`]: a body that is not JSON,
+/// or JSON that is not an object, never reads as an object the caller then indexes.
+fn answered_object(body: &[u8], what: &str) -> Result<Value, ApiError> {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or_else(|| {
+            ApiError::Invalid(format!(
+                "{what} answered something other than a JSON object"
+            ))
+        })
+}
+
+/// `Ok` for a Pod name the client may put into a path or a field selector: a DNS-1123 subdomain.
+pub(crate) fn pod_name(name: &str) -> Result<(), ApiError> {
+    if is_dns_subdomain(name) {
+        Ok(())
+    } else {
+        Err(ApiError::Invalid(
+            "the Pod name is not a DNS-1123 subdomain".to_owned(),
+        ))
+    }
+}
+
+/// `Ok` for a container name the client may put into a query: a DNS-1123 label.
+pub(crate) fn container_name(name: &str) -> Result<(), ApiError> {
+    if is_dns_label(name) {
+        Ok(())
+    } else {
+        Err(ApiError::Invalid(
+            "the container name is not a DNS-1123 label".to_owned(),
+        ))
+    }
 }
 
 /// The API's own `Status.message`, whole, or nothing. Neither cleared of the credential nor

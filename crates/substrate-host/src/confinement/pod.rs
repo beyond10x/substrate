@@ -1350,7 +1350,7 @@ async fn read_log(api: &Api, run: &PodRun) -> Result<(Vec<u8>, bool), String> {
                     api.status_message(&body)
                 );
             }
-            Err(error) => failure = error,
+            Err(error) => failure = error.to_string(),
         }
     }
     Err(failure)

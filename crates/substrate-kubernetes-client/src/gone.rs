@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::RUN_CONTAINER;
-use crate::api::{Api, WatchError};
+use crate::api::{Api, WatchError, bounded, pod_name};
 
 /// How long a watch of one Pod may take to show how its container ended, once a read found the Pod
 /// gone. The API server replays the Pod's history from the `resourceVersion` last read at once; a
@@ -119,8 +119,20 @@ pub enum PodEnd {
 }
 
 /// One line of a watch of the Pod `name`: noted in `trace`, and the [`PodEnd`] it decides, if any:
-/// a container shown terminated, a deletion that showed none, or an `ERROR` event.
+/// a container shown terminated, a deletion that showed none, or an `ERROR` event, whose message
+/// is quoted bounded as every API message is.
 pub fn watch_event(line: &[u8], name: &str, trace: &mut PodTrace) -> Option<PodEnd> {
+    decide(line, name, trace, bounded)
+}
+
+/// [`watch_event`], with `quote` turning an `ERROR` event's message into what the reason quotes:
+/// a client clears its own credential from it before it bounds it.
+fn decide(
+    line: &[u8],
+    name: &str,
+    trace: &mut PodTrace,
+    quote: impl Fn(&str) -> String,
+) -> Option<PodEnd> {
     if line.trim_ascii().is_empty() {
         return None;
     }
@@ -133,7 +145,7 @@ pub fn watch_event(line: &[u8], name: &str, trace: &mut PodTrace) -> Option<PodE
     if kind == Some("ERROR") {
         return Some(PodEnd::Unproven(format!(
             "the watch answered an error: {}",
-            event["object"]["message"].as_str().unwrap_or_default()
+            quote(event["object"]["message"].as_str().unwrap_or_default())
         )));
     }
     let object = &event["object"];
@@ -177,8 +189,12 @@ pub async fn pod_end(api: &Api, name: &str, trace: &PodTrace) -> PodEnd {
 impl Api {
     /// What a watch of the Pod `name` from the `resourceVersion` `trace` last read shows of its
     /// container within [`WATCH_LIMIT`]: the API server replays every change since, and the
-    /// deletion last. Only a container shown terminated is [`PodEnd::Stopped`].
+    /// deletion last. Only a container shown terminated is [`PodEnd::Stopped`]. A `name` that is
+    /// not a DNS-1123 subdomain reaches no field selector: it is unproven before any request.
     async fn watch_pod(&self, name: &str, trace: &PodTrace, version: &str) -> PodEnd {
+        if let Err(invalid) = pod_name(name) {
+            return PodEnd::Unproven(invalid.to_string());
+        }
         let version: String = url::form_urlencoded::byte_serialize(version.as_bytes()).collect();
         let path = format!(
             "{}?watch=1&fieldSelector=metadata.name%3D{name}&resourceVersion={version}\
@@ -223,7 +239,7 @@ impl Api {
         loop {
             match watch.next_line().await {
                 Ok(Some(line)) => {
-                    if let Some(decided) = watch_event(&line, name, trace) {
+                    if let Some(decided) = decide(&line, name, trace, |text| self.quote(text)) {
                         return decided;
                     }
                 }
