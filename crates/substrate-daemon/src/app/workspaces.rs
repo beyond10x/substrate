@@ -264,7 +264,8 @@ pub(super) async fn workspace_create(
 /// `workspace.adopt` (ADR 0035): serve a directory the operator placed under the workspace root.
 ///
 /// Refusals run in the decided order and every one is a recorded ledger row a retry replays:
-/// an out-of-set name, a name another subject's row holds (answered exactly as an absent
+/// an out-of-set name, a driver that adopts nothing (before any name is looked up), a name
+/// another subject's row holds (answered exactly as an absent
 /// directory), a name the caller's own row holds, the host observation (absent, not a directory,
 /// or not owned by the daemon's effective uid), then the workspace partition and the ledger. The
 /// held-name and capacity checks run again inside the reservation transaction, so a row written
@@ -312,6 +313,21 @@ pub(super) async fn workspace_adopt(
             ADDRESS,
             &mutation,
             response,
+        )
+        .await;
+    }
+    // A driver that adopts nothing says so before any name is looked up, so a free name, another
+    // subject's and the caller's own get one answer (design 34 § 8).
+    if let Some(error) = app.driver.adopt_refusal() {
+        return refuse_before_dispatch(
+            &app,
+            &identity,
+            &request_id,
+            KIND,
+            "POST",
+            ADDRESS,
+            &mutation,
+            &error,
         )
         .await;
     }

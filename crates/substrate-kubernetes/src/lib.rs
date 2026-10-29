@@ -194,6 +194,10 @@ impl substrate_host::Driver for NamespaceDriver {
         self.workspace_observe(id, root_name, previous).await
     }
 
+    fn adopt_refusal(&self) -> Option<substrate_host::DriverError> {
+        Some(adopt_unserved())
+    }
+
     async fn read_workspace_path(
         &self,
         workspace_id: &str,
