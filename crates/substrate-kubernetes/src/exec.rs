@@ -511,7 +511,7 @@ impl NamespaceDriver {
         lock(&self.execs().tracked).insert(
             id.to_owned(),
             Tracked {
-                observation: previous.clone(),
+                observation: unproven_output(previous),
                 pod: name.clone(),
                 uid: uid.clone(),
                 trace,
@@ -1346,6 +1346,22 @@ fn running(id: &str, input: &ExecStartInput, pod: &str) -> ExecObservation {
         output_complete: false,
         cgroup: Some(pod.to_owned()),
         leader_pid: None,
+    }
+}
+
+/// The exec a restarted driver reconciles, with no output proven: the daemon's restart pass
+/// records an `unknown` exec with `output_complete` set, and only a log read under the bound uid
+/// may make its output whole (invariant 3), so every end that reads none leaves it incomplete.
+fn unproven_output(recorded: &ExecObservation) -> ExecObservation {
+    ExecObservation {
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        stdout_kept: None,
+        stderr_kept: None,
+        output_complete: false,
+        ..recorded.clone()
     }
 }
 
