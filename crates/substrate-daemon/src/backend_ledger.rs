@@ -9,7 +9,6 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use chrono::Utc;
 use sha2::{Digest as _, Sha256};
 use substrate_host::{
     BackendKind, BackendLedger, BackendName, BackendRecord, BackendRole, Driver, DriverError,
@@ -19,6 +18,8 @@ use substrate_store::{
     BackendObject, BackendObjectKind, BackendObjectName, BackendObjectRole, BackendReservation,
     BackendUidBinding, Store, StoreError,
 };
+
+use crate::Authority;
 
 /// How many unsettled rows one [`BackendLedger::unsettled`] call returns, oldest first.
 pub const UNSETTLED_PAGE: usize = 256;
@@ -139,17 +140,26 @@ fn ledger_failure(error: &StoreError) -> DriverError {
 }
 
 /// The `BackendLedger` port over the store, scoped to one deployment.
+///
+/// Every timestamp it writes is read from the daemon's authority, the clock that stamps
+/// `accepted_at` and against which the dispatch bound is measured (design 34 § 5.1).
 pub struct StoreBackendLedger {
     store: Arc<Store>,
     deployment: String,
+    authority: Arc<dyn Authority>,
 }
 
 impl StoreBackendLedger {
     #[must_use]
-    pub fn new(store: Arc<Store>, deployment: impl Into<String>) -> Self {
+    pub fn new(
+        store: Arc<Store>,
+        deployment: impl Into<String>,
+        authority: Arc<dyn Authority>,
+    ) -> Self {
         Self {
             store,
             deployment: deployment.into(),
+            authority,
         }
     }
 }
@@ -176,7 +186,7 @@ impl BackendLedger for StoreBackendLedger {
 
     fn settle(&self, name: &str) -> Result<bool, DriverError> {
         self.store
-            .settle_backend_object(&self.deployment, name, Utc::now())
+            .settle_backend_object(&self.deployment, name, self.authority.now())
             .map_err(|error| ledger_failure(&error))
     }
 
@@ -186,7 +196,7 @@ impl BackendLedger for StoreBackendLedger {
             objects: names.iter().map(store_name).collect(),
         };
         self.store
-            .reserve_backend_probe(&self.deployment, nonce, Utc::now(), &reservation)
+            .reserve_backend_probe(&self.deployment, nonce, self.authority.now(), &reservation)
             .map_err(|error| ledger_failure(&error))
     }
 

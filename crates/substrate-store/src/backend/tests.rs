@@ -447,3 +447,88 @@ fn the_unsettled_cursor_reaches_rows_past_the_first_page() {
         .collect();
     assert_eq!(seen, expected);
 }
+
+/// Dispatch absence of an exec (design 34 § 5.1) closes, in the transaction that fails the start
+/// and deletes the exec row, the rows whose create was never answered. A row with a bound uid
+/// names an object that was stored: it stays open for the garbage rule.
+#[test]
+fn dispatch_absence_settles_the_unbound_rows_of_the_exec_it_deletes() {
+    let store = Store::open(":memory:").expect("store");
+    assert_eq!(
+        workspace_create(&store, &BackendReservation::default()),
+        Reservation::Accepted
+    );
+    store
+        .complete_workspace(
+            &scope("local:1000"),
+            "01JBACKENDWORKSPACE00001",
+            ACCEPTED_AT,
+            201,
+            WORKSPACE,
+            &workspace(WORKSPACE),
+        )
+        .expect("workspace ready");
+    let start = |operation: &str, id: &str, pod: &str| {
+        let new = operation_named("local:1000", operation, "exec.start", id, "sha256:exec");
+        assert_eq!(
+            store
+                .reserve_exec_start_with_backend(
+                    &new,
+                    &exec(id, WORKSPACE, ExecState::Accepted),
+                    None,
+                    None,
+                    &[],
+                    &names(&"b".repeat(64), &[(BackendObjectRole::Pod, pod)]),
+                )
+                .expect("exec reservation"),
+            Reservation::Accepted
+        );
+        new
+    };
+    let unbound = start("01JBACKENDABSENT00000001", "ex_unbound", "sbx-ex-unbound");
+    let bound = start("01JBACKENDABSENT00000002", "ex_bound", "sbx-ex-bound");
+    assert_eq!(
+        store
+            .bind_backend_uid(DEPLOYMENT, "sbx-ex-bound", "uid-1")
+            .expect("bind"),
+        BackendUidBinding::Bound
+    );
+    let error = substrate_wire::ErrorDetail {
+        class: substrate_wire::ErrorClass::Failed,
+        code: "exec.spawn-failed".to_owned(),
+        message: "failure".to_owned(),
+        retriable: false,
+        address: Some("exec".to_owned()),
+        operation: None,
+    };
+    let terminal_at = "2026-08-13T12:00:30Z";
+    for (new, id) in [(&unbound, "ex_unbound"), (&bound, "ex_bound")] {
+        store
+            .complete_dispatch_absence(
+                &new.scope,
+                &new.operation,
+                terminal_at,
+                500,
+                "exec",
+                id,
+                &error,
+            )
+            .expect("dispatch absence");
+    }
+    let row = |id: &str| {
+        let rows = store
+            .backend_objects(DEPLOYMENT, BackendObjectKind::Exec, id)
+            .expect("exec rows");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        rows.into_iter().next().expect("one row")
+    };
+    assert_eq!(
+        row("ex_unbound").settled_at,
+        Some(terminal_at.parse().expect("time"))
+    );
+    let open = row("ex_bound");
+    assert_eq!(
+        (open.uid.as_deref(), open.settled_at),
+        (Some("uid-1"), None)
+    );
+}

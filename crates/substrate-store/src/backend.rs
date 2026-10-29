@@ -177,6 +177,25 @@ pub(crate) fn insert_backend_objects(
     Ok(())
 }
 
+/// Closes, inside the caller's transaction, every open row of one resource that no create
+/// answered: dispatch absence proved its object was never stored (design 34 § 5.1). A row with a
+/// bound uid names an object that was stored and stays open for the garbage rule (§ 5).
+pub(crate) fn settle_unbound_backend_objects(
+    connection: &Connection,
+    deployment: &str,
+    kind: BackendObjectKind,
+    resource_id: &str,
+    settled_at: &str,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "UPDATE backend_objects SET settled_at = ?4
+         WHERE deployment = ?1 AND resource_kind = ?2 AND resource_id = ?3
+           AND uid IS NULL AND settled_at IS NULL",
+        params![deployment, kind.as_str(), resource_id, settled_at],
+    )?;
+    Ok(())
+}
+
 const BACKEND_OBJECT_COLUMNS: &str = "resource_kind, resource_id, role, name, operation_digest, \
      uid, created_at, settled_at";
 
