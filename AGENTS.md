@@ -199,7 +199,8 @@ on Flux.
 bash scripts/gate.sh
 ```
 
-In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`,
+In order: `cargo xtask check-ess`, `cargo xtask check-docs`,
+`cargo test --workspace --release --locked`, `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --release --locked -- -D warnings`, then `cargo xtask check-links`,
 `cargo xtask check-adrs`, `cargo xtask check-secrets`, `cargo xtask check-advisories`,
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,

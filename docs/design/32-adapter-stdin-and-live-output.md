@@ -1,6 +1,7 @@
 # Design 32: standard input and live output on the confinement adapters
 
-Status: proposed, 2026-10-28, revised after review passes 1, 2 and 3 the same day (§ 13). § 11
+Status: accepted for implementation, 2026-10-28, under the coordinating session's D166
+(`approval-record:adapter-io-waves`); revised after review passes 1, 2 and 3 the same day (§ 13). § 11
 names the stories. It changes no wire byte and no contract bundle: the adapters are substrate-host's
 confinement API
 ([ADR 0044](../../adr/0044-confinement-is-a-contract-family-served-by-declared-adapters.md)
