@@ -73,11 +73,14 @@ fn copy_workspace() -> tempfile::TempDir {
     scratch
 }
 
+/// Runs `check-packages` as CI does: `gate.yml` sets `CARGO_TERM_COLOR=always`, under which
+/// `cargo tree` wraps its drawing characters in colour codes.
 fn check_packages(root: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("check-packages")
         .current_dir(root)
         .env("CARGO_NET_OFFLINE", "true")
+        .env("CARGO_TERM_COLOR", "always")
         .output()
         .expect("xtask runs")
 }
