@@ -281,8 +281,10 @@ The log names each failure's code. The cluster check repeats every 10 s; a faile
 The probe never proves the four Linux confinement facts. Each exec start is therefore refused
 `exec.sandbox-unavailable`.
 
-Readiness reads one snapshot, taken when the first cluster check fails or its first probe ends. A
-fact named by `--ops-require-fact` and absent from it keeps the daemon unready until it restarts.
+Readiness reads one snapshot, taken after the first probe, or when the cluster check fails for a
+reason a retry cannot clear (RBAC, NetworkPolicy, Pod Security). A held Lease or an unanswering API
+is retried and keeps the daemon unready until then. A fact named by `--ops-require-fact` and
+absent from the snapshot keeps the daemon unready until it restarts.
 
 ## Rules that do not change by posture
 

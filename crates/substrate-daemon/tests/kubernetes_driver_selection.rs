@@ -204,23 +204,26 @@ async fn an_unopened_namespace_driver_is_served_with_every_driver_fact_absent() 
 }
 
 /// ADR 0045 D5 A and design 34 § 6.1: readiness reads one snapshot, taken once the namespace
-/// driver's first open sequence has finished or failed. Until then `driver` fails, even for a
-/// fact the daemon publishes itself. The API here accepts the connection and answers nothing, so
-/// the open is in flight until the case closes it; the open then fails, the snapshot taken then
-/// publishes `events.pull`, and the daemon is ready. A host daemon's snapshot is taken as it
-/// starts, as before, so it is ready without waiting on anything.
+/// driver's first open sequence has settled. Until then `driver` fails, even for a fact the
+/// daemon publishes itself. Here the first open's connection is closed unanswered, a refusal the
+/// open's retry can clear, so nothing settles and the daemon stays not ready. The retry's rules
+/// review is held, then answered with a grant beyond the Role: `kubernetes.rbac-excess`, which no
+/// retry clears, settles it, the snapshot taken then publishes `events.pull`, and the daemon is
+/// ready. A host daemon's snapshot is taken as it starts, as before, so it is ready at once.
 #[tokio::test(flavor = "multi_thread")]
 async fn readiness_reads_the_snapshot_taken_once_the_first_open_sequence_has_settled() {
     let required = vec!["events.pull".to_owned()];
     let (_directory, base) = tree();
     let api = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("a silent API address");
+        .expect("an API address");
     let server = format!("https://{}", api.local_addr().expect("API address"));
+    let (ca_pem, acceptor) = api_identity();
     let path = base.join("other/kubeconfig.json");
     std::fs::write(
         &path,
-        serde_json::to_vec(&kubeconfig_naming(&server, Some(extension()))).expect("kubeconfig"),
+        serde_json::to_vec(&kubeconfig_naming(&server, &ca_pem, Some(extension())))
+            .expect("kubeconfig"),
     )
     .expect("write kubeconfig");
     let ops = unused_address();
@@ -230,7 +233,7 @@ async fn readiness_reads_the_snapshot_taken_once_the_first_open_sequence_has_set
         require_facts: required.clone(),
     });
     let daemon = tokio::spawn(serve(namespace));
-    let (held, _) = tokio::time::timeout(Duration::from_secs(10), api.accept())
+    let (unanswered, _) = tokio::time::timeout(Duration::from_secs(10), api.accept())
         .await
         .expect("the open sequence reached the API")
         .expect("accept the open's connection");
@@ -245,13 +248,31 @@ async fn readiness_reads_the_snapshot_taken_once_the_first_open_sequence_has_set
         (503, pending),
         "before the open settled"
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(unanswered);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        readyz(ops).await,
+        Some((503, pending.to_owned())),
+        "an open refused for a reason its retry can clear has not settled"
+    );
+
+    // The retry, after the driver's 10 s: its rules review is held, then refused for good.
+    let (retry, _) = tokio::time::timeout(Duration::from_secs(15), api.accept())
+        .await
+        .expect("the open is retried")
+        .expect("accept the retry's connection");
+    let mut review = acceptor.accept(retry).await.expect("the retry's TLS");
+    let request = read_request(&mut review).await;
+    assert!(
+        request.starts_with("POST /apis/authorization.k8s.io/v1/selfsubjectrulesreviews "),
+        "{request}"
+    );
     assert_eq!(
         readyz(ops).await,
         Some((503, pending.to_owned())),
         "an open in flight is not ready"
     );
-    drop(held);
+    answer_excess_rules(&mut review).await;
     let ready = "store ok\nschema ok\nmaintenance ok\ndriver ok\n";
     let settled = readiness_until(ops, |status, _| status == 200).await;
     assert_eq!(
@@ -431,17 +452,95 @@ fn extension() -> Value {
 /// A self-contained JSON kubeconfig naming a loopback port nothing listens on, trusted through a
 /// CA made here, with `extension` as the namespace driver's context extension.
 fn unreachable_kubeconfig(extension: Option<Value>) -> Value {
-    kubeconfig_naming("https://127.0.0.1:1", extension)
+    let (ca, _) = certificate_authority();
+    kubeconfig_naming("https://127.0.0.1:1", &ca.pem(), extension)
 }
 
-/// A self-contained JSON kubeconfig naming `server`, trusted through a CA made here that no
-/// server holds a certificate of, with `extension` as the namespace driver's context extension.
-fn kubeconfig_naming(server: &str, extension: Option<Value>) -> Value {
+/// A CA made here and its issuer.
+fn certificate_authority() -> (rcgen::Certificate, rcgen::Issuer<'static, rcgen::KeyPair>) {
     let key = rcgen::KeyPair::generate().expect("a CA key");
     let mut params =
         rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA certificate parameters");
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let ca = params.self_signed(&key).expect("a CA certificate");
+    (ca, rcgen::Issuer::new(params, key))
+}
+
+/// A CA's PEM and a TLS acceptor holding a `127.0.0.1` certificate it issued: an API server the
+/// kubeconfig naming that CA trusts.
+fn api_identity() -> (String, tokio_rustls::TlsAcceptor) {
+    let (ca, issuer) = certificate_authority();
+    let key = rcgen::KeyPair::generate().expect("a server key");
+    let server = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()])
+        .expect("server certificate parameters")
+        .signed_by(&key, &issuer)
+        .expect("a server certificate");
+    let private = rustls::pki_types::PrivateKeyDer::try_from(key.serialize_der())
+        .expect("a server key in DER");
+    let tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![server.der().clone()], private)
+        .expect("the API's TLS configuration");
+    (ca.pem(), tokio_rustls::TlsAcceptor::from(Arc::new(tls)))
+}
+
+/// One HTTP/1.1 request's head and body, read whole.
+async fn read_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
+    use tokio::io::AsyncReadExt as _;
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 4_096];
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buffer))
+            .await
+            .expect("the request arrives")
+            .expect("read the request");
+        assert_ne!(read, 0, "the request ended early");
+        bytes.extend_from_slice(&buffer[..read]);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            if body.len() >= length {
+                return text;
+            }
+        }
+    }
+}
+
+/// Answers a rules review with one grant beyond the driver's Role: `get` on `secrets`.
+async fn answer_excess_rules(stream: &mut (impl tokio::io::AsyncWrite + Unpin)) {
+    use tokio::io::AsyncWriteExt as _;
+    let body = json!({
+        "apiVersion": "authorization.k8s.io/v1",
+        "kind": "SelfSubjectRulesReview",
+        "status": {
+            "resourceRules": [{"verbs": ["get"], "apiGroups": [""], "resources": ["secrets"]}],
+            "nonResourceRules": [],
+            "incomplete": false,
+        },
+    })
+    .to_string();
+    let answer = format!(
+        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(answer.as_bytes())
+        .await
+        .expect("answer the review");
+    stream.shutdown().await.expect("close the answer");
+}
+
+/// A self-contained JSON kubeconfig naming `server`, trusted through the CA `ca_pem`, with
+/// `extension` as the namespace driver's context extension.
+fn kubeconfig_naming(server: &str, ca_pem: &str, extension: Option<Value>) -> Value {
     let mut context = json!({"cluster": "c", "user": "u", "namespace": "substrate"});
     if let Some(extension) = extension {
         context["extensions"] = json!([{
@@ -456,7 +555,7 @@ fn kubeconfig_naming(server: &str, extension: Option<Value>) -> Value {
         "clusters": [{"name": "c", "cluster": {
             "server": server,
             "certificate-authority-data":
-                base64::engine::general_purpose::STANDARD.encode(ca.pem()),
+                base64::engine::general_purpose::STANDARD.encode(ca_pem),
         }}],
         "contexts": [{"name": "c", "context": context}],
         "users": [{"name": "u", "user": {"token": "unused-token"}}],

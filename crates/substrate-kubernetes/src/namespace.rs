@@ -615,6 +615,17 @@ fn refusal(code: &'static str, message: impl Into<String>) -> StartupRefusal {
     }
 }
 
+/// Whether an open refused with `code` settles the first open sequence (§ 6.1, ADR 0045 D5 A):
+/// a refusal no retry clears does; a Lease another instance or deployment holds, and an API
+/// that did not answer or answered nothing a step can read, are retried every
+/// [`lease::RENEW_EVERY`] and do not.
+fn settles_opening(code: &str) -> bool {
+    matches!(
+        code,
+        CONFIG_INVALID | RBAC_EXCESS | POLICY_NOT_DEFAULT_DENY | POD_SECURITY_UNENFORCED
+    )
+}
+
 fn config_invalid(message: String) -> StartupRefusal {
     refusal(CONFIG_INVALID, message)
 }

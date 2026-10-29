@@ -229,10 +229,16 @@ until the Lease is retaken (decision 2). Reconciliation pauses. Retaking it runs
 
 `/readyz` reads the startup snapshot (ADR 0045 D5 A): one capability snapshot, taken once the
 first open sequence has settled (`NamespaceDriver::opening_settles`, `start_ops_listener` in
-`crates/substrate-daemon/src/runtime.rs`). It settles when the open is refused, or when the first
-probe after a successful open has run, whatever it proved. Until then the `driver` check fails.
-A failed open or a failed first probe leaves the driver facts absent from that snapshot, so a fact
-named with `--ops-require-fact` keeps `/readyz` not ready (D185) until the daemon restarts. A host
+`crates/substrate-daemon/src/runtime.rs`). It settles when the first probe after a successful
+open has run, whatever it proved, or when the open is refused for a reason no retry clears:
+`kubernetes.rbac-excess`, `kubernetes.policy-not-default-deny` or
+`kubernetes.pod-security-unenforced` (`settles_opening`). `kubernetes.lease-held`,
+`kubernetes.lease-foreign` and `kubernetes.api-failed` (no answer, a timeout, an unreadable
+answer) do not settle it: the open is retried every 10 s, so a successor whose predecessor's
+Lease has not yet expired becomes ready once it takes the Lease and probes. Until then the
+`driver` check fails. A lasting refusal or a failed first probe leaves the driver facts absent
+from that snapshot, so a fact named with `--ops-require-fact` keeps `/readyz` not ready (D185)
+until the daemon restarts. A host
 daemon's snapshot is taken as its operational listener starts. A live re-probe stays deferred
 (ADR 0045 D5 B).
 

@@ -612,11 +612,13 @@ async fn a_probe_in_flight_across_a_lost_and_retaken_lease_does_not_stand_for_st
     );
 }
 
-/// § 6.1 and ADR 0045 D5 A: the first open sequence settles when the open is refused, or when the
-/// first probe after a successful open has run, whatever it proved. An open alone does not settle
-/// it, because the facts readiness reads arrive with the probe.
+/// § 6.1 and ADR 0045 D5 A: the first open sequence settles when an open is refused for a reason
+/// no retry clears, or when the first probe after a successful open has run, whatever it proved.
+/// An open alone does not settle it, because the facts readiness reads arrive with the probe, and
+/// neither does a refusal the open's own retry can clear: a Lease still held by a predecessor, or
+/// an API that did not answer.
 #[tokio::test]
-async fn the_first_open_sequence_settles_on_a_refused_open_or_after_the_first_probe() {
+async fn the_first_open_sequence_settles_on_a_lasting_refusal_or_after_the_first_probe() {
     let fake = passing_fake();
     let clock = ManualClock::new();
     let (refused, _ledger) = driver(&fake, &clock);
@@ -626,10 +628,57 @@ async fn the_first_open_sequence_settles_on_a_refused_open_or_after_the_first_pr
     ]);
     refused.lease_round().await;
     assert!(!refused.opened());
-    assert!(refused.opening_settled(), "a refused open settles it");
+    assert!(refused.opening_settled(), "rbac-excess settles it at once");
     tokio::time::timeout(Duration::from_secs(5), refused.opening_settles())
         .await
         .expect("a settled open sequence is awaited at once");
+
+    let unrestricted = passing_fake();
+    unrestricted.enforce_restricted(false);
+    let (admitted, _ledger) = driver(&unrestricted, &clock);
+    admitted.lease_round().await;
+    assert!(!admitted.opened());
+    assert!(
+        admitted.opening_settled(),
+        "pod-security-unenforced settles it at once"
+    );
+
+    let silent = passing_fake();
+    silent.fault(Fault::DropAnswer {
+        method: Method::POST,
+        path: "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews".to_owned(),
+    });
+    let (unanswered, _ledger) = driver(&silent, &clock);
+    unanswered.lease_round().await;
+    assert!(!unanswered.opened());
+    assert!(
+        !unanswered.opening_settled(),
+        "an API that did not answer is retried, not settled"
+    );
+
+    // A Recreate rollout: the predecessor's Lease has not expired when the successor opens.
+    let predecessor = rig(Child::Exact, None).await;
+    let successor_clock = ManualClock::new();
+    let successor = driver_over(
+        &predecessor.fake,
+        &successor_clock,
+        &predecessor.ledger,
+        DEPLOYMENT,
+    );
+    successor.lease_round().await;
+    assert!(!successor.opened(), "the predecessor still holds the Lease");
+    assert!(
+        !successor.opening_settled(),
+        "lease-held is retried, not settled"
+    );
+    successor_clock.set(crate::lease::TAKEOVER_AFTER);
+    successor.lease_round().await;
+    assert!(successor.opened(), "the unrenewed Lease is taken over");
+    assert!(!successor.opening_settled(), "its probe has not run yet");
+    successor.probe().await.expect("the successor probes");
+    assert!(successor.opening_settled());
+    assert_eq!(Driver::machine(&successor).facts.exec_argv_only, Some(true));
+    drop(predecessor);
 
     let opened = rig(Child::Exact, None).await;
     assert!(opened.driver.opened());
@@ -656,4 +705,24 @@ async fn the_first_open_sequence_settles_on_a_refused_open_or_after_the_first_pr
         failed.driver.opening_settled(),
         "a failed first probe settles it too, with its facts absent"
     );
+}
+
+/// Every reason code an open can refuse with, split by whether the open's own retry can clear it.
+#[test]
+fn every_open_refusal_is_either_retried_or_settles_the_opening() {
+    use crate::{
+        CONFIG_INVALID, LEASE_FOREIGN, LEASE_HELD, POD_SECURITY_UNENFORCED,
+        POLICY_NOT_DEFAULT_DENY, RBAC_EXCESS,
+    };
+    for lasting in [
+        CONFIG_INVALID,
+        RBAC_EXCESS,
+        POLICY_NOT_DEFAULT_DENY,
+        POD_SECURITY_UNENFORCED,
+    ] {
+        assert!(super::settles_opening(lasting), "{lasting}");
+    }
+    for retried in [LEASE_HELD, LEASE_FOREIGN, crate::API_FAILED] {
+        assert!(!super::settles_opening(retried), "{retried}");
+    }
 }

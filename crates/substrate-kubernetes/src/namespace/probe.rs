@@ -232,7 +232,9 @@ impl NamespaceDriver {
                     message = %refused.message,
                     "the namespace driver is not open; every driver fact is absent"
                 );
-                self.opening_settled.send_replace(true);
+                if super::settles_opening(refused.code) {
+                    self.opening_settled.send_replace(true);
+                }
             }
         }
     }
