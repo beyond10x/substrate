@@ -825,3 +825,76 @@ fn names_labels_and_bounds_are_derived_from_the_deployment_and_the_id() {
     assert_eq!(driver.dispatch_bound(), Duration::from_secs(90));
     assert!(driver.lease_holder().starts_with(&format!("{DEPLOYMENT}/")));
 }
+
+/// Design 34 § 6.3 and ADR 0047 decision 9: before the Pod create the driver compares the re-read
+/// policy set with the binding of the snapshot the start was **admitted** under. A re-open (what
+/// retaking the Lease runs, § 6.1) over a changed set binds the new set; a start admitted under
+/// the first binding must still be stale. `check_binding` takes no admitted binding, so it can
+/// only compare with the latest open, and this start passes.
+#[tokio::test]
+async fn a_start_admitted_before_a_reopen_over_a_changed_policy_set_is_stale() {
+    let fake = passing_fake();
+    let clock = ManualClock::new();
+    let (driver, _) = driver(&fake, &clock);
+    driver.open().await.expect("opens");
+    let admitted = driver
+        .binding()
+        .expect("the start is admitted under this binding");
+
+    fake.seed(
+        "networkpolicies",
+        json!({"metadata": {"name": "allow-egress"}, "spec": {"podSelector": {}, "policyTypes": ["Egress"], "egress": [{}]}}),
+    )
+    .expect("an additive allow is stored after the admission");
+    driver
+        .open()
+        .await
+        .expect("a re-open binds the new policy set");
+    let current = driver.binding().expect("bound again");
+    assert_ne!(current.config_generation(), admitted.config_generation());
+
+    let refusal = driver.check_binding().await.expect_err(
+        "the Pod create of a start admitted under the first binding must be refused: the policy \
+         set it was admitted under is gone",
+    );
+    assert_eq!(refusal.code, CAPABILITY_STALE, "{}", refusal.message);
+}
+
+/// Design 34 § 5.1 and N9: an unbound row's absence is authoritative only past the N9 bound,
+/// because an unanswered create may still be stored (`ApiError::Unanswered`). A removal that reads
+/// an unbound row absent and settles it at once leaves a create that lands afterwards in the
+/// namespace for good: the settled row makes it a collision, never deleted.
+#[tokio::test]
+async fn an_unbound_row_read_absent_still_removes_an_object_whose_create_lands_later() {
+    let fake = passing_fake();
+    let clock = ManualClock::new();
+    let (driver, ledger) = driver(&fake, &clock);
+    let ours = names::deployment_label(DEPLOYMENT);
+    let digest = "d".repeat(64);
+    let name = names::exec_pod(DEPLOYMENT, "ex_in_flight");
+    ledger.reserve(
+        BackendKind::Exec,
+        "ex_in_flight",
+        BackendRole::Pod,
+        &name,
+        &digest,
+    );
+
+    let first = driver
+        .remove_owned(&ledger.row(&name), 1)
+        .await
+        .expect("answered");
+    fake.seed("pods", owned_object(&name, &ours, &digest))
+        .expect("the unanswered create is stored late");
+    let second = driver
+        .remove_owned(&ledger.row(&name), 1)
+        .await
+        .expect("answered");
+
+    assert!(
+        fake.object("pods", &name).is_none(),
+        "the late object, ours by its operation annotation, is left in the namespace: first \
+         removal {first:?}, second {second:?}, row settled at {:?}",
+        ledger.row(&name).settled_at
+    );
+}
