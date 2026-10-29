@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:kubernetes-namespace-workspace-and-exec-slice
 kind: story
-status: proposed
+status: active
 title: Kubernetes namespaces serve workspace and exec
 summary: PVC-backed workspaces and one-shot executor pods implement the shared contract with durable Kubernetes dispatch and exact observations.
 owner: substrate
@@ -13,9 +13,10 @@ tags:
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
 - depends_on: story:kubernetes-namespace-driver-entry-gate
-revision: 2
+revision: 3
 transitions:
 - {from: "draft", to: "proposed", at: "2026-08-31T22:54:34Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-10-29T02:08:26Z", actor: "human:timo", revision: 3}
 ---
 # Story: Kubernetes namespaces serve workspace and exec
 
