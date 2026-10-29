@@ -7,10 +7,11 @@ use anyhow::{Context as _, Result};
 
 use crate::report::Report;
 
-const SOURCE_PACKAGES: [(&str, &str); 8] = [
+const SOURCE_PACKAGES: [(&str, &str); 9] = [
     ("crates/substrate-wire", "b10x-substrate-wire"),
     ("crates/substrate-store", "b10x-substrate-store"),
     ("crates/substrate-guarded", "b10x-substrate-guarded"),
+    ("crates/substrate-executor", "b10x-substrate-executor"),
     ("crates/substrate-host", "b10x-substrate-host"),
     (
         "crates/substrate-kubernetes-client",
@@ -34,6 +35,95 @@ pub fn check(root: &Path) -> Result<Report> {
     } else {
         Ok(Report::failed(failures))
     }
+}
+
+/// [`check`] plus the executor's dependency-tree rule, which needs the real workspace and its
+/// lock file: what `cargo xtask check-packages` runs.
+pub fn check_with_executor_tree(root: &Path) -> Result<Report> {
+    let (summary, mut failures) = check(root)?.into_parts();
+    failures.extend(check_executor_tree(root)?);
+    if failures.is_empty() {
+        Ok(Report::passed(format!(
+            "{summary}; the executor's normal dependency tree names none of {}",
+            EXECUTOR_REFUSED.join(", ")
+        )))
+    } else {
+        Ok(Report::failed(failures))
+    }
+}
+
+/// The package whose normal dependency tree [`EXECUTOR_REFUSED`] fences.
+const EXECUTOR: &str = "b10x-substrate-executor";
+
+/// What the executor's normal dependency tree may not name (design 34 § 2): the host driver, the
+/// store, the daemon and the Kubernetes client by package, and any `rustls` or `gix` package by a
+/// whole name segment. The executor runs inside an image the operator chooses.
+const EXECUTOR_REFUSED: [&str; 6] = [
+    "b10x-substrate-host",
+    "b10x-substrate-store",
+    "b10x-substrate-daemon",
+    "b10x-substrate-kubernetes-client",
+    "rustls",
+    "gix",
+];
+
+/// Runs `cargo tree --locked -p b10x-substrate-executor -e normal` in `root` and refuses each line
+/// that names a fenced package.
+fn check_executor_tree(root: &Path) -> Result<Vec<String>> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let output = std::process::Command::new(cargo)
+        .current_dir(root)
+        .args(["tree", "--locked", "-p", EXECUTOR, "-e", "normal"])
+        .output()
+        .context("running cargo tree for the executor")?;
+    if !output.status.success() {
+        return Ok(vec![format!(
+            "{EXECUTOR}: cargo tree --locked failed, so the rule checked nothing: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )]);
+    }
+    let tree = String::from_utf8(output.stdout).context("cargo tree wrote non-UTF-8")?;
+    Ok(refused_executor_tree_lines(&tree))
+}
+
+/// The characters `cargo tree` indents a package line with.
+const TREE_DRAWING: [char; 5] = ['│', '├', '└', '─', ' '];
+
+/// The refusals for one `cargo tree` text. A tree whose first line is not the executor selected
+/// nothing, and is refused rather than read as clean.
+fn refused_executor_tree_lines(tree: &str) -> Vec<String> {
+    let names_of = |line: &str| -> Option<String> {
+        line.trim_start_matches(TREE_DRAWING)
+            .split_whitespace()
+            .next()
+            .map(str::to_owned)
+    };
+    let mut lines = tree.lines();
+    let first = lines.next().and_then(names_of);
+    if first.as_deref() != Some(EXECUTOR) {
+        return vec![format!(
+            "{EXECUTOR}: cargo tree did not start at the executor, so the rule checked nothing"
+        )];
+    }
+    lines
+        .filter(|line| {
+            names_of(line).is_some_and(|name| {
+                EXECUTOR_REFUSED.iter().any(|refused| {
+                    if refused.starts_with("b10x-") {
+                        name == *refused
+                    } else {
+                        name.split(['-', '_']).any(|segment| segment == *refused)
+                    }
+                })
+            })
+        })
+        .map(|line| {
+            format!(
+                "{EXECUTOR}: normal dependency tree names {} (design 34 § 2)",
+                line.trim_start_matches(TREE_DRAWING)
+            )
+        })
+        .collect()
 }
 
 /// AGENTS.md invariant 1 — **Substrate is Flux-free**: no Flux crate in any dependency kind
@@ -598,6 +688,61 @@ mod tests {
         );
         let report = check(directory.path()).expect("package check");
         assert_eq!(report.failure_text(), "", "a dev-dependency edge is legal");
+    }
+
+    /// Design 34 § 2: the executor runs inside an image the operator chooses, so its normal
+    /// dependency tree may name neither the host driver's stack nor a TLS or Git one.
+    #[test]
+    fn the_executor_tree_refuses_every_named_package_and_only_those() {
+        const CLEAN: &str = "b10x-substrate-executor v0.4.2 (/w/crates/substrate-executor)\n├── b10x-substrate-guarded v0.4.2 (/w/crates/substrate-guarded)\n│   ├── b10x-substrate-wire v0.4.2 (/w/crates/substrate-wire)\n│   │   └── serde v1.0.229\n│   └── libc v0.2.180\n└── serde_json v1.0.151\n";
+        assert_eq!(
+            super::refused_executor_tree_lines(CLEAN),
+            Vec::<String>::new()
+        );
+
+        for mutant in [
+            "b10x-substrate-host v0.4.2 (/w/crates/substrate-host)",
+            "b10x-substrate-store v0.4.2 (/w/crates/substrate-store)",
+            "b10x-substrate-daemon v0.4.2 (/w/crates/substrate-daemon)",
+            "b10x-substrate-kubernetes-client v0.4.2 (/w/crates/substrate-kubernetes-client)",
+            "rustls v0.23.31",
+            "rustls-pki-types v1.12.0",
+            "tokio-rustls v0.26.2",
+            "gix v0.87.1",
+            "gix-features v0.43.1 (*)",
+        ] {
+            let tree = format!("{CLEAN}│   └── {mutant}\n");
+            let refused = super::refused_executor_tree_lines(&tree);
+            assert_eq!(refused.len(), 1, "{mutant}");
+            assert!(refused[0].contains(mutant), "{refused:?}");
+            assert!(
+                refused[0].starts_with("b10x-substrate-executor: normal dependency tree names "),
+                "{refused:?}"
+            );
+        }
+
+        for innocent in [
+            "gixy v0.1.0",
+            "rustlsx v0.1.0",
+            "b10x-substrate-hosted v0.1.0",
+        ] {
+            let tree = format!("{CLEAN}└── {innocent}\n");
+            assert_eq!(
+                super::refused_executor_tree_lines(&tree),
+                Vec::<String>::new(),
+                "{innocent}"
+            );
+        }
+
+        for selected_nothing in ["", "b10x-substrate-guarded v0.4.2 (/w)\n"] {
+            assert_eq!(
+                super::refused_executor_tree_lines(selected_nothing),
+                vec![
+                    "b10x-substrate-executor: cargo tree did not start at the executor, so the rule checked nothing"
+                        .to_owned()
+                ]
+            );
+        }
     }
 
     #[test]

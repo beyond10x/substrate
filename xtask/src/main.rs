@@ -153,7 +153,7 @@ fn dispatch() -> Result<ExitCode> {
         Command::ImageStartup(args) => image_startup::run(&args),
         Command::Advisories => Ok(advisories::check(&repo::root()?)?.emit()),
         Command::Licenses => Ok(licenses::check(&repo::root()?)?.emit()),
-        Command::Packages => Ok(packages::check(&repo::root()?)?.emit()),
+        Command::Packages => Ok(packages::check_with_executor_tree(&repo::root()?)?.emit()),
         Command::Secrets => Ok(secrets::check(&repo::root()?)?.emit()),
         Command::BotFiles(args) => Ok(bot_files::check(&args).emit()),
         Command::Toolchain { root } => {
