@@ -1,52 +1,12 @@
-# Publishes the daemon image and the explicitly pinned current development contract bundle for a
-# release tag: an **annotated bare-version tag** on `main` (AGENTS.md § "Releases" — "the bare
-# version … annotated, at a fully gated `main` commit"). A deliberate manual recovery may name an
-# existing eligible tag after a partial release failed; it runs the current protected-main workflow
-# against the immutable tagged source and never moves the tag. The results are
-# `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
-# `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>` and the development-only
-# `ghcr.io/beyond10x/b10x-substrate-mcp:<version>`, all keyless-signed with cosign. Their
-# digests are written to the GitHub release and emitted as the exact `CHANGELOG.md` stanza that must
-# land through the protected-main pull-request path. `b10x-substrate-*` is the source-package prefix
+# Publishes a release for an **annotated bare-version tag** on `main` (AGENTS.md § "Releases" — "the
+# bare version … annotated, at a fully gated `main` commit"). A deliberate manual recovery may name
+# an existing eligible tag after a partial release failed; it runs the current protected-main
+# workflow against the immutable tagged source and never moves the tag. Every published digest is
+# written to the GitHub release and emitted as the exact `CHANGELOG.md` stanza that must land
+# through the protected-main pull-request path. `b10x-substrate-*` is the source-package prefix
 # fixed by README.md. The GitHub release also carries the daemon and CLI binaries as
 # `<binary>-<version>-x86_64-unknown-linux-gnu.tar.gz`, exported from the same pinned builder stage
 # as the images, with `SHA256SUMS` over both archives and its keyless `cosign sign-blob` bundle.
-#
-# What this workflow refuses, and why each refusal is a refusal rather than a warning:
-#
-#   * a tag that is not the bare version form. `0.2.2-rc.0` must produce nothing. The ref filter
-#     below is a GitHub glob, not a regex, so it is a coarse first cut; the "Refuse a tag that is
-#     not the bare version form" step re-checks with a real anchored regex. Two mechanisms because
-#     the glob dialect is the part this file cannot prove offline.
-#   * a lightweight tag, or a tag whose commit is not an ancestor of `origin/main`.
-#   * a tag whose version disagrees with `[workspace.package] version` in `Cargo.toml`.
-#   * a tag with no recorded delegated confinement-lane run for its own commit. `gate.yml` green is
-#     the portable lane; the delegated lane is absent on a hosted runner and never reported passed,
-#     so a release with no recorded local run would claim nothing about confinement at all. The
-#     record arrives in the annotated tag's `Confinement-lane:` trailer, or as the
-#     `confinement_evidence` input of a recovery dispatch, and goes into the release notes.
-#   * a tag with no recorded project-quota-lane run for its own commit. The seven `real_quota_*`
-#     cases need a project-quota filesystem no hosted runner has and are outside the confinement
-#     count, so the record arrives in the annotated tag's `Quota-lane:` trailer, written by
-#     `cargo xtask quota-fixture run`, or as the `quota_evidence` input of a recovery dispatch.
-#   * a commit for which `.github/workflows/gate.yml` has not concluded `success`. The gate is the
-#     bar for `main` (AGENTS.md § "The gate"); this workflow reads that workflow's own conclusion
-#     for the exact tagged SHA rather than re-running a lookalike, so "the gate was green for this
-#     commit" means the recorded run, not a second opinion.
-#   * an existing image version tag on an initial tag-push run, an existing image whose source label
-#     disagrees during explicit recovery, or a contract-bundle tag whose digest differs from the
-#     deterministic local package. All canonical tags are write-once. Recovery may verify and reuse
-#     an image already written by this same release; it never replaces an image or bundle tag.
-#   * a release binary that needs a glibc newer than 2.35 (Ubuntu 22.04) or a shared library the
-#     README does not document, or that does not start in that exact Ubuntu 22.04 image; and an
-#     archived daemon that is not byte for byte the daemon of the image being published. All of
-#     these run before any image tag moves.
-#   * a tag push whose Dockerfile has no `release-binaries` stage. Only a recovery dispatch of a
-#     tag cut before that stage existed publishes without binaries, and its notes say so.
-#   * a signature that does not verify. Signing and `cosign verify` for **all** artifacts run before
-#     the GitHub release is created, so a Sigstore failure fails the job with nothing announced.
-#     Registry writes cannot be rolled back here, but no release, changelog stanza or digest claim
-#     is emitted on their strength.
 #
 # Permissions. `contents: read` at workflow level. `preflight` adds `actions: read`, the only
 # scope that can read another workflow's conclusion for a SHA, and `checks: read`, which reads the
@@ -153,6 +113,7 @@ env:
   GLIBC_FLOOR_IMAGE: ubuntu:22.04@sha256:e0f80c829509ef4df9e76bd8944eb7b8ec25cbb379b112a7f9448b2c77a77c9b
   GATE_WORKFLOW: gate.yml
   CHART_WORKFLOW: chart-lane.yml
+  NAMESPACE_WORKFLOW: namespace-lane.yml
   CHART_REPOSITORY: ghcr.io/beyond10x/charts
   CHART_IMAGE: ghcr.io/beyond10x/charts/b10x-substrate
   HELM_VERSION: v3.22.1
@@ -176,6 +137,8 @@ jobs:
       chart: ${{ steps.chart-lane.outputs.chart }}
       chart-lane-run-url: ${{ steps.chart-lane.outputs.run-url }}
       chart-lane-absent: ${{ steps.chart-lane.outputs.absent }}
+      namespace-lane-workflow: ${{ steps.namespace-workflow.outputs.workflow }}
+      namespace-lane-run-url: ${{ steps.namespace-workflow.outputs.run-url }}
       confinement-evidence: ${{ steps.confinement.outputs.evidence }}
       quota-evidence: ${{ steps.quota.outputs.evidence }}
       chart-evidence: ${{ steps.chart-record.outputs.evidence }}
@@ -394,6 +357,62 @@ jobs:
             sleep 30
           done
 
+      - name: Require a green namespace-lane run for this commit
+        id: namespace-workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${SOURCE_SHA}:.github/workflows/${NAMESPACE_WORKFLOW}" 2>/dev/null; then
+            if [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "refused: the tagged source ${SOURCE_SHA} has no .github/workflows/${NAMESPACE_WORKFLOW}; a tag push always carries it." >&2
+              exit 1
+            fi
+            echo "the tagged source ${SOURCE_SHA} predates ${NAMESPACE_WORKFLOW}; no run of it applies"
+            echo "workflow=absent" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          deadline=$(( $(date +%s) + 50 * 60 ))
+          admitted=".workflow_runs[] | select((.event == \"push\" and .head_branch == \"main\") or .event == \"workflow_dispatch\") | select(.head_repository.full_name == \"${GITHUB_REPOSITORY}\")"
+
+          while :; do
+            runs=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${NAMESPACE_WORKFLOW}/runs?head_sha=${SOURCE_SHA}&per_page=100" \
+              --jq "${admitted} | [.status, (.conclusion // \"-\"), .html_url] | @tsv")
+
+            success_url=$(printf '%s\n' "$runs" \
+              | awk -F'\t' '$1 == "completed" && $2 == "success" { print $3; exit }')
+            if [ -n "$success_url" ]; then
+              echo "namespace lane green for ${SOURCE_SHA}: ${success_url}"
+              {
+                echo "workflow=present"
+                echo "run-url=${success_url}"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            pending=$(printf '%s\n' "$runs" | awk -F'\t' 'NF && $1 != "completed" { c++ } END { print c + 0 }')
+            if [ "$pending" -eq 0 ]; then
+              if [ -n "${runs//[[:space:]]/}" ]; then
+                echo "refused: every ${NAMESPACE_WORKFLOW} run for ${SOURCE_SHA} is completed and none concluded success:" >&2
+                printf '%s\n' "$runs" >&2
+                exit 1
+              fi
+              echo "no ${NAMESPACE_WORKFLOW} run recorded for ${SOURCE_SHA} yet; waiting"
+            else
+              echo "${pending} ${NAMESPACE_WORKFLOW} run(s) for ${SOURCE_SHA} still running; waiting"
+            fi
+
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "refused: no successful ${NAMESPACE_WORKFLOW} run for ${SOURCE_SHA} within the wait window." >&2
+              echo "A release requires the namespace lane's static checks to have passed for its commit (design 34, section 10.4)." >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
       # `gate.yml` green is the portable lane only. The delegated confinement lane needs bubblewrap
       # and an exclusive delegated cgroup v2 subtree carrying `cpu`, `memory` and `pids`; a hosted
       # runner has neither, so `gate.yml` reports that lane **absent — not executed, not passed**
@@ -431,7 +450,7 @@ jobs:
             evidence=$(git tag -l --format='%(contents)' "${TAG}" \
               | sed -n 's/^Confinement-lane:[[:space:]]*//p')
             carrier="the annotated tag's Confinement-lane trailer"
-            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            records=$(git tag -l --format='%(contents)' "${TAG}" | grep -c '^Confinement-lane:' || true)
             if [ "${records:-0}" -gt 1 ]; then
               echo "refused: ${TAG} carries ${records} Confinement-lane lines; a release records exactly one." >&2
               exit 1
@@ -526,7 +545,7 @@ jobs:
             evidence=$(git tag -l --format='%(contents)' "${TAG}" \
               | sed -n 's/^Quota-lane:[[:space:]]*//p')
             carrier="the annotated tag's Quota-lane trailer"
-            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            records=$(git tag -l --format='%(contents)' "${TAG}" | grep -c '^Quota-lane:' || true)
             if [ "${records:-0}" -gt 1 ]; then
               echo "refused: ${TAG} carries ${records} Quota-lane lines; a release records exactly one." >&2
               exit 1
@@ -633,7 +652,7 @@ jobs:
             evidence=$(git tag -l --format='%(contents)' "${TAG}" \
               | sed -n 's/^Chart-lane:[[:space:]]*//p')
             carrier="the annotated tag's Chart-lane trailer"
-            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            records=$(git tag -l --format='%(contents)' "${TAG}" | grep -c '^Chart-lane:' || true)
             if [ "${records:-0}" -gt 1 ]; then
               echo "refused: ${TAG} carries ${records} Chart-lane lines; a release records exactly one." >&2
               exit 1
@@ -748,7 +767,7 @@ jobs:
             evidence=$(git tag -l --format='%(contents)' "${TAG}" \
               | sed -n 's/^Namespace-lane:[[:space:]]*//p')
             carrier="the annotated tag's Namespace-lane trailer"
-            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            records=$(git tag -l --format='%(contents)' "${TAG}" | grep -c '^Namespace-lane:' || true)
             if [ "${records:-0}" -gt 1 ]; then
               echo "refused: ${TAG} carries ${records} Namespace-lane lines; a release records exactly one." >&2
               exit 1
@@ -851,6 +870,7 @@ jobs:
           GATE_RUN_URL: ${{ steps.gate.outputs.run-url }}
           CHART_LANE_RUN_URL: ${{ steps.chart-lane.outputs.run-url }}
           CHART_LANE_ABSENT: ${{ steps.chart-lane.outputs.absent }}
+          NAMESPACE_LANE_RUN_URL: ${{ steps.namespace-workflow.outputs.run-url }}
           CONFINEMENT_EVIDENCE: ${{ steps.confinement.outputs.evidence }}
           QUOTA_EVIDENCE: ${{ steps.quota.outputs.evidence }}
           CHART_EVIDENCE: ${{ steps.chart-record.outputs.evidence }}
@@ -866,6 +886,7 @@ jobs:
             echo "| gate run | ${GATE_RUN_URL} |"
             echo "| chart lane run | ${CHART_LANE_RUN_URL:-no chart in the tagged source} |"
             echo "| chart lane absent, not passed | ${CHART_LANE_ABSENT:-no chart in the tagged source} |"
+            echo "| namespace lane run | ${NAMESPACE_LANE_RUN_URL:-no namespace-lane.yml in the tagged source} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE}\` |"
             echo "| quota lane | \`${QUOTA_EVIDENCE}\` |"
             echo "| chart lane record | \`${CHART_EVIDENCE:-no chart in the tagged source}\` |"
@@ -900,6 +921,8 @@ jobs:
       CHART_EVIDENCE: ${{ needs.preflight.outputs.chart-evidence }}
       NAMESPACE_LANE: ${{ needs.preflight.outputs.namespace-lane }}
       NAMESPACE_EVIDENCE: ${{ needs.preflight.outputs.namespace-evidence }}
+      NAMESPACE_LANE_WORKFLOW: ${{ needs.preflight.outputs.namespace-lane-workflow }}
+      NAMESPACE_LANE_RUN_URL: ${{ needs.preflight.outputs.namespace-lane-run-url }}
 
     steps:
       - name: Check out the tagged source
@@ -1381,6 +1404,94 @@ jobs:
           cat SHA256SUMS
           echo "sums-digest=sha256:$(sha256sum SHA256SUMS | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
+      - name: Build, smoke-test and push the executor image once
+        id: executor-build
+        if: steps.executor-source.outputs.present == 'true'
+        env:
+          EXISTS: ${{ steps.artifact-state.outputs.executor-exists }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --target executor \
+            --platform linux/amd64 \
+            --build-arg "SOURCE_SHA=${SOURCE_SHA}" \
+            --tag "${EXECUTOR_IMAGE}:${VERSION}" \
+            --provenance=false \
+            --sbom=false \
+            --metadata-file executor-image-metadata.json \
+            --load \
+            .
+
+          check_executor() {
+            local handshake entrypoint container headers
+            handshake=$(docker run --rm --network none --read-only --entrypoint /substrate-executor "${EXECUTOR_IMAGE}:${VERSION}" version)
+            if ! printf '%s\n' "$handshake" | jq -se \
+                --arg version "$VERSION" \
+                --arg source "$SOURCE_SHA" \
+                '. == [{"protocol": "substrate-executor/1", "version": $version, "source": $source}]' >/dev/null 2>&1; then
+              echo "refused: /substrate-executor in ${EXECUTOR_IMAGE}:${VERSION} answers the version handshake with '${handshake}', not substrate-executor/1 at ${VERSION} from ${SOURCE_SHA}." >&2
+              return 1
+            fi
+            entrypoint=$(docker image inspect --format '{{json .Config.Entrypoint}}' "${EXECUTOR_IMAGE}:${VERSION}")
+            if ! printf '%s\n' "$entrypoint" | jq -se '. == [["/substrate-executor"]]' >/dev/null 2>&1; then
+              echo "refused: ${EXECUTOR_IMAGE}:${VERSION} has the entrypoint '${entrypoint}', not [\"/substrate-executor\"]." >&2
+              return 1
+            fi
+            container=$(docker create "${EXECUTOR_IMAGE}:${VERSION}")
+            mkdir -p target/executor-image-under-test
+            docker cp \
+              "${container}:/substrate-executor" \
+              target/executor-image-under-test/substrate-executor
+            docker rm "${container}" >/dev/null
+            headers=$(readelf -lW target/executor-image-under-test/substrate-executor)
+            if ! printf '%s\n' "$headers" | grep -q '^Program Headers:' \
+              || printf '%s\n' "$headers" | grep -q INTERP; then
+              echo "refused: the substrate-executor in ${EXECUTOR_IMAGE}:${VERSION} is not a static executable." >&2
+              return 1
+            fi
+          }
+          check_executor
+
+          git fetch --force --no-tags origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
+          current_sha=$(git rev-parse "refs/tags/${VERSION}^{commit}")
+          if [ "$current_sha" != "$SOURCE_SHA" ]; then
+            echo "refused: release tag moved from ${SOURCE_SHA} to ${current_sha} before executor publication." >&2
+            exit 1
+          fi
+          case "$EXISTS" in
+            true)
+              docker pull "${EXECUTOR_IMAGE}:${VERSION}"
+              revision=$(docker image inspect "${EXECUTOR_IMAGE}:${VERSION}" \
+                --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+              if [ "$revision" != "$SOURCE_SHA" ]; then
+                echo "refused: existing ${EXECUTOR_IMAGE}:${VERSION} names source ${revision}, not ${SOURCE_SHA}." >&2
+                exit 1
+              fi
+              check_executor
+              echo "reusing ${EXECUTOR_IMAGE}:${VERSION} from the same tagged source ${SOURCE_SHA}"
+              ;;
+            false)
+              if docker manifest inspect "${EXECUTOR_IMAGE}:${VERSION}" >/dev/null 2>&1; then
+                echo "refused: ${EXECUTOR_IMAGE}:${VERSION} appeared before push; it will not be overwritten." >&2
+                exit 1
+              fi
+              docker push "${EXECUTOR_IMAGE}:${VERSION}"
+              ;;
+            *)
+              echo "refused: no answer on whether ${EXECUTOR_IMAGE}:${VERSION} already exists ('${EXISTS}')." >&2
+              exit 1
+              ;;
+          esac
+          digest=$(docker buildx imagetools inspect "${EXECUTOR_IMAGE}:${VERSION}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "refused: buildx reported no executor image digest ('${digest}')." >&2; exit 1 ;;
+          esac
+          echo "pushed ${EXECUTOR_IMAGE}:${VERSION} -> ${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
       - name: Push the daemon image once
         id: build
         env:
@@ -1482,89 +1593,6 @@ jobs:
             *) echo "refused: buildx reported no MCP image digest ('${digest}')." >&2; exit 1 ;;
           esac
           echo "pushed ${MCP_IMAGE}:${VERSION} -> ${digest}"
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-
-      - name: Build, smoke-test and push the executor image once
-        id: executor-build
-        if: steps.executor-source.outputs.present == 'true'
-        env:
-          EXISTS: ${{ steps.artifact-state.outputs.executor-exists }}
-        run: |
-          set -euo pipefail
-          docker buildx build \
-            --file Dockerfile \
-            --target executor \
-            --platform linux/amd64 \
-            --build-arg "SOURCE_SHA=${SOURCE_SHA}" \
-            --tag "${EXECUTOR_IMAGE}:${VERSION}" \
-            --provenance=false \
-            --sbom=false \
-            --metadata-file executor-image-metadata.json \
-            --load \
-            .
-
-          check_executor() {
-            local handshake container headers
-            handshake=$(docker run --rm --network none --read-only "${EXECUTOR_IMAGE}:${VERSION}" version)
-            if ! printf '%s\n' "$handshake" | jq -se \
-                --arg version "$VERSION" \
-                --arg source "$SOURCE_SHA" \
-                '. == [{"protocol": "substrate-executor/1", "version": $version, "source": $source}]' >/dev/null 2>&1; then
-              echo "refused: ${EXECUTOR_IMAGE}:${VERSION} answers the version handshake with '${handshake}', not substrate-executor/1 at ${VERSION} from ${SOURCE_SHA}." >&2
-              return 1
-            fi
-            container=$(docker create "${EXECUTOR_IMAGE}:${VERSION}")
-            mkdir -p target/executor-image-under-test
-            docker cp \
-              "${container}:/substrate-executor" \
-              target/executor-image-under-test/substrate-executor
-            docker rm "${container}" >/dev/null
-            headers=$(readelf -lW target/executor-image-under-test/substrate-executor)
-            if ! printf '%s\n' "$headers" | grep -q '^Program Headers:' \
-              || printf '%s\n' "$headers" | grep -q INTERP; then
-              echo "refused: the substrate-executor in ${EXECUTOR_IMAGE}:${VERSION} is not a static executable." >&2
-              return 1
-            fi
-          }
-          check_executor
-
-          git fetch --force --no-tags origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
-          current_sha=$(git rev-parse "refs/tags/${VERSION}^{commit}")
-          if [ "$current_sha" != "$SOURCE_SHA" ]; then
-            echo "refused: release tag moved from ${SOURCE_SHA} to ${current_sha} before executor publication." >&2
-            exit 1
-          fi
-          case "$EXISTS" in
-            true)
-              docker pull "${EXECUTOR_IMAGE}:${VERSION}"
-              revision=$(docker image inspect "${EXECUTOR_IMAGE}:${VERSION}" \
-                --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
-              if [ "$revision" != "$SOURCE_SHA" ]; then
-                echo "refused: existing ${EXECUTOR_IMAGE}:${VERSION} names source ${revision}, not ${SOURCE_SHA}." >&2
-                exit 1
-              fi
-              check_executor
-              echo "reusing ${EXECUTOR_IMAGE}:${VERSION} from the same tagged source ${SOURCE_SHA}"
-              ;;
-            false)
-              if docker manifest inspect "${EXECUTOR_IMAGE}:${VERSION}" >/dev/null 2>&1; then
-                echo "refused: ${EXECUTOR_IMAGE}:${VERSION} appeared before push; it will not be overwritten." >&2
-                exit 1
-              fi
-              docker push "${EXECUTOR_IMAGE}:${VERSION}"
-              ;;
-            *)
-              echo "refused: no answer on whether ${EXECUTOR_IMAGE}:${VERSION} already exists ('${EXISTS}')." >&2
-              exit 1
-              ;;
-          esac
-          digest=$(docker buildx imagetools inspect "${EXECUTOR_IMAGE}:${VERSION}" \
-            --format '{{json .Manifest.Digest}}' | tr -d '"')
-          case "$digest" in
-            sha256:*) ;;
-            *) echo "refused: buildx reported no executor image digest ('${digest}')." >&2; exit 1 ;;
-          esac
-          echo "pushed ${EXECUTOR_IMAGE}:${VERSION} -> ${digest}"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       # Keyless: the certificate is issued against this job's OIDC token (`id-token: write`), so
@@ -2152,6 +2180,24 @@ jobs:
           exit 1
           ;;
           esac
+          case "$NAMESPACE_LANE_WORKFLOW" in
+          present)
+          cat >> release-notes.md <<NOTES
+          The namespace lane's static checks ran in CI on this commit, and \`.github/workflows/namespace-lane.yml\` concluded \`success\` for it: ${NAMESPACE_LANE_RUN_URL}
+
+          NOTES
+          ;;
+          absent)
+          cat >> release-notes.md <<NOTES
+          No namespace-lane static run applies: the tagged source predates \`.github/workflows/namespace-lane.yml\`.
+
+          NOTES
+          ;;
+          *)
+          echo "refused: no answer on whether the tagged source has the namespace-lane workflow ('${NAMESPACE_LANE_WORKFLOW}')." >&2
+          exit 1
+          ;;
+          esac
           cat >> release-notes.md <<NOTES
           ## Verify the signatures
 
@@ -2323,6 +2369,7 @@ jobs:
             echo "| gate run | ${GATE_RUN_URL} |"
             echo "| chart lane run | ${CHART_LANE_RUN_URL:-<none>} |"
             echo "| chart lane absent, not passed | ${CHART_LANE_ABSENT:-<none>} |"
+            echo "| namespace lane run | ${NAMESPACE_LANE_RUN_URL:-<none>} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE:-<none recorded>}\` |"
             echo "| quota lane | \`${QUOTA_EVIDENCE:-<none recorded>}\` |"
             echo "| chart lane record | \`${CHART_EVIDENCE:-<none recorded>}\` |"

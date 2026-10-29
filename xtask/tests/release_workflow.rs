@@ -1643,7 +1643,7 @@ fn executor_build(
         tools.path(),
         "docker",
         &format!(
-            "case \"$1\" in\n  buildx) [ \"$2\" = imagetools ] && echo '\"sha256:{}\"'; exit 0 ;;\n  run) printf '%s\\n' \"$HANDSHAKE\" ;;\n  create) echo container ;;\n  cp) printf 'executor' > \"$3\" ;;\n  rm) ;;\n  pull) ;;\n  image) printf '%s\\n' \"$REVISION\" ;;\n  manifest) exit 1 ;;\n  push) echo \"$2\" >> \"$PUSH_LOG\" ;;\n  *) exit 2 ;;\nesac",
+            "case \"$1\" in\n  buildx) [ \"$2\" = imagetools ] && echo '\"sha256:{}\"'; exit 0 ;;\n  run) printf '%s\\n' \"$HANDSHAKE\" ;;\n  create) echo container ;;\n  cp) printf 'executor' > \"$3\" ;;\n  rm) ;;\n  pull) ;;\n  image) case \"$*\" in *Entrypoint*) printf '%s\\n' '[\"/substrate-executor\"]' ;; *) printf '%s\\n' \"$REVISION\" ;; esac ;;\n  manifest) exit 1 ;;\n  push) echo \"$2\" >> \"$PUSH_LOG\" ;;\n  *) exit 2 ;;\nesac",
             "e".repeat(64)
         ),
     );
@@ -3206,4 +3206,182 @@ fn security_review_the_namespace_lane_record_resists_carrier_and_shape_substitut
         let (success, stderr, _) = source.run_step(NAMESPACE_STEP, "");
         assert_eq!(success, accepted, "claimed {claimed}: {stderr}");
     }
+}
+
+const NAMESPACE_WORKFLOW_STEP: &str = "Require a green namespace-lane run for this commit";
+const NAMESPACE_WORKFLOW_SOURCE: &str = ".github/workflows/namespace-lane.yml";
+
+/// Runs the namespace-lane workflow preflight step offline against the routing `gh` stub; the
+/// tagged source either carries `namespace-lane.yml` or predates it. Returns the step's success,
+/// log, output and the API paths it read.
+fn namespace_workflow(
+    with_workflow: bool,
+    event: &str,
+    runs: &str,
+) -> (bool, String, String, String) {
+    let files: &[(&str, &str)] = if with_workflow {
+        &[(NAMESPACE_WORKFLOW_SOURCE, "name: Namespace lane\n")]
+    } else {
+        &[("README.md", "a source before the namespace lane workflow\n")]
+    };
+    let source = TaggedSource::with_files(files, "release {sha}");
+    let tools = routing_stub_tools();
+    let gh_log = tools.path().join("gh.log");
+    fs::write(&gh_log, "").expect("gh log");
+    let gh_log_path = gh_log.display().to_string();
+    let (success, log, output) = run_release_step(
+        NAMESPACE_WORKFLOW_STEP,
+        source.directory.path(),
+        &[
+            ("SOURCE_SHA", &source.sha),
+            ("EVENT_NAME", event),
+            ("STUB_JSON", runs),
+            ("STUB_JOBS", "{\"jobs\":[]}"),
+            ("STUB_ANNOTATIONS", "[]"),
+            ("GH_LOG", &gh_log_path),
+            ("NAMESPACE_WORKFLOW", "namespace-lane.yml"),
+            ("GITHUB_REPOSITORY", "example/substrate"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ],
+        Some(tools.path()),
+    );
+    (
+        success,
+        log,
+        output,
+        fs::read_to_string(&gh_log).expect("gh log"),
+    )
+}
+
+#[test]
+fn a_tag_with_a_green_namespace_lane_workflow_run_is_accepted_and_its_run_recorded() {
+    let (success, log, output, paths) = namespace_workflow(
+        true,
+        "push",
+        &main_runs(&[("completed", "failure"), ("completed", "success")]),
+    );
+    assert!(success, "{log}");
+    assert_eq!(
+        output,
+        "workflow=present\nrun-url=https://example.invalid/runs/1\n"
+    );
+    assert!(
+        paths.starts_with(
+            "repos/example/substrate/actions/workflows/namespace-lane.yml/runs?head_sha="
+        ),
+        "{paths}"
+    );
+    assert!(position(&format!("- name: {NAMESPACE_WORKFLOW_STEP}\n")) < position("\n  release:\n"));
+    assert!(WORKFLOW.contains("  NAMESPACE_WORKFLOW: namespace-lane.yml\n"));
+}
+
+#[test]
+fn a_tag_whose_namespace_lane_workflow_runs_all_failed_or_are_absent_is_refused() {
+    for runs in [
+        main_runs(&[("completed", "failure"), ("completed", "cancelled")]),
+        json_runs(&[("workflow_dispatch", "main", "someone/substrate")]),
+        json_runs(&[("push", "story/x", "example/substrate")]),
+        main_runs(&[]),
+    ] {
+        let (success, log, output, _) = namespace_workflow(true, "push", &runs);
+        assert!(!success, "accepted {runs}: {log}");
+        assert!(
+            log.contains("refused:") || log.contains("stub sleep"),
+            "{log}"
+        );
+        assert!(!output.contains("run-url="), "{output}");
+    }
+}
+
+#[test]
+fn a_tag_push_of_a_source_without_the_namespace_lane_workflow_is_refused() {
+    let (success, log, output, _) =
+        namespace_workflow(false, "push", &main_runs(&[("completed", "success")]));
+    assert!(!success, "{log}");
+    assert!(
+        log.contains("has no .github/workflows/namespace-lane.yml"),
+        "{log}"
+    );
+    assert!(!output.contains("workflow="), "{output}");
+}
+
+#[test]
+fn a_recovery_of_a_tag_that_predates_the_namespace_lane_workflow_needs_no_run_and_says_so() {
+    let (success, log, output, paths) = namespace_workflow(false, "workflow_dispatch", "");
+    assert!(success, "{log}");
+    assert_eq!(output, "workflow=absent\n");
+    assert_eq!(
+        paths, "",
+        "a source without the workflow has no run to read"
+    );
+    assert!(WORKFLOW.contains(
+        "      namespace-lane-workflow: ${{ steps.namespace-workflow.outputs.workflow }}\n"
+    ));
+    assert!(WORKFLOW.contains(
+        "      namespace-lane-run-url: ${{ steps.namespace-workflow.outputs.run-url }}\n"
+    ));
+    let notes = step_block("Compose release notes");
+    assert!(
+        notes.contains("\\`.github/workflows/namespace-lane.yml\\` concluded \\`success\\` for it: ${NAMESPACE_LANE_RUN_URL}"),
+        "{notes}"
+    );
+    assert!(
+        notes.contains("predates \\`.github/workflows/namespace-lane.yml\\`"),
+        "{notes}"
+    );
+    for summary in ["Preflight summary", "Release summary"] {
+        assert!(
+            step_block(summary).contains("| namespace lane run |"),
+            "{summary} omits the namespace-lane workflow run"
+        );
+    }
+}
+
+#[test]
+fn a_tag_with_a_second_empty_lane_line_is_refused_by_every_lane_step() {
+    // Command substitution strips trailing newlines, so a count taken from the extracted record
+    // misses an empty trailer after it. Every lane step counts the trailers in the tag itself.
+    for (step, trailer, count, make) in lane_steps() {
+        for message in [
+            format!("release\n\n{trailer}: {{sha}} {count} {AT}\n{trailer}:\n"),
+            format!("release\n\n{trailer}: {{sha}} {count} {AT}\n{trailer}:   \n"),
+            format!("release\n\n{trailer}:\n{trailer}: {{sha}} {count} {AT}\n"),
+        ] {
+            let source = make(&message);
+            refused_by(step, &source, "", &format!("carries 2 {trailer} lines"));
+        }
+    }
+}
+
+#[test]
+fn an_executor_image_whose_entrypoint_is_not_the_executor_is_refused() {
+    // The binary at /substrate-executor answers the handshake correctly; the image's entrypoint
+    // is another program, which a caller that runs the image rather than the path would reach.
+    let (success, log, pushes) = executor_build_with_entrypoint(HANDSHAKE, HANDSHAKE);
+    assert!(!success, "{log}");
+    assert!(log.contains("entrypoint"), "{log}");
+    assert_eq!(pushes, "", "pushed before refusing");
+    let script = step_script(EXECUTOR_BUILD_STEP);
+    assert!(
+        script
+            .contains("--entrypoint /substrate-executor \"${EXECUTOR_IMAGE}:${VERSION}\" version"),
+        "{script}"
+    );
+    assert!(script.contains("{{json .Config.Entrypoint}}"), "{script}");
+    // The refusal must accept the image the Dockerfile builds.
+    let executor_stage = &DOCKERFILE[DOCKERFILE
+        .find("\nFROM scratch AS executor\n")
+        .expect("executor stage")..];
+    assert!(
+        executor_stage.contains("\nENTRYPOINT [\"/substrate-executor\"]\n"),
+        "{executor_stage}"
+    );
+}
+
+#[test]
+fn the_header_comment_enumerates_no_images_or_refusals_that_can_go_stale() {
+    let header = &WORKFLOW[..position("\nname: Release\n")];
+    assert!(!header.contains("ghcr.io/"), "{header}");
+    assert!(!header.contains("What this workflow refuses"), "{header}");
 }
