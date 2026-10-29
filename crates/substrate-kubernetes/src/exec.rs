@@ -38,12 +38,10 @@ use crate::logs::{self, EXECUTOR_PROTOCOL, RunEnd};
 use crate::names::{self, DEPLOYMENT_LABEL, MANAGED_BY, MANAGED_BY_LABEL};
 use crate::ownership::{Ownership, ownership};
 use crate::pod::{self, ExecPod, KILL_GRACE_SECONDS, RunBounds, TERM_GRACE_SECONDS};
-use crate::{API_FAILED, NamespaceDriver, Removal};
+use crate::{API_FAILED, EXCEEDED_QUOTA, NamespaceDriver, Removal};
 
 /// A create the namespace refused for its quota (O7, D184): the `ResourceQuota` admission refusal.
 pub const EXEC_CAPACITY: &str = "exec.capacity";
-/// What a quota refusal's `Status.message` carries after the object's name (D184).
-const QUOTA_MARK: &str = "is forbidden: exceeded quota: ";
 /// Reads of one exec's log before it counts as unreadable (design 28).
 const LOG_ATTEMPTS: usize = 5;
 const LOG_RETRY: Duration = Duration::from_millis(200);
@@ -317,7 +315,7 @@ impl NamespaceDriver {
                 let message = self.api().status_message(&body);
                 let forbidden = serde_json::from_slice::<Value>(&body)
                     .is_ok_and(|status| status["reason"] == "Forbidden");
-                DispatchOutcome::NotDispatched(if forbidden && message.contains(QUOTA_MARK) {
+                DispatchOutcome::NotDispatched(if forbidden && message.contains(EXCEEDED_QUOTA) {
                     DriverError::exhausted(
                         EXEC_CAPACITY,
                         format!("The namespace's quota refused the exec Pod: {message}"),

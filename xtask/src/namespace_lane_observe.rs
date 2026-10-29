@@ -308,14 +308,19 @@ impl Lane<'_> {
         outcomes
     }
 
-    /// Deletes the run's two namespaces (given-kubeconfig mode).
-    pub async fn remove_namespaces(&self) {
+    /// Deletes the run's two namespaces (given-kubeconfig mode); each deletion that failed, which
+    /// withholds the record.
+    pub async fn remove_namespaces(&self) -> Vec<String> {
+        let mut failures = Vec::new();
         for namespace in [self.namespace, self.unlabelled] {
             let path = format!("/api/v1/namespaces/{namespace}");
             if let Err(error) = self.admin.delete(&path, 0).await {
-                eprintln!("namespace lane: deleting namespace {namespace}: {error}");
+                let failure = format!("deleting namespace {namespace}: {error}");
+                eprintln!("namespace lane: {failure}");
+                failures.push(failure);
             }
         }
+        failures
     }
 
     async fn wait_pod(
@@ -394,79 +399,7 @@ impl Lane<'_> {
             .rules_review()
             .await
             .map_err(|error| anyhow!("rules review: {}", answered(&error)))?;
-        let mut resources = BTreeSet::new();
-        for rule in status["resourceRules"].as_array().into_iter().flatten() {
-            for verb in strings(&rule["verbs"]) {
-                for group in strings(&rule["apiGroups"]) {
-                    for resource in strings(&rule["resources"]) {
-                        let names = strings(&rule["resourceNames"]);
-                        if names.is_empty() {
-                            resources.insert((
-                                verb.clone(),
-                                group.clone(),
-                                resource.clone(),
-                                String::new(),
-                            ));
-                        }
-                        for name in names {
-                            resources.insert((verb.clone(), group.clone(), resource.clone(), name));
-                        }
-                    }
-                }
-            }
-        }
-        let mut urls = BTreeSet::new();
-        for rule in status["nonResourceRules"].as_array().into_iter().flatten() {
-            for verb in strings(&rule["verbs"]) {
-                for url in strings(&rule["nonResourceURLs"]) {
-                    urls.insert((verb.clone(), url));
-                }
-            }
-        }
-        let mut expected = BTreeSet::new();
-        for grant in render::role_grants() {
-            for verb in &grant.verbs {
-                expected.insert((
-                    verb.clone(),
-                    grant.group.clone(),
-                    grant.resource.clone(),
-                    String::new(),
-                ));
-            }
-        }
-        for (verb, group, resource) in DEFAULT_RESOURCE_RULES {
-            expected.insert((
-                verb.to_owned(),
-                group.to_owned(),
-                resource.to_owned(),
-                String::new(),
-            ));
-        }
-        let expected_urls: BTreeSet<(String, String)> = DEFAULT_NON_RESOURCE_URLS
-            .iter()
-            .map(|url| ("get".to_owned(), (*url).to_owned()))
-            .collect();
-        let extra: Vec<_> = resources.difference(&expected).collect();
-        let missing: Vec<_> = expected.difference(&resources).collect();
-        let extra_urls: Vec<_> = urls.difference(&expected_urls).collect();
-        let missing_urls: Vec<_> = expected_urls.difference(&urls).collect();
-        let incomplete = status["incomplete"].as_bool().unwrap_or(false);
-        let evidence = format!(
-            "{} resource rules and {} non-resource rules reviewed, incomplete {incomplete}; beyond \
-             decision 3 and the default set: {extra:?} {extra_urls:?}; missing: {missing:?} \
-             {missing_urls:?}",
-            resources.len(),
-            urls.len()
-        );
-        if extra.is_empty()
-            && missing.is_empty()
-            && extra_urls.is_empty()
-            && missing_urls.is_empty()
-        {
-            Ok(Outcome::Held(evidence))
-        } else {
-            Ok(Outcome::NotHeld(evidence))
-        }
+        rules_outcome(&status)
     }
 
     /// O2: a `privileged` Pod's dry run is refused by Pod Security in the `restricted` namespace
@@ -948,6 +881,104 @@ impl ProbeNames {
     }
 }
 
+/// O8's verdict on a `SelfSubjectRulesReview` status: held when the rules are exactly decision 3's
+/// table plus the fixed default set and the review is complete. An incomplete review lists only
+/// what the authorizer could evaluate, so it proves nothing about the whole rule set: a grant
+/// beyond the table still means O8 did not hold, and anything else is inconclusive, an error,
+/// which leaves the run without a record.
+///
+/// # Errors
+///
+/// The review is incomplete, or its `incomplete` member is not a boolean, and it shows no grant
+/// beyond the table.
+pub fn rules_outcome(status: &Value) -> Result<Outcome> {
+    let mut resources = BTreeSet::new();
+    for rule in status["resourceRules"].as_array().into_iter().flatten() {
+        for verb in strings(&rule["verbs"]) {
+            for group in strings(&rule["apiGroups"]) {
+                for resource in strings(&rule["resources"]) {
+                    let names = strings(&rule["resourceNames"]);
+                    if names.is_empty() {
+                        resources.insert((
+                            verb.clone(),
+                            group.clone(),
+                            resource.clone(),
+                            String::new(),
+                        ));
+                    }
+                    for name in names {
+                        resources.insert((verb.clone(), group.clone(), resource.clone(), name));
+                    }
+                }
+            }
+        }
+    }
+    let mut urls = BTreeSet::new();
+    for rule in status["nonResourceRules"].as_array().into_iter().flatten() {
+        for verb in strings(&rule["verbs"]) {
+            for url in strings(&rule["nonResourceURLs"]) {
+                urls.insert((verb.clone(), url));
+            }
+        }
+    }
+    let mut expected = BTreeSet::new();
+    for grant in render::role_grants() {
+        for verb in &grant.verbs {
+            expected.insert((
+                verb.clone(),
+                grant.group.clone(),
+                grant.resource.clone(),
+                String::new(),
+            ));
+        }
+    }
+    for (verb, group, resource) in DEFAULT_RESOURCE_RULES {
+        expected.insert((
+            verb.to_owned(),
+            group.to_owned(),
+            resource.to_owned(),
+            String::new(),
+        ));
+    }
+    let expected_urls: BTreeSet<(String, String)> = DEFAULT_NON_RESOURCE_URLS
+        .iter()
+        .map(|url| ("get".to_owned(), (*url).to_owned()))
+        .collect();
+    let extra: Vec<_> = resources.difference(&expected).collect();
+    let missing: Vec<_> = expected.difference(&resources).collect();
+    let extra_urls: Vec<_> = urls.difference(&expected_urls).collect();
+    let missing_urls: Vec<_> = expected_urls.difference(&urls).collect();
+    let incomplete = match &status["incomplete"] {
+        Value::Null | Value::Bool(false) => false,
+        Value::Bool(true) => true,
+        other => bail!("O8 is inconclusive: the rules review's incomplete member is {other}"),
+    };
+    let evidence = format!(
+        "{} resource rules and {} non-resource rules reviewed, incomplete {incomplete}; beyond \
+         decision 3 and the default set: {extra:?} {extra_urls:?}; missing: {missing:?} \
+         {missing_urls:?}",
+        resources.len(),
+        urls.len()
+    );
+    if !(extra.is_empty() && extra_urls.is_empty()) {
+        return Ok(Outcome::NotHeld(evidence));
+    }
+    if incomplete {
+        bail!(
+            "O8 is inconclusive: the rules review is incomplete ({}), so it proves nothing about \
+             the whole rule set: {evidence}",
+            status["evaluationError"]
+                .as_str()
+                .unwrap_or("no evaluation error given")
+        );
+    }
+    if missing.is_empty() && missing_urls.is_empty() {
+        Ok(Outcome::Held(evidence))
+    } else {
+        Ok(Outcome::NotHeld(evidence))
+    }
+}
+
 fn strings(value: &Value) -> Vec<String> {
     value
         .as_array()
@@ -1025,5 +1056,50 @@ mod tests {
         );
         assert!(statuses("api 0\ndns 0\n").is_err());
         assert!(statuses("nc: bad option\napi 0\ndns 0\noutside 0\n").is_ok());
+    }
+
+    /// A review status holding exactly decision 3's table and the default set.
+    fn exact_review() -> Value {
+        let mut resource_rules: Vec<Value> = render::role_grants()
+            .iter()
+            .map(|grant| {
+                json!({"verbs": grant.verbs, "apiGroups": [grant.group], "resources": [grant.resource]})
+            })
+            .collect();
+        for (verb, group, resource) in DEFAULT_RESOURCE_RULES {
+            resource_rules
+                .push(json!({"verbs": [verb], "apiGroups": [group], "resources": [resource]}));
+        }
+        json!({
+            "resourceRules": resource_rules,
+            "nonResourceRules": [{"verbs": ["get"], "nonResourceURLs": DEFAULT_NON_RESOURCE_URLS}],
+            "incomplete": false,
+        })
+    }
+
+    #[test]
+    fn o8_holds_only_on_a_complete_review_and_an_incomplete_one_is_never_held() {
+        let exact = exact_review();
+        assert!(matches!(rules_outcome(&exact), Ok(Outcome::Held(_))));
+        let mut incomplete = exact.clone();
+        incomplete["incomplete"] = json!(true);
+        incomplete["evaluationError"] = json!("webhook authorizer unreachable");
+        let inconclusive = rules_outcome(&incomplete).expect_err("incomplete is inconclusive");
+        assert!(
+            format!("{inconclusive:#}").contains("incomplete"),
+            "{inconclusive:#}"
+        );
+        let mut odd = exact.clone();
+        odd["incomplete"] = json!("yes");
+        assert!(rules_outcome(&odd).is_err());
+        let mut widened = incomplete.clone();
+        widened["resourceRules"]
+            .as_array_mut()
+            .expect("rules")
+            .push(json!({"verbs": ["create"], "apiGroups": [""], "resources": ["secrets"]}));
+        assert!(matches!(rules_outcome(&widened), Ok(Outcome::NotHeld(_))));
+        let mut short = exact;
+        short["nonResourceRules"] = json!([]);
+        assert!(matches!(rules_outcome(&short), Ok(Outcome::NotHeld(_))));
     }
 }

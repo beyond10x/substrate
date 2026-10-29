@@ -24,6 +24,11 @@ use crate::{
     POD_SECURITY_UNENFORCED, POLICY_NOT_DEFAULT_DENY, RBAC_EXCESS, StartupRefusal, names, rules,
 };
 
+pub(crate) mod files;
+pub(crate) mod workspace;
+#[cfg(test)]
+mod workspace_tests;
+
 /// The `User-Agent` the driver's requests send.
 const USER_AGENT: &str = "b10x-substrate-kubernetes";
 /// Items per page of a policy list, and its pages: the bound of § 5.2.

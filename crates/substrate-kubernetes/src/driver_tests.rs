@@ -22,13 +22,13 @@ use crate::{
     NamespaceDriver, POD_SECURITY_UNENFORCED, POLICY_NOT_DEFAULT_DENY, RBAC_EXCESS, Removal,
 };
 
-const DEPLOYMENT: &str = "deploy-a";
+pub(crate) const DEPLOYMENT: &str = "deploy-a";
 const TOKEN: &str = "fake-token-never-quoted";
 const POLICY: &str = "default-deny";
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// A monotonic clock that moves only when a case advances it.
-struct ManualClock {
+pub(crate) struct ManualClock {
     base: Instant,
     /// The wall time at `base`: taken before any row a case reserves, so a row's `created_at` is
     /// never after the clock's start.
@@ -37,7 +37,7 @@ struct ManualClock {
 }
 
 impl ManualClock {
-    fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             base: Instant::now(),
             wall_base: Utc::now(),
@@ -45,7 +45,7 @@ impl ManualClock {
         })
     }
 
-    fn set(&self, at: Duration) {
+    pub(crate) fn set(&self, at: Duration) {
         *self.offset.lock().unwrap_or_else(PoisonError::into_inner) = at;
     }
 }
@@ -63,13 +63,20 @@ impl Clock for ManualClock {
 
 /// The daemon's ledger, in memory: one row per reserved name.
 #[derive(Default)]
-struct MemoryLedger {
+pub(crate) struct MemoryLedger {
     rows: Mutex<BTreeMap<String, BackendRecord>>,
     binds: Mutex<Vec<(String, String)>>,
 }
 
 impl MemoryLedger {
-    fn reserve(&self, kind: BackendKind, id: &str, role: BackendRole, name: &str, digest: &str) {
+    pub(crate) fn reserve(
+        &self,
+        kind: BackendKind,
+        id: &str,
+        role: BackendRole,
+        name: &str,
+        digest: &str,
+    ) {
         self.rows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -88,7 +95,7 @@ impl MemoryLedger {
             );
     }
 
-    fn row(&self, name: &str) -> BackendRecord {
+    pub(crate) fn row(&self, name: &str) -> BackendRecord {
         self.rows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -145,8 +152,15 @@ impl BackendLedger for MemoryLedger {
         Ok(())
     }
 
-    fn unsettled(&self, _after: Option<&str>) -> Result<Vec<BackendRecord>, DriverError> {
-        Ok(Vec::new())
+    fn unsettled(&self, after: Option<&str>) -> Result<Vec<BackendRecord>, DriverError> {
+        Ok(self
+            .rows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|row| row.settled_at.is_none() && after.is_none_or(|after| *row.name > *after))
+            .cloned()
+            .collect())
     }
 }
 
@@ -175,7 +189,7 @@ fn kubeconfig_with(fake: &FakeCluster, extension: Option<Value>) -> Vec<u8> {
 }
 
 /// A client of the fake with no driver settings: what an operator, or another daemon, does.
-fn admin(fake: &FakeCluster) -> Api {
+pub(crate) fn admin(fake: &FakeCluster) -> Api {
     let bytes = kubeconfig_with(fake, None);
     kubeconfig::parse(&bytes, |_, _| Ok(()))
         .expect("the fake's kubeconfig loads")
@@ -205,7 +219,7 @@ fn default_deny() -> Value {
 
 /// A fake that every startup step passes: the exact rules, the default-deny policy and
 /// `restricted` enforced.
-fn passing_fake() -> FakeCluster {
+pub(crate) fn passing_fake() -> FakeCluster {
     let fake = FakeCluster::start("substrate", TOKEN).expect("the fake starts");
     fake.set_rules(exact_rules());
     fake.seed("networkpolicies", default_deny())
@@ -214,7 +228,10 @@ fn passing_fake() -> FakeCluster {
     fake
 }
 
-fn driver(fake: &FakeCluster, clock: &Arc<ManualClock>) -> (NamespaceDriver, Arc<MemoryLedger>) {
+pub(crate) fn driver(
+    fake: &FakeCluster,
+    clock: &Arc<ManualClock>,
+) -> (NamespaceDriver, Arc<MemoryLedger>) {
     driver_as(fake, clock, DEPLOYMENT)
 }
 
