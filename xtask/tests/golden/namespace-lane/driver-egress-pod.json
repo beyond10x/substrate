@@ -1,0 +1,62 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "annotations": {
+      "b10x-substrate/operation": "sha256:f39dac6cbaba535e2c207cd0cd8f154974223c848f727f98b3564cea569b41cf"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "b10x-substrate",
+      "b10x-substrate/deployment": "3ezejz5qqey66ehnufvaof3cor",
+      "b10x-substrate/probe": "abcdefghijklmnop",
+      "b10x-substrate/role": "pod"
+    },
+    "name": "sbx-pr-abcdefghijklmnop-pod",
+    "namespace": "substrate-namespace-lane"
+  },
+  "spec": {
+    "activeDeadlineSeconds": 600,
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "command": [
+          "sh",
+          "-c",
+          "while read key value rest; do if [ \"$key\" = nameserver ]; then dns=\"$value\"; break; fi; done </etc/resolv.conf; timeout 3 nc \"$KUBERNETES_SERVICE_HOST\" 443 </dev/null >/dev/null 2>&1; echo \"api $?\"; timeout 3 nslookup kubernetes.default.svc.cluster.local \"$dns\" >/dev/null 2>&1; echo \"dns $?\"; timeout 3 nc 172.18.0.1 40000 </dev/null >/dev/null 2>&1; echo \"outside $?\""
+        ],
+        "image": "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "run",
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "32Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "32Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true
+        }
+      }
+    ],
+    "restartPolicy": "Never",
+    "securityContext": {
+      "runAsGroup": 65532,
+      "runAsNonRoot": true,
+      "runAsUser": 65532,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "terminationGracePeriodSeconds": 1
+  }
+}
