@@ -187,6 +187,7 @@ confinement/oci.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub struct RuntimePro
 confinement/oci.rs: struct RuntimeProbe > pub program: PathBuf,
 confinement/oci.rs: struct RuntimeProbe > pub flavor: RuntimeFlavor,
 confinement/oci.rs: struct RuntimeProbe > pub version: String,
+confinement/oci.rs: struct RuntimeProbe > pub client_version: Option<String>,
 confinement/oci.rs: struct RuntimeProbe > pub rootless: bool,
 confinement/oci.rs: struct RuntimeProbe > pub limits: bool,
 confinement/oci.rs: struct RuntimeProbe > pub cpus: u32,
@@ -283,6 +284,7 @@ confinement/stdin.rs: pub const MAX_STDIN_BYTES: u64 = 16 * 1_024 * 1_024;
 confinement/stdin.rs: pub const STDIN_CHUNK_BYTES: usize = 64 * 1_024;
 confinement/stdin.rs: #[async_trait] impl StdinPipe for ChildPipe
 confinement/stdin.rs: impl Drop for Armed<'_>
+confinement/stdin.rs: impl Drop for StdinWriter
 confinement/stdin.rs: pub async fn run_with_stdin(adapter: &Arc<dyn ConfinementAdapter>, admitted: &AdmittedProfile, command: &Command, input: &[u8]) -> Result<(RunObservation, RunOutput, u64), ConfinementError>
 confinement/stdin.rs: impl Drop for KillOnDrop
 confinement/systemd.rs: pub const SESSION_BUS_ENV: &str = "DBUS_SESSION_BUS_ADDRESS";

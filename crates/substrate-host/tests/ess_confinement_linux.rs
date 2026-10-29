@@ -1007,3 +1007,124 @@ async fn a_piped_linux_run_with_unread_recorded_output_does_not_stall() {
     assert!(output.stdout_truncated, "{NAME}: 64 KiB is past the bound");
     println!("{NAME}: executed");
 }
+
+// ---- adversary pass on `story:adapter-stdin-pipe` ----
+
+/// `linux_piped` with a run timeout of `timeout_ms`.
+fn linux_piped_within(workspace: &Path, limit_bytes: u64, timeout_ms: u64) -> ConfinementProfile {
+    ConfinementProfile {
+        process_bounds: Some(ProcessBounds {
+            timeout_ms,
+            processes: 16,
+            memory_bytes: 128 << 20,
+            cpu_millis: 10_000,
+        }),
+        ..linux_piped(workspace, limit_bytes)
+    }
+}
+
+// T7a under `linux`, which T12 does not list: `run_with_stdin` returns `cat`'s input on stdout,
+// and a child that exits without reading 1 MiB is no error.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_run_with_stdin_on_linux_echoes_and_tolerates_a_child_that_reads_nothing() {
+    const NAME: &str = "ESS confinement linux adv run_with_stdin";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            io_bounds: Some(confinement::IoBounds {
+                output_bytes: 1 << 20,
+            }),
+            ..linux_piped(&workspace, confinement::MAX_STDIN_BYTES)
+        })
+        .expect("admitted");
+    let input: Vec<u8> = (0..200_000_u32)
+        .map(|i| u8::try_from(i % 251).expect("below 251"))
+        .collect();
+    let (ended, output, accepted) =
+        confinement::run_with_stdin(&adapter, &admitted, &support::sh("exec cat"), &input)
+            .await
+            .expect("cat ran");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert_eq!(accepted, input.len() as u64);
+    assert_eq!(output.stdout, input, "{NAME}: every byte crossed the pipe");
+    let large = vec![b'y'; 1 << 20];
+    let (ended, _, accepted) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        confinement::run_with_stdin(&adapter, &admitted, &support::sh("exit 0"), &large),
+    )
+    .await
+    .expect("returned")
+    .expect("a child that reads nothing is no error");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert!(accepted < large.len() as u64, "{NAME}: {accepted}");
+    println!("{NAME}: executed");
+}
+
+// Backpressure: a child that never reads its standard input and never ends cannot hold
+// `run_with_stdin` past the run's timeout (2 s here) by more than a few seconds.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_linux_child_that_never_reads_stdin_is_bounded_by_the_run_timeout() {
+    const NAME: &str = "ESS confinement linux adv never reads";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&linux_piped_within(
+            &workspace,
+            confinement::MAX_STDIN_BYTES,
+            2_000,
+        ))
+        .expect("admitted");
+    let large = vec![b'z'; 1 << 20];
+    let started = std::time::Instant::now();
+    let returned = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        confinement::run_with_stdin(&adapter, &admitted, &support::sh("exec sleep 60"), &large),
+    )
+    .await
+    .expect("run_with_stdin returned within 15 s of a 2 s timeout");
+    let (ended, _, accepted) = returned.expect("the timeout is an end, not an error");
+    assert_ne!(ended.state, RunState::Running);
+    assert!(accepted < large.len() as u64, "{NAME}: {accepted}");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1_500),
+        "{NAME}: ended before its timeout"
+    );
+    println!("{NAME}: executed");
+}
+
+// No descriptor leaks into the child: a piped run holds 0, 1 and 2, and `ls` its own directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn adv_a_piped_linux_child_holds_only_its_three_standard_descriptors() {
+    const NAME: &str = "ESS confinement linux adv descriptors";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&linux_piped(&workspace, 1_024))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exec ls -l /proc/self/fd"))
+        .await
+        .expect("started");
+    adapter.close_stdin(&run).await.expect("closed");
+    adapter.wait(&run).await.expect("waited");
+    let output = adapter.output(&run).await.expect("output");
+    let listing = String::from_utf8_lossy(&output.stdout).into_owned();
+    let extra: Vec<&str> = listing
+        .lines()
+        .filter_map(|line| line.split_once(" -> "))
+        .filter_map(|(head, target)| {
+            let fd = head.rsplit(' ').next()?;
+            (!["0", "1", "2"].contains(&fd) && !target.starts_with("/proc/")).then_some(fd)
+        })
+        .collect();
+    assert!(
+        extra.is_empty(),
+        "{NAME}: the child holds descriptors {extra:?} beyond 0, 1 and 2:\n{listing}"
+    );
+    assert!(listing.contains(" 0 -> pipe:"), "{NAME}: {listing}");
+    println!("{NAME}: executed");
+}

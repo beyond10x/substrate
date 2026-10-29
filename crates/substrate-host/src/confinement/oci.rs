@@ -37,7 +37,8 @@
 //!
 //! It serves `process_run`, `process_watch`, `output_read`, `wait`, `workspace`,
 //! `filesystem_view`, `limits` and `audit`, and proves `image_digest_pinned`, and `stdin_pipe` on a
-//! runtime flavor and version in `OCI_STDIN_PINNED`: a piped run is created `--interactive` and
+//! runtime flavor, server version and client version in `OCI_STDIN_PINNED`: a piped run is
+//! created `--interactive` and
 //! started `start --attach --interactive` with the runtime client's stdin piped. It does not prove
 //! `ipc_socket_allowlist`: a Unix socket beneath a bound root is reachable from the container.
 //! Whether the runtime is rootless has no `Fact` variant; [`probe`] reports it.
@@ -151,11 +152,14 @@ pub enum RuntimeFlavor {
     Podman,
 }
 
-/// The runtime flavor and version pairs on which the oci lane wrote the bytes `0x10 0x11` through
-/// a container and read back every byte and the end of file (design 32 D13, T15). `stdin_pipe` is
-/// proved on these pairs only: on any other a detach sequence or a stdin the runtime keeps open
-/// could eat bytes or the end of file, so `Piped` is refused by the fact's name there.
-pub(crate) const OCI_STDIN_PINNED: &[(RuntimeFlavor, &str)] = &[(RuntimeFlavor::Docker, "29.7.2")];
+/// The runtime flavor, server version and client version on which the oci lane wrote the bytes
+/// `0x10 0x11` through a container and read back every byte and the end of file (design 32 D13,
+/// T15). The client is pinned too: it is the process that copies stdin and sends the end of file
+/// (`start --attach --interactive`). `stdin_pipe` is proved on these entries only: on any other a
+/// detach sequence or a stdin the runtime keeps open could eat bytes or the end of file, so
+/// `Piped` is refused by the fact's name there, and so it is where the client version is unknown.
+pub(crate) const OCI_STDIN_PINNED: &[(RuntimeFlavor, &str, &str)] =
+    &[(RuntimeFlavor::Docker, "29.7.2", "29.7.2")];
 
 /// What `open` read from the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +168,9 @@ pub struct RuntimeProbe {
     pub program: PathBuf,
     pub flavor: RuntimeFlavor,
     pub version: String,
+    /// The version of the runtime's client, as `info` reports it (Docker's `ClientInfo.Version`);
+    /// absent where `info` does not report it.
+    pub client_version: Option<String>,
     /// The runtime runs without root on the host.
     pub rootless: bool,
     /// Memory, swap, pids and CPU quota control are all reported.
@@ -369,10 +376,19 @@ fn parse_info(program: PathBuf, bytes: &[u8]) -> Result<RuntimeProbe, String> {
     if cpus == 0 {
         return Err("the container runtime reports no CPU".to_owned());
     }
+    let client_version = match flavor {
+        RuntimeFlavor::Docker => info
+            .pointer("/ClientInfo/Version")
+            .and_then(Value::as_str)
+            .filter(|version| !version.is_empty())
+            .map(str::to_owned),
+        RuntimeFlavor::Podman => None,
+    };
     Ok(RuntimeProbe {
         program,
         flavor,
         version,
+        client_version,
         rootless,
         limits,
         cpus,
@@ -402,11 +418,15 @@ pub fn proof(runtime: &RuntimeProbe) -> AdapterFacts {
     )
 }
 
-/// Whether the runtime's flavor and version are a pair in [`OCI_STDIN_PINNED`].
+/// Whether the runtime's flavor, server version and client version are an entry in
+/// [`OCI_STDIN_PINNED`]; never with the client version unknown.
 fn stdin_pinned(runtime: &RuntimeProbe) -> bool {
-    OCI_STDIN_PINNED
-        .iter()
-        .any(|(flavor, version)| *flavor == runtime.flavor && *version == runtime.version)
+    let Some(client_version) = runtime.client_version.as_deref() else {
+        return false;
+    };
+    OCI_STDIN_PINNED.iter().any(|(flavor, version, client)| {
+        *flavor == runtime.flavor && *version == runtime.version && *client == client_version
+    })
 }
 
 fn check_declared(roots: &[DeclaredWritableRoot]) -> Result<(), ConfinementError> {
@@ -1228,7 +1248,7 @@ impl OciAdapter {
             readers,
             bounds.timeout,
             phase,
-            writer.clone(),
+            writer.as_ref().map(Arc::downgrade),
         ));
         self.runs.lock().push(Arc::new(OciRun {
             id: id.clone(),
@@ -1398,7 +1418,9 @@ async fn monitor(
     readers: [Option<tokio::task::JoinHandle<()>>; 2],
     timeout: Duration,
     phase: watch::Sender<Phase>,
-    writer: Option<Arc<StdinWriter>>,
+    // The run record owns the writer; the monitor only reaches it, so dropping the adapter drops
+    // the client's pipe and the container reads end of file.
+    writer: Option<std::sync::Weak<StdinWriter>>,
 ) {
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
@@ -1433,7 +1455,7 @@ async fn monitor(
     let state = inspect(&program, &run).await;
     let removed = remove(&program, &run).await;
     // The run's end, for its standard input too: a write pending now fails.
-    if let Some(writer) = writer {
+    if let Some(writer) = writer.as_ref().and_then(std::sync::Weak::upgrade) {
         writer.end().await;
     }
     let _ = phase.send(match (ended, state) {
@@ -1688,24 +1710,26 @@ mod tests {
         }
     }
 
-    /// T16 of design 32: `stdin_pipe` is proved for a pinned runtime flavor and version and for
-    /// nothing else, and a piped profile on any other is refused naming it.
+    /// T16 of design 32: `stdin_pipe` is proved for a pinned runtime flavor, server version and
+    /// client version and for nothing else, an unknown client version included, and a piped
+    /// profile on any other is refused naming it.
     #[test]
     fn stdin_pipe_is_proved_only_on_a_pinned_runtime() {
-        let probe = |flavor, version: &str| RuntimeProbe {
+        let probe = |flavor, version: &str, client: Option<&str>| RuntimeProbe {
             program: PathBuf::from("/x"),
             flavor,
             version: version.to_owned(),
+            client_version: client.map(str::to_owned),
             rootless: false,
             limits: true,
             cpus: 4,
             sockets: Vec::new(),
         };
         assert!(!OCI_STDIN_PINNED.is_empty());
-        for (flavor, version) in OCI_STDIN_PINNED {
+        for (flavor, version, client) in OCI_STDIN_PINNED {
             assert!(
-                proof(&probe(*flavor, version)).proves(&Fact::StdinPipe),
-                "{flavor:?} {version}"
+                proof(&probe(*flavor, version, Some(client))).proves(&Fact::StdinPipe),
+                "{flavor:?} {version} {client}"
             );
         }
         let piped = ConfinementProfile {
@@ -1713,23 +1737,77 @@ mod tests {
             image: Some(format!("registry.invalid/run@sha256:{}", "0".repeat(64))),
             ..ConfinementProfile::default()
         };
-        for (flavor, version) in [
-            (RuntimeFlavor::Docker, "29.0.0"),
-            (RuntimeFlavor::Docker, "29.7.20"),
-            (RuntimeFlavor::Podman, "29.7.2"),
-            (RuntimeFlavor::Podman, "5.0.0"),
+        for (flavor, version, client) in [
+            (RuntimeFlavor::Docker, "29.0.0", Some("29.0.0")),
+            (RuntimeFlavor::Docker, "29.7.20", Some("29.7.20")),
+            (RuntimeFlavor::Docker, "29.0.0", Some("29.7.2")),
+            (RuntimeFlavor::Docker, "29.7.2", Some("29.0.0")),
+            (RuntimeFlavor::Docker, "29.7.2", Some("29.7.20")),
+            (RuntimeFlavor::Docker, "29.7.2", None),
+            (RuntimeFlavor::Podman, "29.7.2", Some("29.7.2")),
+            (RuntimeFlavor::Podman, "5.0.0", None),
         ] {
-            let facts = proof(&probe(flavor, version));
-            assert!(!facts.proves(&Fact::StdinPipe), "{flavor:?} {version}");
+            let facts = proof(&probe(flavor, version, client));
+            assert!(
+                !facts.proves(&Fact::StdinPipe),
+                "{flavor:?} {version} {client:?}"
+            );
             match super::super::admission(&facts, &piped, check_profile) {
                 Err(ConfinementError::FactUnserved { fact, .. }) => {
-                    assert_eq!(fact, Fact::StdinPipe, "{flavor:?} {version}");
+                    assert_eq!(fact, Fact::StdinPipe, "{flavor:?} {version} {client:?}");
                 }
                 other => {
-                    panic!("{flavor:?} {version}: expected stdin_pipe unserved, got {other:?}")
+                    panic!(
+                        "{flavor:?} {version} {client:?}: expected stdin_pipe unserved, got \
+                         {other:?}"
+                    )
                 }
             }
         }
+    }
+
+    /// The client version is read from Docker's `info` (`ClientInfo.Version`), and is absent
+    /// where `info` names none or an empty one, and for Podman, whose `info` has no client entry.
+    #[test]
+    fn the_client_version_is_read_from_info_or_absent() {
+        let with_client = |client: serde_json::Value| {
+            let mut info: Value =
+                serde_json::from_slice(&docker_info(&["name=seccomp,profile=builtin"], true))
+                    .expect("json");
+            info["ClientInfo"] = client;
+            parse_info(
+                PathBuf::from("/usr/bin/docker"),
+                &serde_json::to_vec(&info).expect("json"),
+            )
+            .expect("opens")
+        };
+        let read = with_client(serde_json::json!({"Version": "29.7.2"}));
+        assert_eq!(read.client_version.as_deref(), Some("29.7.2"));
+        for absent in [
+            serde_json::json!({}),
+            serde_json::json!({"Version": ""}),
+            serde_json::json!({"Version": 29}),
+            Value::Null,
+        ] {
+            assert_eq!(with_client(absent.clone()).client_version, None, "{absent}");
+        }
+        let docker_without = parse_info(
+            PathBuf::from("/usr/bin/docker"),
+            &docker_info(&["name=seccomp,profile=builtin"], true),
+        )
+        .expect("opens");
+        assert_eq!(docker_without.client_version, None);
+        let podman = serde_json::to_vec(&serde_json::json!({
+            "host": {
+                "security": {"seccompEnabled": true},
+                "cgroupControllers": ["cpu", "memory", "pids"],
+                "cpus": 8,
+            },
+            "version": {"Version": "29.7.2"},
+        }))
+        .expect("json");
+        let podman = parse_info(PathBuf::from("/usr/bin/podman"), &podman).expect("opens");
+        assert_eq!(podman.client_version, None);
     }
 
     /// Security F5 (`story:oci-adapter`): a root embedder would run every container as root.

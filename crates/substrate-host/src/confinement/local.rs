@@ -275,7 +275,9 @@ impl LocalAdapter {
             .and_then(|pid| i32::try_from(pid).ok())
             .ok_or_else(|| DriverError::failed("exec.spawn-failed", "local spawn: no pid"))?;
         let writer = stdin::child_writer(admitted.profile().stdin, child.stdin.take());
-        let ending = writer.clone();
+        // The run record owns the writer; the reaper only reaches it, so dropping the adapter
+        // drops the pipe and the child reads end of file.
+        let ending = writer.as_ref().map(Arc::downgrade);
         let id = {
             let mut sequence = self.sequence.lock();
             *sequence += 1;
@@ -314,7 +316,7 @@ impl LocalAdapter {
             }
             // The run's end, for its standard input too: a write pending now fails, and a
             // descendant outside the group still holding descriptor 0 no longer holds the writer.
-            if let Some(writer) = ending {
+            if let Some(writer) = ending.as_ref().and_then(std::sync::Weak::upgrade) {
                 writer.end().await;
             }
             let _ = phase.send(match ended {

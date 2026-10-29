@@ -401,11 +401,16 @@ mod imp {
                                 id: id.clone(),
                             }),
                         );
-                        self.writers.lock().insert(run.clone(), Arc::clone(&writer));
+                        // The adapter's table owns the writer; the task only reaches it, so
+                        // dropping the adapter drops the writer, which closes the pipe.
+                        let ending = Arc::downgrade(&writer);
+                        self.writers.lock().insert(run.clone(), writer);
                         let driver = Arc::clone(&self.driver);
                         tokio::spawn(async move {
                             driver.processes.wait_ended(&id).await;
-                            writer.end().await;
+                            if let Some(writer) = ending.upgrade() {
+                                writer.end().await;
+                            }
                         });
                     }
                     admitted.audit_start(&run, &command.argv[0]);
