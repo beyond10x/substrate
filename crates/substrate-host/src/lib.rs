@@ -17,9 +17,6 @@ pub mod confinement;
 mod confinement_types;
 #[cfg(target_os = "linux")]
 mod egress;
-mod environment;
-#[cfg(target_os = "linux")]
-mod fs;
 #[cfg(target_os = "linux")]
 mod git;
 pub mod host_process;
@@ -69,7 +66,12 @@ use substrate_wire::{
     LeaseObservation, OutputSlice, Workspace, WorkspaceAbsence, WorkspaceCreateInput,
     WorkspaceTree, WorkspaceTreeQuery,
 };
-use thiserror::Error;
+// Guarded workspace I/O and the environment rule live in `substrate-guarded` (design 34 § 2), so a
+// binary that must not link this crate shares them; `crate::fs` and `crate::environment` still
+// name them here.
+use substrate_guarded::environment;
+#[cfg(target_os = "linux")]
+use substrate_guarded::fs;
 use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
@@ -83,6 +85,9 @@ pub use host_process::{
     LogStreamSelection, LogTail, ProcessExit, ProcessLogs, ProcessSupervisor, Reattached,
     SocketProtocol, StopCause, StoredProcessLogs,
 };
+// The port's error and listing types, declared beside guarded I/O and re-exported so every
+// existing `substrate_host::` path to them compiles unchanged.
+pub use substrate_guarded::{DriverError, DriverErrorClass, Listed};
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::HostDriver;
 
@@ -477,26 +482,6 @@ impl HostConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DriverErrorClass {
-    Refused,
-    Conflict,
-    Unserved,
-    Exhausted,
-    Failed,
-    NotFound,
-}
-
-#[derive(Debug, Error)]
-#[error("{code}: {message}")]
-pub struct DriverError {
-    pub class: DriverErrorClass,
-    pub code: &'static str,
-    pub message: String,
-    pub address: Option<String>,
-    pub retriable: bool,
-}
-
 pub enum DispatchOutcome<T> {
     Observed(T),
     NotDispatched(DriverError),
@@ -510,79 +495,6 @@ pub enum WorkspaceDestroyProgress {
     Pending { removed_items: u64 },
     /// The guarded root descriptor proved that the workspace root is absent.
     Absent(WorkspaceAbsence),
-}
-
-impl DriverError {
-    pub fn refused(code: &'static str, message: impl Into<String>, address: &str) -> Self {
-        Self {
-            class: DriverErrorClass::Refused,
-            code,
-            message: message.into(),
-            address: Some(address.to_owned()),
-            retriable: false,
-        }
-    }
-
-    pub fn not_found() -> Self {
-        Self {
-            class: DriverErrorClass::NotFound,
-            code: "resource.not-found",
-            message: "Resource was not found.".to_owned(),
-            address: Some("resource".to_owned()),
-            retriable: false,
-        }
-    }
-
-    pub fn unserved(code: &'static str, message: impl Into<String>, address: &str) -> Self {
-        Self {
-            class: DriverErrorClass::Unserved,
-            code,
-            message: message.into(),
-            address: Some(address.to_owned()),
-            retriable: false,
-        }
-    }
-
-    pub fn exhausted(code: &'static str, message: impl Into<String>, address: &str) -> Self {
-        Self {
-            class: DriverErrorClass::Exhausted,
-            code,
-            message: message.into(),
-            address: Some(address.to_owned()),
-            retriable: true,
-        }
-    }
-
-    pub fn failed(code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            class: DriverErrorClass::Failed,
-            code,
-            message: message.into(),
-            address: None,
-            retriable: true,
-        }
-    }
-}
-
-/// A listing and the number of entries it omitted because the wire cannot name them (ADR 0043).
-///
-/// The count travels beside the wire object, not in it, because the directory page and the tree
-/// are closed objects; the daemon answers it as `substrate_wire::OMITTED_ENTRIES_HEADER`. A
-/// result that lists nothing, such as a file read, omits nothing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Listed<T> {
-    pub value: T,
-    pub omitted_entries: u64,
-}
-
-impl<T> Listed<T> {
-    /// A result that omitted no entry.
-    pub fn complete(value: T) -> Self {
-        Self {
-            value,
-            omitted_entries: 0,
-        }
-    }
 }
 
 #[async_trait]

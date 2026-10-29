@@ -26,6 +26,10 @@
 //! `pub` definition, and a re-export from any other crate fails the test until the scanner reads
 //! that crate too.
 //!
+//! `substrate-guarded` is read as part of the host crate, beneath [`GUARDED`]: the host crate
+//! re-exports its `DriverError`, `DriverErrorClass` and `Listed` at its root (design 34 § 2), so
+//! their shapes stay held wherever they are declared.
+//!
 //! Every type a recorded item names — in a public field, a variant, a signature or a constant's
 //! type — is recorded the same way when the host crate or `substrate-wire` defines it, and so on
 //! to a fixed point (`story:public-items-cover-field-types`): `HostConfig`'s fields hand a consumer
@@ -45,6 +49,8 @@ const BLESS: &str = "SUBSTRATE_BLESS_PUBLIC_ITEMS";
 const MODULE: &str = "confinement/";
 /// The source name prefix of `substrate-wire`'s files; the host crate's are beneath its `src/`.
 const WIRE: &str = "substrate-wire/src/";
+/// The source name prefix of `substrate-guarded`'s files, read with the host crate's.
+const GUARDED: &str = "substrate-guarded/src/";
 /// Marks a `pub` struct with a field that is not `pub`.
 const PRIVATE_FIELDS: &str = "(private fields)";
 /// Marks a re-exported name without exactly one `pub` definition in its crate.
@@ -551,7 +557,8 @@ fn scan(file: &str, source: &str) -> Vec<Record> {
 enum Origin {
     /// Inside `src/confinement/`, so they are scanned with the module.
     Module,
-    /// The host crate outside `src/confinement/`.
+    /// The host crate outside `src/confinement/`, and `substrate-guarded`, whose types it
+    /// re-exports.
     Host,
     /// `substrate-wire`.
     Wire,
@@ -657,7 +664,7 @@ fn reexport(text: &str, module: &[&(String, String)]) -> (Origin, Vec<String>) {
     let segments: Vec<&str> = prefix.split("::").collect();
     let origin = match segments[0] {
         "crate" if segments.get(1) == Some(&"confinement") => Origin::Module,
-        "crate" => Origin::Host,
+        "crate" | "substrate_guarded" => Origin::Host,
         "substrate_wire" => Origin::Wire,
         "self" | "super" => Origin::Module,
         first
@@ -776,11 +783,12 @@ fn rust_files(directory: &Path, into: &mut Vec<PathBuf>) {
 }
 
 /// Every source the list reads, as `(name, text)`: the module's files beneath `src/confinement/`,
-/// then the host crate's other files beneath `src/`, then `substrate-wire`'s beneath [`WIRE`],
-/// each group sorted.
+/// then the host crate's other files beneath `src/`, then `substrate-guarded`'s beneath
+/// [`GUARDED`], then `substrate-wire`'s beneath [`WIRE`], each group sorted.
 fn sources() -> Vec<(String, String)> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let src = manifest.join("src");
+    let guarded = manifest.join("..").join("substrate-guarded").join("src");
     let wire = manifest.join("..").join("substrate-wire").join("src");
     let mut host = Vec::new();
     rust_files(&src, &mut host);
@@ -789,6 +797,11 @@ fn sources() -> Vec<(String, String)> {
         .into_iter()
         .partition(|path| path.starts_with(src.join("confinement")));
     ordered.extend(rest);
+    let host_count = ordered.len();
+    let mut guarded_files = Vec::new();
+    rust_files(&guarded, &mut guarded_files);
+    guarded_files.sort();
+    ordered.extend(guarded_files);
     let mut wire_files = Vec::new();
     rust_files(&wire, &mut wire_files);
     wire_files.sort();
@@ -802,7 +815,14 @@ fn sources() -> Vec<(String, String)> {
     };
     ordered
         .iter()
-        .map(|path| name(path, &src, ""))
+        .enumerate()
+        .map(|(index, path)| {
+            if index < host_count {
+                name(path, &src, "")
+            } else {
+                name(path, &guarded, GUARDED)
+            }
+        })
         .chain(wire_files.iter().map(|path| name(path, &wire, WIRE)))
         .zip(ordered.iter().chain(&wire_files))
         .map(|(name, path)| (name, std::fs::read_to_string(path).expect("source")))
@@ -1601,10 +1621,10 @@ fn a_type_named_by_a_public_field_of_a_held_type_is_held_too() {
             "lib.rs: struct GitSourceBinding > pub probe: u64,",
         ),
         (
-            "lib.rs",
+            "substrate-guarded/src/lib.rs",
             "    Failed,\n    NotFound,\n",
             "    Failed,\n    NotFound,\n    Probe,\n",
-            "lib.rs: enum DriverErrorClass > Probe,",
+            "substrate-guarded/src/lib.rs: enum DriverErrorClass > Probe,",
         ),
     ] {
         let (added, removed) = adversary_edits(&[(file, from, to)]);

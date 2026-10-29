@@ -2,6 +2,7 @@
 members = [
     "crates/substrate-wire",
     "crates/substrate-store",
+    "crates/substrate-guarded",
     "crates/substrate-host",
     "crates/substrate-daemon",
     "crates/substrate-contract-check",

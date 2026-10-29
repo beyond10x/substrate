@@ -6,15 +6,17 @@
 
 use std::collections::BTreeMap;
 
+use substrate_wire::BaselineEnvironment;
+
 use crate::DriverError;
 
 /// Most variables one start may set.
-pub(crate) const MAX_SET: usize = 64;
+pub const MAX_SET: usize = 64;
 
 /// Refuses `exec.environment-refused` unless every variable in `set` has an upper-case ASCII name
 /// of at most 128 bytes that names no credential, and a value of at most 4096 bytes without NUL,
 /// and there are at most [`MAX_SET`] of them.
-pub(crate) fn check(set: &BTreeMap<String, String>) -> Result<(), DriverError> {
+pub fn check(set: &BTreeMap<String, String>) -> Result<(), DriverError> {
     if set.len() > MAX_SET {
         return Err(refused());
     }
@@ -39,7 +41,7 @@ pub(crate) fn check(set: &BTreeMap<String, String>) -> Result<(), DriverError> {
 }
 
 /// Whether `name` names a credential by one of the fragments a secret's name carries.
-pub(crate) fn is_secretish_name(name: &str) -> bool {
+pub fn is_secretish_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     [
         "authorization",
@@ -54,7 +56,17 @@ pub(crate) fn is_secretish_name(name: &str) -> bool {
     .any(|fragment| lower.contains(fragment))
 }
 
-pub(crate) fn refused() -> DriverError {
+/// The value a baseline variable carries in every run that admits it.
+pub const fn baseline_value(name: BaselineEnvironment) -> &'static str {
+    match name {
+        BaselineEnvironment::Lang | BaselineEnvironment::LcAll => "C.UTF-8",
+        BaselineEnvironment::Path => "/usr/bin:/bin",
+        BaselineEnvironment::Term => "dumb",
+        BaselineEnvironment::Tz => "UTC",
+    }
+}
+
+pub fn refused() -> DriverError {
     DriverError::refused(
         "exec.environment-refused",
         "Exec environment is outside the closed non-secret shape.",

@@ -1,0 +1,33 @@
+[package]
+name = "b10x-substrate-guarded"
+description = "Guarded workspace file access, the driver error type and the exec environment rule of the standalone substrate"
+homepage = "https://beyond10x.github.io/substrate/"
+documentation = "https://beyond10x.github.io/substrate/docs/concepts/adapters"
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+keywords = ["sandbox", "linux", "workspace"]
+categories = ["os::linux-apis"]
+
+[lib]
+name = "substrate_guarded"
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+hex.workspace = true
+libc.workspace = true
+sha2.workspace = true
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.15.0" }
+thiserror.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
