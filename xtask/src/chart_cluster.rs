@@ -521,7 +521,7 @@ impl<'a> Lane<'a> {
 /// Set by the first SIGINT or SIGTERM once [`arm_signals`] ran. The lane stops the command it is
 /// running, starts no other, and runs its cleanup: the cluster's deletion and, in local mode, the
 /// removal of its own profile.
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+pub(crate) static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 /// The flag cleanup runs under: never set.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -551,7 +551,7 @@ pub fn arm_signals() -> Result<()> {
 
 /// Runs `command` in a process group of its own and returns its standard output. Refused without
 /// starting when `stop` is set; stopped, with its whole group, when `stop` is set while it runs.
-fn output(command: &mut Command, stop: &AtomicBool) -> Result<String> {
+pub(crate) fn output(command: &mut Command, stop: &AtomicBool) -> Result<String> {
     use std::os::unix::process::CommandExt as _;
     let rendered = format!("{command:?}");
     ensure!(

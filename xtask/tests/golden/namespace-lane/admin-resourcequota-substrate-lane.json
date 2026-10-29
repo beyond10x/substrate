@@ -1,0 +1,14 @@
+{
+  "apiVersion": "v1",
+  "kind": "ResourceQuota",
+  "metadata": {
+    "name": "substrate-lane",
+    "namespace": "substrate-namespace-lane"
+  },
+  "spec": {
+    "hard": {
+      "count/persistentvolumeclaims": "4",
+      "pods": "8"
+    }
+  }
+}

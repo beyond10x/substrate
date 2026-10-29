@@ -1,0 +1,28 @@
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "annotations": {
+      "b10x-substrate/operation": "sha256:f39dac6cbaba535e2c207cd0cd8f154974223c848f727f98b3564cea569b41cf"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "b10x-substrate",
+      "b10x-substrate/deployment": "3ezejz5qqey66ehnufvaof3cor",
+      "b10x-substrate/probe": "abcdefghijklmnop",
+      "b10x-substrate/role": "pvc"
+    },
+    "name": "sbx-pr-abcdefghijklmnop-pvc",
+    "namespace": "substrate-namespace-lane"
+  },
+  "spec": {
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "resources": {
+      "requests": {
+        "storage": "64Mi"
+      }
+    },
+    "storageClassName": "standard"
+  }
+}

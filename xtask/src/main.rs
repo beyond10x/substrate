@@ -23,6 +23,9 @@ mod licenses;
 mod links;
 mod mcp;
 mod mcp_smoke;
+mod namespace_lane;
+mod namespace_lane_observe;
+mod namespace_lane_render;
 mod package;
 mod packages;
 mod quota_fixture;
@@ -55,6 +58,9 @@ enum Command {
     /// Check the Kubernetes chart (static) or run its kind scenarios (cluster), per ADR 0046.
     #[command(name = "chart-lane")]
     ChartLane(chart::LaneArgs),
+    /// Check the namespace lane's objects (check) or run its first observations on kind (observe).
+    #[command(name = "namespace-lane")]
+    NamespaceLane(namespace_lane::Args),
     /// Package the released Kubernetes chart with its version and pinned daemon digest.
     #[command(name = "package-chart")]
     PackageChart(chart::PackageArgs),
@@ -144,6 +150,7 @@ fn dispatch() -> Result<ExitCode> {
     // outcome shares a binding with another verb's report.
     match cli.command {
         Command::ChartLane(args) => chart::run_lane(&args),
+        Command::NamespaceLane(args) => namespace_lane::run(&args),
         Command::PackageChart(args) => chart::run_package(&args),
         Command::CheckEss => Ok(ess::check(&repo::root()?)?.emit()),
         Command::CheckDocs => Ok(docs::check(&repo::root()?)?.emit()),
