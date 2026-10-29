@@ -128,6 +128,8 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             network: true,
         }),
         exec_no_egress: exec.then_some(true),
+        // Design 34 N5: the neutral fact is the namespace driver's; the host publishes the Linux one.
+        confinement_no_egress: None,
         exec_workspace_scoped_write: workspace_scoped_write.then_some(true),
         exec_cgroup_limits: exec.then_some(CgroupLimitFacts {
             processes: true,

@@ -1,0 +1,32 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.25.0:input:process-stop",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Stops one record (ADR 0036 S3, S5): SIGTERM to every cgroup member, the bounded grace, then cgroup.kill. Stopping an ended record answers it unchanged.",
+  "properties": {},
+  "required": [],
+  "title": "process-stop operation input",
+  "type": "object",
+  "x-b10x-refusals": [
+    {
+      "class": "unserved",
+      "code": "process.host-unserved",
+      "status": 501
+    },
+    {
+      "class": "refused",
+      "code": "process.host-posture-refused",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.host-subject-mismatch",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.not-found",
+      "status": 404
+    }
+  ]
+}

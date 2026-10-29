@@ -104,7 +104,7 @@ refusal design 28 lists (N1 A). The driver reads one context extension,
 | `machine.get`, `operation.get`, `event.list`, `event.stream`, `reconciliation.snapshot.*`, `*.lease.renew` | served (daemon-side) | — |
 | `workspace.create` (empty source), `.get`, `.destroy` | served: PVC and keeper | request-sized PVCs, once `workspace.storage-quota` can be observed (§ 6) |
 | `workspace.file.read`, `.write`, `.delete`; `workspace.file.read-v2`, `.tree.read-v2`, `.file.replace-v2`, `.file.edit-v2`, `.file.patch-v2` | served: one executor call each through `pods/exec` | — |
-| `workspace.adopt` | refused (§ 14 Q3) | an operator PVC as an adopted workspace, its own decision |
+| `workspace.adopt` | `workspace.adopt-unserved` (501, § 14 Q3 A) | an operator PVC as an adopted workspace, its own decision |
 | `workspace.git.*` | `workspace.git-unserved` (501), the trait default | Git on a PVC |
 | `exec.start`, `.get`, `.output.get`, `.signal`, `.retire` | served: one Pod per exec | re-attach across restart (N8 B) |
 | `session.*` | `session.unserved` / `session.pty-unserved` (501), the trait defaults | `pods/attach` sessions |
@@ -346,8 +346,8 @@ container_log_max_bytes`, capped at 1 MiB. It is therefore never more than the k
 log file.
 
 **Signals.** `term` deletes with grace 5 s and `kill` with grace 1 s, each with `preconditions.uid`.
-`int` is refused (§ 14 Q3). The end is committed only once the container is shown stopped, as in
-design 28.
+`int` is `exec.signal-unserved` (501, § 14 Q3 A). The end is committed only once the container is
+shown stopped, as in design 28.
 
 ## 8. Named refusals
 
@@ -369,14 +369,14 @@ The wire refusals, in the daemon's existing check order. Everything here except 
 | scoped `workspace_access` | `exec.workspace-scoped-write-unserved` (501) | existing check |
 | neither confinement set proved | `exec.sandbox-unavailable` (501) | widened final check (§ 6.4) |
 | an inline capsule | `exec.inline-capsule-unserved` (501), **new** | after the final check |
-| `signal: int` | **new**, § 14 Q3 | driver |
+| `signal: int` | `exec.signal-unserved` (501), **new** (§ 14 Q3 A) | driver |
 | a raw-pipe or PTY session | `session.unserved`, `session.pty-unserved` (501) | trait defaults |
 | `process.*` | `process.host-unserved` (501) | existing |
 | a non-empty workspace source | `workspace.source-unserved` (501) | driver, as `HostDriver::create_workspace` answers |
 | Git v2 routes | `workspace.git-unserved` (501) | trait defaults |
 | a workspace storage quota | `workspace.storage-quota-unserved` (501) | driver (§ 6.2) |
 | a create the namespace's ResourceQuota refuses | `workspace.capacity`, `exec.capacity` (429, `exhausted`) | driver: a 403 whose Status message starts with `exceeded quota:` (O7); any other 403 is `Failed` `kubernetes.api-failed` |
-| `workspace.adopt` | § 14 Q3 | driver |
+| `workspace.adopt` | `workspace.adopt-unserved` (501), **new** (§ 14 Q3 A) | driver |
 
 Failures (500, class `failed`) carry codes as the host driver's `exec.spawn-failed` does:
 `kubernetes.api-failed`, `kubernetes.executor-unanswered` and `kubernetes.executor-protocol`. The
@@ -502,21 +502,75 @@ gains both refusals. AGENTS.md § *Releases* names the image and the condition.
 
 ## 11. Wire: one successor bundle
 
-ADR 0047 decision 12 and § *Consequences* require one successor bundle after design 30's. It is the
-next free version when that story starts: **`0.26.0`** if design 30 is cut as `0.25.0`. It adds no
-route. It carries:
+ADR 0047 decision 12 and § *Consequences* require one successor bundle. It is the next free version
+when that story starts. Design 30 has not been cut, so this bundle is **`0.25.0`**, and design 30's
+bundle takes the next free version after it. It adds no route. It carries:
 
 - `driver`: the schema's `{"const": "host"}` becomes `{"enum": ["host", "kubernetes"]}`, and
   `HostDriverKind` gains `Kubernetes` (N7 A);
 - the optional fact `confinement.no-egress` (N5 A);
 - `exec.inline-capsule-unserved` (501) with a vector;
-- whatever § 14 Q3 adds, each with a vector.
+- § 14 Q3 A's `exec.signal-unserved` (501) and `workspace.adopt-unserved` (501), each with a vector.
 
-Invariant 6 requires that bundle to have **its own design section before it is cut**: the
-compatibility block, the exact route counts, each vector and the constant it is held to, and the
-`ADVERTISED_CONTRACT_BUNDLE` move. That section is U7's first deliverable. This note fixes only the
-content above. `cargo xtask render-bundle` cuts it. `scripts/gate.sh` gains it in `check-bundles` and
-`check-json` in the same change, and design 31's runner moves its pin with it.
+Invariant 6 requires that bundle to have **its own design section before it is cut**. This is it.
+
+**Compatibility block.** `bundle.json` states `kind: additive-v1`, predecessor `0.24.0`,
+`preserves_routes: 45` and `adds_routes: 0`. `cargo xtask check-bundle 0.25.0` recomputes both
+counts from the two `operations.json` inventories. `compatibility.json` states four client-visible
+changes:
+
+1. `driver` admits `kubernetes`. A client that matches `driver` exhaustively, or validates a
+   snapshot against `0.24.0`, rejects a namespace daemon's snapshot until it moves. A host daemon
+   still answers `host`.
+2. `confinement.no-egress` is `true` when a connection from inside a run was observed to fail, and
+   absent otherwise. It is never written `false` and never read from configuration. The four Linux
+   facts keep their bytes and meanings.
+3. Three refusals are new, all `unserved`, 501, not retriable. Each is listed in the table below.
+4. The vector schema's machine setup gains a third shape. It requires `confinement.no-egress` and
+   admits none of `exec.namespaces`, `exec.cgroup-limits`, `exec.cgroup-kill`, `exec.no-egress` or
+   `exec.inline-capsule`. The three new vectors use it.
+
+**The refusals, each with its vector and the constants it is held to.** Code, message and
+`address` come from `substrate_wire::DRIVER_UNSERVED_REFUSALS`. The table is `[UnservedRefusal; 3]`
+in `crates/substrate-wire/src/lib.rs`.
+
+| code | constant | address | vector (`vectors/http/`) | request |
+|---|---|---|---|---|
+| `exec.inline-capsule-unserved` | `EXEC_INLINE_CAPSULE_UNSERVED` | `capsule` | `inline-capsule-unserved-without-the-fact.json` | an exec start with a one-file capsule on a namespace machine without `exec.inline-capsule` |
+| `exec.signal-unserved` | `EXEC_SIGNAL_UNSERVED` | `signal` | `exec-signal-outside-the-published-set-is-unserved.json` | `INT` to a running exec on a machine whose `exec.signals` is `["TERM", "KILL"]` |
+| `workspace.adopt-unserved` | `WORKSPACE_ADOPT_UNSERVED` | none (the route) | `workspace-adopt-unserved-by-the-driver.json` | `workspace.adopt` on a namespace machine |
+
+Each vector's postconditions state no driver dispatch and no fixture identity taken from the
+request. The vectors are design vectors, not executable ones. No daemon in this repository answers
+them before U10. A host daemon publishes all three signals and `exec.inline-capsule`, and it serves
+adoption, so its answers do not change and the portable runtime lane reaches none of the three.
+
+**Constants.** The fact name is `CONFINEMENT_NO_EGRESS_FACT`. The field is
+`CapabilityFacts::confinement_no_egress`, which skips `None`, so a host snapshot's bytes and digest
+are unchanged. `render_v2.rs` is hashed by every bundle it rendered, so it learns no new `{"$wire":
+…}` binding. The bundle states these values as literals. `xtask/src/bundle/namespace_driver.rs`
+holds each literal to its wire constant for `0.25.0` and every later bundle:
+
+- the `driver` enum is exactly the serialization of every `HostDriverKind` variant;
+- the fact is an optional `const: true`;
+- one vector per table row answers exactly that row;
+- a vector machine whose `driver` is `kubernetes` states none of the four Linux facts;
+- `compatibility.json` names each change.
+
+**`ADVERTISED_CONTRACT_BUNDLE` moves** to `substrate-wire/0.25.0`, with the SHA-256 of its inner
+`bundle.json`. The daemon and SDK move with it. So do `release.yml`'s `BUNDLE_VERSION`, the
+shipped-binary runner's pin in `runtime_vectors.rs` (its route probes read the promoted
+`operations.json`, still 45 operations), the TLS listener test's and the SDK machine probe's
+bundle paths, and the session-capabilities result's contract `const`. The three codes are wire
+constants, so the operational listener's `substrate_refusals_total` names each of them (ADR 0045
+decision 7): a scrape carries at most 582 samples, three more zero-valued series than before,
+and no existing series changes. `cargo xtask render-bundle 0.25.0` cuts the bundle
+from `xtask/bundle-source/0.25.0/`, and `scripts/gate.sh` gains it in `check-bundles`.
+`check-json` lists `contracts/` itself, so it checks the new bundle without a gate edit.
+
+Design 30's families are not in `0.25.0`. Until its bundle is cut, a namespace machine can state
+`confinement.no-egress` but none of the families that N6's admission set names beside it. U10
+cannot admit an exec on the neutral set before that bundle.
 
 ## 12. Implementation slices
 

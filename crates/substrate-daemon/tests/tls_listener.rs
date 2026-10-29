@@ -878,7 +878,7 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert!(
         response
             .to_ascii_lowercase()
-            .contains("x-b10x-contract: substrate-wire/0.24.0"),
+            .contains("x-b10x-contract: substrate-wire/0.25.0"),
         "{response}"
     );
 
@@ -1463,7 +1463,7 @@ async fn development_static_bearer_refuses_non_loopback_binding() {
 /// The largest number of samples `/metrics` may carry (ADR 0045 decision 7): 471 without
 /// `substrate_refusals_total`, plus one series per refusal code the wire crate names and `other`.
 /// `app::health::tests` pins the same number against the catalogue itself.
-const OPS_SERIES_MAXIMUM: usize = 579;
+const OPS_SERIES_MAXIMUM: usize = 582;
 
 struct OpsAnswer {
     status: u16,

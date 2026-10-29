@@ -17,6 +17,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   published no `exec.*` fact. A test checks every remount flag combination against both
   policies: `v2` refuses everything `v1` refuses except a remount that adds `noatime` or
   `nodiratime`.
+- Development contract bundle `substrate-wire/0.25.0` (design 34 § 11, ADR 0047), now advertised
+  by the daemon and the Rust SDK. It adds no route: a capability snapshot's `driver` may be
+  `kubernetes`, a driver may publish the optional fact `confinement.no-egress`, and three refusals
+  are published at 501 with a vector each: `exec.inline-capsule-unserved`, `exec.signal-unserved`
+  and `workspace.adopt-unserved`. The host daemon's answers do not change.
 
 ### Changed
 

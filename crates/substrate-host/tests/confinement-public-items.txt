@@ -453,6 +453,8 @@ substrate-wire/src/lib.rs: struct CapabilitySnapshot > #[serde(skip_serializing_
 substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub facts: CapabilityFacts,
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] pub enum HostDriverKind
 substrate-wire/src/lib.rs: enum HostDriverKind > #[serde(rename = "host")] Host,
+substrate-wire/src/lib.rs: enum HostDriverKind > #[serde(rename = "kubernetes")] Kubernetes,
+substrate-wire/src/lib.rs: impl HostDriverKind > pub const ALL: [Self; 2] = [Self::Host, Self::Kubernetes];
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct CapabilityFacts
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.pull", skip_serializing_if = "Option::is_none")] pub events_pull: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.stream", skip_serializing_if = "Option::is_none")] pub events_stream: Option<bool>,
@@ -475,6 +477,7 @@ substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.argv-only", skip_serializing_if = "Option::is_none")] pub exec_argv_only: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.namespaces", skip_serializing_if = "Option::is_none")] pub exec_namespaces: Option<NamespaceFacts>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.no-egress", skip_serializing_if = "Option::is_none")] pub exec_no_egress: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.no-egress", default, skip_serializing_if = "Option::is_none")] pub confinement_no_egress: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.workspace-scoped-write", skip_serializing_if = "Option::is_none")] pub exec_workspace_scoped_write: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.cgroup-limits", skip_serializing_if = "Option::is_none")] pub exec_cgroup_limits: Option<CgroupLimitFacts>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.cgroup-kill", skip_serializing_if = "Option::is_none")] pub exec_cgroup_kill: Option<bool>,

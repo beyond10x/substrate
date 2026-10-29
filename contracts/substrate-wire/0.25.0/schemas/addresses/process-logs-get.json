@@ -1,0 +1,15 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.25.0:address:process-logs-get",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "process_id": {
+      "$ref": "../common.json#/$defs/process-id"
+    }
+  },
+  "required": [
+    "process_id"
+  ],
+  "title": "process-logs-get normalized route address",
+  "type": "object"
+}
