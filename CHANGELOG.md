@@ -120,7 +120,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   requires the new fact `output_live`; the default, `OutputDelivery::Recorded`, is the recorded
   output as before. `ConfinementAdapter::read_output` returns the next `OutputEvent`: a `Chunk`
   with its stream and its offset in that stream's record, `Bounded` for a stream that reached its
-  output bound, `Stalled` once, then `None` after the run's end. Live output needs `Head`
+  output bound, `Stalled` once, then `None` once both streams have ended, which a child that closes them
+  while it keeps running reaches before the run ends. Live output needs `Head`
   retention on both streams: anything else is `confinement.live-output-retention-invalid` (422),
   and a queue outside 1 to 16 is `session.limit-unserved` (429), both at admission. When the queue
   stays full for one second the run is killed and `Stalled` follows the queued chunks;

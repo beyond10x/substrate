@@ -85,8 +85,8 @@ An unconfined host process, always declared insecure.
   run's process group; the leader stays unreaped until its output closes, so its group id cannot
   be reused.
 - **Declares.** `process_run`, `process_watch`, `output_read`, `wait`, `workspace` (a host
-  directory) and `audit`; the facts `declared_insecure`, `paths_are_host_paths`, `host_network`
-  and `output_live`, and `local_permitted` unless the host forbids it.
+  directory) and `audit`; the facts `declared_insecure`, `paths_are_host_paths`, `host_network`,
+  `stdin_pipe` and `output_live`, and `local_permitted` unless the host forbids it.
 - **Refuses by name.** A profile without a reason (`confinement.local-reason-missing`); any profile
   when the host forbids `local` (`confinement.local-refused`); every filesystem view, network
   policy and bound (`confinement.family-unserved`); a profile that requires a fact it does not
@@ -137,8 +137,8 @@ A host process under a Seatbelt profile, run through `/usr/bin/sandbox-exec`.
   subpaths are admitted, and the run's environment is all it sees. `signal` reaches only the same
   sandbox.
 - **Declares.** `process_run`, `process_watch`, `output_read`, `wait`, `workspace`,
-  `filesystem_view` and `audit`; the facts `paths_are_host_paths`, `ipc_signals_contained` and
-  `output_live`.
+  `filesystem_view` and `audit`; the facts `paths_are_host_paths`, `ipc_signals_contained`,
+  `stdin_pipe` and `output_live`.
   The build policy adds three facts, each only when a Seatbelt probe at open saw it enforced:
   `sealed_paths` (paths inside the workspace, and the directories above them, stay unwritable),
   `exec_subpaths` (programs beneath a declared directory may run: a workspace-relative path such as
@@ -199,7 +199,8 @@ One Docker or podman container per run, the image named by digest only.
   read-only. The container is removed after `wait`, a kill or a timeout.
 - **Declares.** `process_run`, `process_watch`, `output_read`, `wait`, `workspace`,
   `filesystem_view` and `audit`, `limits` when the runtime reports memory, swap, pids and CPU quota
-  control, and the facts `image_digest_pinned` and `output_live`. It does not prove
+  control, the facts `image_digest_pinned` and `output_live`, and `stdin_pipe` when the runtime
+  is the pinned Docker server and client 29.7.2. It does not prove
   `ipc_socket_allowlist`: a Unix socket beneath a bound root is reachable from the container.
 - **Refuses by name.**
   - An image that is not `name@sha256:` and 64 lowercase hex characters
