@@ -1026,6 +1026,7 @@ async fn adversary_open_removes_only_an_old_owned_policy_whose_pod_is_gone() {
         );
         let gone = |name: &str, state: Value| {
             json!({"metadata": {"name": name, "resourceVersion": "2"},
+                   "spec": {"nodeName": "node-a", "restartPolicy": "Never"},
                    "status": {"phase": "Failed",
                               "containerStatuses": [{"name": "run", "state": state}]}})
         };

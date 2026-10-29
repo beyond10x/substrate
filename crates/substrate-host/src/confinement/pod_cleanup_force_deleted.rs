@@ -58,6 +58,7 @@ async fn follow(cluster: &Arc<Cluster>, api: Arc<Api>, kill: bool) -> Phase {
         Arc::clone(&run),
         sender,
         Instant::now() + Duration::from_mins(10),
+        PodTrace::default(),
     ));
     let read = format!("GET {}/{RUN}", api.pods());
     let began = Instant::now();
