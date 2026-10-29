@@ -50,9 +50,10 @@ fn check_boundary_invariants(root: &Path, failures: &mut Vec<String>) -> Result<
     let root_manifest: toml::Value =
         toml::from_str(&root_text).context("parsing workspace Cargo.toml")?;
 
+    let inherited = inherited_names(&root_manifest);
     let mut manifests = 1;
-    check_dependency_tables("Cargo.toml", &root_manifest, failures);
-    check_fake_features("Cargo.toml", &root_manifest, failures);
+    check_dependency_tables("Cargo.toml", &root_manifest, &inherited, failures);
+    check_fake_features("Cargo.toml", &root_manifest, &inherited, failures);
 
     let members = root_manifest
         .get("workspace")
@@ -70,8 +71,8 @@ fn check_boundary_invariants(root: &Path, failures: &mut Vec<String>) -> Result<
         let manifest: toml::Value =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         manifests += 1;
-        check_dependency_tables(&relative, &manifest, failures);
-        check_fake_features(&relative, &manifest, failures);
+        check_dependency_tables(&relative, &manifest, &inherited, failures);
+        check_fake_features(&relative, &manifest, &inherited, failures);
     }
     Ok(manifests)
 }
@@ -82,14 +83,46 @@ const KUBERNETES_CLIENT: &str = "b10x-substrate-kubernetes-client";
 /// Why an edge enabling the client's `fake` feature outside `[dev-dependencies]` is refused.
 const FAKE_FENCE: &str = "the fake feature of b10x-substrate-kubernetes-client is legal only under [dev-dependencies] (design 34 § 10.1)";
 
-/// Whether a dependency entry names the Kubernetes client, by its `package` key or by an alias
-/// that is the package name or the workspace's conventional alias for it. An entry inherited with
-/// `workspace = true` carries no `package` key, so the alias is all it has.
-fn names_kubernetes_client(alias: &str, dependency: &toml::Value) -> bool {
-    let name = dependency
-        .get("package")
-        .and_then(toml::Value::as_str)
-        .unwrap_or(alias);
+/// The package each `[workspace.dependencies]` alias names: its `package` key, or the alias itself.
+fn inherited_names(root_manifest: &toml::Value) -> BTreeMap<String, String> {
+    root_manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .map(|table| {
+            table
+                .iter()
+                .map(|(alias, dependency)| {
+                    let name = dependency
+                        .get("package")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or(alias);
+                    (alias.clone(), name.to_owned())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a dependency entry names the Kubernetes client. An entry inherited with
+/// `workspace = true` carries no `package` key: its package is the one `[workspace.dependencies]`
+/// names under the same alias, so a workspace entry that renames the client is still the client.
+/// Any other entry names it by its `package` key, or by an alias that is the package name. The
+/// workspace's conventional alias is refused whatever it resolves to.
+fn names_kubernetes_client(
+    alias: &str,
+    dependency: &toml::Value,
+    inherited: &BTreeMap<String, String>,
+) -> bool {
+    let inherits = dependency.get("workspace").and_then(toml::Value::as_bool) == Some(true);
+    let name = if inherits {
+        inherited.get(alias).map_or(alias, String::as_str)
+    } else {
+        dependency
+            .get("package")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(alias)
+    };
     name == KUBERNETES_CLIENT || alias == "substrate-kubernetes-client"
 }
 
@@ -109,7 +142,12 @@ fn enables_fake(dependency: &toml::Value) -> bool {
 /// `<client>?/fake` from a feature of its own, and the client may not turn `fake` on from any
 /// other feature of its own (`default` included), because either reaches a runtime edge without
 /// naming `fake` on it.
-fn check_fake_features(manifest_path: &str, manifest: &toml::Value, failures: &mut Vec<String>) {
+fn check_fake_features(
+    manifest_path: &str,
+    manifest: &toml::Value,
+    inherited: &BTreeMap<String, String>,
+    failures: &mut Vec<String>,
+) {
     let Some(features) = manifest.get("features").and_then(toml::Value::as_table) else {
         return;
     };
@@ -135,7 +173,7 @@ fn check_fake_features(manifest_path: &str, manifest: &toml::Value, failures: &m
         .iter()
         .filter_map(|table| table.as_table())
         .flat_map(|table| table.iter())
-        .filter(|(alias, dependency)| names_kubernetes_client(alias, dependency))
+        .filter(|(alias, dependency)| names_kubernetes_client(alias, dependency, inherited))
         .map(|(alias, _)| alias.as_str())
         .collect();
 
@@ -165,18 +203,20 @@ fn check_fake_features(manifest_path: &str, manifest: &toml::Value, failures: &m
 fn check_dependency_tables(
     manifest_path: &str,
     manifest: &toml::Value,
+    inherited: &BTreeMap<String, String>,
     failures: &mut Vec<String>,
 ) {
     const KINDS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
 
     for kind in KINDS {
-        check_dependency_table(manifest_path, kind, manifest.get(kind), failures);
+        check_dependency_table(manifest_path, kind, manifest.get(kind), inherited, failures);
     }
     if let Some(workspace) = manifest.get("workspace") {
         check_dependency_table(
             manifest_path,
             "workspace.dependencies",
             workspace.get("dependencies"),
+            inherited,
             failures,
         );
     }
@@ -187,6 +227,7 @@ fn check_dependency_tables(
                     manifest_path,
                     &format!("target.{target}.{kind}"),
                     table.get(kind),
+                    inherited,
                     failures,
                 );
             }
@@ -200,6 +241,7 @@ fn check_dependency_tables(
                 manifest_path,
                 &format!("patch.{registry}"),
                 Some(table),
+                inherited,
                 failures,
             );
         }
@@ -210,6 +252,7 @@ fn check_dependency_table(
     manifest_path: &str,
     kind: &str,
     table: Option<&toml::Value>,
+    inherited: &BTreeMap<String, String>,
     failures: &mut Vec<String>,
 ) {
     let Some(table) = table.and_then(toml::Value::as_table) else {
@@ -240,7 +283,7 @@ fn check_dependency_table(
         // can carry the fence's subject.
         if !kind.ends_with("dev-dependencies")
             && !kind.starts_with("patch.")
-            && names_kubernetes_client(alias, dependency)
+            && names_kubernetes_client(alias, dependency, inherited)
             && enables_fake(dependency)
         {
             failures.push(format!(
