@@ -1047,13 +1047,19 @@ pub fn pod_posture(pod: &Value, execution: Option<&str>, what: &str) -> Vec<Stri
 }
 
 /// Design 33 § 6: `--apparmor-profile <profile>` appears exactly once when `profile` is not the
-/// default, and not at all when it is.
+/// default, and not at all when it is. The one-word `--apparmor-profile=<profile>`, which clap
+/// reads the same way, counts as a statement of the flag.
 fn profile_flag(words: &[&str], profile: &str) -> Vec<String> {
     let stated: Vec<Option<&str>> = words
         .iter()
         .enumerate()
-        .filter(|(_, word)| **word == PROFILE_FLAG)
-        .map(|(at, _)| words.get(at + 1).copied())
+        .filter_map(|(at, word)| {
+            if *word == PROFILE_FLAG {
+                Some(words.get(at + 1).copied())
+            } else {
+                one_word_value(word, PROFILE_FLAG).map(Some)
+            }
+        })
         .collect();
     let expected: &[Option<&str>] = if profile == APPARMOR_PROFILE {
         &[]
@@ -1081,10 +1087,36 @@ fn bootstrap_profile(args: &[Value], profile: &str) -> Vec<String> {
         .into_iter()
         .map(|failure| format!("the bootstrap: {failure}"))
         .collect();
-    if words[separator..].contains(&PROFILE_FLAG) {
+    if states_flag(&words[separator..], PROFILE_FLAG) {
         failures.push(format!("the daemon itself is passed {PROFILE_FLAG}"));
     }
     failures
+}
+
+/// The value of `word` when it is `flag` in clap's one-word spelling, `--flag=<value>`.
+fn one_word_value<'a>(word: &'a str, flag: &str) -> Option<&'a str> {
+    word.strip_prefix(flag)?.strip_prefix('=')
+}
+
+/// Whether `words` state `flag` in either spelling clap reads: `--flag <value>` or
+/// `--flag=<value>`.
+fn states_flag(words: &[&str], flag: &str) -> bool {
+    words
+        .iter()
+        .any(|word| *word == flag || one_word_value(word, flag).is_some())
+}
+
+/// The hosted daemon never listens on development TCP, maps a peer uid or takes a cgroup root.
+fn forbidden_daemon_flags(words: &[&str]) -> Vec<String> {
+    words
+        .iter()
+        .filter(|word| {
+            word.starts_with("--tcp-")
+                || states_flag(&[word], "--allow-uid")
+                || word.starts_with("--cgroup-root")
+        })
+        .map(|word| format!("the daemon is started with {word}"))
+        .collect()
 }
 
 fn pairs(args: &[Value]) -> Vec<(&str, &str)> {
@@ -1131,7 +1163,7 @@ fn check_daemon(pod: &Value, expect: &Expect) -> Vec<String> {
     }
     if expect.execution {
         failures.extend(bootstrap_profile(args, &expect.apparmor_profile));
-    } else if words.contains(&PROFILE_FLAG) {
+    } else if states_flag(&words, PROFILE_FLAG) {
         failures.push(format!(
             "the daemon is started with {PROFILE_FLAG} without the execution bootstrap"
         ));
@@ -1173,12 +1205,7 @@ fn check_daemon(pod: &Value, expect: &Expect) -> Vec<String> {
             failures.push(format!("the daemon is started without {required}"));
         }
     }
-    for word in &words {
-        if word.starts_with("--tcp-") || *word == "--allow-uid" || word.starts_with("--cgroup-root")
-        {
-            failures.push(format!("the daemon is started with {word}"));
-        }
-    }
+    failures.extend(forbidden_daemon_flags(&words));
     let operations = value("--ops-listen").unwrap_or("");
     if !operations.ends_with(":9090")
         || !array(daemon, "/ports")
@@ -1788,9 +1815,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        Expect, Posture, base_values, bootstrap_profile, check_certificate_names,
-        check_network_policy, check_services, merged, pod_posture, profile_flag, refused_cases,
-        released_sources,
+        Expect, Posture, base_values, bootstrap_profile, check_certificate_names, check_daemon,
+        check_network_policy, check_services, forbidden_daemon_flags, merged, pod_posture,
+        profile_flag, refused_cases, released_sources,
     };
     use crate::chart_yaml;
 
@@ -2030,6 +2057,49 @@ mod tests {
                 "{names}"
             );
         }
+    }
+
+    /// clap reads `--flag=value` as `--flag value`, so every flag the lane refuses by name is
+    /// refused in its one-word spelling too.
+    #[test]
+    fn a_refused_daemon_flag_in_its_one_word_spelling_is_refused() {
+        let daemon = |args: &[&str]| {
+            json!({"containers": [{
+                "name": "daemon",
+                "command": ["/usr/local/bin/substrate-daemon"],
+                "args": args,
+            }]})
+        };
+        for word in [
+            "--apparmor-profile=substrate-host-exec-v1",
+            "--apparmor-profile=",
+        ] {
+            let failures = check_daemon(&daemon(&[word]), &Expect::lane());
+            assert!(
+                failures
+                    .iter()
+                    .any(|failure| failure.contains("without the execution bootstrap")),
+                "{word} admitted without the bootstrap: {failures:?}"
+            );
+        }
+        assert!(
+            !check_daemon(&daemon(&[]), &Expect::lane())
+                .iter()
+                .any(|failure| failure.contains("without the execution bootstrap"))
+        );
+        for words in [
+            &["--allow-uid", "0"][..],
+            &["--allow-uid=0"],
+            &["--allow-uid="],
+            &["--tcp-listen=127.0.0.1:1"],
+            &["--cgroup-root=/sys/fs/cgroup"],
+        ] {
+            assert!(
+                !forbidden_daemon_flags(words).is_empty(),
+                "{words:?} admitted"
+            );
+        }
+        assert!(forbidden_daemon_flags(&["--allow-uids-x", "--state", "/s"]).is_empty());
     }
 
     #[test]
@@ -2411,6 +2481,15 @@ mod tests {
             .is_empty()
         );
         assert!(!bootstrap(&["--", "--apparmor-profile", NAMED], NAMED).is_empty());
+        assert!(
+            bootstrap(
+                &["--apparmor-profile=substrate-host-exec-v1-lane-a", "--"],
+                NAMED
+            )
+            .is_empty()
+        );
+        assert!(!bootstrap(&["--apparmor-profile=", "--"], NAMED).is_empty());
+        assert!(!bootstrap(&["--apparmor-profile=", "--"], default).is_empty());
         assert!(
             !bootstrap(
                 &[
