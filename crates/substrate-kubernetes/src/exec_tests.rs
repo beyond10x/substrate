@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde_json::{Value, json};
 use substrate_executor::frame::{Applied, Control, ExitRecord, Frame, Refusal};
 use substrate_executor::spec::RunSpec;
@@ -26,6 +26,7 @@ use substrate_wire::{
     Signal, StorageLimit, WorkspaceAccess, WritableGitRoot, WritableHostRoot, WritableRoot,
 };
 
+use crate::driver_tests::ManualClock;
 use crate::lease::Clock;
 use crate::logs::EXECUTOR_PROTOCOL;
 use crate::names::{self, DEPLOYMENT_LABEL, MANAGED_BY, MANAGED_BY_LABEL, OPERATION_ANNOTATION};
@@ -40,21 +41,6 @@ const WORKSPACE: &str = "ws_0001";
 const NODE: &str = "node-a";
 const SNAPSHOT: &str = "sha256:snapshot-under-test";
 const POD_CREATE: &str = "POST /api/v1/namespaces/substrate/pods";
-
-struct ManualClock {
-    base: Instant,
-    wall_base: DateTime<Utc>,
-}
-
-impl Clock for ManualClock {
-    fn now(&self) -> Instant {
-        self.base
-    }
-
-    fn wall(&self) -> DateTime<Utc> {
-        self.wall_base
-    }
-}
 
 /// The daemon's ledger, in memory: one row per reserved name, paged as the store pages it.
 #[derive(Default)]
@@ -162,6 +148,21 @@ fn kubeconfig_with(fake: &FakeCluster, extension: Option<Value>) -> Vec<u8> {
     serde_json::to_vec(&config).expect("the kubeconfig serializes")
 }
 
+/// A driver over `fake` that records in `ledger` and reads `clock`, not yet opened.
+fn driver_over(
+    fake: &FakeCluster,
+    ledger: &Arc<MemoryLedger>,
+    clock: &Arc<ManualClock>,
+) -> NamespaceDriver {
+    NamespaceDriver::parse_with_clock(
+        &kubeconfig_with(fake, Some(extension())),
+        DEPLOYMENT,
+        Arc::clone(ledger) as Arc<dyn BackendLedger>,
+        Arc::clone(clock) as Arc<dyn Clock>,
+    )
+    .expect("the configuration loads")
+}
+
 /// A client of the fake with no driver settings: the kubelet, an operator or another party.
 fn admin(fake: &FakeCluster) -> Api {
     let bytes = kubeconfig_with(fake, None);
@@ -186,6 +187,7 @@ struct Rig {
     fake: FakeCluster,
     driver: NamespaceDriver,
     ledger: Arc<MemoryLedger>,
+    clock: Arc<ManualClock>,
     admin: Api,
     pvc: String,
     pvc_uid: String,
@@ -204,16 +206,8 @@ async fn rig() -> Rig {
     .expect("the policy is stored");
     fake.enforce_restricted(true);
     let ledger = Arc::new(MemoryLedger::default());
-    let driver = NamespaceDriver::parse_with_clock(
-        &kubeconfig_with(&fake, Some(extension())),
-        DEPLOYMENT,
-        Arc::clone(&ledger) as Arc<dyn BackendLedger>,
-        Arc::new(ManualClock {
-            base: Instant::now(),
-            wall_base: Utc::now(),
-        }),
-    )
-    .expect("the configuration loads");
+    let clock = ManualClock::new();
+    let driver = driver_over(&fake, &ledger, &clock);
     driver.open().await.expect("the driver opens");
     let generation = driver.binding().expect("bound").config_generation();
     driver.publish_exec_snapshot(SNAPSHOT, generation);
@@ -257,6 +251,7 @@ async fn rig() -> Rig {
         fake,
         driver,
         ledger,
+        clock,
         admin,
         pvc,
         pvc_uid,
@@ -1174,3 +1169,6 @@ async fn a_gone_log_leaves_the_exec_unknown_without_an_exit() {
         "a refusal never read is not counted"
     );
 }
+
+#[path = "restart_tests.rs"]
+mod restart;

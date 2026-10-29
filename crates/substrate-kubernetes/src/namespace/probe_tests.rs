@@ -13,12 +13,14 @@ use substrate_executor::frame::{Applied, Control, ExitRecord, Frame, Stream};
 use substrate_executor::serve::{open_workspace, serve};
 use substrate_executor::spec::RunSpec;
 use substrate_host::{BackendKind, BackendRole, Driver, DriverErrorClass};
-use substrate_kubernetes_client::fake::{ExecAnswer, ExecRequest, FakeCluster};
-use substrate_kubernetes_client::{Api, ListForm};
+use substrate_kubernetes_client::fake::{ExecAnswer, ExecRequest, FakeCluster, Fault};
+use substrate_kubernetes_client::{Api, ListForm, Method};
 use substrate_wire::{CapabilitySnapshot, HostDriverKind, Signal};
 
 use super::NamespaceDriver;
-use crate::driver_tests::{DEPLOYMENT, ManualClock, MemoryLedger, admin, driver, passing_fake};
+use crate::driver_tests::{
+    DEPLOYMENT, ManualClock, MemoryLedger, admin, driver, driver_over, passing_fake,
+};
 use crate::lease::HELD_FOR;
 use crate::names::{self, DEPLOYMENT_LABEL, MANAGED_BY, MANAGED_BY_LABEL, OPERATION_ANNOTATION};
 use crate::{EXECUTOR_HANDSHAKE_FAILED, pod};
@@ -462,6 +464,63 @@ async fn objects_an_earlier_probe_left_are_removed_before_the_next() {
         );
     }
     assert_eq!(lock(&rig.ran).len(), 1, "the leftover Pod was never run");
+}
+
+/// § 5's probe row across a restart (§ 12 U11): a process whose probe could not delete its
+/// objects stops, its rows unsettled and bound. The process that takes the namespace over, over
+/// the same ledger, removes them under the uid rule before its own probe creates anything.
+#[tokio::test]
+async fn probe_objects_a_stopped_process_left_are_removed_by_the_next_process() {
+    let mut rig = rig(Child::Exact, None).await;
+    let failing = |path: &str| Fault::Answer {
+        method: Method::DELETE,
+        path: format!("/api/v1/namespaces/substrate/{path}/sbx-pr-"),
+        status: 500,
+        body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "code": 500, "message": "etcdserver: request timed out"}),
+    };
+    for path in ["pods", "pods", "persistentvolumeclaims"] {
+        rig.fake.fault(failing(path));
+    }
+    rig.driver.probe().await.expect("the first process probes");
+    let left: Vec<_> = rig
+        .ledger
+        .rows_of(BackendKind::Probe)
+        .into_iter()
+        .filter(|row| row.settled_at.is_none())
+        .collect();
+    assert_eq!(left.len(), 3, "{left:?}");
+    for row in &left {
+        assert!(row.uid.is_some(), "{} is bound", row.name);
+        assert!(rig.present(&row.name), "{} was left", row.name);
+    }
+
+    let reopened = driver_over(&rig.fake, &rig.clock, &rig.ledger, DEPLOYMENT);
+    let held = reopened
+        .open()
+        .await
+        .expect_err("the stopped process's Lease is not yet expired");
+    assert_eq!(held.code, crate::LEASE_HELD, "{}", held.message);
+    rig.clock.set(Duration::from_secs(30));
+    reopened.open().await.expect("the Lease is taken over");
+    drop(std::mem::replace(&mut rig.driver, reopened));
+
+    rig.driver.probe().await.expect("the next process probes");
+    for row in &left {
+        assert!(!rig.present(&row.name), "{} is gone", row.name);
+        assert!(
+            rig.ledger.row(&row.name).settled_at.is_some(),
+            "{}'s row is settled",
+            row.name
+        );
+    }
+    assert!(
+        rig.ledger
+            .rows_of(BackendKind::Probe)
+            .iter()
+            .all(|row| row.settled_at.is_some()),
+        "the next process's own probe left nothing"
+    );
+    assert_eq!(lock(&rig.ran).len(), 2);
 }
 
 #[tokio::test]

@@ -24,9 +24,10 @@ use substrate_host::{
 };
 use substrate_store::{BackendObjectKind, BackendObjectRole, Scope, Store};
 use substrate_wire::{
-    CapabilitySnapshot, ExecOutputQuery, ExecSignalInput, ExecStartInput, FileAbsence,
-    FileObservation, FileReadQuery, FileReadResult, LeaseObservation, OperationOutcome,
-    OperationState, OutputSlice, Workspace, WorkspaceAbsence, WorkspaceCreateInput,
+    CapabilitySnapshot, Exec, ExecExit, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput,
+    ExecState, FileAbsence, FileObservation, FileReadQuery, FileReadResult, LeaseObservation,
+    OperationOutcome, OperationState, OutputSlice, Workspace, WorkspaceAbsence,
+    WorkspaceCreateInput,
 };
 use tempfile::TempDir;
 use tower::ServiceExt as _;
@@ -60,6 +61,12 @@ struct Fixture {
     bound: Mutex<Option<Duration>>,
     /// When set, every start is refused before anything is created (`NotDispatched`).
     refuse: AtomicBool,
+    /// When set, every start answers the exec running (`Observed`).
+    run: AtomicBool,
+    /// When set, a restart's question about an exec answers it exited 4 with stdout.
+    end_on_recovery: AtomicBool,
+    /// Every exec a restart asked about, as the daemon recorded it.
+    recovered: Mutex<Vec<ExecObservation>>,
 }
 
 impl Fixture {
@@ -233,7 +240,7 @@ impl Driver for Fixture {
         &self,
         id: &str,
         _workspace_root_name: &str,
-        _input: &ExecStartInput,
+        input: &ExecStartInput,
     ) -> DispatchOutcome<ExecObservation> {
         let rows = self
             .store
@@ -250,6 +257,33 @@ impl Driver for Fixture {
                 "exec",
             ));
         }
+        if self.run.load(Ordering::SeqCst) {
+            return DispatchOutcome::Observed(ExecObservation {
+                resource: Exec {
+                    unrecorded_output: None,
+                    id: id.to_owned(),
+                    kind: ExecKind::Exec,
+                    workspace: input.workspace.clone(),
+                    state: ExecState::Running,
+                    observed_at: Utc::now(),
+                    requested: input.sandbox.clone(),
+                    applied: None,
+                    exit: None,
+                    usage: None,
+                    lease: None,
+                    refusal: None,
+                },
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                stdout_kept: None,
+                stderr_kept: None,
+                output_complete: false,
+                cgroup: Some(pod_name(id)),
+                leader_pid: None,
+            });
+        }
         DispatchOutcome::OutcomeUnknown(DriverError::failed(
             "exec.containment-unproven",
             "The fixture cannot prove whether the exec runs.",
@@ -258,6 +292,29 @@ impl Driver for Fixture {
 
     async fn observe_exec(&self, _id: &str) -> Result<ExecObservation, DriverError> {
         Err(DriverError::not_found())
+    }
+
+    async fn recover_exec(
+        &self,
+        previous: &ExecObservation,
+    ) -> Result<ExecObservation, DriverError> {
+        self.recovered
+            .lock()
+            .expect("fixture lock")
+            .push(previous.clone());
+        if !self.end_on_recovery.load(Ordering::SeqCst) {
+            return self.observe_exec(&previous.resource.id).await;
+        }
+        let mut ended = previous.clone();
+        ended.resource.state = ExecState::Exited;
+        ended.resource.exit = Some(ExecExit {
+            code: Some(4),
+            signal: None,
+        });
+        ended.resource.observed_at = Utc::now();
+        ended.stdout = b"before the restart".to_vec();
+        ended.output_complete = true;
+        Ok(ended)
     }
 
     async fn output(&self, id: &str, query: &ExecOutputQuery) -> Result<OutputSlice, DriverError> {
@@ -314,6 +371,9 @@ impl Harness {
             rows_at_dispatch: Mutex::new(Vec::new()),
             bound: Mutex::new(None),
             refuse: AtomicBool::new(false),
+            run: AtomicBool::new(false),
+            end_on_recovery: AtomicBool::new(false),
+            recovered: Mutex::new(Vec::new()),
         });
         let app = App::new(Arc::clone(&store), driver.clone(), DEPLOYMENT);
         (
@@ -825,4 +885,55 @@ async fn the_ledger_port_stamps_rows_with_the_daemon_authority_clock() {
         .expect("probe rows");
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!((rows[0].created_at, rows[0].settled_at), (at, Some(at)));
+}
+
+/// Design 34 § 5, the exec start row's restart column, through a real daemon restart: an exec
+/// that was running when the daemon stopped is asked about with the exec as the restart pass
+/// recorded it (`unknown`, its own id, workspace and request), because a driver that kept nothing
+/// in memory answers from that and its backend ledger. An end the driver then shows is kept: the
+/// exit and the output replace `unknown`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_asks_the_driver_with_the_recorded_exec_and_keeps_the_end_it_shows() {
+    let (harness, driver) = Harness::fixture(true);
+    let (status, created) = harness.create_workspace("01JBACKENDRECOVERCREATE01").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let workspace = workspace_id(&created);
+    driver.run.store(true, Ordering::SeqCst);
+    let (status, started) = harness
+        .start_exec("01JBACKENDRECOVEREXEC0001", &workspace)
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let exec = exec_id(&harness, "01JBACKENDRECOVEREXEC0001");
+
+    driver.end_on_recovery.store(true, Ordering::SeqCst);
+    let restarted = harness.restart(driver.clone());
+    restarted.sweep_expired().await;
+
+    let asked = driver.recovered.lock().expect("fixture lock").clone();
+    let first = asked.first().expect("the restart asked the driver");
+    assert_eq!(first.resource.id, exec);
+    assert_eq!(first.resource.state, ExecState::Unknown);
+    assert_eq!(first.resource.workspace, workspace);
+    assert_eq!(
+        first.resource.requested.capability_snapshot,
+        started["result"]["requested"]["capability_snapshot"]
+            .as_str()
+            .expect("the requested snapshot")
+    );
+    let stored = harness
+        .store
+        .exec(&scope(), &exec)
+        .expect("exec read")
+        .expect("exec recorded");
+    assert_eq!(stored.resource.state, ExecState::Exited);
+    assert_eq!(
+        stored.resource.exit,
+        Some(ExecExit {
+            code: Some(4),
+            signal: None
+        })
+    );
+    assert_eq!(stored.stdout, b"before the restart");
+    assert!(stored.output_complete);
+    assert_eq!(harness.physically_absent(&exec), Some(false));
 }

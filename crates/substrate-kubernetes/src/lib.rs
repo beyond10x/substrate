@@ -118,6 +118,13 @@ impl substrate_host::Driver for NamespaceDriver {
         self.exec_observe(id).await
     }
 
+    async fn recover_exec(
+        &self,
+        previous: &substrate_host::ExecObservation,
+    ) -> Result<substrate_host::ExecObservation, substrate_host::DriverError> {
+        self.exec_recover(previous).await
+    }
+
     async fn output(
         &self,
         id: &str,
