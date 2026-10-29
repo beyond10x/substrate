@@ -341,6 +341,12 @@ fn lane_profile() -> String {
     )
 }
 
+/// The node-profile `DaemonSet`, by the name the chart gives it. Only its pods carry the
+/// `node-profiles` component label; the object itself carries the chart's common labels.
+fn node_profiles_daemonset() -> String {
+    format!("{RELEASE}-node-profiles")
+}
+
 /// What removes the lane's own profile from the kernel, run on the node: the parser reading the
 /// exact source the installer wrote for `profile` under the chart's default
 /// `nodeProfiles.kubeletRoot`. It names no other profile.
@@ -1179,10 +1185,9 @@ fn installation_diagnosis(lane: &Lane<'_>) -> String {
         "daemonset",
         "-n",
         NODE_PROFILES_NAMESPACE,
-        "-l",
-        "app.kubernetes.io/component=node-profiles",
+        &node_profiles_daemonset(),
         "-o",
-        "jsonpath={range .items[*]}{.metadata.name} ready {.status.numberReady} of {.status.desiredNumberScheduled}{end}",
+        "jsonpath={.metadata.name} ready {.status.numberReady} of {.status.desiredNumberScheduled}",
     ]);
     let logs = ask(&[
         "logs",
@@ -1226,6 +1231,8 @@ struct DaemonProcess {
     ordinal: usize,
     node: String,
     container: Value,
+    /// The daemon container's containerd id, for `crictl exec` diagnostics on its node.
+    container_id: String,
     runtime: Value,
     init: String,
     init_status: String,
@@ -1292,6 +1299,7 @@ impl DaemonProcess {
         Ok(Self {
             ordinal,
             runtime: inspected["info"]["runtimeSpec"].clone(),
+            container_id: id,
             node,
             container,
             init,
@@ -1407,13 +1415,16 @@ fn execution_bootstrap(
         "wait": true
     }});
     let (status, executed) = call(&pod, "POST", "/v1/execs", Some(&exec))?;
-    ensure!(
-        status == 200
-            && executed["result"]["state"] == "exited"
-            && executed["result"]["exit"] == json!({"code": 0, "signal": null})
-            && executed["result"]["applied"]["network"] == "none",
-        "the confined exec answered {status}: {executed}"
-    );
+    if !(status == 200
+        && executed["result"]["state"] == "exited"
+        && executed["result"]["exit"] == json!({"code": 0, "signal": null})
+        && executed["result"]["applied"]["network"] == "none")
+    {
+        bail!(
+            "the confined exec answered {status}: {executed}; {}",
+            exec_diagnosis(lane, &pods[0], &machine)
+        );
+    }
     let id = executed["result"]["id"].as_str().unwrap_or_default();
     let (status, stdout) = call(
         &pod,
@@ -1433,6 +1444,50 @@ fn execution_bootstrap(
             .collect::<Vec<_>>()
             .join(" and ")
     )))
+}
+
+/// What the daemon's confinement probe could have tripped on, as its node and its own container
+/// see it: the capability facts it published, its cgroup, the delegated root it writes, and one
+/// bubblewrap sandbox started inside its container under the same `AppArmor` and seccomp profiles.
+fn exec_diagnosis(lane: &Lane<'_>, pod: &DaemonProcess, machine: &Value) -> String {
+    let answer = |result: Result<String>| match result {
+        Ok(text) => text.trim().to_owned(),
+        Err(error) => format!("<{error:#}>"),
+    };
+    let inside = |argv: &[&str]| {
+        let mut command = vec!["crictl", "exec", pod.container_id.as_str()];
+        command.extend_from_slice(argv);
+        answer(on_node(lane, &pod.node, &command))
+    };
+    let facts = machine["result"]["facts"].to_string();
+    let cgroup = answer(on_node(
+        lane,
+        &pod.node,
+        &["cat", &format!("/proc/{}/cgroup", pod.daemon)],
+    ));
+    let root = inside(&[
+        "ls",
+        "-ln",
+        "/sys/fs/cgroup/cgroup.procs",
+        "/sys/fs/cgroup/cgroup.subtree_control",
+    ]);
+    let controllers = inside(&["cat", "/sys/fs/cgroup/cgroup.controllers"]);
+    let sandbox = inside(&[
+        "/usr/bin/bwrap",
+        "--unshare-all",
+        "--disable-userns",
+        "--die-with-parent",
+        "--ro-bind",
+        "/",
+        "/",
+        "/usr/bin/true",
+    ]);
+    format!(
+        "diagnosis of {}: published facts {facts}; daemon cgroup {cgroup:?}; delegated root \
+         {root:?} with controllers {controllers:?}; a bubblewrap sandbox in its container: \
+         {sandbox:?}",
+        pod.name()
+    )
 }
 
 /// The syscall names of a seccomp document, profile or OCI runtime spec alike.
@@ -1503,10 +1558,9 @@ fn localhost_apparmor(lane: &Lane<'_>, pods: &[DaemonProcess]) -> Result<Outcome
         "daemonset",
         "-n",
         NODE_PROFILES_NAMESPACE,
-        "-l",
-        "app.kubernetes.io/component=node-profiles",
+        &node_profiles_daemonset(),
         "-o",
-        "jsonpath={.items[0].status.numberReady}",
+        "jsonpath={.status.numberReady}",
     ])?;
     ensure!(
         ready.trim() == pods.len().to_string(),
@@ -2796,6 +2850,26 @@ mod tests {
         assert!(
             !argv[2].ends_with(&format!("/{APPARMOR_PROFILE}.apparmor")),
             "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn the_node_profile_daemonset_is_found_by_the_name_the_chart_gives_it() {
+        let template = repository_file("deploy/helm/substrate/templates/node-profiles.yaml");
+        assert!(
+            template.contains(
+                "{{- $name := printf \"%s-node-profiles\" (include \"substrate.name\" .) -}}"
+            ),
+            "the node-profile DaemonSet's name moved"
+        );
+        let helpers = repository_file("deploy/helm/substrate/templates/_helpers.tpl");
+        assert!(
+            helpers.contains("{{- .Release.Name -}}"),
+            "substrate.name is no longer the release name"
+        );
+        assert_eq!(
+            node_profiles_daemonset(),
+            format!("{RELEASE}-node-profiles")
         );
     }
 
