@@ -32,6 +32,22 @@ capability fact or an unrecorded driver side effect.
 | Stack adoption | independent consumers prove the public contract rather than sibling implementation paths | a consumer records adoption in its own repository | at least one product execution path uses the remote SDK and published contract evidence | externally gated |
 | Hosted composition | identity, placement and product services operate Substrate without moving their policy into it | remote conformance and an external adoption record are complete | production deployment evidence shows the execution data plane remains standalone and policy-free | pending |
 
+## Definition of done
+
+Operator decision, 2026-10-29 (`approval-record:definition-of-done`). Substrate is done when all
+four hold:
+
+1. **Remote serving** meets its exit criterion: clean-room conformance passes against a remote
+   instance.
+2. **Kubernetes deployment and driver** meets its exit criterion: the node-bound serving profile
+   of ADR 0046 and the namespace workspace/exec driver both pass shared conformance.
+3. **Stack adoption** meets its exit criterion: one product execution path uses the remote SDK and
+   published contract evidence.
+4. The O1 evidence in `atlas/ROADMAP.md` is recorded against those three.
+
+Follow-up tracks, not part of done: **Firecracker driver** (needs a KVM-capable host), **Docker
+driver** and **Hosted composition**.
+
 The Kubernetes and Docker driver tracks are not the `pod` and `oci` adapters. An adapter serves the
 confinement API in substrate-host to an embedder; a driver serves the whole wire through the daemon
 (ADR 0044 decision 8).
