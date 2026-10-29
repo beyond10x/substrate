@@ -95,6 +95,27 @@ impl NamespaceDriver {
     /// release; `kubernetes.api-failed` when the driver is not open or an object could not be
     /// created. Every fact the probe proves is then absent.
     pub async fn probe(&self) -> Result<(), StartupRefusal> {
+        let probed = self.probe_once().await;
+        self.opening_settled.send_replace(true);
+        probed
+    }
+
+    /// Whether the first open sequence has settled (§ 6.1): the open was refused, or the first
+    /// probe after it ran, whatever it proved. The snapshot taken from then on is the one the
+    /// daemon's readiness reads (ADR 0045 D5 A).
+    #[must_use]
+    pub fn opening_settled(&self) -> bool {
+        *self.opening_settled.borrow()
+    }
+
+    /// Resolves once [`NamespaceDriver::opening_settled`] holds, at once when it already does.
+    pub async fn opening_settles(&self) {
+        let mut settled = self.opening_settled.subscribe();
+        // The sender lives as long as `self`, so the wait ends only by the flag.
+        let _ = settled.wait_for(|settled| *settled).await;
+    }
+
+    async fn probe_once(&self) -> Result<(), StartupRefusal> {
         let Some(binding) = self.binding() else {
             return Err(refusal(API_FAILED, "the namespace driver is not open"));
         };
@@ -205,11 +226,14 @@ impl NamespaceDriver {
                 namespace = %self.config.namespace,
                 "the namespace driver is open"
             ),
-            Err(refused) => tracing::warn!(
-                code = refused.code,
-                message = %refused.message,
-                "the namespace driver is not open; every driver fact is absent"
-            ),
+            Err(refused) => {
+                tracing::warn!(
+                    code = refused.code,
+                    message = %refused.message,
+                    "the namespace driver is not open; every driver fact is absent"
+                );
+                self.opening_settled.send_replace(true);
+            }
         }
     }
 

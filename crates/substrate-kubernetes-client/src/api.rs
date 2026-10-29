@@ -58,6 +58,8 @@ pub enum ApiError {
     Answered {
         /// The HTTP status.
         status: u16,
+        /// The API's own bounded `Status.reason`, or empty when the answer carries none.
+        reason: String,
         /// The call, the status and the API's own bounded `Status.message`.
         detail: String,
     },
@@ -232,6 +234,12 @@ impl Api {
     /// longer equal to it, which the clearing could not find.
     pub fn status_message(&self, body: &[u8]) -> String {
         self.quote(&status_message(body))
+    }
+
+    /// The API's own `Status.reason` in `body` (`Forbidden`, `Conflict`, ...), quoted as
+    /// [`Api::status_message`] quotes the message, or nothing.
+    pub fn status_reason(&self, body: &[u8]) -> String {
+        self.quote(&status_member(body, "reason"))
     }
 
     /// `text`, a message the API echoed, as an error quotes it: cleared of the bearer token, then
@@ -440,6 +448,7 @@ impl Api {
             Ok((200..=202, body)) => answered_object(&body, what),
             Ok((status, body)) => Err(ApiError::Answered {
                 status,
+                reason: self.status_reason(&body),
                 detail: format!("{what} answered {status}: {}", self.status_message(&body)),
             }),
             Err(error) => Err(ApiError::Unanswered(error)),
@@ -461,6 +470,7 @@ impl Api {
             (404, _) => Ok(None),
             (status, body) => Err(ApiError::Answered {
                 status,
+                reason: self.status_reason(&body),
                 detail: format!("get answered {status}: {}", self.status_message(&body)),
             }),
         }
@@ -493,6 +503,7 @@ impl Api {
             Ok((200 | 201, body)) => answered_object(&body, "update"),
             Ok((status, body)) => Err(ApiError::Answered {
                 status,
+                reason: self.status_reason(&body),
                 detail: format!("update answered {status}: {}", self.status_message(&body)),
             }),
             Err(error) => Err(ApiError::Unanswered(error)),
@@ -546,6 +557,7 @@ impl Api {
             (200 | 202, _) => Ok(false),
             (status, body) => Err(ApiError::Answered {
                 status,
+                reason: self.status_reason(&body),
                 detail: format!("delete answered {status}: {}", self.status_message(&body)),
             }),
         }
@@ -723,6 +735,7 @@ impl Api {
             if status != 200 {
                 return Err(ApiError::Answered {
                     status,
+                    reason: self.status_reason(&body),
                     detail: format!(
                         "the {what} list answered {status}: {}",
                         self.status_message(&body)
@@ -988,9 +1001,14 @@ pub(crate) fn container_name(name: &str) -> Result<(), ApiError> {
 /// The API's own `Status.message`, whole, or nothing. Neither cleared of the credential nor
 /// bounded: quote it through [`Api::status_message`], which does both in that order.
 fn status_message(body: &[u8]) -> String {
+    status_member(body, "message")
+}
+
+/// The API's own `Status` member `name` when it is a string, whole, or nothing.
+fn status_member(body: &[u8], name: &str) -> String {
     serde_json::from_slice::<Value>(body)
         .ok()
-        .and_then(|status| status["message"].as_str().map(str::to_owned))
+        .and_then(|status| status[name].as_str().map(str::to_owned))
         .unwrap_or_default()
 }
 

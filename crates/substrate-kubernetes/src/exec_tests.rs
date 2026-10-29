@@ -658,6 +658,20 @@ async fn a_quota_refusal_is_exec_capacity_and_any_other_403_is_api_failed() {
     };
     assert_eq!(other.code, API_FAILED);
     assert_eq!(other.class, DriverErrorClass::Failed);
+
+    // The quota message under another reason is not a quota refusal either.
+    rig.fake.fault(Fault::Answer {
+        method: Method::POST,
+        path: "/api/v1/namespaces/substrate/pods".to_owned(),
+        status: 403,
+        body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "Invalid", "code": 403, "message": "pods \"sbx-ex-x\" is forbidden: exceeded quota: substrate-lane"}),
+    });
+    let DispatchOutcome::NotDispatched(reasoned) =
+        rig.start("exec_reasoned", &input(&["/bin/true"])).await
+    else {
+        panic!("a 403 was not a refusal");
+    };
+    assert_eq!(reasoned.code, API_FAILED);
 }
 
 /// § 4: a name held by an object that is not ours is a retriable failure; the holder is never

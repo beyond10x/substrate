@@ -611,3 +611,49 @@ async fn a_probe_in_flight_across_a_lost_and_retaken_lease_does_not_stand_for_st
         "a proof begun under the lost Lease is published under the retaken one"
     );
 }
+
+/// § 6.1 and ADR 0045 D5 A: the first open sequence settles when the open is refused, or when the
+/// first probe after a successful open has run, whatever it proved. An open alone does not settle
+/// it, because the facts readiness reads arrive with the probe.
+#[tokio::test]
+async fn the_first_open_sequence_settles_on_a_refused_open_or_after_the_first_probe() {
+    let fake = passing_fake();
+    let clock = ManualClock::new();
+    let (refused, _ledger) = driver(&fake, &clock);
+    assert!(!refused.opening_settled(), "nothing has run yet");
+    fake.set_rules(vec![
+        json!({"verbs": ["get"], "apiGroups": [""], "resources": ["secrets"]}),
+    ]);
+    refused.lease_round().await;
+    assert!(!refused.opened());
+    assert!(refused.opening_settled(), "a refused open settles it");
+    tokio::time::timeout(Duration::from_secs(5), refused.opening_settles())
+        .await
+        .expect("a settled open sequence is awaited at once");
+
+    let opened = rig(Child::Exact, None).await;
+    assert!(opened.driver.opened());
+    assert!(
+        !opened.driver.opening_settled(),
+        "an open whose first probe has not run has not settled"
+    );
+    opened.driver.probe().await.expect("the probe runs");
+    assert!(
+        opened.driver.opening_settled(),
+        "the first probe settles it"
+    );
+
+    let other = r#"{"protocol":"substrate-executor/0","version":"0.0.0","source":"x"}"#;
+    let failed = rig(Child::Exact, Some(other.to_owned())).await;
+    assert!(!failed.driver.opening_settled());
+    let handshake = failed
+        .driver
+        .probe()
+        .await
+        .expect_err("the handshake fails");
+    assert_eq!(handshake.code, EXECUTOR_HANDSHAKE_FAILED);
+    assert!(
+        failed.driver.opening_settled(),
+        "a failed first probe settles it too, with its facts absent"
+    );
+}

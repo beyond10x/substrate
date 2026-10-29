@@ -92,6 +92,9 @@ pub struct NamespaceDriver {
     incomplete_reviews: AtomicU64,
     execs: crate::exec::Execs,
     probe: Mutex<probe::ProbeState>,
+    /// Whether the first open sequence has finished or failed (§ 6.1): the open was refused, or
+    /// the first probe after it ran. Set once and never cleared.
+    opening_settled: tokio::sync::watch::Sender<bool>,
     /// The daemon's event retention, which the snapshot states as `events.retention-events`.
     event_retention: u64,
     /// Whether this host serves explicit leases, which the daemon keeps.
@@ -175,6 +178,7 @@ impl NamespaceDriver {
             incomplete_reviews: AtomicU64::new(0),
             execs: crate::exec::Execs::default(),
             probe: Mutex::new(probe::ProbeState::default()),
+            opening_settled: tokio::sync::watch::Sender::new(false),
             event_retention: DEFAULT_EVENT_RETENTION,
             lease_clock: lease_clock_is_provable(),
         })
@@ -306,10 +310,12 @@ impl NamespaceDriver {
             Err(ApiError::Answered {
                 status: 403,
                 detail,
+                ..
             }) if detail.contains(RESTRICTED_VIOLATION) => Ok(()),
             Err(ApiError::Answered {
                 status: 403,
                 detail,
+                ..
             }) if detail.contains("violates PodSecurity") => Err(refusal(
                 POD_SECURITY_UNENFORCED,
                 format!(

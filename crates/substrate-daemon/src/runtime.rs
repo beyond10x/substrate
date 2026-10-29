@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::app::{
-    ConnectionGauge, Listener, MaintenanceTask, Operations, RequestMetrics, development_router,
-    hosted_router, is_capability_fact_name, record_request,
+    ConnectionGauge, Listener, MaintenanceTask, Operations, RequestMetrics, StartupFacts,
+    development_router, hosted_router, is_capability_fact_name, record_request,
 };
 use crate::delegation::{DelegatedContextPolicy, TrustedKey};
 use crate::hosted::{HostedAdmission, HostedIdentityConfig, require_hosted_authority};
@@ -757,8 +757,15 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     let maintenance = MaintenanceTasks::start(&app);
     // Design 34 § 6.1: steps 2 to 7 run, and run again, in the driver's own task; until they
     // succeed every driver fact is absent and the daemon still serves.
+    // ADR 0045 D5 A: readiness reads the snapshot taken once that first open sequence has
+    // finished or failed, never one taken before its probe could run.
+    let opening_settled = namespace.as_ref().map(|namespace| {
+        let namespace = Arc::clone(namespace);
+        async move { namespace.opening_settles().await }
+    });
     let _driver_task = DriverTask(namespace.map(|namespace| tokio::spawn(namespace.serve())));
-    let _ops_listener = start_ops_listener(&app, &maintenance, config.ops.as_ref()).await?;
+    let _ops_listener =
+        start_ops_listener(&app, &maintenance, config.ops.as_ref(), opening_settled).await?;
     if let Some(tcp) = config.tcp.as_ref() {
         let result = serve_tcp(Arc::clone(&app), tcp).await;
         maintenance.abort();
@@ -2008,10 +2015,15 @@ impl Drop for OpsListener {
 
 /// Binds and starts the operational listener when one is declared. It is bound before any
 /// control listener, so the readiness a probe reads is `503` until a control listener is bound.
+///
+/// Readiness reads one startup snapshot (ADR 0045 D5 A). Without `opening_settled` the driver's
+/// open has already finished, so the snapshot is taken now; with it, the snapshot is taken once
+/// it resolves, and the `driver` check fails until then.
 async fn start_ops_listener(
     app: &Arc<App>,
     maintenance: &MaintenanceTasks,
     config: Option<&OpsListenerConfig>,
+    opening_settled: Option<impl Future<Output = ()> + Send + 'static>,
 ) -> anyhow::Result<Option<OpsListener>> {
     let Some(config) = config else {
         return Ok(None);
@@ -2019,16 +2031,28 @@ async fn start_ops_listener(
     let listener = TcpListener::bind(config.listen)
         .await
         .map_err(|_| anyhow!("ops.listener-config-invalid: bind the operational listener"))?;
+    let startup = StartupFacts::default();
+    if opening_settled.is_none() {
+        startup.take(&app.driver.machine().facts);
+    }
     let operations = Operations::new(
         Arc::clone(app),
         maintenance.handles(),
         config.require_facts.clone(),
+        startup.clone(),
         substrate_host::output_stall_terminations,
     );
     info!(listen = %config.listen, "substrate operational listener ready");
-    Ok(Some(OpsListener(tokio::spawn(serve_ops(
-        listener, operations,
-    )))))
+    let driver = Arc::clone(&app.driver);
+    let snapshot = async move {
+        if let Some(settled) = opening_settled {
+            settled.await;
+            startup.take(&driver.machine().facts);
+        }
+    };
+    Ok(Some(OpsListener(tokio::spawn(async move {
+        tokio::join!(serve_ops(listener, operations), snapshot);
+    }))))
 }
 
 /// One exchange per connection, no keep-alive, no upgrade, no body read, no credential read.

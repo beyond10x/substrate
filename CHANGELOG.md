@@ -37,7 +37,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   extension `b10x-substrate/namespace-driver`; nothing else is read, no ambient kubeconfig and no
   in-cluster account. A file that does not load stops startup with `kubernetes.config-invalid`, and
   host-only flags are refused (`config.driver-conflict`). A cluster check that fails leaves every
-  driver fact absent while the daemon serves; each failure's code is logged. The driver's Role
+  driver fact absent while the daemon serves; each failure's code is logged. `/readyz` reads the
+  snapshot taken when the first cluster check fails or its first probe ends. The driver's Role
   needs `get` and `create` on `pods/exec`, because the API server authorizes the exec WebSocket as
   `get`, and `get` and `list` on `networkpolicies`. A ResourceQuota refusal is `workspace.capacity`
   or `exec.capacity` (429). `workspace.adopt` is refused `workspace.adopt-unserved` before any name
