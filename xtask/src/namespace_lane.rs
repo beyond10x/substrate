@@ -11,15 +11,23 @@
 //! uses `b10x-substrate-kubernetes-client`, never `kubectl`, and reads only the kubeconfig it
 //! creates or is given: never `KUBECONFIG` and never `~/.kube`. Every command it starts gets
 //! `KUBECONFIG` set to the run's own file, and it refuses a kubeconfig whose server is not
-//! `https://127.0.0.1:<port>`, kind's loopback endpoint, or that lies under `~/.kube`. The cluster
-//! is named `substrate-namespace-lane-<id>`, fresh per run; `kind create` and `kind delete` always
-//! name it and the run's kubeconfig. The deletion is armed only once `kind create` succeeded, runs
-//! on every exit path and on SIGINT or SIGTERM, and the commands that remove the cluster and the
-//! run's local registry by hand are printed when each is created. Given `--admin-kubeconfig`, the
-//! verb creates no cluster and deletes only the two namespaces it created.
+//! `https://127.0.0.1:<port>`, kind's loopback endpoint. The cluster is named
+//! `substrate-namespace-lane-<id>`, fresh per run; `kind create` and `kind delete` always name it
+//! and the run's kubeconfig. The deletion is armed only once `kind create` succeeded, runs on
+//! every exit path and on SIGINT or SIGTERM, and the commands that remove the cluster and the
+//! run's local registry by hand are printed when each is created.
+//!
+//! Given `--admin-kubeconfig`, the verb creates no cluster and deletes only the two namespaces it
+//! created, and it acts only on a cluster this lane created. Before reading the file it refuses a
+//! default kubeconfig: one under `~/.kube` of `HOME` or of the current uid's passwd entry, or a
+//! file the `KUBECONFIG` list names. It then refuses a cluster or user member kind never writes
+//! (`tls-server-name`, `proxy-url`, `exec`, `auth-provider` among them), and a current context or
+//! cluster that is not `kind-substrate-namespace-lane-<id>`; and before any write, a cluster whose
+//! API lists no node `substrate-namespace-lane-<id>-control-plane`.
 //!
 //! It prints `Namespace-lane: <sha> <observation-count> <RFC 3339 UTC>` only when every declared
-//! observation ran (held or not), `HEAD` did not move and the checkout was clean before and after.
+//! observation ran (held or not), what the run created was removed, no signal arrived, `HEAD` did
+//! not move and the checkout was clean before and after.
 
 use std::fs;
 use std::io::Write as _;
@@ -91,7 +99,9 @@ pub struct ObserveArgs {
     node_image: String,
     /// The JSON admin kubeconfig of an existing kind cluster: no cluster and no registry is
     /// created, and only the run's two namespaces are deleted. Its server must be
-    /// `https://127.0.0.1:<port>`, and it may not lie under `~/.kube`.
+    /// `https://127.0.0.1:<port>`, its context and cluster `kind-substrate-namespace-lane-<id>`
+    /// with that cluster's control-plane node, and it may be neither under `~/.kube` nor named by
+    /// `KUBECONFIG`.
     #[arg(long)]
     admin_kubeconfig: Option<PathBuf>,
 }
@@ -110,14 +120,16 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         Verb::Observe(args) => {
             crate::chart_cluster::arm_signals()?;
             let result = run_observe(args, &INTERRUPTED);
-            if INTERRUPTED.load(Ordering::SeqCst) {
+            // A record is printed only when no signal had arrived; one that arrives after it
+            // changes nothing the run printed.
+            if INTERRUPTED.load(Ordering::SeqCst) && !matches!(result, Ok((_, true))) {
                 eprintln!(
                     "namespace lane: interrupted by a signal; the run removed what it created and \
                      is no record"
                 );
                 return result.and(Ok(ExitCode::FAILURE));
             }
-            result
+            result.map(|(code, _)| code)
         }
     }
 }
@@ -262,6 +274,246 @@ pub fn loopback_port(server: &str) -> Result<u16, String> {
     }
 }
 
+/// The home directories whose `.kube` the lane refuses: `env_home` (from `HOME`), when set and
+/// not empty, and the home directory of the current uid's passwd entry, so the refusal holds
+/// whatever `HOME` says.
+///
+/// # Errors
+///
+/// Neither is known, so no `~/.kube` could be refused.
+pub fn home_directories(
+    env_home: Option<PathBuf>,
+    passwd_home: Option<PathBuf>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut homes: Vec<PathBuf> = env_home
+        .into_iter()
+        .chain(passwd_home)
+        .filter(|home| !home.as_os_str().is_empty())
+        .collect();
+    homes.dedup();
+    if homes.is_empty() {
+        return Err(
+            "neither HOME nor the passwd entry of the current uid names a home directory, so the \
+             lane cannot refuse ~/.kube; it refuses to run"
+                .into(),
+        );
+    }
+    Ok(homes)
+}
+
+/// The home directory of the current uid's passwd entry, read with `getpwuid_r`.
+pub fn passwd_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    // SAFETY: `getuid` takes no argument and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let mut size = 4096_usize;
+    while size <= 1_048_576 {
+        let mut buffer = vec![0 as libc::c_char; size];
+        // SAFETY: `passwd` is plain data; all-zero is a valid value that `getpwuid_r` overwrites.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: every pointer names a live local of the stated size; the strings `entry` points
+        // at live in `buffer`, which outlives every read of them below.
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                &raw mut entry,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &raw mut found,
+            )
+        };
+        if status == libc::ERANGE {
+            size *= 4;
+            continue;
+        }
+        if status != 0 || found.is_null() || entry.pw_dir.is_null() {
+            return None;
+        }
+        // SAFETY: `pw_dir` is a NUL-terminated string inside `buffer`, checked non-null above.
+        let directory = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+        return Some(PathBuf::from(std::ffi::OsStr::from_bytes(
+            directory.to_bytes(),
+        )));
+    }
+    None
+}
+
+/// `path` made absolute: canonical when it resolves, else joined to the working directory.
+fn absolute(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_or_else(|_| path.to_path_buf(), |working| working.join(path))
+        }
+    })
+}
+
+/// Refuses `path` when it is a default kubeconfig: under `.kube` in any of `homes`, or one of the
+/// files the `KUBECONFIG` list `ambient` names, compared by canonical path and by file identity;
+/// before anything reads it.
+///
+/// # Errors
+///
+/// Why the path is a default kubeconfig.
+pub fn refuse_default_kubeconfigs(
+    path: &Path,
+    homes: &[PathBuf],
+    ambient: Option<&std::ffi::OsStr>,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    for home in homes {
+        refuse_home_kube(path, Some(home))?;
+    }
+    let given = absolute(path);
+    let identity = |path: &Path| {
+        fs::metadata(path)
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()))
+    };
+    let given_identity = identity(path);
+    for entry in std::env::split_paths(ambient.unwrap_or_default()) {
+        if entry.as_os_str().is_empty() {
+            continue;
+        }
+        let same = absolute(&entry) == given
+            || given_identity.is_some_and(|id| identity(&entry) == Some(id));
+        if same {
+            return Err(format!(
+                "{} is the file KUBECONFIG names ({}), a default kubeconfig; the lane reads only \
+                 the kubeconfig it creates or one written for a lane cluster elsewhere",
+                path.display(),
+                entry.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The cluster members kind writes into a kubeconfig, and the only ones a given one may carry:
+/// any other can point the client at another cluster (`tls-server-name`, `proxy-url`) or change
+/// whom it trusts.
+pub const GIVEN_CLUSTER_MEMBERS: [&str; 2] = ["server", "certificate-authority-data"];
+/// The user members a given kubeconfig may carry: kind's client certificate and key, or a bearer
+/// token; any other runs a plugin (`exec`, `auth-provider`) or changes who the client is.
+pub const GIVEN_USER_MEMBERS: [&str; 3] = ["client-certificate-data", "client-key-data", "token"];
+
+/// Refuses a given kubeconfig whose current cluster or user carries a member outside
+/// [`GIVEN_CLUSTER_MEMBERS`] and [`GIVEN_USER_MEMBERS`], naming it.
+///
+/// # Errors
+///
+/// The first such member, or no current cluster or user object.
+pub fn refuse_foreign_members(config: &Value) -> Result<(), String> {
+    let context = config["current-context"]
+        .as_str()
+        .ok_or("the kubeconfig names no current context")?;
+    let entry = config["contexts"]
+        .as_array()
+        .and_then(|contexts| contexts.iter().find(|entry| entry["name"] == context))
+        .map(|entry| &entry["context"])
+        .ok_or("the kubeconfig names no current context entry")?;
+    for (list, member_of, name_member, allowed) in [
+        (
+            "clusters",
+            "cluster",
+            "cluster",
+            GIVEN_CLUSTER_MEMBERS.as_slice(),
+        ),
+        ("users", "user", "user", GIVEN_USER_MEMBERS.as_slice()),
+    ] {
+        let name = entry[name_member]
+            .as_str()
+            .ok_or_else(|| format!("the current context names no {member_of}"))?;
+        let object = config[list]
+            .as_array()
+            .and_then(|entries| entries.iter().find(|entry| entry["name"] == name))
+            .and_then(|entry| entry[member_of].as_object())
+            .ok_or_else(|| format!("the kubeconfig names no {member_of} {name:?}"))?;
+        if let Some(member) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+            return Err(format!(
+                "the kubeconfig's {member_of} member {member} is refused: kind writes only \
+                 {allowed:?}, and {member} can reach another cluster or change who the client is"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The run id of a given kubeconfig made for a cluster this lane created: its current context
+/// and that context's cluster are both `kind-substrate-namespace-lane-<id>`, with one `<id>` for
+/// which `substrate-namespace-lane-<id>-control-plane` is a node name.
+///
+/// # Errors
+///
+/// What did not match, naming the context and the cluster.
+pub fn lane_cluster_id(config: &Value) -> Result<String, String> {
+    let context = config["current-context"].as_str().unwrap_or_default();
+    let cluster = config["contexts"]
+        .as_array()
+        .and_then(|contexts| contexts.iter().find(|entry| entry["name"] == context))
+        .and_then(|entry| entry["context"]["cluster"].as_str())
+        .unwrap_or_default();
+    let prefix = format!("kind-{CLUSTER_PREFIX}");
+    let id = context
+        .strip_prefix(&prefix)
+        .filter(|id| !id.is_empty() && cluster == context)
+        .filter(|id| substrate_kubernetes_client::is_dns_label(&control_plane(id)));
+    id.map(str::to_owned).ok_or_else(|| {
+        format!(
+            "the kubeconfig's current context {context:?} and its cluster {cluster:?} are not \
+             both {prefix}<id> for one run id: a cluster this lane did not create, refused before \
+             provisioning"
+        )
+    })
+}
+
+/// The control-plane node kind names for the lane cluster of run `id`.
+pub fn control_plane(id: &str) -> String {
+    format!("{}-control-plane", cluster_name(id))
+}
+
+/// Refuses a cluster whose node list, `nodes`, holds no control plane of the lane cluster `id`.
+///
+/// # Errors
+///
+/// The expected node and the nodes the API listed.
+pub fn refuse_foreign_nodes(id: &str, nodes: &[String]) -> Result<(), String> {
+    let expected = control_plane(id);
+    if nodes.contains(&expected) {
+        return Ok(());
+    }
+    let shown: Vec<&String> = nodes.iter().take(8).collect();
+    Err(format!(
+        "the API lists no node {expected:?}, only {} node(s) {shown:?}: a cluster this lane did \
+         not create, refused before provisioning",
+        nodes.len()
+    ))
+}
+
+/// Lists the nodes through `admin` and refuses a cluster without lane `id`'s control plane;
+/// read-only, before any write.
+async fn verify_lane_nodes(admin: &substrate_kubernetes_client::Api, id: &str) -> Result<()> {
+    let listed = admin
+        .list(
+            "/api/v1/nodes",
+            "NodeList",
+            substrate_kubernetes_client::ListForm::Metadata,
+            100,
+            4,
+        )
+        .await
+        .map_err(|error| anyhow!("listing the nodes before provisioning: {error}"))?;
+    let nodes: Vec<String> = listed
+        .items
+        .iter()
+        .filter_map(|item| item["metadata"]["name"].as_str().map(str::to_owned))
+        .collect();
+    refuse_foreign_nodes(id, &nodes).map_err(|error| anyhow!(error))
+}
+
 /// Refuses a kubeconfig path under `home/.kube`, before anything reads it.
 ///
 /// # Errors
@@ -272,16 +524,6 @@ pub fn refuse_home_kube(path: &Path, home: Option<&Path>) -> Result<(), String> 
         return Ok(());
     };
     let kube = home.join(".kube");
-    let absolute = |path: &Path| {
-        fs::canonicalize(path).unwrap_or_else(|_| {
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                std::env::current_dir()
-                    .map_or_else(|_| path.to_path_buf(), |working| working.join(path))
-            }
-        })
-    };
     let resolved = absolute(path);
     if resolved.starts_with(&kube) || resolved.starts_with(absolute(&kube)) {
         return Err(format!(
@@ -443,27 +685,41 @@ struct Cluster<'a> {
     kind: &'a Path,
     name: String,
     kubeconfig: PathBuf,
+    removed: bool,
 }
 
-impl Drop for Cluster<'_> {
-    fn drop(&mut self) {
+impl Cluster<'_> {
+    /// Deletes the cluster once; why it failed, printed and returned, so the run is no record.
+    fn remove(&mut self) -> Option<String> {
         use std::os::unix::process::CommandExt as _;
+        if std::mem::replace(&mut self.removed, true) {
+            return None;
+        }
         let deleted = tool(self.kind, &self.kubeconfig)
             .args(["delete", "cluster", "--name", &self.name, "--kubeconfig"])
             .arg(&self.kubeconfig)
             .stdin(Stdio::null())
             .process_group(0)
             .status();
-        if !deleted
+        if deleted
             .as_ref()
             .is_ok_and(std::process::ExitStatus::success)
         {
-            eprintln!(
-                "namespace lane: deleting kind cluster {} failed ({deleted:?}); remove it with \
-                 `kind delete cluster --name {}`",
-                self.name, self.name
-            );
+            return None;
         }
+        let failure = format!(
+            "deleting kind cluster {} failed ({deleted:?}); remove it with `kind delete cluster \
+             --name {}`",
+            self.name, self.name
+        );
+        eprintln!("namespace lane: {failure}");
+        Some(failure)
+    }
+}
+
+impl Drop for Cluster<'_> {
+    fn drop(&mut self) {
+        self.remove();
     }
 }
 
@@ -472,27 +728,41 @@ struct Registry<'a> {
     docker: &'a Path,
     name: String,
     kubeconfig: PathBuf,
+    removed: bool,
 }
 
-impl Drop for Registry<'_> {
-    fn drop(&mut self) {
+impl Registry<'_> {
+    /// Removes the container once; why it failed, printed and returned, so the run is no record.
+    fn remove(&mut self) -> Option<String> {
         use std::os::unix::process::CommandExt as _;
+        if std::mem::replace(&mut self.removed, true) {
+            return None;
+        }
         let removed = tool(self.docker, &self.kubeconfig)
             .args(["rm", "--force", &self.name])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .process_group(0)
             .status();
-        if !removed
+        if removed
             .as_ref()
             .is_ok_and(std::process::ExitStatus::success)
         {
-            eprintln!(
-                "namespace lane: removing the registry container {} failed ({removed:?}); remove \
-                 it with `docker rm --force {}`",
-                self.name, self.name
-            );
+            return None;
         }
+        let failure = format!(
+            "removing the registry container {} failed ({removed:?}); remove it with `docker rm \
+             --force {}`",
+            self.name, self.name
+        );
+        eprintln!("namespace lane: {failure}");
+        Some(failure)
+    }
+}
+
+impl Drop for Registry<'_> {
+    fn drop(&mut self) {
+        self.remove();
     }
 }
 
@@ -507,13 +777,16 @@ pub enum Decision {
     Failed(String),
 }
 
-/// The decision for `outcomes`, one per observation name.
+/// The decision for `outcomes`, one per observation name. A run a signal `interrupted`, or one
+/// that failed to remove what it created (`removal_failures`), is no record: the Chart-lane rule.
 pub fn decision(
     outcomes: &[(String, Result<Outcome, String>)],
     sha: &str,
     head_after: &str,
     clean_before: bool,
     clean_after: bool,
+    interrupted: bool,
+    removal_failures: &[String],
 ) -> Decision {
     let mut missing = Vec::new();
     for name in OBSERVATIONS {
@@ -538,6 +811,15 @@ pub fn decision(
     if !missing.is_empty() {
         return Decision::Failed(missing.join("; "));
     }
+    if interrupted {
+        return Decision::NoRecord("a signal interrupted the run".to_owned());
+    }
+    if !removal_failures.is_empty() {
+        return Decision::NoRecord(format!(
+            "the run did not remove what it created: {}",
+            removal_failures.join("; ")
+        ));
+    }
     if head_after != sha {
         return Decision::NoRecord(format!(
             "HEAD moved from {sha} to {head_after} during the run"
@@ -552,7 +834,8 @@ pub fn decision(
     Decision::Record(OBSERVATIONS.len())
 }
 
-fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<ExitCode> {
+/// The run, and whether it printed the record line.
+fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<(ExitCode, bool)> {
     let root = crate::repo::root()?;
     let sha = git_text(&root, &["rev-parse", "HEAD"])?;
     let clean_before = git_text(&root, &["status", "--porcelain"])?.is_empty();
@@ -564,10 +847,11 @@ fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<ExitCode> {
 
     let mut cluster = None;
     let mut registry = None;
+    let mut lane_id = None;
     let image;
     let docker_kubeconfig;
     if let Some(given) = &args.admin_kubeconfig {
-        given_admin(given, &namespace, &admin_path)?;
+        lane_id = Some(given_admin(given, &namespace, &admin_path)?);
         image = format!("{BUSYBOX_REPOSITORY}@{BUSYBOX_DIGEST}");
         docker_kubeconfig = admin_path.clone();
     } else {
@@ -595,7 +879,10 @@ fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<ExitCode> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let outcomes = runtime.block_on(async {
+    if let Some(lane_id) = &lane_id {
+        runtime.block_on(verify_lane_nodes(&admin, lane_id))?;
+    }
+    let (outcomes, mut removal_failures) = runtime.block_on(async {
         let lane = observe::Lane {
             admin: &admin,
             namespace: &namespace,
@@ -627,23 +914,36 @@ fn run_observe(args: &ObserveArgs, stop: &AtomicBool) -> Result<ExitCode> {
                 })
                 .collect(),
         };
-        if cluster.is_none() {
-            lane.remove_namespaces().await;
-        }
-        outcomes
+        let removal_failures = if cluster.is_none() {
+            lane.remove_namespaces().await
+        } else {
+            Vec::new()
+        };
+        (outcomes, removal_failures)
     });
-    drop(registry);
-    drop(cluster);
-    finish(&root, &outcomes, &sha, clean_before)
+    removal_failures.extend(registry.as_mut().and_then(Registry::remove));
+    removal_failures.extend(cluster.as_mut().and_then(Cluster::remove));
+    finish(
+        &root,
+        &outcomes,
+        &sha,
+        clean_before,
+        &removal_failures,
+        stop,
+    )
 }
 
-/// The run's summary, one line per observation, then the record line or why there is none.
+/// The run's summary, one line per observation, then the record line or why there is none; and
+/// whether it printed the record. The record is printed only after the removal succeeded and
+/// when no signal arrived before it.
 fn finish(
     root: &Path,
     outcomes: &[(String, Result<Outcome, String>)],
     sha: &str,
     clean_before: bool,
-) -> Result<ExitCode> {
+    removal_failures: &[String],
+    stop: &AtomicBool,
+) -> Result<(ExitCode, bool)> {
     for (name, outcome) in outcomes {
         match outcome {
             Ok(Outcome::Held(evidence)) => println!("namespace lane: {name} held: {evidence}"),
@@ -655,33 +955,48 @@ fn finish(
     }
     let head_after = git_text(root, &["rev-parse", "HEAD"])?;
     let clean_after = git_text(root, &["status", "--porcelain"])?.is_empty();
-    match decision(outcomes, sha, &head_after, clean_before, clean_after) {
+    match decision(
+        outcomes,
+        sha,
+        &head_after,
+        clean_before,
+        clean_after,
+        stop.load(Ordering::SeqCst),
+        removal_failures,
+    ) {
         Decision::Record(count) => {
             println!("{}", record_line(TRAILER, sha, count, SystemTime::now()));
-            Ok(ExitCode::SUCCESS)
+            Ok((ExitCode::SUCCESS, true))
         }
         Decision::NoRecord(reason) => {
             eprintln!("namespace lane: every observation ran, but no record: {reason}");
-            Ok(ExitCode::FAILURE)
+            Ok((ExitCode::FAILURE, false))
         }
         Decision::Failed(reason) => {
             eprintln!("namespace lane: no record: {reason}");
-            Ok(ExitCode::FAILURE)
+            Ok((ExitCode::FAILURE, false))
         }
     }
 }
 
-/// Copies the given JSON admin kubeconfig to `admin_path`, its context naming `namespace`; refused
-/// under `~/.kube` before it is read, and for any server but kind's loopback endpoint.
-fn given_admin(given: &Path, namespace: &str, admin_path: &Path) -> Result<()> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    refuse_home_kube(given, home.as_deref()).map_err(|error| anyhow!(error))?;
+/// Copies the given JSON admin kubeconfig to `admin_path`, its context naming `namespace`, and
+/// returns the run id of the lane cluster it names. Refused before it is read when it is a default
+/// kubeconfig (under `~/.kube` or named by `KUBECONFIG`); then for any server but kind's loopback
+/// endpoint, any cluster or user member kind does not write, and any context or cluster name but
+/// `kind-substrate-namespace-lane-<id>`.
+fn given_admin(given: &Path, namespace: &str, admin_path: &Path) -> Result<String> {
+    let homes = home_directories(std::env::var_os("HOME").map(PathBuf::from), passwd_home())
+        .map_err(|error| anyhow!(error))?;
+    refuse_default_kubeconfigs(given, &homes, std::env::var_os("KUBECONFIG").as_deref())
+        .map_err(|error| anyhow!(error))?;
     let bytes =
         substrate_kubernetes_client::kubeconfig::read(given).map_err(|error| anyhow!(error))?;
     let mut config: Value = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow!("{} is not a JSON kubeconfig", given.display()))?;
     loopback_port(current_server(&config).map_err(|error| anyhow!(error))?)
         .map_err(|error| anyhow!(error))?;
+    refuse_foreign_members(&config).map_err(|error| anyhow!(error))?;
+    let id = lane_cluster_id(&config).map_err(|error| anyhow!(error))?;
     let context = config["current-context"]
         .as_str()
         .unwrap_or_default()
@@ -693,7 +1008,8 @@ fn given_admin(given: &Path, namespace: &str, admin_path: &Path) -> Result<()> {
     }) {
         entry["context"]["namespace"] = json!(namespace);
     }
-    write_private(admin_path, &config)
+    write_private(admin_path, &config)?;
+    Ok(id)
 }
 
 /// Creates the run's cluster `name`, its kubeconfig written to `kubeconfig` and nowhere else; the
@@ -746,6 +1062,7 @@ fn create_cluster<'a>(
         kind: &args.kind,
         name: name.to_owned(),
         kubeconfig: kubeconfig.to_path_buf(),
+        removed: false,
     })
 }
 
@@ -777,6 +1094,7 @@ fn start_registry<'a>(
         docker: &args.docker,
         name: name.clone(),
         kubeconfig: kubeconfig.to_path_buf(),
+        removed: false,
     };
     println!(
         "namespace lane: started the local registry {name}; a run killed before it removes it \
@@ -970,29 +1288,168 @@ mod tests {
                 Ok(Outcome::Held("held".to_owned()))
             }
         });
-        assert_eq!(decision(&ran, "a", "a", true, true), Decision::Record(8));
+        assert_eq!(
+            decision(&ran, "a", "a", true, true, false, &[]),
+            Decision::Record(8)
+        );
         assert!(matches!(
-            decision(&ran, "a", "b", true, true),
+            decision(&ran, "a", "b", true, true, false, &[]),
             Decision::NoRecord(_)
         ));
         assert!(matches!(
-            decision(&ran, "a", "a", false, true),
+            decision(&ran, "a", "a", false, true, false, &[]),
             Decision::NoRecord(_)
         ));
         assert!(matches!(
-            decision(&ran, "a", "a", true, false),
+            decision(&ran, "a", "a", true, false, false, &[]),
             Decision::NoRecord(_)
         ));
+        let Decision::NoRecord(interrupted) = decision(&ran, "a", "a", true, true, true, &[])
+        else {
+            panic!("a run a signal interrupted after its last observation printed a record");
+        };
+        assert!(interrupted.contains("signal"), "{interrupted}");
+        let removal = ["deleting namespace snl-x: the API did not answer".to_owned()];
+        let Decision::NoRecord(unremoved) = decision(&ran, "a", "a", true, true, false, &removal)
+        else {
+            panic!("a run that failed to remove what it created printed a record");
+        };
+        assert!(unremoved.contains("snl-x"), "{unremoved}");
         let mut short = ran;
         short.retain(|(name, _)| name != "O10");
         assert!(matches!(
-            decision(&short, "a", "a", true, true),
+            decision(&short, "a", "a", true, true, false, &[]),
             Decision::Failed(_)
         ));
         let failed = all(|_| Err("no cluster".to_owned()));
         assert!(matches!(
-            decision(&failed, "a", "a", true, true),
+            decision(&failed, "a", "a", true, true, false, &[]),
             Decision::Failed(_)
         ));
+    }
+
+    #[test]
+    fn a_failed_cluster_or_registry_removal_is_returned_once_and_withholds_the_record() {
+        let tools = tempfile::tempdir().expect("tools");
+        let failing = tools.path().join("failing");
+        fs::write(&failing, "#!/bin/sh\nexit 1\n").expect("stand-in");
+        fs::set_permissions(
+            &failing,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("mode");
+        let kubeconfig = tools.path().join("kubeconfig");
+        let mut cluster = Cluster {
+            kind: &failing,
+            name: cluster_name("x"),
+            kubeconfig: kubeconfig.clone(),
+            removed: false,
+        };
+        let failure = cluster.remove().expect("a failed delete is returned");
+        assert!(failure.contains("kind delete cluster --name"), "{failure}");
+        assert_eq!(cluster.remove(), None, "removal runs once");
+        let mut registry = Registry {
+            docker: &failing,
+            name: "r".to_owned(),
+            kubeconfig,
+            removed: false,
+        };
+        assert!(registry.remove().is_some());
+        let outcomes: Vec<(String, Result<Outcome, String>)> = OBSERVATIONS
+            .iter()
+            .map(|name| ((*name).to_owned(), Ok(Outcome::Held(String::new()))))
+            .collect();
+        assert!(matches!(
+            decision(&outcomes, "a", "a", true, true, false, &[failure]),
+            Decision::NoRecord(_)
+        ));
+    }
+
+    #[test]
+    fn the_home_kube_refusal_holds_from_the_passwd_entry_when_home_is_unset_or_elsewhere() {
+        let passwd = tempfile::tempdir().expect("passwd home");
+        let elsewhere = tempfile::tempdir().expect("HOME");
+        let kube = passwd.path().join(".kube").join("config");
+        for env_home in [
+            None,
+            Some(elsewhere.path().to_path_buf()),
+            Some(PathBuf::new()),
+        ] {
+            let homes = home_directories(env_home.clone(), Some(passwd.path().to_path_buf()))
+                .expect("homes");
+            let refused = refuse_default_kubeconfigs(&kube, &homes, None)
+                .expect_err("the passwd home's .kube");
+            assert!(refused.contains("~/.kube"), "{env_home:?}: {refused}");
+        }
+        assert!(home_directories(None, None).is_err());
+        assert!(home_directories(Some(PathBuf::new()), None).is_err());
+        let own = passwd_home().expect("the current uid has a passwd entry");
+        assert!(own.is_absolute(), "{}", own.display());
+    }
+
+    #[test]
+    fn only_a_lane_cluster_kubeconfig_names_a_run_id() {
+        let config = |context: &str, cluster: &str| {
+            json!({
+                "current-context": context,
+                "contexts": [{"name": context, "context": {"cluster": cluster, "user": "u"}}],
+            })
+        };
+        let lane = "kind-substrate-namespace-lane-0a1b2c3d4e5f";
+        assert_eq!(
+            lane_cluster_id(&config(lane, lane)),
+            Ok("0a1b2c3d4e5f".to_owned())
+        );
+        for (context, cluster) in [
+            ("kind-b10x-dev", "kind-b10x-dev"),
+            (lane, "kind-b10x-dev"),
+            ("kind-b10x-dev", lane),
+            (lane, "kind-substrate-namespace-lane-ffffffffffff"),
+            (
+                "kind-substrate-namespace-lane-",
+                "kind-substrate-namespace-lane-",
+            ),
+            ("substrate-namespace-lane-x", "substrate-namespace-lane-x"),
+            (
+                "kind-substrate-namespace-lane-A",
+                "kind-substrate-namespace-lane-A",
+            ),
+            (
+                "kind-substrate-namespace-lane-x.y",
+                "kind-substrate-namespace-lane-x.y",
+            ),
+        ] {
+            let refused = lane_cluster_id(&config(context, cluster)).expect_err(context);
+            assert!(refused.contains("this lane did not create"), "{refused}");
+            assert!(
+                refused.contains(context) && refused.contains(cluster),
+                "{refused}"
+            );
+        }
+        let long = format!("kind-{}", cluster_name(&"a".repeat(40)));
+        assert!(lane_cluster_id(&config(&long, &long)).is_err());
+    }
+
+    #[test]
+    fn a_cluster_without_the_lane_runs_control_plane_node_is_refused() {
+        let id = "0a1b2c3d4e5f";
+        let own = vec![
+            "substrate-namespace-lane-0a1b2c3d4e5f-control-plane".to_owned(),
+            "substrate-namespace-lane-0a1b2c3d4e5f-worker".to_owned(),
+        ];
+        assert_eq!(refuse_foreign_nodes(id, &own), Ok(()));
+        for nodes in [
+            vec!["b10x-dev-control-plane".to_owned()],
+            vec!["substrate-namespace-lane-ffffffffffff-control-plane".to_owned()],
+            vec!["substrate-namespace-lane-0a1b2c3d4e5f-worker".to_owned()],
+            Vec::new(),
+        ] {
+            let refused = refuse_foreign_nodes(id, &nodes).expect_err("foreign");
+            assert!(
+                refused.contains("substrate-namespace-lane-0a1b2c3d4e5f-control-plane"),
+                "{refused}"
+            );
+            assert!(refused.contains("this lane did not create"), "{refused}");
+        }
     }
 }
