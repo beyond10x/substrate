@@ -239,7 +239,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.24.0` in one invocation |
 | `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-four |
 | `chart-lane static [--helm <path>]` | a rendering of `deploy/helm/substrate` that breaks ADR 0046 (a second Service selecting the pods, a Service certificate name, an unretained ledger claim, a token, a capability, host namespace or host path the profile does not grant, an open NetworkPolicy rule), or a privilege, cgroup, mount, quota, transport or egress posture the chart renders instead of refusing | no — `chart-lane.yml` |
-| `chart-lane cluster --image <ref> --node-image <ref>` | creates and deletes its own kind cluster, then refuses a pod that is not ready on its own pool node, a certificate that verifies under the Service name, a ledger that does not survive a rolling restart, an undeclared egress that arrives, an execution pod `baseline` admits, or an uninstall that leaves more than the ledger claims; a scenario it cannot prove is reported absent | no — `chart-lane.yml` |
+| `chart-lane cluster --image <ref> --node-image <ref>` | creates and deletes its own kind cluster, then refuses a pod that is not ready on its own pool node, a certificate that verifies under the Service name, a ledger that does not survive a rolling restart, an undeclared egress that arrives, an execution pod `baseline` admits, or an uninstall that leaves more than the ledger claims; a scenario it cannot prove is reported absent. `--node-profiles` (K9 C, a workstation) runs one worker built from `fixtures/chart-lab/Dockerfile` and also refuses an image whose `org.opencontainers.image.revision` is not `HEAD`, a recipe not built on `--node-image`, and a worker without `AppArmor`, without `/sbin/apparmor_parser`, already holding the run's own profile name in the shared kernel, or without a cgroup v2 `cpu`/`memory`/`pids` hierarchy, naming every scenario that did not run; it names its profile `substrate-host-exec-v1-lane-<ulid>`, fresh per run (design 33 § 7), installs the execution-enabled chart with the node profiles under that `execution.appArmorProfile`, runs the four execution scenarios, removes only that profile, and prints `Chart-lane:` only when every scenario in `SCENARIOS` passed and the removal succeeded at an unmoved, clean `HEAD` | no — `chart-lane.yml`; `--node-profiles` by hand before a release |
 | `package-chart --version <v> --image-digest <d> --out <dir>` | produces the released chart, a byte-for-byte reproducible archive, with its version set and its default image pinned to the daemon digest | no — `release.yml` |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
@@ -484,8 +484,9 @@ commit** (ADR 0046, K7 and K9). The preflight waits for `.github/workflows/chart
 recorded `success` for that exact commit, as it does for `gate.yml`, and refuses a tag without one.
 Both steps count only a `push` run on `main` or a `workflow_dispatch` run of this repository: a
 pull-request run tested a merge, not the tagged tree. The scenarios the chart lane reports absent
-(always the four execution-enabled ones it cannot run on kind) are read from that run's
-annotations and printed under the chart lane in the release notes and both job summaries.
+(always the four execution-enabled ones it cannot run on a hosted kind node) are read from that
+run's annotations and printed under the chart lane in the release notes and both job summaries; the
+local record below is what proves those four.
 That workflow runs on every push to `main`, so every taggable commit has a run; on pull requests it
 runs only when the chart, its xtask modules, the daemon and the crates it links, the toolchain, the
 `Dockerfile` or a release workflow changes. An existing chart tag refuses a tag push before any
@@ -558,6 +559,52 @@ check and the same one-line, three-field rule as `Confinement-lane:`; a `Confine
 not satisfy it. The line is written into the GitHub release under *Quota lane* and into both job summaries, and a
 recovery dispatch may pass it as the `quota_evidence` input instead. The step's refusals are executed
 offline against throwaway tagged repositories by `xtask/tests/release_workflow.rs`.
+
+**A release that publishes the chart also requires a recorded local chart-lane run for the tagged
+commit** (ADR 0046, K9 C), in the same shape. The hosted chart lane reports the four
+execution-enabled scenarios absent, because a hosted node loads no Localhost seccomp or AppArmor
+profile. Before tagging, build the daemon image from that commit with
+`--build-arg SOURCE_SHA=<sha>` (the lane refuses an image whose `org.opencontainers.image.revision`
+is not `HEAD`), run `cargo xtask chart-lane cluster --node-profiles --image <ref> --node-image <ref>`
+with a clean checkout on a host whose kernel enables AppArmor, and put the line it prints in the
+annotated tag's message:
+
+```
+Chart-lane: <source-sha> <scenario-count> <RFC 3339 UTC>
+```
+
+The verb builds its kind node image from the committed
+[`fixtures/chart-lab/Dockerfile`](fixtures/chart-lab/Dockerfile): the hosted lane's
+`kindest/node` digest, which `--node-image` must name, plus the pinned `apparmor` package from the
+node's own Debian snapshot, its boot unit masked so the node never loads its distribution's
+profiles. The image is tagged `b10x-substrate-chart-lab:<key>` per checkout and never pushed. The
+cluster has one worker, because every kind node shares the host kernel and a second node's
+installer would find the first one's profile loaded without its own source. The worker gets the
+host's securityfs. Each run names its own AppArmor profile `substrate-host-exec-v1-lane-<ulid>`,
+a fresh lowercased ULID
+([design 33](docs/design/33-host-profile-name-parameter.md) § 7),
+so it never loads, selects or removes a profile it does not own; a `substrate-host-exec-v1` another
+workload holds in the shared kernel does not stop it. The chart is installed with one pod,
+`execution.enabled`, that name as `execution.appArmorProfile` and `nodeProfiles.enabled` in
+`privileged` namespaces, and the verb runs every scenario in the literal
+`SCENARIOS` array of [`xtask/src/chart_cluster.rs`](xtask/src/chart_cluster.rs): exactly the four
+the hosted lane reports absent, namely the bootstrap's drop to uid 65532 with a confined exec
+through it, the Localhost seccomp profile, the run's own enforced AppArmor label,
+and the 0400 key served after the drop. The six hosted scenarios stay the hosted lane's. A missing
+prerequisite is a refusal that names it and every scenario that did not run, and prints no record;
+the run's own name already loaded in the kernel is one, because the installer refuses a loaded
+profile whose source its fresh node does not hold and the run did not load it. After the scenarios
+the verb uninstalls the release, waits until none of its pods remain, and removes its own profile,
+by name, with `apparmor_parser --remove` on the node, which holds the source; a failed removal is
+no record and names the profile left loaded. A run that dies before teardown leaves only its own
+uniquely named profile loaded, which blocks no later run.
+`release.yml` refuses to publish without the line, refuses a record naming any other commit,
+refuses a count other than the number of entries in that array at the tagged commit (one quoted
+name per line, matching its declared length), and applies the same calendar, one-line and
+three-field rules; the line is written into the GitHub release under *Chart lane* and into both job
+summaries, and a recovery dispatch may pass it as the `chart_evidence` input instead. A tagged
+source without `deploy/helm/substrate` needs no record. The step's refusals are executed offline by
+`xtask/tests/release_workflow.rs`.
 
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
