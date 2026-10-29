@@ -1018,7 +1018,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_older_claim_is_refused_before_an_operation_body_is_read() {
-        let temporary = tempfile::tempdir().expect("temporary socket directory");
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let server = tokio::spawn(async move {
@@ -1052,7 +1052,7 @@ content-length: not-a-number\r\n\r\n",
 
     #[tokio::test]
     async fn an_event_stream_gap_preserves_its_code_and_cursor() {
-        let temporary = tempfile::tempdir().expect("temporary socket directory");
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let server = tokio::spawn(async move {

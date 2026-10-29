@@ -166,7 +166,7 @@ async fn livez_on(mut stream: TcpStream) -> Vec<u8> {
 /// served, and the global bound of eight still closes a ninth from a third source.
 #[tokio::test]
 async fn ops_security_one_source_holds_at_most_four_connections() {
-    let root = TempDir::new().expect("temporary root");
+    let root = unix_socket::tempdir("control.sock");
     let ops = unused_address();
     let mut child = unix_daemon_with_ops(root.path(), &ops.to_string())
         .spawn()
@@ -242,7 +242,7 @@ async fn ops_security_one_source_holds_at_most_four_connections() {
 /// over 32 headers or 16 KiB is not served.
 #[tokio::test]
 async fn ops_security_connection_bounds_hold_on_the_shipped_daemon() {
-    let root = TempDir::new().expect("temporary root");
+    let root = unix_socket::tempdir("control.sock");
     let ops = unused_address();
     let mut child = unix_daemon_with_ops(root.path(), &ops.to_string())
         .spawn()

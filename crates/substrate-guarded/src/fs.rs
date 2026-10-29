@@ -2074,8 +2074,7 @@ mod tests {
         let fifo = CString::new(mixed.join("a-fifo").into_os_string().into_vec()).expect("path");
         // SAFETY: `fifo` is a valid NUL-terminated path.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
-        let socket = std::os::unix::net::UnixListener::bind(mixed.join("b-socket")).expect("bind");
-        drop(socket);
+        drop(crate::test_unix_socket::bind_in(&mixed, "b-socket"));
         let raw_name = mixed.join(std::path::PathBuf::from(OsString::from_vec(
             b"c\xff-dir".to_vec(),
         )));

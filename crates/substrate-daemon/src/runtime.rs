@@ -2298,7 +2298,7 @@ mod tests {
 
     #[test]
     fn socket_cleanup_removes_bound_socket_on_early_drop() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = crate::test_unix_socket::tempdir("substrate.sock");
         let path = directory.path().join("substrate.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind socket");
         let cleanup = SocketCleanup(path.clone());
@@ -2940,7 +2940,7 @@ mod tests {
     async fn an_upgraded_websocket_hands_its_per_uid_connection_permit_to_its_stream() {
         const DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = crate::test_unix_socket::tempdir("substrate.sock");
         let socket_path = directory.path().join("substrate.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
         let uid = std::fs::metadata(&socket_path)

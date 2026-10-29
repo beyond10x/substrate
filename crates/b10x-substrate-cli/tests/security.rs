@@ -31,6 +31,11 @@ use tokio::net::{UnixListener, UnixStream};
 const ENVIRONMENT_SECRET: &str = "env-secret-7f3a9c41d2b84e6f";
 
 /// The shipped daemon binary, found or built as `scenarios.rs` does.
+#[path = "../../../test-support/readiness.rs"]
+mod readiness;
+#[path = "../../../test-support/unix_socket.rs"]
+mod unix_socket;
+
 fn daemon_binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY
@@ -87,12 +92,13 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
-    let data = tempfile::tempdir().expect("temporary parent");
+    let data = unix_socket::tempdir("owned/substrate.sock");
     let root = data.path().join("owned");
     let mut builder = ManagedDaemon::builder()
         .data_dir(&root)
         .deployment("cli_security")
-        .external_binary(daemon_binary());
+        .external_binary(daemon_binary())
+        .startup_timeout(readiness::DAEMON_READINESS);
     if let Some(cgroup) = std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT") {
         builder = builder.cgroup_root(cgroup);
     }
@@ -122,6 +128,8 @@ impl Drop for Relay {
 
 fn relay(upstream: &Path, dir: &Path) -> Relay {
     let socket = dir.join("relay.sock");
+    // Shorter than the fixture's own socket beside it, which `unix_socket::tempdir` sized.
+    unix_socket::assert_fits(&socket);
     let listener = UnixListener::bind(&socket).expect("relay socket binds");
     let streams: Streams = Arc::default();
     let recorded = Arc::clone(&streams);
@@ -794,7 +802,7 @@ async fn a_socket_value_is_never_a_network_address() {
 /// at every conventional location under the working directory, `HOME` and `XDG_RUNTIME_DIR`.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_socket_selected_connects_nowhere() {
-    let dir = tempfile::tempdir().expect("temporary home");
+    let dir = unix_socket::tempdir("home/.local/state/b10x/substrate/substrate.sock");
     let home = dir.path().join("home");
     let runtime = dir.path().join("run");
     let state = home.join(".local/state");

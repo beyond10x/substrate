@@ -53,6 +53,8 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) {
 
 #[path = "support/ports.rs"]
 mod ports;
+#[path = "../../../test-support/readiness.rs"]
+mod readiness;
 use ports::unused_address;
 
 /// What the scripted Identity does with one resolution request.
@@ -329,6 +331,7 @@ impl Daemon {
         let identity_ca = root.path().join("identity-ca.pem");
         write_file(&identity_ca, identity.certificate_pem.as_bytes(), 0o644);
         let address = unused_address();
+        let stderr_log = root.path().join("daemon.stderr");
         let mut command = Command::new(env!("CARGO_BIN_EXE_substrate-daemon"));
         command
             .arg("--socket")
@@ -350,7 +353,7 @@ impl Daemon {
             .arg("--hosted-identity-ca-bundle")
             .arg(&identity_ca)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(std::fs::File::create(&stderr_log).expect("daemon stderr log"))
             .kill_on_drop(true);
         let child = command.spawn().expect("spawn TLS daemon");
         let mut daemon = Self {
@@ -359,15 +362,24 @@ impl Daemon {
             address,
             trusted: connector(server.certificate_der.clone()),
         };
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + readiness::DAEMON_READINESS;
         loop {
             if let Some(status) = daemon.child.try_wait().expect("inspect daemon") {
-                panic!("TLS daemon exited before readiness: {status}");
+                let stderr = std::fs::read_to_string(&stderr_log).unwrap_or_default();
+                panic!("TLS daemon exited before readiness: {status}: {stderr}");
             }
             if daemon.try_stream().await.is_some() {
                 break;
             }
-            assert!(Instant::now() < deadline, "TLS daemon readiness timed out");
+            if Instant::now() >= deadline {
+                let _ = daemon.child.start_kill();
+                let _ = daemon.child.wait().await;
+                let stderr = std::fs::read_to_string(&stderr_log).unwrap_or_default();
+                panic!(
+                    "TLS daemon readiness timed out after {:?}: {stderr}",
+                    readiness::DAEMON_READINESS
+                );
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         daemon

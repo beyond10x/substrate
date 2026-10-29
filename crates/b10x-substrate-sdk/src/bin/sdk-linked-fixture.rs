@@ -1,4 +1,8 @@
 #[cfg(feature = "linked-daemon")]
+#[path = "../../../../test-support/readiness.rs"]
+mod readiness;
+
+#[cfg(feature = "linked-daemon")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if b10x_substrate_sdk::run_daemon_child_if_requested().await? {
@@ -11,6 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .data_dir(data_dir)
         .deployment("sdk_linked_test")
         .linked_current_exe()
+        .startup_timeout(readiness::DAEMON_READINESS)
         .start()
         .await?;
     let parent_pid = std::process::id();
