@@ -250,7 +250,7 @@ Pod, created like a workspace and an exec but with probe rows, then deleted unde
 
 | observation | fact |
 |---|---|
-| `substrate-executor fs check` in the keeper: `openat2` with `RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_XDEV`, a symlink escape refused, `renameat2` replacement | `workspace.guarded-io`, `workspace.openat2-beneath`, `workspace.atomic-replace` |
+| `substrate-executor fs check` in the keeper: `openat2` with `RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_XDEV`, three symlink escapes refused by `openat2` and by the served read, the served write's `renameat` replacement (a new inode; a descriptor on the old file keeps its bytes; no temporary left) | `workspace.guarded-io`, `workspace.openat2-beneath`, `workspace.atomic-replace` |
 | the probe Pod runs the executor's `probe-child`, which writes its argv as JSON; the argv holds `$(HOME)`, `$$`, a space and a non-ASCII byte; byte-exact | `exec.argv-only` |
 | the Pod ends, its log frames decode, and its `applied` record matches the rendered memory and CPU | `confinement.family.process-run`, `.process-watch`, `.output-read`, `.wait`, `.limits`, `.audit`, `.workspace` (design 30 § 4.3) |
 | `probe-child` forks a grandchild that writes a heartbeat to the PVC every 100 ms and exits; after the container is shown `terminated`, the keeper's `fs stat` sees the heartbeat unchanged for 2 s | `confinement.whole-tree-kill` |
