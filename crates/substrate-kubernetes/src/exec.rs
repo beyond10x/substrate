@@ -58,6 +58,9 @@ const WAIT_SLACK: Duration = Duration::from_mins(1);
 /// How long past its wall bound a Pod not shown ended is left before the driver deletes it
 /// (design 28): `activeDeadlineSeconds` is the kubelet's, and a Pod it never started never ends.
 const WALL_BOUND_GRACE: Duration = Duration::from_mins(1);
+/// How long after the API accepted the driver's deletion of an exec Pod the kubelet has to
+/// confirm it (design 28): a Pod still holding the bound uid then leaves the exec `unknown`.
+const DELETION_CONFIRM: Duration = Duration::from_mins(1);
 
 /// The exec state one driver keeps.
 #[derive(Debug, Default)]
@@ -89,6 +92,10 @@ struct Tracked {
     /// [`WALL_BOUND_GRACE`] past the start (design 28, design 34 § 9). A recovered exec is ended
     /// where it is recovered and carries none.
     wall_deletion_at: Option<DateTime<Utc>>,
+    /// When, on the driver's wall clock, the API first accepted the driver's deletion of the Pod
+    /// (a signal or the wall-bound deletion); [`DELETION_CONFIRM`] later a Pod still holding the
+    /// bound uid ends the exec `unknown`.
+    deletion_accepted_at: Option<DateTime<Utc>>,
 }
 
 /// How a gone Pod's container ended, as the watch shows it.
@@ -170,6 +177,7 @@ impl NamespaceDriver {
                 signal: None,
                 output_failure: None,
                 wall_deletion_at,
+                deletion_accepted_at: None,
             },
         );
         if !input.wait {
@@ -437,6 +445,13 @@ impl NamespaceDriver {
                 self.note(id, &pod);
                 if shows_end(&pod) {
                     self.finish(id, &pod, true).await
+                } else if self.deletion_unconfirmed(&tracked) {
+                    tracing::warn!(
+                        pod = tracked.pod,
+                        "an exec Pod's deletion was not confirmed within its bound; the run is \
+                         unknown and the garbage round deletes it again"
+                    );
+                    Ok(self.end(id, ExecState::Unknown, None, Output::Unknown))
                 } else if self.past_wall_bound(&tracked) {
                     self.delete_past_wall_bound(id, &tracked).await
                 } else {
@@ -462,10 +477,33 @@ impl NamespaceDriver {
                 .is_some_and(|at| self.wall_now() >= at)
     }
 
+    /// Design 28: whether [`DELETION_CONFIRM`] has passed, on the driver's wall clock, since the
+    /// API accepted the driver's deletion of the exec's Pod. The caller has read the Pod holding
+    /// the bound uid and not shown ended, so its container may still run.
+    fn deletion_unconfirmed(&self, tracked: &Tracked) -> bool {
+        tracked
+            .deletion_accepted_at
+            .and_then(|at| {
+                at.checked_add_signed(chrono::Duration::from_std(DELETION_CONFIRM).ok()?)
+            })
+            .is_some_and(|due| self.wall_now() >= due)
+    }
+
+    /// Records the first deletion of the exec's Pod the API accepted under the bound uid; a
+    /// deletion delivered again does not move it.
+    fn deletion_accepted(&self, id: &str) {
+        let now = self.wall_now();
+        if let Some(entry) = lock(&self.execs().tracked).get_mut(id) {
+            entry.deletion_accepted_at.get_or_insert(now);
+        }
+    }
+
     /// Design 28 and design 34 § 9: a Pod not ended 60 s after its wall bound is deleted as
     /// `signal: Kill` deletes one, under the bound uid, and the intent is kept so the exec ends as
     /// that signal once the Pod is shown gone and the garbage round delivers it again until then.
-    /// A Pod another uid holds under the name is never deleted: the precondition refuses it.
+    /// A Pod still holding the bound uid [`DELETION_CONFIRM`] after the deletion was accepted ends
+    /// the exec `unknown` instead. A Pod another uid holds under the name is never deleted: the
+    /// precondition refuses it.
     async fn delete_past_wall_bound(
         &self,
         id: &str,
@@ -478,8 +516,12 @@ impl NamespaceDriver {
         if let Some(entry) = lock(&self.execs().tracked).get_mut(id) {
             entry.signal = Some(Signal::Kill);
         }
-        self.deliver(&tracked.pod, &tracked.uid, KILL_GRACE_SECONDS)
-            .await?;
+        if self
+            .deliver(&tracked.pod, &tracked.uid, KILL_GRACE_SECONDS)
+            .await?
+        {
+            self.deletion_accepted(id);
+        }
         let path = format!("{}/{}", self.api().pods(), tracked.pod);
         match self
             .api()
@@ -592,12 +634,13 @@ impl NamespaceDriver {
                 signal: None,
                 output_failure: None,
                 wall_deletion_at: None,
+                deletion_accepted_at: None,
             },
         );
         let recovered = match output_bytes {
             Some(_) if ended => self.finish(id, &pod, true).await,
             _ => match self.deliver(&name, &uid, KILL_GRACE_SECONDS).await {
-                Ok(()) => Ok(self.end(id, ExecState::Unknown, None, Output::Unknown)),
+                Ok(_) => Ok(self.end(id, ExecState::Unknown, None, Output::Unknown)),
                 Err(error) => Err(error),
             },
         };
@@ -995,20 +1038,24 @@ impl NamespaceDriver {
         {
             entry.signal = Some(input.signal);
         }
-        self.deliver(&tracked.pod, &tracked.uid, grace).await?;
+        if self.deliver(&tracked.pod, &tracked.uid, grace).await? {
+            self.deletion_accepted(id);
+        }
         Ok(tracked.observation)
     }
 
-    async fn deliver(&self, pod: &str, uid: &str, grace: u64) -> Result<(), DriverError> {
+    /// Deletes the exec Pod under `uid`: `true` once the API accepted the deletion, `false` when
+    /// the precondition refused it because another uid holds the name.
+    async fn deliver(&self, pod: &str, uid: &str, grace: u64) -> Result<bool, DriverError> {
         let path = format!("{}/{pod}", self.api().pods());
         match self.api().delete_preconditioned(&path, grace, uid).await {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(true),
             Err(error) if error.status() == Some(409) => {
                 tracing::warn!(
                     pod,
                     "an exec Pod was replaced; the replacement is untouched"
                 );
-                Ok(())
+                Ok(false)
             }
             Err(error) => Err(api_failed(&error)),
         }
@@ -1052,31 +1099,41 @@ impl NamespaceDriver {
     }
 
     /// One maintenance round (§ 5 garbage and signal rows): every signal intent not yet shown
-    /// ended is delivered again as the same deletion, and every ended exec's Pod is deleted
-    /// under the uid rule, its row settled once it reads absent. Returns the rows settled.
+    /// ended is delivered again as the same deletion, an exec whose deletion the kubelet has not
+    /// confirmed within [`DELETION_CONFIRM`] is observed, which ends it `unknown` while its Pod
+    /// holds the bound uid (design 28), and every ended exec's Pod is deleted under the uid rule,
+    /// its row settled once it reads absent. Returns the rows settled.
     ///
     /// # Errors
     ///
     /// The ledger's own failure to page its rows.
     pub async fn exec_garbage_round(&self) -> Result<usize, DriverError> {
-        let intents: Vec<(String, String, u64)> = lock(&self.execs().tracked)
-            .values()
-            .filter(|tracked| !is_terminal(tracked.observation.resource.state))
-            .filter_map(|tracked| {
+        let intents: Vec<(String, String, String, u64)> = lock(&self.execs().tracked)
+            .iter()
+            .filter(|(_, tracked)| !is_terminal(tracked.observation.resource.state))
+            .filter_map(|(id, tracked)| {
                 let grace = match tracked.signal? {
                     Signal::Kill => KILL_GRACE_SECONDS,
                     Signal::Term | Signal::Int => TERM_GRACE_SECONDS,
                 };
-                Some((tracked.pod.clone(), tracked.uid.clone(), grace))
+                Some((id.clone(), tracked.pod.clone(), tracked.uid.clone(), grace))
             })
             .collect();
-        for (pod, uid, grace) in intents {
-            if let Err(error) = self.deliver(&pod, &uid, grace).await {
-                tracing::info!(
+        for (id, pod, uid, grace) in intents {
+            match self.deliver(&pod, &uid, grace).await {
+                Ok(true) => self.deletion_accepted(&id),
+                Ok(false) => {}
+                Err(error) => tracing::info!(
                     code = error.code,
                     pod,
                     "a signal is delivered again next round"
-                );
+                ),
+            }
+            let due = lock(&self.execs().tracked)
+                .get(&id)
+                .is_some_and(|tracked| self.deletion_unconfirmed(tracked));
+            if due && let Err(error) = self.exec_observe(&id).await {
+                tracing::info!(code = error.code, id, "an exec is read again next round");
             }
         }
         let garbage = lock(&self.execs().garbage).clone();
