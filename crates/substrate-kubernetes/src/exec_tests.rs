@@ -1715,5 +1715,134 @@ async fn a_term_whose_accepted_answer_was_lost_starts_the_bound_too() {
     );
 }
 
+/// Adversary pass 2, `story:kubernetes-collisions-metric`: the same exec Pod name held first by
+/// one foreign Pod and, once that one is removed, by another (a new uid) is two objects. A start
+/// retried over the first holder meets the same object and does not move the count.
+#[tokio::test]
+async fn adversary_one_name_held_by_two_foreign_pods_in_turn_counts_two() {
+    let rig = rig().await;
+    let id = "exec_held_in_turn";
+    let name = names::exec_pod(DEPLOYMENT, id);
+    let count = || substrate_host::Driver::backend_collisions(&rig.driver);
+    rig.fake
+        .seed("pods", json!({"metadata": {"name": name}, "spec": {}}))
+        .expect("a foreign Pod holds the name");
+    for attempt in 0..2 {
+        let DispatchOutcome::NotDispatched(_) = rig.start(id, &input(&["/bin/true"])).await else {
+            panic!("attempt {attempt}: a held name was dispatched");
+        };
+    }
+    assert_eq!(count(), Some(1), "one holder met twice is one object");
+    rig.admin
+        .delete(&format!("{}/{name}", rig.admin.pods()), 0)
+        .await
+        .expect("its owner removes the first holder");
+    rig.fake
+        .seed("pods", json!({"metadata": {"name": name}, "spec": {}}))
+        .expect("another foreign Pod takes the name");
+    let DispatchOutcome::NotDispatched(_) = rig.start(id, &input(&["/bin/true"])).await else {
+        panic!("a held name was dispatched");
+    };
+    assert_eq!(
+        count(),
+        Some(2),
+        "story:kubernetes-collisions-metric: a second object under the same name is counted"
+    );
+}
+
+/// Marks the exec Pod `name` deleted under its uid, as the API does when it acts on a deletion.
+async fn mark_deleting(rig: &Rig, name: &str) {
+    let mut deleting = rig.pod(name).expect("the Pod is present");
+    deleting["metadata"]["deletionTimestamp"] = json!(Utc::now().to_rfc3339());
+    deleting["metadata"]["deletionGracePeriodSeconds"] = json!(1);
+    rig.admin
+        .update(&format!("{}/{name}", rig.admin.pods()), &deleting)
+        .await
+        .expect("the API marks the Pod deleted");
+}
+
+fn lost_answer(method: Method, name: &str, status: u16) -> Fault {
+    Fault::Answer {
+        method,
+        path: format!("/api/v1/namespaces/substrate/pods/{name}"),
+        status,
+        body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "Timeout", "code": status, "message": "Timeout"}),
+    }
+}
+
+/// Adversary pass 2, `story:unconfirmed-pod-deletion-ends-unknown`, acceptance "a kill the API
+/// acted on whose answer was lost starts the bound at the first observation that sees it". The
+/// kill's answer is lost and `deliver_tracked`'s own read fails too: the signal returns the lost
+/// answer, records nothing, and the bound starts at the first observe that reads the Pod under
+/// its bound uid with `deletionTimestamp` (30 s), not at the signal (0 s). So 89 s is still
+/// running and 90 s is `Unknown`. With `read_deleting` only in the lost-answer read, or the
+/// acceptance taken at the signal, one of the two assertions fails.
+#[tokio::test]
+async fn adversary_a_lost_kill_whose_own_read_fails_starts_the_bound_at_the_first_observe() {
+    let rig = rig().await;
+    let id = "exec_read_lost_too";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    mark_deleting(&rig, &name).await;
+    rig.fake.fault(lost_answer(Method::DELETE, &name, 504));
+    rig.fake.fault(lost_answer(Method::GET, &name, 503));
+    let lost = rig
+        .driver
+        .exec_signal(id, &kill())
+        .await
+        .expect_err("the kill's answer is lost");
+    assert_eq!(lost.code, API_FAILED, "{}", lost.message);
+    assert!(
+        lost.message.contains("504"),
+        "the DELETE's answer: {}",
+        lost.message
+    );
+
+    rig.clock.set(Duration::from_secs(30));
+    let first = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(first.resource.state, ExecState::Running);
+    rig.clock.set(Duration::from_secs(89));
+    let waiting = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        waiting.resource.state,
+        ExecState::Running,
+        "story:unconfirmed-pod-deletion-ends-unknown: the bound runs from the first observation \
+         that saw the deletion (30 s), not from the signal whose read failed"
+    );
+    rig.clock.set(Duration::from_secs(90));
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        (ended.resource.state, ended.resource.exit),
+        (ExecState::Unknown, None),
+        "story:unconfirmed-pod-deletion-ends-unknown: 60 s after the first observation saw the \
+         deletion, the bound uid still present ends the exec unknown"
+    );
+}
+
+/// Adversary pass 2, `story:unconfirmed-pod-deletion-ends-unknown`: a `deletionTimestamp` the
+/// driver did not cause (an eviction, an operator) while the driver holds no signal intent is no
+/// accepted deletion of the driver's: 65 s later, before the wall bound's own deletion at 70 s,
+/// the exec is still running. Without `read_deleting`'s intent guard it would read `Unknown`.
+#[tokio::test]
+async fn adversary_a_deletion_the_driver_did_not_ask_for_starts_no_bound() {
+    let rig = rig().await;
+    let id = "exec_evicted";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    mark_deleting(&rig, &name).await;
+    let seen = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(seen.resource.state, ExecState::Running);
+    rig.clock.set(Duration::from_secs(65));
+    let later = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        later.resource.state,
+        ExecState::Running,
+        "story:unconfirmed-pod-deletion-ends-unknown: only the driver's own deletion starts the bound"
+    );
+}
+
 #[path = "restart_tests.rs"]
 mod restart;
