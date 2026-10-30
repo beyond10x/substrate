@@ -306,6 +306,76 @@ async fn readiness_reads_the_snapshot_taken_once_the_first_open_sequence_has_set
     );
 }
 
+/// `story:kubernetes-collisions-metric`, design 34 § 4: the operational listener of a daemon
+/// running the Kubernetes driver serves `substrate_kubernetes_collisions_total`, the driver's own
+/// count, here 0 because the driver never reached a cluster. A host daemon's scrape carries no
+/// such series. That a real collision moves the count by one is the driver crate's case on the
+/// fake API (`one_collision_on_the_api_moves_the_ports_collision_count_by_exactly_one`), which
+/// this crate cannot link (design 34 § 10.1).
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_kubernetes_daemon_serves_the_collision_series() {
+    let collisions = "substrate_kubernetes_collisions_total 0\n";
+    let (_directory, base) = tree();
+    let path = base.join("other/kubeconfig.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&unreachable_kubeconfig(Some(extension()))).expect("kubeconfig"),
+    )
+    .expect("write kubeconfig");
+    let ops = unused_address();
+    let mut namespace = config(&base, path);
+    namespace.ops = Some(OpsListenerConfig {
+        listen: ops,
+        require_facts: Vec::new(),
+    });
+    let daemon = tokio::spawn(serve(namespace));
+    let scrape = metrics_once_listening(ops).await;
+    daemon.abort();
+    assert!(
+        scrape.contains("# TYPE substrate_kubernetes_collisions counter\n"),
+        "{scrape}"
+    );
+    assert!(scrape.contains(collisions), "{scrape}");
+
+    let (_host_directory, host_base) = tree();
+    std::fs::create_dir(host_base.join("workspaces")).expect("workspaces");
+    let host_ops = unused_address();
+    let mut host = DaemonConfig::minimum(
+        host_base.join("other/api.sock"),
+        host_base.join("state/state.db"),
+        host_base.join("workspaces"),
+        "d",
+        vec![nix::unistd::getuid().as_raw()],
+    );
+    host.ops = Some(OpsListenerConfig {
+        listen: host_ops,
+        require_facts: Vec::new(),
+    });
+    let host_daemon = tokio::spawn(serve(host));
+    let host_scrape = metrics_once_listening(host_ops).await;
+    host_daemon.abort();
+    assert!(host_scrape.ends_with("# EOF\n"), "{host_scrape}");
+    assert!(
+        !host_scrape.contains("substrate_kubernetes"),
+        "{host_scrape}"
+    );
+}
+
+/// The first `/metrics` body the operational listener answers `200` with, within 10 s.
+async fn metrics_once_listening(ops: std::net::SocketAddr) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some((200, body)) = ops_get(ops, "/metrics").await {
+            return body;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the operational listener never answered"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// `/readyz` until `done` holds for its answer or 10 s have passed; the last answer.
 async fn readiness_until(
     ops: std::net::SocketAddr,
@@ -328,10 +398,16 @@ async fn readiness_until(
 /// One `GET /readyz` on the operational listener: its status and body, or `None` before it
 /// listens.
 async fn readyz(ops: std::net::SocketAddr) -> Option<(u16, String)> {
+    ops_get(ops, "/readyz").await
+}
+
+/// One `GET` of `path` on the operational listener: its status and body, or `None` before it
+/// listens.
+async fn ops_get(ops: std::net::SocketAddr, path: &str) -> Option<(u16, String)> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let mut stream = tokio::net::TcpStream::connect(ops).await.ok()?;
     stream
-        .write_all(b"GET /readyz HTTP/1.1\r\nHost: substrate\r\n\r\n")
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: substrate\r\n\r\n").as_bytes())
         .await
         .ok()?;
     let mut answer = Vec::new();

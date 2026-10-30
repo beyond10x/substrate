@@ -515,12 +515,15 @@ impl Telemetry {
         self.accepting.store(false, Ordering::Release);
     }
 
+    /// `collisions` is what the driver port answers (`Driver::backend_collisions`): a driver that
+    /// creates no backend object answers `None` and its scrape carries no collision series.
     #[allow(clippy::too_many_lines)] // The closed catalogue, in the order ADR 0045 states it.
     fn render(
         &self,
         ready: Readiness,
         process: Option<&ProcessStats>,
         output_stalls: u64,
+        collisions: Option<u64>,
     ) -> String {
         let mut out = Exposition::default();
         out.family("substrate_build_info", "gauge", "The running binary.");
@@ -729,6 +732,16 @@ impl Telemetry {
             &[],
             &self.resolution,
         );
+        // Design 34 § 4's addition to the catalogue: published only by a driver that counts.
+        if let Some(collisions) = collisions {
+            out.family(
+                "substrate_kubernetes_collisions",
+                "counter",
+                "Objects the Kubernetes driver met under a name it would use and did not create, \
+                 each left untouched.",
+            );
+            out.sample("substrate_kubernetes_collisions_total", &[], collisions);
+        }
         if let Some(process) = process {
             out.family(
                 "process_cpu_seconds",
@@ -1035,6 +1048,7 @@ impl Operations {
                     readiness,
                     process_stats().as_ref(),
                     (self.output_stalls)(),
+                    self.app.driver.backend_collisions(),
                 );
                 plain(StatusCode::OK, Some(OPENMETRICS), exposition.into_bytes())
             }
@@ -1194,6 +1208,8 @@ mod tests {
     /// more per refusal code the wire crate names plus `other`.
     const SERIES_WITHOUT_REFUSALS: usize = 471;
     const SERIES_MAXIMUM: usize = SERIES_WITHOUT_REFUSALS + REFUSAL_CODES.len() + 1;
+    /// A daemon whose driver counts collisions (design 34 § 4) carries one series more.
+    const KUBERNETES_SERIES_MAXIMUM: usize = SERIES_MAXIMUM + 1;
 
     fn every_check_passes() -> Readiness {
         Readiness {
@@ -1219,10 +1235,16 @@ mod tests {
             .collect()
     }
 
+    /// A fresh registry's scrape with every check passing, process metrics and no stall, for a
+    /// driver whose collision count is `collisions`.
+    fn scrape(collisions: Option<u64>) -> String {
+        Telemetry::default().render(every_check_passes(), Some(&process()), 0, collisions)
+    }
+
     #[test]
     fn the_series_count_is_pinned_at_its_maximum() {
         let telemetry = Telemetry::default();
-        let exposition = telemetry.render(every_check_passes(), Some(&process()), 0);
+        let exposition = telemetry.render(every_check_passes(), Some(&process()), 0, None);
         assert_eq!(SERIES_MAXIMUM, 582);
         assert_eq!(samples(&exposition).len(), SERIES_MAXIMUM);
         let refusals = samples(&exposition)
@@ -1238,7 +1260,7 @@ mod tests {
             Some(Duration::from_millis(3)),
         );
         telemetry.maintenance_round(MaintenanceTask::Containment, Duration::from_secs(20));
-        let recorded = telemetry.render(every_check_passes(), Some(&process()), 3);
+        let recorded = telemetry.render(every_check_passes(), Some(&process()), 3, None);
         assert_eq!(samples(&recorded).len(), SERIES_MAXIMUM);
         assert!(!recorded.contains("/srv/secret"));
         assert!(recorded.contains("substrate_refusals_total{code=\"other\"} 1\n"));
@@ -1249,7 +1271,7 @@ mod tests {
     /// changes this test, the deployment guide and the changelog together.
     #[test]
     fn the_metric_names_and_label_sets_are_the_catalogue() {
-        let exposition = Telemetry::default().render(every_check_passes(), Some(&process()), 0);
+        let exposition = scrape(None);
         let families = exposition
             .lines()
             .filter_map(|line| line.strip_prefix("# TYPE "))
@@ -1349,6 +1371,70 @@ mod tests {
                 "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1.0", "2.5", "5.0",
                 "10.0", "+Inf"
             ]
+        );
+    }
+
+    /// Design 34 § 4's one addition to the catalogue, on a daemon whose driver answers
+    /// `Driver::backend_collisions`: its name, type, help text and empty label set, after the
+    /// hosted families and before the process ones. Every other line of the scrape is the host
+    /// scrape's, byte for byte, and a host driver's scrape carries no collision line at all.
+    #[test]
+    fn the_kubernetes_collisions_series_is_the_one_addition_a_namespace_driver_makes() {
+        let host = scrape(None);
+        let namespace = scrape(Some(0));
+        let golden = [
+            "# TYPE substrate_kubernetes_collisions counter",
+            "# HELP substrate_kubernetes_collisions Objects the Kubernetes driver met under a name \
+             it would use and did not create, each left untouched.",
+            "substrate_kubernetes_collisions_total 0",
+        ];
+        let added = namespace
+            .lines()
+            .filter(|line| !host.lines().any(|kept| kept == *line))
+            .collect::<Vec<_>>();
+        assert_eq!(added, golden);
+        let without = namespace
+            .lines()
+            .filter(|line| !golden.contains(line))
+            .collect::<Vec<_>>();
+        assert_eq!(without, host.lines().collect::<Vec<_>>());
+        assert!(!host.contains("substrate_kubernetes"), "{host}");
+        let families = namespace
+            .lines()
+            .filter_map(|line| line.strip_prefix("# TYPE "))
+            .collect::<Vec<_>>();
+        let at = families
+            .iter()
+            .position(|family| *family == "substrate_kubernetes_collisions counter")
+            .expect("the collision family");
+        assert_eq!(
+            (families[at - 1], families[at + 1]),
+            (
+                "substrate_hosted_resolution_duration_seconds histogram",
+                "process_cpu_seconds counter"
+            )
+        );
+        assert_eq!(samples(&namespace).len(), KUBERNETES_SERIES_MAXIMUM);
+        assert_eq!(KUBERNETES_SERIES_MAXIMUM, 583);
+    }
+
+    /// The scrape states the driver's count as it is, so one more collision is one more on the
+    /// scrape, and nothing else on it moves.
+    #[test]
+    fn the_collision_sample_moves_by_exactly_what_the_driver_counted() {
+        let before = scrape(Some(4));
+        let after = scrape(Some(5));
+        let moved = before
+            .lines()
+            .zip(after.lines())
+            .filter(|(was, is)| was != is)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            moved,
+            [(
+                "substrate_kubernetes_collisions_total 4",
+                "substrate_kubernetes_collisions_total 5"
+            )]
         );
     }
 
@@ -1710,7 +1796,7 @@ mod tests {
             super::Outcome::Failure(ErrorClass::Unserved)
         );
         telemetry.refusal(substrate_wire::EXEC_WORKDIR_UNSERVED);
-        let exposition = telemetry.render(every_check_passes(), None, 0);
+        let exposition = telemetry.render(every_check_passes(), None, 0, None);
         assert!(
             exposition.contains("substrate_refusals_total{code=\"exec.workdir-unserved\"} 1\n")
         );
@@ -1724,7 +1810,7 @@ mod tests {
     fn a_failure_answer_without_a_code_is_counted_as_other() {
         let telemetry = Telemetry::default();
         telemetry.unnamed_refusal();
-        let exposition = telemetry.render(every_check_passes(), Some(&process()), 0);
+        let exposition = telemetry.render(every_check_passes(), Some(&process()), 0, None);
         assert!(exposition.contains("substrate_refusals_total{code=\"other\"} 1\n"));
         assert_eq!(samples(&exposition).len(), SERIES_MAXIMUM);
     }
@@ -1758,7 +1844,7 @@ mod tests {
         let telemetry = Telemetry::default();
         telemetry.maintenance_round(MaintenanceTask::Containment, Duration::from_millis(1));
         telemetry.maintenance_round(MaintenanceTask::Containment, Duration::from_secs(20));
-        let exposition = telemetry.render(every_check_passes(), None, 0);
+        let exposition = telemetry.render(every_check_passes(), None, 0, None);
         for expected in [
             "substrate_maintenance_round_duration_seconds_bucket{task=\"containment\",le=\"10.0\"} 1\n",
             "substrate_maintenance_round_duration_seconds_bucket{task=\"containment\",le=\"+Inf\"} 2\n",
