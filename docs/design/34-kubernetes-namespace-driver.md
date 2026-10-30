@@ -374,7 +374,10 @@ log file.
 
 **Signals.** `term` deletes with grace 5 s and `kill` with grace 1 s, each with `preconditions.uid`.
 `int` is `exec.signal-unserved` (501, § 14 Q3 A). The end is committed only once the container is
-shown stopped, as in design 28.
+shown stopped, as in design 28. A Pod still holding the bound uid 60 s after the API accepted the
+driver's deletion of it, a signal's or the wall bound's, on the driver's wall clock, leaves the exec
+`unknown` with no exit, because its container may still run, and `exec_garbage_round` keeps deleting
+it under its uid until it reads absent.
 
 ## 8. Named refusals
 

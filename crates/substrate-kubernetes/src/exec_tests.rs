@@ -1236,6 +1236,173 @@ async fn a_replacement_past_the_wall_bound_is_never_deleted() {
     );
 }
 
+/// The next `count` deletions of the Pod `name` are accepted and do nothing: a kubelet that does
+/// not confirm them, so the Pod keeps its uid and its running container.
+fn ignore_deletes(rig: &Rig, name: &str, count: usize) {
+    let mut accepted = rig.pod(name).expect("the Pod is present");
+    accepted["metadata"]["deletionTimestamp"] = json!(Utc::now().to_rfc3339());
+    for _ in 0..count {
+        rig.fake.fault(Fault::Answer {
+            method: Method::DELETE,
+            path: format!("/api/v1/namespaces/substrate/pods/{name}"),
+            status: 200,
+            body: accepted.clone(),
+        });
+    }
+}
+
+fn deletes(rig: &Rig, name: &str) -> usize {
+    let target = format!("DELETE /api/v1/namespaces/substrate/pods/{name}");
+    rig.fake
+        .requests()
+        .iter()
+        .filter(|request| **request == target)
+        .count()
+}
+
+fn kill() -> ExecSignalInput {
+    ExecSignalInput {
+        signal: Signal::Kill,
+        grace_ms: 0,
+    }
+}
+
+/// Design 28: a kubelet that has not confirmed a deletion within 60 s leaves the run `Unknown`,
+/// because its container may still run. The bound is the driver's own wall clock from the
+/// accepted delete, and the garbage round observes it with no timer of its own; once the exec is
+/// `Unknown` the same round keeps deleting the Pod under its uid.
+#[tokio::test]
+async fn a_kill_the_kubelet_does_not_confirm_within_sixty_seconds_ends_unknown() {
+    let rig = rig().await;
+    let id = "exec_unconfirmed";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    ignore_deletes(&rig, &name, 5);
+    rig.driver
+        .exec_signal(id, &kill())
+        .await
+        .expect("signalled");
+
+    rig.clock.set(Duration::from_secs(59));
+    rig.driver.exec_garbage_round().await.expect("a round");
+    let waiting = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        waiting.resource.state,
+        ExecState::Running,
+        "story:unconfirmed-pod-deletion-ends-unknown: 59 s after the accepted delete it is not yet \
+         unconfirmed"
+    );
+
+    rig.clock.set(Duration::from_mins(1));
+    rig.driver.exec_garbage_round().await.expect("a round");
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        ended.resource.state,
+        ExecState::Unknown,
+        "story:unconfirmed-pod-deletion-ends-unknown: a deletion unconfirmed 60 s after it was \
+         accepted leaves the run unknown, never cancelled"
+    );
+    assert_eq!(ended.resource.exit, None, "no exit is fabricated");
+    assert!(!ended.output_complete, "what the run wrote is not known");
+    assert!(rig.pod(&name).is_some(), "the Pod still holds its uid");
+
+    let before = deletes(&rig, &name);
+    rig.driver.exec_garbage_round().await.expect("a round");
+    assert!(
+        deletes(&rig, &name) > before,
+        "story:unconfirmed-pod-deletion-ends-unknown: the garbage round deletes the Pod again"
+    );
+    assert!(
+        rig.ledger.row(&name).settled_at.is_none(),
+        "its row stays open while the Pod is present"
+    );
+}
+
+/// The wall-bound deletion is the same deletion as `kill` and shares its bound: a Pod still
+/// holding its uid 60 s after the driver's own deletion was accepted leaves the exec `Unknown`.
+#[tokio::test]
+async fn a_wall_bound_deletion_unconfirmed_within_sixty_seconds_ends_unknown() {
+    let rig = rig().await;
+    let id = "exec_wall_unconfirmed";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    ignore_deletes(&rig, &name, 1);
+    let deleted_at = 10 + 60 + 1;
+    rig.clock.set(Duration::from_secs(deleted_at));
+    let deleting = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(deleting.resource.state, ExecState::Running);
+    assert_eq!(deletes(&rig, &name), 1, "deleted past the wall bound");
+
+    rig.clock.set(Duration::from_secs(deleted_at + 59));
+    let waiting = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(waiting.resource.state, ExecState::Running);
+
+    rig.clock.set(Duration::from_secs(deleted_at + 60));
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        ended.resource.state,
+        ExecState::Unknown,
+        "story:unconfirmed-pod-deletion-ends-unknown: the wall-bound deletion unconfirmed for 60 s \
+         leaves the run unknown"
+    );
+    assert_eq!(ended.resource.exit, None, "no exit is fabricated");
+}
+
+/// A Pod gone after the accepted delete, or a name now holding another uid, ends as before the
+/// 60 s bound existed, however late it is observed: the bound only reads a Pod that still holds
+/// the bound uid.
+#[tokio::test]
+async fn a_pod_gone_or_replaced_after_its_delete_ends_as_before() {
+    let rig = rig().await;
+    let gone = "exec_gone";
+    let swapped = "exec_swapped";
+    rig.started(gone, &input(&["/bin/sleep", "600"])).await;
+    rig.started(swapped, &input(&["/bin/sleep", "600"])).await;
+    let gone_pod = names::exec_pod(DEPLOYMENT, gone);
+    let swapped_pod = names::exec_pod(DEPLOYMENT, swapped);
+    for (id, name) in [(gone, &gone_pod), (swapped, &swapped_pod)] {
+        ignore_deletes(&rig, name, 1);
+        rig.driver
+            .exec_signal(id, &kill())
+            .await
+            .expect("signalled");
+    }
+    rig.clock.set(Duration::from_secs(30));
+    rig.admin
+        .delete(&format!("{}/{gone_pod}", rig.admin.pods()), 1)
+        .await
+        .expect("the deletion completes");
+    let mut replacement = rig.pod(&swapped_pod).expect("present");
+    rig.admin
+        .delete(&format!("{}/{swapped_pod}", rig.admin.pods()), 1)
+        .await
+        .expect("the deletion completes");
+    for member in ["uid", "resourceVersion", "creationTimestamp"] {
+        replacement["metadata"]
+            .as_object_mut()
+            .expect("metadata")
+            .remove(member);
+    }
+    let replaced = rig.fake.seed("pods", replacement).expect("replaced");
+
+    rig.clock.set(Duration::from_secs(61));
+    for id in [gone, swapped] {
+        let ended = rig.driver.exec_observe(id).await.expect("observed");
+        assert_eq!(
+            ended.resource.state,
+            ExecState::Cancelled,
+            "{id}: a Pod shown stopped ends as the signal"
+        );
+    }
+    assert_eq!(
+        rig.pod(&swapped_pod),
+        Some(replaced),
+        "the replacement is untouched"
+    );
+}
+
 /// Design 34 § 7.3: an exec Pod is owned by the workspace PVC by uid and mounts it by name. A PVC
 /// deleted and created again under the same name has another uid, so a start over the workspace's
 /// bound rows is refused before any Pod create.
