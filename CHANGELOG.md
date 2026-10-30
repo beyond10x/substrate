@@ -7,6 +7,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The operational listener of a daemon running `--driver kubernetes` serves
+  `substrate_kubernetes_collisions_total`, a counter with no labels: the objects the driver met
+  under a name it would use and did not create, each left untouched (design 34 § 4, the one
+  addition it makes to ADR 0045's catalogue). Each object is counted once, keyed on its kind, name
+  and uid, however often a provisional loop or a read meets it again; the driver remembers 4096
+  such objects, and past that a new one is counted every time it is met, so the series can
+  overcount but never misses an object. A foreign Pod met under an exec Pod's name at start is
+  counted too. Its scrape carries at most 583 samples. A host daemon publishes no such series and
+  its scrape is unchanged at 582. The driver port gains `Driver::backend_collisions`, `None` by
+  default.
+
+### Changed
+
+- Pinned ESS 0.77.0 across every specification and the CI gate (`ESS_VERSION` and `ESS_SHA256` in
+  `.github/workflows/gate.yml`); `cargo xtask check-ess` passes with unchanged scenario counts.
+
+### Fixed
+
+- A Pod removal no longer treats a 409 on its uid-preconditioned delete as the Pod gone: it reads
+  the name, and retries while the Pod it read is still there. The Status of the 409 does not
+  decide, because an admission webhook sets its own.
+- Kubernetes driver: an exec Pod still holding its bound uid 60 s or more after the driver's
+  deletion was accepted ends the exec `unknown`, not `running`, even when that read already shows
+  the container terminated, so the end no longer depends on when the exec is first observed; the
+  garbage round keeps deleting it (design 28). A `kill` or `term` whose delete answer was lost
+  starts the same bound at the first read that shows the Pod's `deletionTimestamp`; before, such
+  an exec stayed `running` when no garbage round ran.
+
 ## [0.16.1] — 2026-10-29
 
 Published by [release run 40949928365](https://github.com/beyond10x/substrate/actions/runs/40949928365)
