@@ -217,17 +217,10 @@ fn timestamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
 
-/// A server-supplied word the closed report can carry, or `unrepresentable`.
+/// A server-supplied word the closed report can carry ([`report::word_fits`]), or
+/// `unrepresentable`.
 fn word(value: &str) -> String {
-    let fits = value.len() <= 64
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|first| first.is_ascii_alphanumeric())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'_' | b'-'));
-    if fits {
+    if report::word_fits(value) {
         value.to_owned()
     } else {
         "unrepresentable".to_owned()
@@ -317,11 +310,20 @@ async fn certify(input: Input) -> Result<ExitCode, Stop> {
         input.roots.clone(),
         io,
     );
-    let first = handshake(&probe, &tokens, &args.scopes).await?;
-    let first = cases::decode_machine(&first);
-    let tls = probe
-        .endpoint_tls()
+    // `--deadline` bounds the whole run, the handshake and the SDK connect included: an endpoint
+    // that answers one byte per `--io-timeout` cannot hold the runner past it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(args.deadline);
+    let first = tokio::time::timeout_at(deadline, handshake(&probe, &tokens, &args.scopes))
         .await
+        .map_err(|_| Stop::Harness("deadline-exceeded"))?
+        .map_err(|stop| match stop {
+            Stop::Harness(_) if tokens.poisoned() => Stop::Harness("token-fd-poisoned"),
+            other => other,
+        })?;
+    let first = cases::decode_machine(&first);
+    let tls = tokio::time::timeout_at(deadline, probe.endpoint_tls())
+        .await
+        .map_err(|_| Stop::Harness("deadline-exceeded"))?
         .map_err(|fault| Stop::Harness(fault.code()))?;
     let label = format!(
         "run-{}",
@@ -342,11 +344,15 @@ async fn certify(input: Input) -> Result<ExitCode, Stop> {
             },
         );
     };
-    let settings = settings(&input, io, label)?;
-    let client = tokio::time::timeout(io, run::connect(&settings, &tokens))
-        .await
-        .map_err(|_| Stop::Harness("io-timeout"))?
-        .map_err(|_| Stop::Harness("sdk-connect-failed"))?;
+    let settings = settings(&input, io, deadline, label)?;
+    let client = tokio::time::timeout_at(
+        deadline,
+        tokio::time::timeout(io, run::connect(&settings, &tokens)),
+    )
+    .await
+    .map_err(|_| Stop::Harness("deadline-exceeded"))?
+    .map_err(|_| Stop::Harness("io-timeout"))?
+    .map_err(|_| Stop::Harness("sdk-connect-failed"))?;
     let facts =
         serde_json::to_value(&first.facts).map_err(|_| Stop::Harness("machine-undecodable"))?;
     let mut ctx = Ctx {
@@ -361,6 +367,11 @@ async fn certify(input: Input) -> Result<ExitCode, Stop> {
         cases: Vec::new(),
     };
     let last = inventory(&mut ctx, &first).await;
+    if tokens.poisoned() {
+        // Every case after the poisoning ran without a credential: its failures are the
+        // provider's, not the endpoint's, so no report is written.
+        return Err(Stop::Harness("token-fd-poisoned"));
+    }
     let capability = CapabilitySnapshot {
         first: cases::snapshot_read(&first),
         last: last.as_ref().and_then(cases::snapshot_read),
@@ -384,7 +395,12 @@ async fn certify(input: Input) -> Result<ExitCode, Stop> {
 }
 
 /// The run's settings from the checked command line.
-fn settings(input: &Input, io: Duration, label: String) -> Result<Settings, Stop> {
+fn settings(
+    input: &Input,
+    io: Duration,
+    deadline: tokio::time::Instant,
+    label: String,
+) -> Result<Settings, Stop> {
     let args = &input.args;
     let hook = args
         .restart_hook
@@ -401,7 +417,7 @@ fn settings(input: &Input, io: Duration, label: String) -> Result<Settings, Stop
         scopes: args.scopes.clone(),
         only: input.only.clone(),
         io,
-        deadline: tokio::time::Instant::now() + Duration::from_secs(args.deadline),
+        deadline,
         restart_timeout: Duration::from_secs(args.restart_timeout),
         probe_shell: args.probe_shell.clone(),
         max_generated_events: args.max_generated_events,
@@ -432,8 +448,9 @@ async fn inventory(
     cases::events(ctx).await;
     cases_exec::restart(ctx).await;
     cases_exec::ops(ctx).await;
-    let last = match ctx.raw("GET", "/v1/machine", None).await {
-        Ok(reply) if reply.status == 200 => cases::decode_machine(&reply),
+    let deadline = ctx.settings.deadline;
+    let last = match tokio::time::timeout_at(deadline, ctx.raw("GET", "/v1/machine", None)).await {
+        Ok(Ok(reply)) if reply.status == 200 => cases::decode_machine(&reply),
         _ => None,
     };
     cases::snapshot_stable(
@@ -537,6 +554,9 @@ fn finish(input: &Input, finished: Finished) -> Result<ExitCode, Stop> {
         verdict,
     };
     let bytes = report::render(&report).map_err(|_| Stop::Harness("report-unrenderable"))?;
+    if !report::conforms(&bytes) {
+        return Err(Stop::Harness("report-outside-schema"));
+    }
     report::write(&args.out, &bytes).map_err(|_| Stop::Harness("report-unwritable"))?;
     Ok(ExitCode::from(verdict.exit_code()))
 }

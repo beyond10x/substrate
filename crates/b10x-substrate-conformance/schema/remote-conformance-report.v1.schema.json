@@ -95,7 +95,7 @@
       ]
     },
     "word": {
-      "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$",
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$",
       "type": "string"
     }
   },

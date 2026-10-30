@@ -234,13 +234,21 @@ fn connection(tcp: TcpStream, config: &Arc<ServerConfig>, behaviour: Behaviour, 
             let _ = stream.flush();
             while !shared.stop.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(300));
-                if stream.write_all(b" ").and_then(|()| stream.flush()).is_err() {
+                if stream
+                    .write_all(b" ")
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
                     return;
                 }
             }
         }
         Behaviour::EchoBearerAsSnapshot if is_machine => {
-            answer(&mut stream, "200 OK", &machine(&bearer, "1.0.0").to_string());
+            answer(
+                &mut stream,
+                "200 OK",
+                &machine(&bearer, "1.0.0").to_string(),
+            );
         }
         Behaviour::EchoBearerAsDriverVersion if is_machine => {
             answer(
@@ -265,7 +273,13 @@ struct Ended {
     output: String,
 }
 
-fn run(directory: &Path, endpoint: &Endpoint, out: &Path, extra: &[&str], bound: Duration) -> Ended {
+fn run(
+    directory: &Path,
+    endpoint: &Endpoint,
+    out: &Path,
+    extra: &[&str],
+    bound: Duration,
+) -> Ended {
     assert!(Path::new(ECHO).is_file(), "{ECHO} is the token command");
     let log = directory.join("runner.log");
     let file = std::fs::File::create(&log).expect("log");
@@ -401,7 +415,14 @@ fn an_endpoint_supplied_snapshot_cannot_carry_the_credential_into_the_report() {
         directory.path(),
         &endpoint,
         &out,
-        &["--deadline", "20", "--io-timeout", "2", "--restart-timeout", "1"],
+        &[
+            "--deadline",
+            "20",
+            "--io-timeout",
+            "2",
+            "--restart-timeout",
+            "1",
+        ],
         Duration::from_secs(90),
     );
     assert!(!ended.killed, "the runner did not end: {}", ended.output);
@@ -432,7 +453,14 @@ fn an_endpoint_supplied_driver_version_cannot_carry_the_credential_into_the_repo
         directory.path(),
         &endpoint,
         &out,
-        &["--deadline", "20", "--io-timeout", "2", "--restart-timeout", "1"],
+        &[
+            "--deadline",
+            "20",
+            "--io-timeout",
+            "2",
+            "--restart-timeout",
+            "1",
+        ],
         Duration::from_secs(90),
     );
     assert!(!ended.killed, "the runner did not end: {}", ended.output);

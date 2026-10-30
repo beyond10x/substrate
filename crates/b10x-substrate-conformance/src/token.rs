@@ -8,6 +8,7 @@ use std::os::unix::fs::FileTypeExt as _;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
@@ -51,7 +52,13 @@ pub enum TokenSource {
         arguments: Vec<String>,
         environment: Vec<(String, OsString)>,
     },
-    Socket(Mutex<BufReader<UnixStream>>),
+    /// An inherited socket. `poisoned` is set before each exchange and cleared only when a whole
+    /// line came back, so an exchange cut by its deadline or an over-long answer leaves bytes
+    /// no later request may read as its own answer: the socket refuses every later fetch.
+    Socket {
+        stream: Mutex<BufReader<UnixStream>>,
+        poisoned: AtomicBool,
+    },
 }
 
 /// Whether a line is a credential in the bundle's format.
@@ -121,7 +128,22 @@ impl TokenSource {
             .set_nonblocking(true)
             .map_err(|_| "token-fd-invalid")?;
         let stream = UnixStream::from_std(stream).map_err(|_| "token-fd-invalid")?;
-        Ok(Self::Socket(Mutex::new(BufReader::new(stream))))
+        Ok(Self::socket(stream))
+    }
+
+    fn socket(stream: UnixStream) -> Self {
+        Self::Socket {
+            stream: Mutex::new(BufReader::new(stream)),
+            poisoned: AtomicBool::new(false),
+        }
+    }
+
+    /// Whether an earlier exchange on `--token-fd` was cut short; every later fetch then fails.
+    pub fn poisoned(&self) -> bool {
+        match self {
+            Self::Command { .. } => false,
+            Self::Socket { poisoned, .. } => poisoned.load(Ordering::SeqCst),
+        }
     }
 
     /// One credential, or why there is none.
@@ -139,8 +161,11 @@ impl TokenSource {
                     arguments,
                     environment,
                 } => command_exchange(program, arguments, environment, &request).await,
-                Self::Socket(socket) => {
-                    let mut socket = socket.lock().await;
+                Self::Socket { stream, poisoned } => {
+                    let mut socket = stream.lock().await;
+                    if poisoned.swap(true, Ordering::SeqCst) {
+                        return Err(TokenError::Failed);
+                    }
                     socket
                         .get_mut()
                         .write_all(request.as_bytes())
@@ -155,6 +180,7 @@ impl TokenSource {
                     if !answer.ends_with(b"\n") {
                         return Err(TokenError::Failed);
                     }
+                    poisoned.store(false, Ordering::SeqCst);
                     judge(&answer)
                 }
             }
@@ -257,6 +283,44 @@ mod tests {
             judge(&Zeroizing::new(vec![b'a'; 200])).err(),
             Some(TokenError::Failed)
         );
+    }
+
+    /// Security review (u1): an over-long answer on `--token-fd` leaves its tail unread; the
+    /// socket is then poisoned, so the tail is never read as the next request's answer.
+    #[tokio::test]
+    async fn an_over_long_socket_answer_poisons_every_later_fetch() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+        let (ours, theirs) = tokio::net::UnixStream::pair().expect("socket pair");
+        let source = super::TokenSource::socket(ours);
+        let credential = format!("identity_access_v1_{}", "c".repeat(43));
+        let provider = tokio::spawn(async move {
+            let mut theirs = tokio::io::BufReader::new(theirs);
+            let mut request = String::new();
+            theirs.read_line(&mut request).await.expect("first request");
+            // 200 bytes and no newline, then a well-formed credential line.
+            let mut answer = vec![b'x'; 200];
+            answer.extend_from_slice(format!("\n{credential}\n").as_bytes());
+            theirs.get_mut().write_all(&answer).await.expect("answer");
+            theirs
+        });
+        assert_eq!(
+            source
+                .fetch(Reason::Request, Purpose::Primary, &[])
+                .await
+                .err(),
+            Some(TokenError::Failed)
+        );
+        let _theirs = provider.await.expect("provider");
+        assert!(source.poisoned());
+        assert_eq!(
+            source
+                .fetch(Reason::Request, Purpose::Primary, &[])
+                .await
+                .err(),
+            Some(TokenError::Failed),
+            "the unread tail is never taken as an answer"
+        );
+        assert!(source.poisoned());
     }
 
     #[test]
