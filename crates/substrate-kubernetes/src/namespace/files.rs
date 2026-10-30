@@ -29,7 +29,7 @@ use substrate_wire::{
 use super::NamespaceDriver;
 use super::workspace::{EXECUTOR_PATH, KEEPER_CONTAINER};
 use crate::API_FAILED;
-use crate::ownership::{Ownership, ownership};
+use crate::ownership::{Foreign, Ownership, ownership};
 use crate::policy::hex;
 
 /// A file call whose answer was lost and whose one `stat` did not show the requested state
@@ -443,7 +443,10 @@ impl NamespaceDriver {
         match ownership(&object, Some(&keeper), &self.deployment_label) {
             Ownership::Ours { adopt: false, .. } => Ok(keeper.name),
             Ownership::Ours { adopt: true, .. } | Ownership::Collision(_) => {
-                self.collision(&format!("{:?} is not the bound keeper", keeper.name));
+                self.collision(
+                    Some(Foreign::of(keeper.role, &object)),
+                    &format!("{:?} is not the bound keeper", keeper.name),
+                );
                 Err(DriverError::failed(
                     API_FAILED,
                     "the object under the keeper's name is not the bound keeper; it is not called",

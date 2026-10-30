@@ -24,7 +24,7 @@ use substrate_wire::{Workspace, WorkspaceAbsence, WorkspaceCreateInput};
 use super::{NamespaceDriver, Removal, api_failed};
 use crate::API_FAILED;
 use crate::names::{self, MANAGED_BY, MANAGED_BY_LABEL, OPERATION_ANNOTATION, ROLE_LABEL};
-use crate::ownership::{Ownership, ownership};
+use crate::ownership::{Foreign, Ownership, ownership};
 
 /// The workspace's capacity refusal (429, `exhausted`): the namespace's `ResourceQuota` refused
 /// one of its objects (design 34 § 8, O7).
@@ -346,7 +346,7 @@ impl NamespaceDriver {
             )
             .await
             .map_err(|error| api_failed(&error))?;
-        let owned: Vec<String> = listed
+        let owned: Vec<(String, &Value)> = listed
             .items
             .iter()
             .filter(|pod| {
@@ -354,7 +354,11 @@ impl NamespaceDriver {
                     .as_array()
                     .is_some_and(|owners| owners.iter().any(|owner| owner["uid"] == pvc_uid))
             })
-            .filter_map(|pod| pod["metadata"]["name"].as_str().map(str::to_owned))
+            .filter_map(|pod| {
+                pod["metadata"]["name"]
+                    .as_str()
+                    .map(|name| (name.to_owned(), pod))
+            })
             .collect();
         if owned.is_empty() {
             return Ok(Vec::new());
@@ -362,12 +366,15 @@ impl NamespaceDriver {
         let rows = self.unsettled_by_name()?;
         owned
             .into_iter()
-            .map(|name| {
+            .map(|(name, pod)| {
                 rows.get(&name)
                     .filter(|row| row.kind == BackendKind::Exec)
                     .cloned()
                     .ok_or_else(|| {
-                        self.collision(&format!("{name:?} uses the workspace and has no exec row"));
+                        self.collision(
+                            Some(Foreign::of(BackendRole::Pod, pod)),
+                            &format!("{name:?} uses the workspace and has no exec row"),
+                        );
                         collided(&name)
                     })
             })
@@ -479,18 +486,19 @@ impl NamespaceDriver {
                 },
             });
         };
+        let foreign = || Some(Foreign::of(row.role, &object));
         match ownership(&object, Some(row), &self.deployment_label) {
             Ownership::Ours { uid, adopt: false } => Ok(Resolved::Ours(uid)),
             Ownership::Ours { uid, adopt: true } => match self.ledger.bind_uid(&row.name, &uid)? {
                 UidBinding::Bound => Ok(Resolved::Ours(uid)),
                 other => {
                     let reason = format!("{:?} could not be adopted: {other:?}", row.name);
-                    self.collision(&reason);
+                    self.collision(foreign(), &reason);
                     Ok(Resolved::Collision(reason))
                 }
             },
             Ownership::Collision(reason) => {
-                self.collision(&reason);
+                self.collision(foreign(), &reason);
                 Ok(Resolved::Collision(reason))
             }
         }
