@@ -484,6 +484,17 @@ fn labelled_collections(namespace: &str) -> Vec<(String, &'static str, &'static 
     ]
 }
 
+/// What shows a started daemon is ready for the lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ready {
+    /// Its Unix socket exists, within 30 s.
+    Socket,
+    /// `GET /readyz` on this operational listener answers 200, within [`SERVING_BOUND`]. A daemon
+    /// given `--tls-listen` serves TLS instead of its Unix socket and never creates one; its
+    /// `/readyz` answers 200 only once the listener accepts and the driver's opening settled.
+    Ops(SocketAddr),
+}
+
 /// One daemon the lane started: the shipped binary on a Unix socket, its stderr in a file.
 pub struct Daemon {
     child: Option<Child>,
@@ -500,20 +511,22 @@ impl Daemon {
     ///
     /// The process does not start, or exits or creates no socket within 30 s.
     pub fn start(binary: &Path, directory: &Path, config: &Path, deployment: &str) -> Result<Self> {
-        Self::start_with(binary, directory, config, deployment, &[])
+        Self::start_with(binary, directory, config, deployment, &[], Ready::Socket)
     }
 
-    /// [`Daemon::start`] with `extra` arguments after the lane's own: step 4's TLS listener.
+    /// [`Daemon::start`] with `extra` arguments after the lane's own (step 4's TLS listener),
+    /// waiting for what `ready` names.
     ///
     /// # Errors
     ///
-    /// The process does not start, or exits or creates no socket within 30 s.
+    /// The process does not start, or exits or is not ready within the bound `ready` names.
     pub fn start_with(
         binary: &Path,
         directory: &Path,
         config: &Path,
         deployment: &str,
         extra: &[String],
+        ready: Ready,
     ) -> Result<Self> {
         fs::create_dir_all(directory)?;
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
@@ -547,24 +560,39 @@ impl Daemon {
             log,
             sequence: 0,
         };
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !daemon.socket.exists() {
+        let (bound, awaited) = match ready {
+            Ready::Socket => (Duration::from_secs(30), "created no socket"),
+            Ready::Ops(_) => (SERVING_BOUND, "answered no 200 on /readyz"),
+        };
+        let deadline = Instant::now() + bound;
+        loop {
+            let done = match ready {
+                Ready::Socket => daemon.socket.exists(),
+                Ready::Ops(ops) => readyz_answers_ok(ops),
+            };
+            if done {
+                return Ok(daemon);
+            }
             if let Some(child) = daemon.child.as_mut()
                 && let Some(status) = child.try_wait()?
             {
                 bail!(
-                    "the daemon exited before its socket existed ({status}): {}",
+                    "the daemon exited before it was ready ({status}): {}",
                     daemon.log()
                 );
             }
             ensure!(
                 Instant::now() < deadline,
-                "the daemon created no socket within 30 s: {}",
+                "the daemon {awaited} within {} s: {}",
+                bound.as_secs(),
                 daemon.log()
             );
-            std::thread::sleep(Duration::from_millis(50));
+            let pause = match ready {
+                Ready::Socket => Duration::from_millis(50),
+                Ready::Ops(_) => Duration::from_millis(500),
+            };
+            std::thread::sleep(pause);
         }
-        Ok(daemon)
     }
 
     /// Everything the daemon wrote to stderr so far.
@@ -829,6 +857,34 @@ fn runner_beside(daemon: &Path) -> PathBuf {
 /// A loopback address no listener holds now.
 fn unused_loopback() -> Result<SocketAddr> {
     Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()?)
+}
+
+/// Whether `GET /readyz` on the plaintext operational listener at `ops` answers 200 within 2 s.
+/// Any failure to connect, write or read is "not yet".
+fn readyz_answers_ok(ops: SocketAddr) -> bool {
+    use std::io::Read as _;
+    let bound = Duration::from_secs(2);
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&ops, bound) else {
+        return false;
+    };
+    if stream.set_read_timeout(Some(bound)).is_err()
+        || stream.set_write_timeout(Some(bound)).is_err()
+        || stream
+            .write_all(
+                format!("GET /readyz HTTP/1.1\r\nHost: {ops}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .is_err()
+    {
+        return false;
+    }
+    let mut head = [0_u8; 12];
+    stream.read_exact(&mut head).is_ok() && status_is_ok(&head)
+}
+
+/// Whether an HTTP/1.x status line starts with status 200.
+fn status_is_ok(head: &[u8]) -> bool {
+    head.starts_with(b"HTTP/1.") && head.get(8..12) == Some(b" 200".as_slice())
 }
 
 /// Step 4's daemon arguments beside the lane's own: the production TLS listener with the
@@ -1200,10 +1256,10 @@ impl Steps<'_> {
                 self.driver_config,
                 LANE_DEPLOYMENT,
                 &arguments,
+                Ready::Ops(ops),
             )
         };
         let mut daemon = start()?;
-        daemon.serving(self.stop).await?;
         let out = self.work.join("conformance-report");
         let call = runner_call(address, ops, &chain, &out, daemon.pid()?);
         let token = clean_room::TokenSocket::serve(material.credential.clone())?;
@@ -1911,6 +1967,86 @@ mod tests {
                 (name, case)
             })
             .collect()
+    }
+
+    /// A stand-in daemon: a script that ignores the lane's arguments and creates no socket, as
+    /// the shipped daemon does with `--tls-listen`; it sleeps, or exits at once with `exit`.
+    fn stand_in(directory: &Path, exit: bool) -> PathBuf {
+        let path = directory.join("daemon");
+        let body = if exit { "exit 7" } else { "exec sleep 60" };
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write the stand-in");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("make it executable");
+        path
+    }
+
+    /// An operational listener that answers every request with `status`.
+    fn ops_answering(status: &'static str) -> SocketAddr {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let address = listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut request = [0_u8; 256];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                let _ = stream.write_all(
+                    format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\n\r\n").as_bytes(),
+                );
+            }
+        });
+        address
+    }
+
+    #[test]
+    fn a_tls_daemon_is_ready_by_its_readyz_though_it_creates_no_socket() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = stand_in(directory.path(), false);
+        let ops = ops_answering("200 OK");
+        let started = Instant::now();
+        let daemon = Daemon::start_with(
+            &binary,
+            &directory.path().join("d"),
+            &directory.path().join("config.json"),
+            LANE_DEPLOYMENT,
+            &[],
+            Ready::Ops(ops),
+        )
+        .expect("ready by /readyz");
+        assert!(
+            !daemon.socket.exists(),
+            "the stand-in creates no socket, as a TLS daemon does not"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_readyz_503_is_not_ready_and_a_200_is() {
+        assert!(!readyz_answers_ok(ops_answering("503 Service Unavailable")));
+        assert!(readyz_answers_ok(ops_answering("200 OK")));
+        assert!(!readyz_answers_ok(unused_loopback().expect("a free port")));
+        assert!(status_is_ok(b"HTTP/1.1 200"));
+        assert!(!status_is_ok(b"XTTP/1.1 200"));
+    }
+
+    #[test]
+    fn a_daemon_that_exits_before_its_readyz_answers_is_named() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = stand_in(directory.path(), true);
+        let ops = unused_loopback().expect("a free port");
+        let error = Daemon::start_with(
+            &binary,
+            &directory.path().join("d"),
+            &directory.path().join("config.json"),
+            LANE_DEPLOYMENT,
+            &[],
+            Ready::Ops(ops),
+        )
+        .err()
+        .expect("an exited daemon is refused")
+        .to_string();
+        assert!(
+            error.contains("exited before it was ready"),
+            "unexpected: {error}"
+        );
     }
 
     #[test]
