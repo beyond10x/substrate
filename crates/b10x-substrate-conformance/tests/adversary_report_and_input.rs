@@ -437,8 +437,10 @@ async fn a_descriptor_the_runner_inherited_never_reaches_the_token_command() {
     .await;
     let out = directory.path().join("out");
     let record = directory.path().join("token-descriptors.txt");
+    // `find` opens the record itself: a shell redirect would make dash, `/bin/sh` on Debian and
+    // Ubuntu, save its standard output at descriptor 10 before the listing runs.
     let script = format!(
-        "ls /proc/$$/fd > '{}'; printf '{}'",
+        "find /proc/$$/fd -mindepth 1 -maxdepth 1 -fprintf '{}' '%f\\n'; printf '{}'",
         record.display(),
         credential_line()
     );
