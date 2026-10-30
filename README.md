@@ -347,9 +347,10 @@ Its limits, stated plainly:
   `confinement.no-egress`, so every exec start is `exec.sandbox-unavailable` (501). Exec Pods are
   implemented but unverified on a real cluster: on kind no enforced egress denial was observed,
   so `confinement.no-egress` stays absent.
-- **Shared clean-room conformance follows in the next release.** `cargo xtask namespace-lane
-  observe` runs design 34's observations and steps 3 and 5 to 7 on a kind cluster of its own, and
-  reports step 4 absent until `story:remote-clean-room-conformance` lands.
+- **Shared clean-room conformance runs as the lane's step 4.** `cargo xtask namespace-lane
+  observe` runs design 34's observations and steps 3 to 7 on a kind cluster of its own; step 4 runs
+  the remote runner `b10x-substrate-conformance` (design 31) against the `--driver kubernetes`
+  daemon over TLS, and the exec cases it cannot select stay absent with their reasons.
 
 From 0.16.1, the first published release of the driver (tag `0.16.0` was not published), each
 release publishes the executor image

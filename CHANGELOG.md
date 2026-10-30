@@ -7,8 +7,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-10-30
+
+Shared clean-room conformance arrives: design 31's remote runner certifies a deployed endpoint from
+outside it, and the Kubernetes namespace lane runs it as step 4. The namespace driver still refuses
+every exec start `exec.sandbox-unavailable`; admitting one needs design 30's neutral confinement
+families, which wait on an operator decision.
+
 ### Added
 
+- `b10x-substrate-conformance`, design 31's clean-room runner: it certifies one deployed endpoint
+  over HTTPS and WSS from outside it, pinned to `substrate-wire/0.25.0`, and writes `report.json`
+  with `report.json.sha256` under a closed schema (exit 0 passed, 1 failed, 2 invalid input, 3
+  harness failure, 4 incomplete). Build it with
+  `cargo build --release --locked -p b10x-substrate-conformance`; `cargo xtask check-packages`
+  holds that this build links no daemon, host driver or store. Guide: *Remote conformance*. No
+  release artifact (design 31 Q3).
+- The namespace lane's step 4 runs the runner against the `--driver kubernetes` daemon with a
+  crash restart hook, and the chart lane's hosted scenarios gain "clean-room runner" against
+  ordinal 0, with the report uploaded as the `clean-room-report` artifact.
 - The operational listener of a daemon running `--driver kubernetes` serves
   `substrate_kubernetes_collisions_total`, a counter with no labels: the objects the driver met
   under a name it would use and did not create, each left untouched (design 34 § 4, the one
