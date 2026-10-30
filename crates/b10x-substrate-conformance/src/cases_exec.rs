@@ -482,6 +482,12 @@ pub async fn restart(ctx: &mut Ctx) {
         }
         return;
     }
+    restart_state(ctx).await;
+    restart_execs(ctx).await;
+}
+
+/// The workspace, replay and cursor cases after a detected restart.
+async fn restart_state(ctx: &mut Ctx) {
     ctx.case(&RESTART_WORKSPACE, async |ctx: &mut Ctx| {
         let restarted = ctx
             .state
@@ -529,6 +535,10 @@ pub async fn restart(ctx: &mut Ctx) {
         cursor_continuous(ctx, &head.0, head.1, head.2).await
     })
     .await;
+}
+
+/// The exec cases after a detected restart: both failed when the sequence started no exec.
+async fn restart_execs(ctx: &mut Ctx) {
     if ctx
         .state
         .restart
@@ -716,6 +726,7 @@ async fn sequence(ctx: &mut Ctx) -> CaseResult {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    crate::harden::standard_streams_only(&mut command);
     let mut child = command.spawn().map_err(|_| Fail::new("hook-failed"))?;
     match tokio::time::timeout_at(until, child.wait()).await {
         Ok(Ok(status)) if status.success() => {}

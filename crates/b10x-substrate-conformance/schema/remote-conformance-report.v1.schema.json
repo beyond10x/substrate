@@ -89,7 +89,10 @@
         "probed_at",
         "snapshot"
       ],
-      "type": "object"
+      "type": [
+        "null",
+        "object"
+      ]
     },
     "word": {
       "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$",
@@ -127,7 +130,10 @@
         "first",
         "last"
       ],
-      "type": "object"
+      "type": [
+        "null",
+        "object"
+      ]
     },
     "cases": {
       "items": {
@@ -434,26 +440,42 @@
     },
     "not_covered": {
       "items": {
-        "additionalProperties": false,
-        "properties": {
-          "case": {
-            "enum": [
-              "crash-after-dispatch",
-              "crash-before-dispatch",
-              "restart-no-redispatch"
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "case": {
+                "enum": [
+                  "crash-after-dispatch",
+                  "crash-before-dispatch",
+                  "restart-no-redispatch"
+                ],
+                "type": "string"
+              },
+              "covered_by": {
+                "const": "crates/substrate-daemon/tests/contract_vectors.rs",
+                "type": "string"
+              }
+            },
+            "required": [
+              "case",
+              "covered_by"
             ],
-            "type": "string"
+            "type": "object"
           },
-          "covered_by": {
-            "const": "crates/substrate-daemon/tests/contract_vectors.rs",
-            "type": "string"
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "$ref": "#/$defs/code"
+              }
+            },
+            "required": [
+              "operation"
+            ],
+            "type": "object"
           }
-        },
-        "required": [
-          "case",
-          "covered_by"
-        ],
-        "type": "object"
+        ]
       },
       "type": "array"
     },

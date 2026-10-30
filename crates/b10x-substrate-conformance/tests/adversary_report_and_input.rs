@@ -153,6 +153,11 @@ async fn read_request(stream: &mut (impl AsyncRead + Unpin)) -> Option<String> {
 
 impl Stub {
     async fn start(directory: &Path, snapshot: &str, other: Other) -> Self {
+        Self::start_with_machine(directory, machine_body(snapshot), other).await
+    }
+
+    /// A stub whose `GET /v1/machine` answers `machine` as given, decodable or not.
+    async fn start_with_machine(directory: &Path, machine: Vec<u8>, other: Other) -> Self {
         let identity = identity();
         let roots = directory.join("roots.pem");
         std::fs::write(&roots, &identity.certificate_pem).expect("trust roots");
@@ -161,7 +166,7 @@ impl Stub {
             .await
             .expect("stub listener");
         let endpoint = format!("https://{}/", listener.local_addr().expect("stub address"));
-        let machine = Arc::new(machine_body(snapshot));
+        let machine = Arc::new(machine);
         let mutations = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&mutations);
         let task = tokio::spawn(async move {
@@ -510,5 +515,120 @@ async fn a_token_command_that_does_not_exist_is_invalid_input() {
         "story:remote-clean-room-conformance: a token command that does not exist is invalid \
          input (exit 2); stderr: {}",
         outcome.stderr
+    );
+}
+
+/// The same rule for every program the runner would start: a token command that exists but is
+/// not executable, and a restart hook that does not exist, are invalid input found at start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_program_the_runner_cannot_start_is_invalid_input_before_any_request() {
+    let directory = scratch();
+    let stub = Stub::start(
+        directory.path(),
+        &format!("sha256:{}", "a".repeat(64)),
+        not_found(),
+    )
+    .await;
+    let unexecutable = directory.path().join("not-executable");
+    std::fs::write(&unexecutable, "#!/bin/sh\n").expect("a plain file");
+    let out = directory.path().join("out-a");
+    let outcome = run(
+        &arguments(
+            &stub.endpoint,
+            &stub.roots,
+            &out,
+            &unexecutable.display().to_string(),
+        ),
+        directory.path(),
+    )
+    .await;
+    assert_eq!(
+        outcome.code, 2,
+        "story:remote-clean-room-conformance: a token command that is not executable is invalid \
+         input (exit 2); stderr: {}",
+        outcome.stderr
+    );
+    let out = directory.path().join("out-b");
+    let mut hooked = arguments(&stub.endpoint, &stub.roots, &out, PRINTF);
+    hooked.extend([
+        "--restart-hook".to_owned(),
+        directory.path().join("no-such-hook").display().to_string(),
+    ]);
+    let outcome = run(&hooked, directory.path()).await;
+    stub.task.abort();
+    assert_eq!(
+        outcome.code, 2,
+        "story:remote-clean-room-conformance: a restart hook that does not exist is invalid \
+         input (exit 2); stderr: {}",
+        outcome.stderr
+    );
+    assert_eq!(
+        stub.mutations.load(Ordering::SeqCst),
+        0,
+        "story:remote-clean-room-conformance: invalid input sends no mutation to the endpoint"
+    );
+    assert!(
+        !directory.path().join("out-a").exists() && !out.exists(),
+        "story:remote-clean-room-conformance: a run refused as invalid input leaves no --out"
+    );
+}
+
+/// Finding `undecodable-machine-is-harness-failure`: a machine body the wire types refuse is the
+/// endpoint's failure, not the runner's. The core case `machine.envelope-decodes` fails, the
+/// report is written inside its schema with no server text, and the run exits 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_undecodable_machine_body_fails_the_envelope_case_and_writes_the_report() {
+    let directory = scratch();
+    let machine = serde_json::to_vec(&json!({
+        "api_version": "v1",
+        "request_id": "req_stub",
+        "result": { "snapshot": "tenant-a/namespace-b", "driver": "host" }
+    }))
+    .expect("machine body");
+    assert!(
+        serde_json::from_slice::<substrate_wire::Success<substrate_wire::CapabilitySnapshot>>(
+            &machine
+        )
+        .is_err(),
+        "the stub's machine body is one the wire crate refuses"
+    );
+    let stub = Stub::start_with_machine(directory.path(), machine, not_found()).await;
+    let out = directory.path().join("out");
+    let outcome = run(
+        &arguments(&stub.endpoint, &stub.roots, &out, PRINTF),
+        directory.path(),
+    )
+    .await;
+    stub.task.abort();
+    assert_eq!(
+        outcome.code, 1,
+        "story:remote-clean-room-conformance: an undecodable machine body fails the run (exit \
+         1), it is not a harness failure; stderr: {}",
+        outcome.stderr
+    );
+    let errors = schema_errors(&out);
+    assert!(
+        errors.is_empty(),
+        "story:remote-clean-room-conformance: report outside its schema: {errors:?}"
+    );
+    let text = std::fs::read_to_string(out.join("report.json")).expect("report.json");
+    assert!(
+        !text.contains("tenant-a/namespace-b"),
+        "story:remote-clean-room-conformance: the report carries server text"
+    );
+    let report: Value = serde_json::from_str(&text).expect("report JSON");
+    let envelope = report["cases"]
+        .as_array()
+        .expect("cases")
+        .iter()
+        .find(|case| case["id"] == "machine.envelope-decodes")
+        .expect("story:remote-clean-room-conformance: the report records machine.envelope-decodes");
+    assert_eq!(envelope["status"], "failed");
+    assert_eq!(envelope["diagnostics"], json!(["envelope-undecodable"]));
+    assert_eq!(report["verdict"], "failed");
+    assert_eq!(
+        stub.mutations.load(Ordering::SeqCst),
+        0,
+        "story:remote-clean-room-conformance: no case runs on facts the runner could not read"
     );
 }

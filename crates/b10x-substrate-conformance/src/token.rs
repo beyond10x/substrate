@@ -191,6 +191,7 @@ async fn command_exchange(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    crate::harden::standard_streams_only(&mut command);
     let mut child = command.spawn().map_err(|_| TokenError::Failed)?;
     let mut stdin = child.stdin.take().ok_or(TokenError::Failed)?;
     let mut stdout = child.stdout.take().ok_or(TokenError::Failed)?;

@@ -2,6 +2,7 @@
 //! every level, written in deterministic form (sorted keys, two-space indent, trailing newline)
 //! and atomically, with its SHA-256 beside it.
 
+use std::collections::BTreeSet;
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
@@ -11,6 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::probe::sha256_hex;
+use crate::registry::Registry;
 
 pub const FORMAT: &str = "b10x.substrate-remote-conformance-report.v1";
 
@@ -115,10 +117,12 @@ pub struct SnapshotRead {
     pub probed_at: String,
 }
 
+/// What the runner read of the capability snapshot; `None` (`null`) for a read whose values the
+/// closed report cannot carry, or that did not happen.
 #[derive(Debug, Clone, Serialize)]
 pub struct CapabilitySnapshot {
-    pub first: SnapshotRead,
-    pub last: SnapshotRead,
+    pub first: Option<SnapshotRead>,
+    pub last: Option<SnapshotRead>,
     pub driver: String,
     pub driver_version: String,
     pub config_generation: u64,
@@ -142,10 +146,13 @@ pub struct Declared {
     pub bounds: Bounds,
 }
 
+/// What the report does not prove: a crash window and the in-repository reference that covers it
+/// (§ 4), or a registry operation no case of this run names.
 #[derive(Debug, Clone, Serialize)]
-pub struct NotCovered {
-    pub case: String,
-    pub covered_by: String,
+#[serde(untagged)]
+pub enum NotCovered {
+    Window { case: String, covered_by: String },
+    Operation { operation: String },
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -181,7 +188,8 @@ pub struct Report {
     pub run: Run,
     pub endpoint: Endpoint,
     pub contract: Contract,
-    pub capability_snapshot: CapabilitySnapshot,
+    /// `None` when the first machine read did not decode into the wire types.
+    pub capability_snapshot: Option<CapabilitySnapshot>,
     pub declared: Declared,
     pub cases: Vec<Case>,
     pub not_covered: Vec<NotCovered>,
@@ -189,19 +197,31 @@ pub struct Report {
     pub verdict: Verdict,
 }
 
-/// The crash windows only fault injection inside the daemon reaches (§ 4).
-pub fn not_covered() -> Vec<NotCovered> {
-    [
+/// The crash windows only fault injection inside the daemon reaches (§ 4), then every operation
+/// of the pinned registry that no case of `cases` names in `requires.operations`, in registry
+/// id order.
+pub fn not_covered(registry: &Registry, cases: &[Case]) -> Vec<NotCovered> {
+    let named: BTreeSet<&str> = cases
+        .iter()
+        .flat_map(|case| case.requires.operations.iter().map(String::as_str))
+        .collect();
+    let windows = [
         "crash-before-dispatch",
         "crash-after-dispatch",
         "restart-no-redispatch",
     ]
     .into_iter()
-    .map(|case| NotCovered {
+    .map(|case| NotCovered::Window {
         case: case.to_owned(),
         covered_by: "crates/substrate-daemon/tests/contract_vectors.rs".to_owned(),
-    })
-    .collect()
+    });
+    let operations = registry
+        .operations()
+        .filter(|operation| !named.contains(operation.id.as_str()))
+        .map(|operation| NotCovered::Operation {
+            operation: operation.id.clone(),
+        });
+    windows.chain(operations).collect()
 }
 
 /// Totals and verdict: failed if any case failed; passed if none failed, the run is not partial
@@ -285,7 +305,7 @@ fn write_atomic(out: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use serde_json::json;
 
-    use super::{Case, Requires, Status, Verdict, judge, sorted};
+    use super::{Case, NotCovered, Requires, Status, Verdict, judge, not_covered, sorted};
 
     fn case(group: &str, status: Status) -> Case {
         Case {
@@ -324,6 +344,47 @@ mod tests {
             [Verdict::Passed, Verdict::Failed, Verdict::Incomplete].map(Verdict::exit_code),
             [0, 1, 4]
         );
+    }
+
+    /// Finding `uncovered-operations-unlisted`: `not_covered` is derived from the pinned registry
+    /// and the cases of the run, so no operation is left out of both.
+    #[test]
+    fn every_registry_operation_is_named_by_a_case_or_listed_not_covered() {
+        let registry = crate::registry::Registry::pinned();
+        let mut machine = case("machine", Status::Passed);
+        machine.requires.operations = vec!["machine.get".to_owned()];
+        let mut exec = case("exec", Status::Absent);
+        exec.requires.operations = vec!["exec.start".to_owned(), "exec.get".to_owned()];
+        let cases = [machine, exec];
+        let listed = not_covered(&registry, &cases);
+        let operations: Vec<&str> = listed
+            .iter()
+            .filter_map(|entry| match entry {
+                NotCovered::Operation { operation } => Some(operation.as_str()),
+                NotCovered::Window { .. } => None,
+            })
+            .collect();
+        let named: std::collections::BTreeSet<&str> = cases
+            .iter()
+            .flat_map(|case| case.requires.operations.iter().map(String::as_str))
+            .collect();
+        let mut count = 0;
+        for operation in registry.operations() {
+            count += 1;
+            assert!(
+                named.contains(operation.id.as_str())
+                    != operations.contains(&operation.id.as_str()),
+                "{} is named by a case or listed, never both or neither",
+                operation.id
+            );
+        }
+        assert!(count > 40, "the pinned registry is read, not a hand list");
+        assert_eq!(operations.len(), count - named.len());
+        let windows = listed
+            .iter()
+            .filter(|entry| matches!(entry, NotCovered::Window { .. }))
+            .count();
+        assert_eq!(windows, 3, "the crash windows of § 4 stay listed");
     }
 
     #[test]

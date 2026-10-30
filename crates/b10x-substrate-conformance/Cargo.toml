@@ -23,6 +23,7 @@ base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 getrandom.workspace = true
+libc.workspace = true
 nix = { workspace = true, features = ["process", "resource"] }
 rustls.workspace = true
 rustls-pemfile.workspace = true

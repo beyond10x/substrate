@@ -10,7 +10,8 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 use crate::probe::{Reply, sha256_hex};
-use crate::report::{Absent, AbsentReason, Observed};
+use crate::registry::Registry;
+use crate::report::{Absent, AbsentReason, Case, Observed, SnapshotRead, Status};
 use crate::run::{CaseResult, Ctx, Fail, LABEL_KEY, Note, Spec, ensure, expect, refusal_code};
 use crate::token::{Purpose, Reason, TokenError};
 
@@ -326,11 +327,52 @@ fn is_not_found(error: &SdkError) -> bool {
     refusal_code(error) == Some("resource.not-found")
 }
 
+/// The first and last machine read as the closed report carries it: the wire `snapshot` in its
+/// `sha256:<64 hex>` form and `probed_at` within four-digit years, or `None`. No other server
+/// string is ever copied.
+pub fn snapshot_read(snapshot: &substrate_wire::CapabilitySnapshot) -> Option<SnapshotRead> {
+    let digest = snapshot
+        .snapshot
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+    let year = chrono::Datelike::year(&snapshot.probed_at);
+    ((0..=9999).contains(&year) && digest).then(|| SnapshotRead {
+        snapshot: snapshot.snapshot.clone(),
+        probed_at: snapshot
+            .probed_at
+            .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+    })
+}
+
+/// The report entry of `machine.envelope-decodes` when the handshake's own machine body did not
+/// decode into the wire types: no case can be selected on facts the runner could not read, so
+/// this is the run's only case.
+pub fn machine_undecodable(registry: &Registry) -> Case {
+    Case {
+        id: MACHINE_ENVELOPE.id.to_owned(),
+        group: MACHINE_ENVELOPE.group.to_owned(),
+        status: Status::Failed,
+        absent: None,
+        requires: crate::run::requires(registry, &MACHINE_ENVELOPE),
+        diagnostics: vec!["envelope-undecodable".to_owned()],
+        observed: None,
+        branch: None,
+        detection: None,
+        duration_ms: 0,
+    }
+}
+
 pub async fn machine(ctx: &mut Ctx) {
     ctx.case(&MACHINE_ENVELOPE, async |ctx: &mut Ctx| {
         let reply = ctx.raw("GET", "/v1/machine", None).await?;
         expect(&reply, 200, None)?;
-        decode_machine(&reply).ok_or_else(|| Fail::new("envelope-undecodable"))?;
+        let snapshot = decode_machine(&reply).ok_or_else(|| Fail::new("envelope-undecodable"))?;
+        snapshot_read(&snapshot).ok_or_else(|| Fail::new("snapshot-unrepresentable"))?;
         Ok(Note::default())
     })
     .await;
@@ -787,6 +829,10 @@ fn unserved_answer(reply: &Reply) -> CaseResult {
         "class-not-unserved",
     )
     .map_err(|fail| fail.with(Some(&error.code)))?;
+    ensure(
+        (100..=599).contains(&reply.status),
+        "status-unrepresentable",
+    )?;
     let code = if crate::run::code_ok(&error.code) {
         error.code
     } else {

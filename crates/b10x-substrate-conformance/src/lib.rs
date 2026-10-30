@@ -16,7 +16,7 @@ mod token;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,11 +26,10 @@ use clap::Parser as _;
 use rustls::RootCertStore;
 use rustls::pki_types::ServerName;
 
-use crate::probe::{Probe, Reply, http_authority, https_authority, sha256_hex};
+use crate::probe::{EndpointTls, Probe, Reply, http_authority, https_authority, sha256_hex};
 use crate::registry::{PINNED_CONTRACT, PINNED_SHA256, Registry};
 use crate::report::{
     Bounds, CapabilitySnapshot, Contract, Declared, Endpoint, FORMAT, Report, Run, Runner,
-    SnapshotRead,
 };
 use crate::run::{CORE_GROUPS, Ctx, GROUPS, Hook, Settings, State};
 use crate::token::{Purpose, Reason, SharedSource, TokenSource};
@@ -73,16 +72,22 @@ pub fn main() -> ExitCode {
         Ok(input) => input,
         Err(stop) => return stop.exit(),
     };
-    let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+    let out = input.args.out.clone();
+    let outcome = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
-    else {
-        return Stop::Harness("runtime-unavailable").exit();
+    {
+        Ok(runtime) => runtime.block_on(certify(input)),
+        Err(_) => Err(Stop::Harness("runtime-unavailable")),
     };
-    match runtime.block_on(certify(input)) {
+    match outcome {
         Ok(code) => code,
-        Err(stop) => stop.exit(),
+        Err(stop) => {
+            // No report was written: the `--out` the check created goes again, if still empty.
+            let _ = std::fs::remove_dir(&out);
+            stop.exit()
+        }
     }
 }
 
@@ -97,8 +102,24 @@ struct Input {
     ops_authority: Option<String>,
 }
 
-fn absolute(path: &Path) -> bool {
-    path.is_absolute()
+/// A program the runner will start (the token command, the restart hook): an absolute path to a
+/// regular file this process may execute, checked before any request.
+fn program(
+    path: Option<&Path>,
+    not_absolute: &'static str,
+    unusable: &'static str,
+) -> Result<(), Stop> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if !path.is_absolute() {
+        return Err(Stop::Invalid(not_absolute));
+    }
+    let file = std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file());
+    if !file || nix::unistd::access(path, nix::unistd::AccessFlags::X_OK).is_err() {
+        return Err(Stop::Invalid(unusable));
+    }
+    Ok(())
 }
 
 fn environment(names: &[String]) -> Result<Vec<(String, OsString)>, Stop> {
@@ -133,20 +154,16 @@ impl Input {
             ServerName::try_from(name.clone())
                 .map_err(|_| Stop::Invalid("forbidden-name-invalid"))?;
         }
-        if args
-            .token_command
-            .as_deref()
-            .is_some_and(|path| !absolute(path))
-        {
-            return Err(Stop::Invalid("token-command-not-absolute"));
-        }
-        if args
-            .restart_hook
-            .as_deref()
-            .is_some_and(|path| !absolute(path))
-        {
-            return Err(Stop::Invalid("restart-hook-not-absolute"));
-        }
+        program(
+            args.token_command.as_deref(),
+            "token-command-not-absolute",
+            "token-command-unusable",
+        )?;
+        program(
+            args.restart_hook.as_deref(),
+            "restart-hook-not-absolute",
+            "restart-hook-unusable",
+        )?;
         if !args.probe_shell.starts_with('/') {
             return Err(Stop::Invalid("probe-shell-not-absolute"));
         }
@@ -182,6 +199,8 @@ impl Input {
         if args.out.symlink_metadata().is_ok() {
             return Err(Stop::Invalid("out-exists"));
         }
+        // Last, so no other refusal leaves it behind; a stop after this removes it again.
+        report::create_out(&args.out).map_err(|_| Stop::Invalid("out-uncreatable"))?;
         Ok(Self {
             authority,
             roots,
@@ -276,14 +295,15 @@ async fn handshake(probe: &Probe, tokens: &SharedSource, scopes: &[String]) -> R
     }
 }
 
-fn snapshot_read(snapshot: &substrate_wire::CapabilitySnapshot) -> SnapshotRead {
-    SnapshotRead {
-        snapshot: snapshot.snapshot.clone(),
-        probed_at: timestamp(snapshot.probed_at),
-    }
+/// What a finished run puts in its report besides the command line.
+struct Finished {
+    started_at: DateTime<Utc>,
+    tls: EndpointTls,
+    label: String,
+    capability: Option<CapabilitySnapshot>,
+    cases: Vec<report::Case>,
 }
 
-#[allow(clippy::too_many_lines, reason = "the run is one ordered procedure")]
 async fn certify(input: Input) -> Result<ExitCode, Stop> {
     let started_at = Utc::now();
     let args = &input.args;
@@ -298,41 +318,31 @@ async fn certify(input: Input) -> Result<ExitCode, Stop> {
         io,
     );
     let first = handshake(&probe, &tokens, &args.scopes).await?;
-    let first = cases::decode_machine(&first).ok_or(Stop::Harness("machine-undecodable"))?;
+    let first = cases::decode_machine(&first);
     let tls = probe
         .endpoint_tls()
         .await
         .map_err(|fault| Stop::Harness(fault.code()))?;
-    let hook = args
-        .restart_hook
-        .as_ref()
-        .map(|program| -> Result<Hook, Stop> {
-            Ok(Hook {
-                program: program.clone(),
-                arguments: args.restart_hook_argv.clone(),
-                environment: environment(&args.hook_env)?,
-            })
-        });
-    let hook = hook.transpose()?;
-    let settings = Settings {
-        scopes: args.scopes.clone(),
-        only: input.only.clone(),
-        io,
-        deadline: tokio::time::Instant::now() + Duration::from_secs(args.deadline),
-        restart_timeout: Duration::from_secs(args.restart_timeout),
-        probe_shell: args.probe_shell.clone(),
-        max_generated_events: args.max_generated_events,
-        hook,
-        ops_authority: input.ops_authority.clone(),
-        forbidden_names: args.forbidden_names.clone(),
-        label: format!(
-            "run-{}",
-            ulid::Ulid::generate().to_string().to_ascii_lowercase()
-        ),
-        endpoint: format!("https://{}/", input.authority),
-        trust_roots: args.trust_roots.clone(),
-        server_name: input.server_name.clone(),
+    let label = format!(
+        "run-{}",
+        ulid::Ulid::generate().to_string().to_ascii_lowercase()
+    );
+    let Some(first) = first else {
+        // The endpoint's failure, not the runner's: no case is selected on facts it could not
+        // read, and the report says which core case failed.
+        let cases = vec![cases::machine_undecodable(&Registry::pinned())];
+        return finish(
+            &input,
+            Finished {
+                started_at,
+                tls,
+                label,
+                capability: None,
+                cases,
+            },
+        );
     };
+    let settings = settings(&input, io, label)?;
     let client = tokio::time::timeout(io, run::connect(&settings, &tokens))
         .await
         .map_err(|_| Stop::Harness("io-timeout"))?
@@ -350,34 +360,98 @@ async fn certify(input: Input) -> Result<ExitCode, Stop> {
         state: State::default(),
         cases: Vec::new(),
     };
+    let last = inventory(&mut ctx, &first).await;
+    let capability = CapabilitySnapshot {
+        first: cases::snapshot_read(&first),
+        last: last.as_ref().and_then(cases::snapshot_read),
+        driver: serde_json::to_value(first.driver)
+            .ok()
+            .and_then(|value| value.as_str().map(word))
+            .unwrap_or_else(|| "unrepresentable".to_owned()),
+        driver_version: word(&first.driver_version),
+        config_generation: first.config_generation,
+    };
+    finish(
+        &input,
+        Finished {
+            started_at,
+            tls,
+            label: ctx.settings.label.clone(),
+            capability: Some(capability),
+            cases: ctx.cases,
+        },
+    )
+}
 
-    cases::machine(&mut ctx).await;
-    cases::tls(&mut ctx).await;
-    cases::auth(&mut ctx).await;
-    cases::workspace(&mut ctx).await;
-    cases::unserved(&mut ctx).await;
-    cases::recovery(&mut ctx).await;
-    cases_exec::exec(&mut ctx).await;
-    cases_exec::resources(&mut ctx).await;
-    cases_exec::sessions(&mut ctx).await;
-    cases::events(&mut ctx).await;
-    cases_exec::restart(&mut ctx).await;
-    cases_exec::ops(&mut ctx).await;
+/// The run's settings from the checked command line.
+fn settings(input: &Input, io: Duration, label: String) -> Result<Settings, Stop> {
+    let args = &input.args;
+    let hook = args
+        .restart_hook
+        .as_ref()
+        .map(|program| -> Result<Hook, Stop> {
+            Ok(Hook {
+                program: program.clone(),
+                arguments: args.restart_hook_argv.clone(),
+                environment: environment(&args.hook_env)?,
+            })
+        })
+        .transpose()?;
+    Ok(Settings {
+        scopes: args.scopes.clone(),
+        only: input.only.clone(),
+        io,
+        deadline: tokio::time::Instant::now() + Duration::from_secs(args.deadline),
+        restart_timeout: Duration::from_secs(args.restart_timeout),
+        probe_shell: args.probe_shell.clone(),
+        max_generated_events: args.max_generated_events,
+        hook,
+        ops_authority: input.ops_authority.clone(),
+        forbidden_names: args.forbidden_names.clone(),
+        label,
+        endpoint: format!("https://{}/", input.authority),
+        trust_roots: args.trust_roots.clone(),
+        server_name: input.server_name.clone(),
+    })
+}
+
+/// Every group in its fixed order; the last machine read, if it decoded.
+async fn inventory(
+    ctx: &mut Ctx,
+    first: &substrate_wire::CapabilitySnapshot,
+) -> Option<substrate_wire::CapabilitySnapshot> {
+    cases::machine(ctx).await;
+    cases::tls(ctx).await;
+    cases::auth(ctx).await;
+    cases::workspace(ctx).await;
+    cases::unserved(ctx).await;
+    cases::recovery(ctx).await;
+    cases_exec::exec(ctx).await;
+    cases_exec::resources(ctx).await;
+    cases_exec::sessions(ctx).await;
+    cases::events(ctx).await;
+    cases_exec::restart(ctx).await;
+    cases_exec::ops(ctx).await;
     let last = match ctx.raw("GET", "/v1/machine", None).await {
         Ok(reply) if reply.status == 200 => cases::decode_machine(&reply),
         _ => None,
     };
     cases::snapshot_stable(
-        &mut ctx,
+        ctx,
         &first.snapshot,
         last.as_ref().map(|last| last.snapshot.as_str()),
     )
     .await;
-    cases_exec::cleanup(&mut ctx).await;
+    cases_exec::cleanup(ctx).await;
+    last
+}
 
+/// Prints one line per case and the verdict, writes the report, and answers the exit code.
+fn finish(input: &Input, finished: Finished) -> Result<ExitCode, Stop> {
+    let args = &input.args;
     let partial = input.only.is_some();
-    let (totals, verdict) = report::judge(&ctx.cases, &CORE_GROUPS, partial);
-    for case in &ctx.cases {
+    let (totals, verdict) = report::judge(&finished.cases, &CORE_GROUPS, partial);
+    for case in &finished.cases {
         let status = match case.status {
             report::Status::Passed => "passed",
             report::Status::Failed => "failed",
@@ -405,7 +479,7 @@ async fn certify(input: Input) -> Result<ExitCode, Stop> {
         "verdict: {verdict_word} (passed {}, failed {}, absent {})",
         totals.passed, totals.failed, totals.absent
     );
-    let last = last.unwrap_or_else(|| first.clone());
+    let not_covered = report::not_covered(&Registry::pinned(), &finished.cases);
     let report = Report {
         format: FORMAT.to_owned(),
         runner: Runner {
@@ -413,35 +487,26 @@ async fn certify(input: Input) -> Result<ExitCode, Stop> {
             source_revision: source_revision(),
         },
         run: Run {
-            started_at: timestamp(started_at),
+            started_at: timestamp(finished.started_at),
             finished_at: timestamp(Utc::now()),
-            label: ctx.settings.label.clone(),
+            label: finished.label,
             partial,
             only: input.only.iter().flatten().cloned().collect(),
         },
         endpoint: Endpoint {
             origin_sha256: sha256_hex(format!("https://{}/", input.authority).as_bytes()),
             server_name_sha256: sha256_hex(input.server_name.as_bytes()),
-            tls_version: tls.tls_version,
-            alpn: tls.alpn,
-            leaf_certificate_sha256: tls.leaf_sha256,
+            tls_version: finished.tls.tls_version,
+            alpn: finished.tls.alpn,
+            leaf_certificate_sha256: finished.tls.leaf_sha256,
             trust_roots_sha256: input.roots_sha256.clone(),
-            leaf_not_after: tls.leaf_not_after,
+            leaf_not_after: finished.tls.leaf_not_after,
         },
         contract: Contract {
             name: PINNED_CONTRACT.to_owned(),
             sha256: PINNED_SHA256.to_owned(),
         },
-        capability_snapshot: CapabilitySnapshot {
-            first: snapshot_read(&first),
-            last: snapshot_read(&last),
-            driver: serde_json::to_value(first.driver)
-                .ok()
-                .and_then(|value| value.as_str().map(word))
-                .unwrap_or_else(|| "unrepresentable".to_owned()),
-            driver_version: word(&first.driver_version),
-            config_generation: first.config_generation,
-        },
+        capability_snapshot: finished.capability,
         declared: Declared {
             scopes: args
                 .scopes
@@ -466,14 +531,12 @@ async fn certify(input: Input) -> Result<ExitCode, Stop> {
                 max_generated_events: args.max_generated_events,
             },
         },
-        cases: ctx.cases,
-        not_covered: report::not_covered(),
+        cases: finished.cases,
+        not_covered,
         totals,
         verdict,
     };
     let bytes = report::render(&report).map_err(|_| Stop::Harness("report-unrenderable"))?;
-    let out: PathBuf = args.out.clone();
-    report::create_out(&out).map_err(|_| Stop::Harness("out-uncreatable"))?;
-    report::write(&out, &bytes).map_err(|_| Stop::Harness("report-unwritable"))?;
+    report::write(&args.out, &bytes).map_err(|_| Stop::Harness("report-unwritable"))?;
     Ok(ExitCode::from(verdict.exit_code()))
 }
