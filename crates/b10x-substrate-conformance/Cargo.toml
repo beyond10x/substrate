@@ -1,0 +1,52 @@
+[package]
+name = "b10x-substrate-conformance"
+description = "Clean-room conformance runner that certifies a deployed b10x Substrate endpoint over HTTPS and WSS"
+homepage = "https://beyond10x.github.io/substrate/"
+documentation = "https://beyond10x.github.io/substrate/docs/guides/remote-conformance"
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+keywords = ["sandbox", "conformance", "testing", "remote"]
+categories = ["command-line-utilities", "development-tools::testing"]
+
+[[bin]]
+name = "b10x-substrate-conformance"
+path = "src/main.rs"
+
+[dependencies]
+b10x-substrate-sdk = { path = "../b10x-substrate-sdk", version = "=0.16.1" }
+base64.workspace = true
+chrono.workspace = true
+clap.workspace = true
+getrandom.workspace = true
+nix = { workspace = true, features = ["process", "resource"] }
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.16.1" }
+tokio.workspace = true
+tokio-rustls.workspace = true
+ulid.workspace = true
+x509-parser.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true
+nix = { workspace = true, features = ["signal"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+tempfile.workspace = true
+
+# Its own `main`: the runner's token command and restart hook are this test executable, and a
+# token command's standard output is its credential line, which libtest's output would precede.
+[[test]]
+name = "local_endpoint"
+harness = false
+
+[lints]
+workspace = true

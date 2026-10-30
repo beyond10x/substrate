@@ -34,6 +34,7 @@ const sidebars: SidebarsConfig = {
         page('guides/rust-sdk', 'Rust SDK'),
         page('guides/cli', 'Command line'),
         page('guides/mcp-adapter', 'MCP adapter'),
+        page('guides/remote-conformance', 'Remote conformance'),
       ],
     },
     {

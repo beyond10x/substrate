@@ -149,6 +149,18 @@ jobs:
             --load \
             .
 
+      - name: Build the clean-room runner from this commit
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --target conformance-runner \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --output "type=local,dest=$RUNNER_TEMP/conformance-runner" \
+            .
+
       - name: Chart cluster lane
         run: |
           cargo run --release --locked -p xtask -- chart-lane cluster \
@@ -156,7 +168,18 @@ jobs:
             --node-image "$KIND_NODE_IMAGE" \
             --cluster "$CHART_LANE_CLUSTER" \
             --kind "$RUNNER_TEMP/lane-bin/kind" \
-            --helm "$RUNNER_TEMP/lane-bin/helm"
+            --helm "$RUNNER_TEMP/lane-bin/helm" \
+            --conformance-runner "$RUNNER_TEMP/conformance-runner/b10x-substrate-conformance" \
+            --conformance-out "$RUNNER_TEMP/conformance-report"
+
+      - name: Upload the clean-room report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: clean-room-report
+          path: ${{ runner.temp }}/conformance-report
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Delete the lane cluster
         if: always()

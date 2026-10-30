@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result};
 
 use crate::report::Report;
 
-const SOURCE_PACKAGES: [(&str, &str); 10] = [
+const SOURCE_PACKAGES: [(&str, &str); 11] = [
     ("crates/substrate-wire", "b10x-substrate-wire"),
     ("crates/substrate-store", "b10x-substrate-store"),
     ("crates/substrate-guarded", "b10x-substrate-guarded"),
@@ -21,6 +21,10 @@ const SOURCE_PACKAGES: [(&str, &str); 10] = [
     ("crates/substrate-daemon", "b10x-substrate-daemon"),
     ("crates/b10x-substrate-sdk", "b10x-substrate-sdk"),
     ("crates/b10x-substrate-cli", "b10x-substrate-cli"),
+    (
+        "crates/b10x-substrate-conformance",
+        "b10x-substrate-conformance",
+    ),
 ];
 
 pub fn check(root: &Path) -> Result<Report> {
@@ -45,10 +49,12 @@ pub fn check_with_executor_tree(root: &Path) -> Result<Report> {
     let (summary, mut failures) = check(root)?.into_parts();
     failures.extend(check_executor_tree(root)?);
     failures.extend(check_fake_graph(root)?);
+    failures.extend(check_conformance_tree(root)?);
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{summary}; the executor's normal dependency tree names none of {}; the resolved graph enables the client's fake feature on no normal or build edge and in no member with a binary target",
-            EXECUTOR_REFUSED.join(", ")
+            "{summary}; the executor's normal dependency tree names none of {}; the resolved graph enables the client's fake feature on no normal or build edge and in no member with a binary target; the conformance runner's normal and dev tree names none of {}",
+            EXECUTOR_REFUSED.join(", "),
+            CONFORMANCE_REFUSED.join(", ")
         )))
     } else {
         Ok(Report::failed(failures))
@@ -130,6 +136,135 @@ fn refused_executor_tree_lines(tree: &str) -> Vec<String> {
             format!(
                 "{EXECUTOR}: normal dependency tree names {} (design 34 § 2)",
                 line.trim_start_matches(TREE_DRAWING)
+            )
+        })
+        .collect()
+}
+
+/// The clean-room runner, which certifies an endpoint from outside every Substrate process.
+const CONFORMANCE: &str = "b10x-substrate-conformance";
+
+/// The only workspace packages the runner may depend on (design 31 § 2).
+const CONFORMANCE_EDGES: [&str; 2] = ["b10x-substrate-wire", "b10x-substrate-sdk"];
+
+/// What the runner's resolved tree may not name: it links no daemon, host driver or store.
+const CONFORMANCE_REFUSED: [&str; 3] = [
+    "b10x-substrate-daemon",
+    "b10x-substrate-host",
+    "b10x-substrate-store",
+];
+
+/// Why the runner's graph is fenced.
+const CONFORMANCE_FENCE: &str = "the conformance runner depends only on b10x-substrate-wire and on b10x-substrate-sdk without features, so the binary built with -p links no daemon (design 31 § 2)";
+
+/// The manifest half of the runner's fence: in every dependency table, a workspace path
+/// dependency other than [`CONFORMANCE_EDGES`] is refused, and so is a `features` entry on the SDK
+/// edge, whether written on the member's edge or inherited from `[workspace.dependencies]`.
+fn check_conformance_edges(
+    member: &str,
+    manifest: &toml::Value,
+    root_manifest: &toml::Value,
+    failures: &mut Vec<String>,
+) {
+    const KINDS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+    let workspace_dependencies = root_manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table);
+    let mut tables: Vec<(String, &toml::Value)> = KINDS
+        .iter()
+        .filter_map(|kind| manifest.get(*kind).map(|table| ((*kind).to_owned(), table)))
+        .collect();
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for (target, table) in targets {
+            tables.extend(KINDS.iter().filter_map(|kind| {
+                table
+                    .get(*kind)
+                    .map(|table| (format!("target.{target}.{kind}"), table))
+            }));
+        }
+    }
+    for (kind, table) in tables {
+        let Some(table) = table.as_table() else {
+            continue;
+        };
+        for (alias, dependency) in table {
+            let inherited = (dependency.get("workspace").and_then(toml::Value::as_bool)
+                == Some(true))
+            .then(|| workspace_dependencies.and_then(|dependencies| dependencies.get(alias)))
+            .flatten();
+            let entries: Vec<&toml::Value> = [Some(dependency), inherited]
+                .into_iter()
+                .flatten()
+                .collect();
+            let name = entries
+                .iter()
+                .find_map(|entry| entry.get("package").and_then(toml::Value::as_str))
+                .unwrap_or(alias);
+            let has_path = entries.iter().any(|entry| entry.get("path").is_some());
+            if has_path && !CONFORMANCE_EDGES.contains(&name) {
+                failures.push(format!(
+                    "{member}/Cargo.toml: {kind}.{alias} is a workspace path dependency; {CONFORMANCE_FENCE}"
+                ));
+            }
+            if name == "b10x-substrate-sdk"
+                && entries.iter().any(|entry| entry.get("features").is_some())
+            {
+                failures.push(format!(
+                    "{member}/Cargo.toml: {kind}.{alias} sets features on the SDK edge; {CONFORMANCE_FENCE}"
+                ));
+            }
+        }
+    }
+}
+
+/// Runs `cargo tree --locked -p b10x-substrate-conformance -e normal,dev --prefix none` in `root`,
+/// which resolves features for the runner alone, and refuses each line naming a fenced package.
+fn check_conformance_tree(root: &Path) -> Result<Vec<String>> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let output = std::process::Command::new(cargo)
+        .current_dir(root)
+        .env("CARGO_TERM_COLOR", "never")
+        .args([
+            "tree",
+            "--locked",
+            "-p",
+            CONFORMANCE,
+            "-e",
+            "normal,dev",
+            "--prefix",
+            "none",
+        ])
+        .output()
+        .context("running cargo tree for the conformance runner")?;
+    if !output.status.success() {
+        return Ok(vec![format!(
+            "{CONFORMANCE}: cargo tree --locked failed, so the rule checked nothing: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )]);
+    }
+    let tree = String::from_utf8(output.stdout).context("cargo tree wrote non-UTF-8")?;
+    Ok(refused_conformance_tree_lines(&tree))
+}
+
+/// The refusals for one `cargo tree --prefix none` text. A tree whose first line is not the runner
+/// selected nothing, and is refused rather than read as clean.
+fn refused_conformance_tree_lines(tree: &str) -> Vec<String> {
+    let name_of = |line: &str| line.split_whitespace().next().map(str::to_owned);
+    let mut lines = tree.lines();
+    if lines.next().and_then(name_of).as_deref() != Some(CONFORMANCE) {
+        return vec![format!(
+            "{CONFORMANCE}: cargo tree did not start at the runner, so the rule checked nothing"
+        )];
+    }
+    lines
+        .filter(|line| {
+            name_of(line).is_some_and(|name| CONFORMANCE_REFUSED.contains(&name.as_str()))
+        })
+        .map(|line| {
+            format!(
+                "{CONFORMANCE}: dependency tree names {}; {CONFORMANCE_FENCE}",
+                line.trim()
             )
         })
         .collect()
@@ -646,6 +781,9 @@ fn check_manifests(root: &Path, failures: &mut Vec<String>) -> Result<BTreeMap<S
                     ));
                 }
                 check_dependencies(member, &manifest, &approved_names, &exact_version, failures);
+                if name == CONFORMANCE {
+                    check_conformance_edges(member, &manifest, &root_manifest, failures);
+                }
                 observed.insert(member.to_owned(), name.to_owned());
             }
             None if publish != Some(false) => failures.push(format!(
@@ -930,6 +1068,148 @@ mod tests {
             ]
         );
         assert!(super::fake_paths(&TREE.replace("\"fake\"", "\"default\"")).is_empty());
+    }
+
+    /// Design 31 § 2: the runner's workspace edges are the wire crate and the SDK without
+    /// features, in every dependency table, written on the edge or inherited from the workspace.
+    #[test]
+    fn the_conformance_runner_takes_no_other_workspace_edge_and_no_sdk_feature() {
+        const MEMBER: &str = "crates/b10x-substrate-conformance";
+        const FENCE: &str = "the conformance runner depends only on b10x-substrate-wire and on b10x-substrate-sdk without features, so the binary built with -p links no daemon (design 31 § 2)";
+        const SDK: &str =
+            "b10x-substrate-sdk = { path = \"../b10x-substrate-sdk\", version = \"=0.4.2\" }";
+        const WIRE: &str = "substrate-wire = { package = \"b10x-substrate-wire\", path = \"../substrate-wire\", version = \"=0.4.2\" }";
+
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        fixture(
+            directory.path(),
+            MEMBER,
+            &format!("\n[dependencies]\n{SDK}\n{WIRE}\nserde = \"1\"\n"),
+        );
+        assert_eq!(
+            check(directory.path())
+                .expect("package check")
+                .failure_text(),
+            ""
+        );
+
+        let cases = [
+            (
+                format!(
+                    "\n[dependencies]\n{SDK}\nhost = {{ package = \"b10x-substrate-host\", path = \"../substrate-host\", version = \"=0.4.2\" }}\n"
+                ),
+                format!(
+                    "{MEMBER}/Cargo.toml: dependencies.host is a workspace path dependency; {FENCE}"
+                ),
+            ),
+            (
+                format!(
+                    "\n[dev-dependencies]\nb10x-substrate-daemon = {{ path = \"../substrate-daemon\", version = \"=0.4.2\" }}\n\n[dependencies]\n{SDK}\n"
+                ),
+                format!(
+                    "{MEMBER}/Cargo.toml: dev-dependencies.b10x-substrate-daemon is a workspace path dependency; {FENCE}"
+                ),
+            ),
+            (
+                "\n[target.'cfg(unix)'.build-dependencies]\nshim = { path = \"../../shim\" }\n"
+                    .to_owned(),
+                format!(
+                    "{MEMBER}/Cargo.toml: target.cfg(unix).build-dependencies.shim is a workspace path dependency; {FENCE}"
+                ),
+            ),
+            (
+                format!(
+                    "\n[dependencies]\n{}\n",
+                    SDK.replace(" }", ", features = [\"linked-daemon\"] }")
+                ),
+                format!(
+                    "{MEMBER}/Cargo.toml: dependencies.b10x-substrate-sdk sets features on the SDK edge; {FENCE}"
+                ),
+            ),
+        ];
+        for (extra, refused) in cases {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            fixture(directory.path(), MEMBER, &extra);
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(report.failure_text(), refused, "{extra}");
+        }
+
+        // An edge inherited from `[workspace.dependencies]` carries the workspace entry's path and
+        // features. An inherited SDK edge is also unpinned in the member, which the version rule
+        // already refuses; the fence still names the feature.
+        for (workspace_entry, refused) in [
+            (
+                "store = { package = \"b10x-substrate-store\", path = \"crates/substrate-store\" }",
+                format!(
+                    "{MEMBER}/Cargo.toml: dependencies.store is a workspace path dependency; {FENCE}"
+                ),
+            ),
+            (
+                "b10x-substrate-sdk = { path = \"crates/b10x-substrate-sdk\", version = \"=0.4.2\", features = [\"linked-daemon\"] }",
+                format!(
+                    "{MEMBER}/Cargo.toml: dependency b10x-substrate-sdk must pin version =0.4.2\n{MEMBER}/Cargo.toml: dependencies.b10x-substrate-sdk sets features on the SDK edge; {FENCE}"
+                ),
+            ),
+        ] {
+            let alias = workspace_entry.split_whitespace().next().expect("alias");
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            fixture(
+                directory.path(),
+                MEMBER,
+                &format!("\n[dependencies]\n{alias}.workspace = true\n"),
+            );
+            let root = directory.path().join("Cargo.toml");
+            let mut manifest = std::fs::read_to_string(&root).expect("workspace manifest");
+            write!(manifest, "\n[workspace.dependencies]\n{workspace_entry}\n")
+                .expect("workspace manifest");
+            std::fs::write(&root, manifest).expect("workspace manifest");
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(report.failure_text(), refused, "{workspace_entry}");
+        }
+    }
+
+    /// The tree half of the runner's fence reads `cargo tree --prefix none` output: it refuses each
+    /// line naming the daemon, the host driver or the store, and nothing of a similar name.
+    #[test]
+    fn the_conformance_tree_refuses_the_daemon_host_and_store_and_only_those() {
+        const CLEAN: &str = "b10x-substrate-conformance v0.4.2 (/w/crates/b10x-substrate-conformance)\nb10x-substrate-sdk v0.4.2 (/w/crates/b10x-substrate-sdk)\nb10x-substrate-wire v0.4.2 (/w/crates/substrate-wire)\nb10x-substrate-wire v0.4.2 (/w/crates/substrate-wire) (*)\nrustls v0.23.31\n";
+        assert_eq!(
+            super::refused_conformance_tree_lines(CLEAN),
+            Vec::<String>::new()
+        );
+        for mutant in [
+            "b10x-substrate-daemon v0.4.2 (/w/crates/substrate-daemon)",
+            "b10x-substrate-host v0.4.2 (/w/crates/substrate-host)",
+            "b10x-substrate-store v0.4.2 (/w/crates/substrate-store) (*)",
+        ] {
+            let refused = super::refused_conformance_tree_lines(&format!("{CLEAN}{mutant}\n"));
+            assert_eq!(refused.len(), 1, "{mutant}");
+            assert!(
+                refused[0].starts_with(&format!(
+                    "b10x-substrate-conformance: dependency tree names {mutant}; "
+                )),
+                "{refused:?}"
+            );
+        }
+        for innocent in [
+            "b10x-substrate-hosted v0.1.0",
+            "b10x-substrate-storex v0.1.0",
+        ] {
+            assert_eq!(
+                super::refused_conformance_tree_lines(&format!("{CLEAN}{innocent}\n")),
+                Vec::<String>::new(),
+                "{innocent}"
+            );
+        }
+        for selected_nothing in ["", "b10x-substrate-sdk v0.4.2 (/w)\n"] {
+            assert_eq!(
+                super::refused_conformance_tree_lines(selected_nothing),
+                vec![
+                    "b10x-substrate-conformance: cargo tree did not start at the runner, so the rule checked nothing"
+                        .to_owned()
+                ]
+            );
+        }
     }
 
     #[test]
