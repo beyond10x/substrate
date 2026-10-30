@@ -625,15 +625,22 @@ impl Api {
     }
 
     /// One deletion of the object at `path` and one read of it, noted in `seen`; `true` once it is
-    /// gone. Once `seen` holds a `uid` the deletion carries it as `preconditions.uid`, and a 409 on
-    /// it or a read of another `uid` is the object read gone: a same-named replacement is never
-    /// deleted.
+    /// gone. Once `seen` holds a `uid` the deletion carries it as `preconditions.uid`, so a
+    /// same-named replacement is never deleted, and only the read decides: an empty name, or one
+    /// holding another `uid`, is the object read gone; the read `uid` is the object present, and
+    /// the caller tries again within its own bound.
+    ///
+    /// A 409 on the preconditioned deletion is no exception, because it does not say the `uid`
+    /// differed. The API answers 409 Conflict when a precondition cannot be fulfilled
+    /// (<https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/delete-options/#DeleteOptions>,
+    /// `preconditions`), and a validating admission webhook that matches `DELETE` rejects with the
+    /// code and `Status` it chooses, 409 among them
+    /// (<https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#response>).
+    /// The second leaves the read `uid` at the name with any `reason` and `details`, so neither is
+    /// read as the object gone (`story:preconditioned-delete-409-is-not-a-uid-mismatch`).
     async fn remove_once(&self, path: &str, grace_seconds: u64, seen: &mut PodTrace) -> bool {
         let deleted = match seen.uid() {
-            Some(uid) => match self.delete_preconditioned(path, grace_seconds, uid).await {
-                Err(error) if error.status() == Some(409) => return true,
-                deleted => deleted,
-            },
+            Some(uid) => self.delete_preconditioned(path, grace_seconds, uid).await,
             None => self.delete(path, grace_seconds).await,
         };
         if matches!(deleted, Ok(true)) {
