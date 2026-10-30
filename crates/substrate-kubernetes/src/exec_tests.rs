@@ -1624,5 +1624,96 @@ async fn adversary_a_kill_whose_accepted_answer_was_lost_still_ends_unknown() {
     );
 }
 
+/// story:unconfirmed-pod-deletion-ends-unknown, the watch path of the same rule: the kill is
+/// accepted at 0 s, the Pod still holds its uid, and the kubelet shows the container terminated
+/// only at 65 s. A watch round that first sees that event at 70 s ends the exec as an observe at
+/// 61 s would, `Unknown`, and not from the event's terminated container.
+#[tokio::test]
+async fn a_watch_event_after_the_bound_ends_an_unconfirmed_deletion_unknown() {
+    let rig = rig().await;
+    let id = "exec_watched_late";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    ignore_deletes(&rig, &name, 1);
+    rig.driver
+        .exec_signal(id, &kill())
+        .await
+        .expect("signalled");
+    let round = Duration::from_secs(1);
+    rig.driver
+        .exec_watch_round(round)
+        .await
+        .expect("the first round lists");
+
+    rig.clock.set(Duration::from_secs(65));
+    let log = [applied_line(67_108_864, 500), exit_line(0)].concat();
+    rig.terminated(&name, 0, log.as_bytes()).await;
+    rig.clock.set(Duration::from_secs(70));
+    rig.driver
+        .exec_watch_round(round)
+        .await
+        .expect("a watch round");
+    assert_eq!(
+        rig.driver
+            .exec_completed()
+            .iter()
+            .map(|observation| (
+                observation.resource.state,
+                observation.resource.exit.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(ExecState::Unknown, None)],
+        "story:unconfirmed-pod-deletion-ends-unknown: the bound uid present 70 s after the \
+         accepted kill ends the exec unknown, through the watch as through an observe"
+    );
+}
+
+/// story:unconfirmed-pod-deletion-ends-unknown: a `term` whose accepted answer was lost starts
+/// the bound as a lost `kill` does. The read right after the lost answer shows the Pod under its
+/// bound uid with `deletionTimestamp`, so the bound runs from the signal, and 61 s later (before
+/// the wall bound's own deletion at 70 s) the exec is `Unknown`.
+#[tokio::test]
+async fn a_term_whose_accepted_answer_was_lost_starts_the_bound_too() {
+    let rig = rig().await;
+    let id = "exec_term_lost";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    let mut deleting = rig.pod(&name).expect("the Pod is present");
+    deleting["metadata"]["deletionTimestamp"] = json!(Utc::now().to_rfc3339());
+    deleting["metadata"]["deletionGracePeriodSeconds"] = json!(5);
+    rig.admin
+        .update(&format!("{}/{name}", rig.admin.pods()), &deleting)
+        .await
+        .expect("the API marks the Pod deleted");
+    rig.fake.fault(Fault::Answer {
+        method: Method::DELETE,
+        path: format!("/api/v1/namespaces/substrate/pods/{name}"),
+        status: 504,
+        body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "Timeout", "code": 504, "message": "Timeout"}),
+    });
+    rig.driver
+        .exec_signal(
+            id,
+            &ExecSignalInput {
+                signal: Signal::Term,
+                grace_ms: 0,
+            },
+        )
+        .await
+        .expect_err("the term's answer is lost");
+
+    rig.clock.set(Duration::from_secs(61));
+    let observed = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        (observed.resource.state, observed.resource.exit),
+        (ExecState::Unknown, None),
+        "story:unconfirmed-pod-deletion-ends-unknown: 61 s after a term the API acted on, with \
+         its answer lost and the kubelet silent, the exec is unknown"
+    );
+}
+
 #[path = "restart_tests.rs"]
 mod restart;
