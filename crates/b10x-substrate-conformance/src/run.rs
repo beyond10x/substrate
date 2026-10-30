@@ -207,6 +207,37 @@ pub async fn connect(settings: &Settings, tokens: &SharedSource) -> Result<Clien
         .await
 }
 
+/// What a case requires: its operations, the fact-only predicates and scopes the pinned registry
+/// gives them, and the facts and inputs the case names itself.
+pub fn requires(registry: &Registry, spec: &Spec) -> Requires {
+    let mut facts: BTreeSet<String> = spec.facts.iter().map(|fact| (*fact).to_owned()).collect();
+    let mut scopes = BTreeSet::new();
+    for id in spec.operations {
+        if let Some(scope) = registry.scope(id) {
+            scopes.insert(scope.to_owned());
+            if let Some(operation) = registry.operation(id) {
+                facts.extend(
+                    operation
+                        .capability_predicates
+                        .iter()
+                        .filter(|predicate| predicate.input_pointer.is_none())
+                        .map(|predicate| predicate.fact.clone()),
+                );
+            }
+        }
+    }
+    Requires {
+        operations: spec.operations.iter().map(|id| (*id).to_owned()).collect(),
+        facts: facts.into_iter().collect(),
+        scopes: scopes.into_iter().collect(),
+        inputs: spec
+            .inputs
+            .iter()
+            .map(|input| (*input).to_owned())
+            .collect(),
+    }
+}
+
 /// The run's state between cases.
 #[derive(Default)]
 pub struct State {
@@ -264,33 +295,7 @@ impl Ctx {
     }
 
     pub fn requires(&self, spec: &Spec) -> Requires {
-        let mut facts: BTreeSet<String> =
-            spec.facts.iter().map(|fact| (*fact).to_owned()).collect();
-        let mut scopes = BTreeSet::new();
-        for id in spec.operations {
-            if let Some(scope) = self.registry.scope(id) {
-                scopes.insert(scope.to_owned());
-                if let Some(operation) = self.registry.operation(id) {
-                    facts.extend(
-                        operation
-                            .capability_predicates
-                            .iter()
-                            .filter(|predicate| predicate.input_pointer.is_none())
-                            .map(|predicate| predicate.fact.clone()),
-                    );
-                }
-            }
-        }
-        Requires {
-            operations: spec.operations.iter().map(|id| (*id).to_owned()).collect(),
-            facts: facts.into_iter().collect(),
-            scopes: scopes.into_iter().collect(),
-            inputs: spec
-                .inputs
-                .iter()
-                .map(|input| (*input).to_owned())
-                .collect(),
-        }
+        requires(&self.registry, spec)
     }
 
     fn select(&self, spec: &Spec) -> Selection {

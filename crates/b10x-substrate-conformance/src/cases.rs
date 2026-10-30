@@ -10,7 +10,8 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 use crate::probe::{Reply, sha256_hex};
-use crate::report::{Absent, AbsentReason, Observed};
+use crate::registry::Registry;
+use crate::report::{Absent, AbsentReason, Case, Observed, SnapshotRead, Status};
 use crate::run::{CaseResult, Ctx, Fail, LABEL_KEY, Note, Spec, ensure, expect, refusal_code};
 use crate::token::{Purpose, Reason, TokenError};
 
@@ -326,11 +327,56 @@ fn is_not_found(error: &SdkError) -> bool {
     refusal_code(error) == Some("resource.not-found")
 }
 
+/// The first and last machine read as the closed report carries it: the wire `snapshot` in its
+/// `sha256:<64 hex>` form and `probed_at` within four-digit years, or `None`. No other server
+/// string is ever copied.
+pub fn snapshot_read(snapshot: &substrate_wire::CapabilitySnapshot) -> Option<SnapshotRead> {
+    let digest = snapshot
+        .snapshot
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+    let year = chrono::Datelike::year(&snapshot.probed_at);
+    ((0..=9999).contains(&year) && digest).then(|| SnapshotRead {
+        snapshot: snapshot.snapshot.clone(),
+        probed_at: snapshot
+            .probed_at
+            .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+    })
+}
+
+/// The report entry of `machine.envelope-decodes` when the handshake's own machine body did not
+/// decode into the wire types: no case can be selected on facts the runner could not read, so
+/// this is the run's only case.
+pub fn machine_undecodable(registry: &Registry) -> Case {
+    Case {
+        id: MACHINE_ENVELOPE.id.to_owned(),
+        group: MACHINE_ENVELOPE.group.to_owned(),
+        status: Status::Failed,
+        absent: None,
+        requires: crate::run::requires(registry, &MACHINE_ENVELOPE),
+        diagnostics: vec!["envelope-undecodable".to_owned()],
+        observed: None,
+        branch: None,
+        detection: None,
+        duration_ms: 0,
+    }
+}
+
 pub async fn machine(ctx: &mut Ctx) {
     ctx.case(&MACHINE_ENVELOPE, async |ctx: &mut Ctx| {
         let reply = ctx.raw("GET", "/v1/machine", None).await?;
         expect(&reply, 200, None)?;
-        decode_machine(&reply).ok_or_else(|| Fail::new("envelope-undecodable"))?;
+        let snapshot = decode_machine(&reply).ok_or_else(|| Fail::new("envelope-undecodable"))?;
+        snapshot_read(&snapshot).ok_or_else(|| Fail::new("snapshot-unrepresentable"))?;
+        ensure(
+            crate::report::word_fits(&snapshot.driver_version),
+            "driver-version-unrepresentable",
+        )?;
         Ok(Note::default())
     })
     .await;
@@ -787,6 +833,10 @@ fn unserved_answer(reply: &Reply) -> CaseResult {
         "class-not-unserved",
     )
     .map_err(|fail| fail.with(Some(&error.code)))?;
+    ensure(
+        (100..=599).contains(&reply.status),
+        "status-unrepresentable",
+    )?;
     let code = if crate::run::code_ok(&error.code) {
         error.code
     } else {
@@ -1002,6 +1052,14 @@ async fn commit_order(ctx: &mut Ctx) -> CaseResult {
     Ok(Note::default())
 }
 
+/// The events of a page past the `checked` the previous page held. A later page that is shorter
+/// fails the case: the endpoint dropped events it had served.
+fn later(events: &[Value], checked: usize) -> Result<&[Value], Fail> {
+    events
+        .get(checked..)
+        .ok_or_else(|| Fail::new("events-page-shrank"))
+}
+
 async fn visible_after_state(ctx: &mut Ctx) -> CaseResult {
     let cursor = ctx.head_cursor().await?.cursor;
     let operation = ctx.operation_id();
@@ -1023,7 +1081,7 @@ async fn visible_after_state(ctx: &mut Ctx) -> CaseResult {
     let mut seen_effect = false;
     while !seen_effect && tokio::time::Instant::now() < until {
         let events = ctx.events_after(&cursor).await?;
-        for event in &events[checked..] {
+        for event in later(&events, checked)? {
             let resource = event["resource"].as_str().unwrap_or_default();
             let read = match event["resource_kind"].as_str() {
                 Some("operation") => ctx.raw("GET", &format!("/v1/ops/{resource}"), None).await?,
@@ -1114,5 +1172,64 @@ async fn retention_gap(ctx: &mut Ctx) -> CaseResult {
         Err(code) if code == "event.retention-gap" => Ok(Note::default()),
         Err(code) => Err(Fail::new("unexpected-code").with(Some(&code))),
         Ok(_) => Err(Fail::new("gap-not-refused")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{later, snapshot_read};
+
+    /// Security review (u1): a later events page shorter than the one before fails the case by
+    /// name; it never panics on a slice.
+    #[test]
+    fn a_shorter_later_events_page_fails_by_name() {
+        let events = [json!({"seq": 1}), json!({"seq": 2})];
+        assert_eq!(later(&events, 1).expect("one more").len(), 1);
+        assert!(later(&events, 2).expect("none more").is_empty());
+        assert_eq!(
+            later(&events, 3).err().map(|fail| fail.0),
+            Some(vec!["events-page-shrank".to_owned()])
+        );
+    }
+
+    /// Finding `snapshot-free-text-in-report`: only a `sha256:<64 hex>` snapshot with a
+    /// four-digit-year `probed_at` is recorded; anything else is `None`, never server text.
+    #[test]
+    fn only_a_snapshot_digest_is_recorded() {
+        let read = |snapshot: &str, probed_at: &str| {
+            let body = json!({
+                "snapshot": snapshot,
+                "driver": "host",
+                "driver_version": "0.0.0",
+                "config_generation": 1,
+                "probed_at": probed_at,
+                "facts": {
+                    "operation.ledger-subject-max-rows": 1,
+                    "operation.ledger-subject-max-bytes": 1,
+                    "operation.ledger-global-max-rows": 1,
+                    "operation.ledger-global-max-bytes": 1
+                }
+            });
+            let snapshot: substrate_wire::CapabilitySnapshot =
+                serde_json::from_value(body).expect("a wire snapshot");
+            snapshot_read(&snapshot)
+        };
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let recorded = read(&digest, "2026-10-30T00:00:00Z").expect("a digest is recorded");
+        assert_eq!(recorded.snapshot, digest);
+        assert_eq!(recorded.probed_at, "2026-10-30T00:00:00Z");
+        for refused in [
+            "tenant-a/namespace-b".to_owned(),
+            format!("sha256:{}", "A".repeat(64)),
+            format!("sha256:{}", "a".repeat(63)),
+            format!("identity_access_v1_{}", "s".repeat(43)),
+        ] {
+            assert!(
+                read(&refused, "2026-10-30T00:00:00Z").is_none(),
+                "{refused}"
+            );
+        }
     }
 }

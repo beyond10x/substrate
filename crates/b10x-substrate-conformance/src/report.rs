@@ -2,6 +2,7 @@
 //! every level, written in deterministic form (sorted keys, two-space indent, trailing newline)
 //! and atomically, with its SHA-256 beside it.
 
+use std::collections::BTreeSet;
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
@@ -11,6 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::probe::sha256_hex;
+use crate::registry::Registry;
 
 pub const FORMAT: &str = "b10x.substrate-remote-conformance-report.v1";
 
@@ -115,10 +117,12 @@ pub struct SnapshotRead {
     pub probed_at: String,
 }
 
+/// What the runner read of the capability snapshot; `None` (`null`) for a read whose values the
+/// closed report cannot carry, or that did not happen.
 #[derive(Debug, Clone, Serialize)]
 pub struct CapabilitySnapshot {
-    pub first: SnapshotRead,
-    pub last: SnapshotRead,
+    pub first: Option<SnapshotRead>,
+    pub last: Option<SnapshotRead>,
     pub driver: String,
     pub driver_version: String,
     pub config_generation: u64,
@@ -142,10 +146,13 @@ pub struct Declared {
     pub bounds: Bounds,
 }
 
+/// What the report does not prove: a crash window and the in-repository reference that covers it
+/// (§ 4), or a registry operation no case of this run names.
 #[derive(Debug, Clone, Serialize)]
-pub struct NotCovered {
-    pub case: String,
-    pub covered_by: String,
+#[serde(untagged)]
+pub enum NotCovered {
+    Window { case: String, covered_by: String },
+    Operation { operation: String },
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -181,7 +188,8 @@ pub struct Report {
     pub run: Run,
     pub endpoint: Endpoint,
     pub contract: Contract,
-    pub capability_snapshot: CapabilitySnapshot,
+    /// `None` when the first machine read did not decode into the wire types.
+    pub capability_snapshot: Option<CapabilitySnapshot>,
     pub declared: Declared,
     pub cases: Vec<Case>,
     pub not_covered: Vec<NotCovered>,
@@ -189,19 +197,31 @@ pub struct Report {
     pub verdict: Verdict,
 }
 
-/// The crash windows only fault injection inside the daemon reaches (§ 4).
-pub fn not_covered() -> Vec<NotCovered> {
-    [
+/// The crash windows only fault injection inside the daemon reaches (§ 4), then every operation
+/// of the pinned registry that no case of `cases` names in `requires.operations`, in registry
+/// id order.
+pub fn not_covered(registry: &Registry, cases: &[Case]) -> Vec<NotCovered> {
+    let named: BTreeSet<&str> = cases
+        .iter()
+        .flat_map(|case| case.requires.operations.iter().map(String::as_str))
+        .collect();
+    let windows = [
         "crash-before-dispatch",
         "crash-after-dispatch",
         "restart-no-redispatch",
     ]
     .into_iter()
-    .map(|case| NotCovered {
+    .map(|case| NotCovered::Window {
         case: case.to_owned(),
         covered_by: "crates/substrate-daemon/tests/contract_vectors.rs".to_owned(),
-    })
-    .collect()
+    });
+    let operations = registry
+        .operations()
+        .filter(|operation| !named.contains(operation.id.as_str()))
+        .map(|operation| NotCovered::Operation {
+            operation: operation.id.clone(),
+        });
+    windows.chain(operations).collect()
 }
 
 /// Totals and verdict: failed if any case failed; passed if none failed, the run is not partial
@@ -227,6 +247,34 @@ pub fn judge(cases: &[Case], core_groups: &[&str], partial: bool) -> (Totals, Ve
         Verdict::Incomplete
     };
     (totals, verdict)
+}
+
+/// The report's own schema, embedded so that every report is validated before it is written.
+const SCHEMA: &str = include_str!("../schema/remote-conformance-report.v1.schema.json");
+
+/// Whether a server-supplied word fits the schema's `word`: `^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$`.
+/// No `_` and at most 32 bytes, so neither a credential (`identity_access_v1_` and a 43-byte body)
+/// nor its body fits (design 31 § 5, point 5).
+pub fn word_fits(value: &str) -> bool {
+    value.len() <= 32
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
+}
+
+/// Whether rendered report bytes validate against the report's own schema.
+pub fn conforms(bytes: &[u8]) -> bool {
+    let Ok(schema) = serde_json::from_str::<Value>(SCHEMA) else {
+        return false;
+    };
+    let Ok(validator) = jsonschema::validator_for(&schema) else {
+        return false;
+    };
+    serde_json::from_slice::<Value>(bytes).is_ok_and(|report| validator.is_valid(&report))
 }
 
 /// The value with every object's keys in sorted order.
@@ -285,7 +333,7 @@ fn write_atomic(out: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use serde_json::json;
 
-    use super::{Case, Requires, Status, Verdict, judge, sorted};
+    use super::{Case, NotCovered, Requires, Status, Verdict, judge, not_covered, sorted};
 
     fn case(group: &str, status: Status) -> Case {
         Case {
@@ -324,6 +372,74 @@ mod tests {
             [Verdict::Passed, Verdict::Failed, Verdict::Incomplete].map(Verdict::exit_code),
             [0, 1, 4]
         );
+    }
+
+    /// Finding `uncovered-operations-unlisted`: `not_covered` is derived from the pinned registry
+    /// and the cases of the run, so no operation is left out of both.
+    #[test]
+    fn every_registry_operation_is_named_by_a_case_or_listed_not_covered() {
+        let registry = crate::registry::Registry::pinned();
+        let mut machine = case("machine", Status::Passed);
+        machine.requires.operations = vec!["machine.get".to_owned()];
+        let mut exec = case("exec", Status::Absent);
+        exec.requires.operations = vec!["exec.start".to_owned(), "exec.get".to_owned()];
+        let cases = [machine, exec];
+        let listed = not_covered(&registry, &cases);
+        let operations: Vec<&str> = listed
+            .iter()
+            .filter_map(|entry| match entry {
+                NotCovered::Operation { operation } => Some(operation.as_str()),
+                NotCovered::Window { .. } => None,
+            })
+            .collect();
+        let named: std::collections::BTreeSet<&str> = cases
+            .iter()
+            .flat_map(|case| case.requires.operations.iter().map(String::as_str))
+            .collect();
+        let mut count = 0;
+        for operation in registry.operations() {
+            count += 1;
+            assert!(
+                named.contains(operation.id.as_str())
+                    != operations.contains(&operation.id.as_str()),
+                "{} is named by a case or listed, never both or neither",
+                operation.id
+            );
+        }
+        assert!(count > 40, "the pinned registry is read, not a hand list");
+        assert_eq!(operations.len(), count - named.len());
+        let windows = listed
+            .iter()
+            .filter(|entry| matches!(entry, NotCovered::Window { .. }))
+            .count();
+        assert_eq!(windows, 3, "the crash windows of § 4 stay listed");
+    }
+
+    /// Security review (u1): no credential, no credential body and no `_` fits a word; and a
+    /// report outside the schema is caught before it is written.
+    #[test]
+    fn a_word_never_holds_a_credential_and_a_report_is_checked_against_its_schema() {
+        let body = "SENTINELsentinelSENTINELsentinelSENTINELsen";
+        assert_eq!(body.len(), 43);
+        for refused in [
+            format!("identity_access_v1_{body}").as_str(),
+            body,
+            &body[..33],
+            "identity_access_v1_",
+            "a_b",
+            "",
+            "-1",
+        ] {
+            assert!(!super::word_fits(refused), "{refused}");
+        }
+        for admitted in ["0.17.0", "host", "kubernetes", "1.0.0+build.7", &body[..32]] {
+            assert!(super::word_fits(admitted), "{admitted}");
+        }
+        let schema: serde_json::Value =
+            serde_json::from_str(super::SCHEMA).expect("the embedded schema is JSON");
+        jsonschema::draft202012::meta::validate(&schema).expect("the schema meta-validates");
+        assert!(!super::conforms(b"{}"));
+        assert!(!super::conforms(b"not json"));
     }
 
     #[test]

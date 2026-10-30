@@ -30,8 +30,10 @@ target/release/b10x-substrate-conformance \
   --out conformance-report
 ```
 
-`--out` must not exist. The runner creates it with mode 0700 and writes only `report.json` and
-`report.json.sha256` into it.
+`--out` must not exist. The runner creates it with mode 0700 at start, before any request, and
+writes only `report.json` and `report.json.sha256` into it. A run that ends without a report
+removes it again. `--token-command` and `--restart-hook` must be absolute paths to executable files;
+the runner checks both at start.
 
 ## Supply credentials
 
@@ -68,6 +70,12 @@ runner then waits for a new capability probe before it checks that nothing ran t
 A case runs only when the endpoint's capability facts, your scopes and your inputs allow it. Any
 other case is `absent`, with a named reason. Absence never satisfies the core groups: machine, TLS,
 auth, workspace, recovery and cleanup. A run limited with `--only` is partial and never passes.
+
+A machine body that does not decode into the contract's types fails the core case
+`machine.envelope-decodes`; no other case runs, and the report is written with
+`capability_snapshot` `null`. A snapshot read the report cannot carry is recorded as `null`.
+`not_covered` lists the crash windows only the daemon's own vectors reach and every operation of
+the pinned registry that no case of the run names.
 
 ## Sign the report
 

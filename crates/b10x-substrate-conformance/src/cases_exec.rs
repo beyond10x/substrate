@@ -360,6 +360,19 @@ async fn session(
     Ok(session)
 }
 
+/// The most session stdout a case reads: the expected answer is one short line.
+const MAX_SESSION_OUTPUT: usize = 64 * 1024;
+
+/// Appends one output frame, failing the case once the output passes [`MAX_SESSION_OUTPUT`].
+fn append_bounded(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Fail> {
+    ensure(
+        output.len().saturating_add(bytes.len()) <= MAX_SESSION_OUTPUT,
+        "session-output-exceeded",
+    )?;
+    output.extend_from_slice(bytes);
+    Ok(())
+}
+
 /// Writes one line and reads frames until the exit frame: the stdout bytes and whether the exit
 /// was a clean zero.
 async fn answer(ctx: &Ctx, channel: &mut PipeChannel) -> Result<(Vec<u8>, bool), Fail> {
@@ -371,7 +384,7 @@ async fn answer(ctx: &Ctx, channel: &mut PipeChannel) -> Result<(Vec<u8>, bool),
                 stream: OutputStream::Stdout,
                 bytes,
                 ..
-            }) => output.extend_from_slice(&bytes),
+            }) => append_bounded(&mut output, &bytes)?,
             Some(PipeFrame::Exit { state, exit, .. }) => {
                 let zero = state == ExecState::Exited && exit.and_then(|exit| exit.code) == Some(0);
                 return Ok((output, zero));
@@ -482,6 +495,12 @@ pub async fn restart(ctx: &mut Ctx) {
         }
         return;
     }
+    restart_state(ctx).await;
+    restart_execs(ctx).await;
+}
+
+/// The workspace, replay and cursor cases after a detected restart.
+async fn restart_state(ctx: &mut Ctx) {
     ctx.case(&RESTART_WORKSPACE, async |ctx: &mut Ctx| {
         let restarted = ctx
             .state
@@ -529,6 +548,10 @@ pub async fn restart(ctx: &mut Ctx) {
         cursor_continuous(ctx, &head.0, head.1, head.2).await
     })
     .await;
+}
+
+/// The exec cases after a detected restart: both failed when the sequence started no exec.
+async fn restart_execs(ctx: &mut Ctx) {
     if ctx
         .state
         .restart
@@ -716,6 +739,7 @@ async fn sequence(ctx: &mut Ctx) -> CaseResult {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    crate::harden::standard_streams_only(&mut command);
     let mut child = command.spawn().map_err(|_| Fail::new("hook-failed"))?;
     match tokio::time::timeout_at(until, child.wait()).await {
         Ok(Ok(status)) if status.success() => {}
@@ -927,7 +951,24 @@ async fn retire(ctx: &mut Ctx, path: &str) -> Result<(), Fail> {
 
 #[cfg(test)]
 mod tests {
-    use super::{egress_routes, metrics_parse};
+    use super::{MAX_SESSION_OUTPUT, append_bounded, egress_routes, metrics_parse};
+
+    /// Security review (u1): session output is bounded; past the bound the case fails by name.
+    #[test]
+    fn session_output_past_its_bound_fails_by_name() {
+        let mut output = Vec::new();
+        append_bounded(&mut output, &vec![b'a'; MAX_SESSION_OUTPUT - 1]).expect("within");
+        append_bounded(&mut output, b"b").expect("exactly the bound");
+        assert_eq!(
+            append_bounded(&mut output, b"c").err().map(|fail| fail.0),
+            Some(vec!["session-output-exceeded".to_owned()])
+        );
+        assert_eq!(
+            output.len(),
+            MAX_SESSION_OUTPUT,
+            "nothing past the bound is kept"
+        );
+    }
 
     #[test]
     fn only_loopback_routes_mean_no_egress() {

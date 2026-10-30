@@ -500,6 +500,9 @@ fn parse_reply(received: &[u8]) -> Result<Option<Reply>, Fault> {
         }
     } else {
         let length = length.unwrap_or(0);
+        if length > MAX_RESPONSE {
+            return Err(Fault::Malformed);
+        }
         if rest.len() < length {
             return Ok(None);
         }
@@ -526,11 +529,16 @@ fn dechunk(mut rest: &[u8]) -> Result<Option<Vec<u8>>, Fault> {
         if size == 0 {
             return Ok(Some(body));
         }
-        if rest.len() < size + 2 {
+        // A size no response within the bound can hold is malformed, never an overflow.
+        let end = size
+            .checked_add(2)
+            .filter(|_| size <= MAX_RESPONSE)
+            .ok_or(Fault::Malformed)?;
+        if rest.len() < end {
             return Ok(None);
         }
         body.extend_from_slice(&rest[..size]);
-        rest = &rest[size + 2..];
+        rest = &rest[end..];
     }
 }
 
@@ -596,7 +604,8 @@ pub fn https_authority(endpoint: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dechunk, http_authority, https_authority, parse_reply, server_hello, tls12_client_hello,
+        Fault, MAX_RESPONSE, dechunk, http_authority, https_authority, parse_reply, server_hello,
+        tls12_client_hello,
     };
 
     #[test]
@@ -638,6 +647,29 @@ mod tests {
         assert_eq!(
             dechunk(b"2\r\n{}\r\n0\r\n\r\n").expect("chunks"),
             Some(b"{}".to_vec())
+        );
+    }
+
+    /// Security review (u1): a chunk size or a declared length beyond the response bound is a
+    /// malformed response, never an overflow or a slice panic.
+    #[test]
+    fn a_size_beyond_the_response_bound_is_malformed() {
+        assert_eq!(
+            dechunk(b"ffffffffffffffff\r\nX"),
+            Err(Fault::Malformed),
+            "usize::MAX"
+        );
+        let beyond = format!("{:x}\r\nX", MAX_RESPONSE + 1);
+        assert_eq!(dechunk(beyond.as_bytes()), Err(Fault::Malformed));
+        let within = format!("{MAX_RESPONSE:x}\r\nX");
+        assert_eq!(dechunk(within.as_bytes()), Ok(None), "still incomplete");
+        let declared = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{{}}",
+            MAX_RESPONSE + 1
+        );
+        assert_eq!(
+            parse_reply(declared.as_bytes()).map(|reply| reply.is_some()),
+            Err(Fault::Malformed)
         );
     }
 

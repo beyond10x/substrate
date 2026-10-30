@@ -42,6 +42,7 @@ const SERVER_NAME: &str = "substrate.test";
 const FORBIDDEN_NAME: &str = "substrate-headless.test";
 const RUNNER: &str = env!("CARGO_BIN_EXE_b10x-substrate-conformance");
 const SCHEMA: &str = include_str!("../schema/remote-conformance-report.v1.schema.json");
+const OPERATIONS: &str = include_str!("../../../contracts/substrate-wire/0.25.0/operations.json");
 /// A variable only the token command may receive.
 const TOKEN_MARK: &str = "B10X_CONFORMANCE_TEST_TOKEN_MARK";
 /// A variable only the restart hook may receive.
@@ -771,7 +772,42 @@ fn read_report(fixture: &Fixture, out: &Path) -> Value {
         errors.is_empty(),
         "report is outside its schema: {errors:?}"
     );
+    assert_every_operation_accounted(&report);
     report
+}
+
+/// Every operation of the pinned registry is named by a case of the report or listed under
+/// `not_covered`, and none is both.
+fn assert_every_operation_accounted(report: &Value) {
+    let registry: Value = serde_json::from_str(OPERATIONS).expect("pinned registry");
+    let named: BTreeSet<&str> = report["cases"]
+        .as_array()
+        .expect("cases")
+        .iter()
+        .flat_map(|case| {
+            case["requires"]["operations"]
+                .as_array()
+                .expect("requires.operations")
+                .iter()
+                .filter_map(Value::as_str)
+        })
+        .collect();
+    let listed: BTreeSet<&str> = report["not_covered"]
+        .as_array()
+        .expect("not_covered")
+        .iter()
+        .filter_map(|entry| entry["operation"].as_str())
+        .collect();
+    for operation in registry["operations"].as_array().expect("operations") {
+        let id = operation["id"].as_str().expect("operation id");
+        assert!(
+            named.contains(id) != listed.contains(id),
+            "story:remote-clean-room-conformance: registry operation {id} is named by a case: \
+             {}, listed under not_covered: {}",
+            named.contains(id),
+            listed.contains(id)
+        );
+    }
 }
 
 fn sorted(value: &Value) -> Value {

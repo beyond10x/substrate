@@ -21,7 +21,7 @@ use std::io::Write as _;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -584,19 +584,22 @@ impl Daemon {
             .ok_or_else(|| anyhow!("the daemon is not running"))
     }
 
-    /// Whether the daemon has exited; an exited one is reaped here, so [`Daemon::stop`] never
+    /// The status of an exit this call observed; `None` while the daemon runs, and for an exit an
+    /// earlier call already returned. An exited daemon is reaped here, so [`Daemon::stop`] never
     /// signals its reused pid.
     ///
     /// # Errors
     ///
     /// The process could not be waited on.
-    pub fn exited(&mut self) -> Result<bool> {
-        if let Some(child) = self.child.as_mut()
-            && child.try_wait()?.is_some()
-        {
+    pub fn exit_status(&mut self) -> Result<Option<ExitStatus>> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(None);
+        };
+        let status = child.try_wait()?;
+        if status.is_some() {
             self.child = None;
         }
-        Ok(self.child.is_none())
+        Ok(status)
     }
 
     /// Stops the daemon with SIGINT, then SIGKILL after 15 s.
@@ -875,6 +878,45 @@ fn runner_call<'a>(
         deadline: RUNNER_DEADLINE,
         io_timeout: RUNNER_IO,
         restart_timeout: RUNNER_RESTART,
+    }
+}
+
+/// Why step 4's daemon exits are not exactly the one its restart hook caused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartFault {
+    /// No daemon exit was observed, so the hook restarted nothing.
+    HookCausedNoExit,
+    /// An exit other than the hook's one `SIGKILL` of the first daemon.
+    ExitNotCausedByHook,
+}
+
+impl std::fmt::Display for RestartFault {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::HookCausedNoExit => {
+                "hook-caused-no-exit: the restart hook ran but no daemon exit was observed"
+            }
+            Self::ExitNotCausedByHook => {
+                "daemon-exit-not-caused-by-hook: the daemon exited other than by the restart \
+                 hook's one SIGKILL of the first daemon"
+            }
+        })
+    }
+}
+
+/// The daemon restarts step 4 admits, from every daemon exit observed in order. The hook
+/// (`runner_call`) sends `SIGKILL` once, to the first daemon's pid, so exactly one exit, by
+/// `SIGKILL`, is the hook's; any further exit, or one by another cause, is not.
+///
+/// # Errors
+///
+/// The exits are not exactly that one.
+pub fn hook_restarts(exits: &[ExitStatus]) -> Result<usize, RestartFault> {
+    use std::os::unix::process::ExitStatusExt as _;
+    match exits {
+        [] => Err(RestartFault::HookCausedNoExit),
+        [only] if only.signal() == Some(libc::SIGKILL) => Ok(1),
+        _ => Err(RestartFault::ExitNotCausedByHook),
     }
 }
 
@@ -1168,7 +1210,7 @@ impl Steps<'_> {
         let mut running =
             clean_room::spawn(runner, &call, &token, &self.work.join("conformance.log"))?;
         let deadline = Instant::now() + call.bound();
-        let mut restarts = 0_usize;
+        let mut exits = Vec::new();
         let exit = loop {
             if let Some(status) = running.exited()? {
                 break status.code();
@@ -1177,15 +1219,25 @@ impl Steps<'_> {
                 running.kill();
                 break None;
             }
-            if daemon.exited()? {
+            if let Some(status) = daemon.exit_status()? {
+                exits.push(status);
+                if hook_restarts(&exits) == Err(RestartFault::ExitNotCausedByHook) {
+                    running.kill();
+                    break None;
+                }
                 self.release(self.namespace).await?;
                 daemon = start()?;
-                restarts += 1;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
         daemon.stop();
         let answered = token.finish();
+        // An exit the hook did not cause stopped the runner: that, not the stopped run, is the
+        // failure. Otherwise the runner's verdict comes first, and only then the count.
+        let restarts = hook_restarts(&exits);
+        if let Err(fault @ RestartFault::ExitNotCausedByHook) = restarts {
+            bail!("step 4: {fault}");
+        }
         let certified = clean_room::judge(
             exit,
             &out,
@@ -1193,6 +1245,7 @@ impl Steps<'_> {
             &material.credential,
             Some(&RUNNER_UNDECLARED),
         )?;
+        let restarts = restarts.map_err(|fault| anyhow!("step 4: {fault}"))?;
         Ok(format!(
             "{}; the daemon was started again {restarts} time(s); {answered} credential \
              request(s) answered",
@@ -1890,6 +1943,44 @@ mod tests {
             );
         }
         assert_eq!(verdict(&passing()), None);
+    }
+
+    /// Finding `namespace-lane-restarts-unpinned`: the hook sends `SIGKILL` to the first daemon
+    /// once, so step 4 admits exactly that one exit; any other exit, or none, fails by name.
+    #[test]
+    fn step_four_admits_exactly_the_daemon_exit_its_restart_hook_caused() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let killed = ExitStatus::from_raw(libc::SIGKILL);
+        let terminated = ExitStatus::from_raw(libc::SIGTERM);
+        let exited = ExitStatus::from_raw(1 << 8);
+        assert_eq!(hook_restarts(&[killed]), Ok(1));
+        assert_eq!(
+            hook_restarts(&[]),
+            Err(RestartFault::HookCausedNoExit),
+            "a run whose hook killed nothing was not restarted by it"
+        );
+        assert_eq!(
+            hook_restarts(&[killed, killed]),
+            Err(RestartFault::ExitNotCausedByHook),
+            "the hook names the first daemon's pid; a second exit is not its doing"
+        );
+        for status in [terminated, exited] {
+            assert_eq!(
+                hook_restarts(&[status]),
+                Err(RestartFault::ExitNotCausedByHook),
+                "{status}: the hook sends SIGKILL only"
+            );
+        }
+        assert!(
+            RestartFault::ExitNotCausedByHook
+                .to_string()
+                .contains("daemon-exit-not-caused-by-hook")
+        );
+        assert!(
+            RestartFault::HookCausedNoExit
+                .to_string()
+                .contains("hook-caused-no-exit")
+        );
     }
 
     #[test]

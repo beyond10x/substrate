@@ -23,6 +23,8 @@ base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 getrandom.workspace = true
+jsonschema.workspace = true
+libc.workspace = true
 nix = { workspace = true, features = ["process", "resource"] }
 rustls.workspace = true
 rustls-pemfile.workspace = true
@@ -37,7 +39,6 @@ x509-parser.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-jsonschema.workspace = true
 nix = { workspace = true, features = ["signal"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 tempfile.workspace = true

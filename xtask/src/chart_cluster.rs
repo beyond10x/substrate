@@ -2892,6 +2892,8 @@ pub(crate) mod clean_room {
     /// whatever inputs it declares.
     const DECIDED_BY_THE_ENDPOINT: [&str; 3] =
         ["fact-absent", "fact-unsatisfied", "bound-exceeded"];
+    /// The credential format's fixed prefix (ADR 0026); its 43-character body follows it.
+    const CREDENTIAL_PREFIX: &str = "identity_access_v1_";
 
     /// One run's arguments, apart from the token descriptor.
     pub struct Call<'a> {
@@ -3230,20 +3232,30 @@ pub(crate) mod clean_room {
         })
     }
 
-    /// Whether `bytes` hold `credential` anywhere.
+    /// Whether `bytes` hold `credential`, its body after [`CREDENTIAL_PREFIX`], or the prefix
+    /// itself anywhere (design 31 § 5 point 4). An empty credential is found nowhere.
     pub fn carries(bytes: &[u8], credential: &str) -> bool {
+        let holds = |needle: &str| {
+            !needle.is_empty()
+                && bytes
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+        };
         !credential.is_empty()
-            && bytes
-                .windows(credential.len())
-                .any(|window| window == credential.as_bytes())
+            && (holds(credential)
+                || holds(credential.strip_prefix(CREDENTIAL_PREFIX).unwrap_or(""))
+                || holds(CREDENTIAL_PREFIX))
     }
 
     /// Reads the run's report, digest and output, refuses any that holds `credential`, and
-    /// judges the run with [`verdict`].
+    /// judges the run with [`verdict`]. A refused run's report, digest and output are deleted
+    /// first, so a later step that uploads the report directory (`chart-lane.yml` uploads it
+    /// whatever the outcome) finds nothing that holds the credential.
     ///
     /// # Errors
     ///
-    /// A file holds the credential (nothing of it is shown), the report is not JSON, or
+    /// A file holds the credential (nothing of it is shown; the files are deleted, and a file
+    /// that could not be deleted is named), the report is not JSON, or
     /// [`verdict`] refused the run; the runner's last lines are appended, as it prints only case
     /// ids, statuses and closed codes.
     pub fn judge(
@@ -3265,7 +3277,29 @@ pub(crate) mod clean_room {
         .flatten()
         .any(|bytes| carries(bytes, credential))
         {
-            bail!("the runner's report or output holds the credential; neither is shown");
+            let kept: Vec<String> = [
+                out.join("report.json"),
+                out.join("report.json.sha256"),
+                log.to_path_buf(),
+            ]
+            .iter()
+            .filter(|path| match fs::remove_file(path) {
+                Ok(()) => false,
+                Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+            })
+            .map(|path| path.display().to_string())
+            .collect();
+            if kept.is_empty() {
+                bail!(
+                    "the runner's report or output holds the credential; neither is shown, and \
+                     both were deleted"
+                );
+            }
+            bail!(
+                "the runner's report or output holds the credential; neither is shown, and {} \
+                 could not be deleted",
+                kept.join(", ")
+            );
         }
         let report: Option<Value> = report
             .map(|bytes| serde_json::from_slice(&bytes))
@@ -3537,10 +3571,43 @@ pub(crate) mod clean_room {
 
         #[test]
         fn a_credential_is_found_anywhere_in_the_bytes_and_an_empty_one_nowhere() {
-            assert!(carries(b"x identity_access_v1_s y", "identity_access_v1_s"));
-            assert!(carries(b"identity_access_v1_s", "identity_access_v1_s"));
-            assert!(!carries(b"identity_access_v1_", "identity_access_v1_s"));
+            // The security review on u1 widened the match to the body and the prefix (design 31
+            // § 5 point 4), so the former case "the bare prefix is not the credential" is
+            // replaced by the cases below with a credential in the bundle's format.
+            let body = "Ab3-_".repeat(8) + "xyz";
+            let credential = format!("identity_access_v1_{body}");
+            assert!(carries(format!("x {credential} y").as_bytes(), &credential));
+            assert!(carries(credential.as_bytes(), &credential));
+            assert!(carries(format!("v{body}").as_bytes(), &credential));
+            assert!(carries(b"driver identity_access_v1_", &credential));
+            assert!(!carries(&body.as_bytes()[1..], &credential));
+            assert!(!carries(b"identity_access_v2_", &credential));
             assert!(!carries(b"anything", ""));
+            assert!(!carries(b"identity_access_v1_", ""));
+        }
+
+        /// Security review (u1): `chart-lane.yml` uploads the report directory whatever the step's
+        /// outcome, so a run refused for holding the credential leaves none of its files behind.
+        #[test]
+        fn a_refused_run_leaves_no_file_that_holds_the_credential() {
+            let directory = tempfile::tempdir().expect("scratch");
+            let out = directory.path().join("out");
+            std::fs::create_dir(&out).expect("out");
+            let log = directory.path().join("conformance.log");
+            let credential = format!("identity_access_v1_{}", "q".repeat(43));
+            std::fs::write(
+                out.join("report.json"),
+                format!("{{\"d\":\"{}\"}}", "q".repeat(43)),
+            )
+            .expect("report");
+            std::fs::write(out.join("report.json.sha256"), "0").expect("digest");
+            std::fs::write(&log, "case a passed\n").expect("log");
+            let refused = super::judge(Some(1), &out, &log, &credential, None)
+                .expect_err("the report holds the body");
+            assert!(!refused.to_string().contains(&"q".repeat(43)));
+            assert!(!out.join("report.json").exists());
+            assert!(!out.join("report.json.sha256").exists());
+            assert!(!log.exists());
         }
     }
 }

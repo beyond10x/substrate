@@ -266,6 +266,7 @@ dependencies = [
  "clap",
  "getrandom 0.4.3",
  "jsonschema",
+ "libc",
  "nix",
  "rcgen",
  "rustls",
