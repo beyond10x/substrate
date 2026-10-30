@@ -235,9 +235,21 @@ fn release_compiles_both_runtime_binaries_once() {
     );
     assert!(executor.contains("--target x86_64-unknown-linux-musl -p b10x-substrate-executor"));
     assert!(!executor.contains("b10x-substrate-daemon"));
+    // The third build is the clean-room runner's own `-p` stage (design 31 § 7): the chart lane
+    // exports it, and no release target depends on it.
+    let runner = DOCKERFILE
+        .split_once(" AS conformance-runner-build\n")
+        .expect("the clean-room runner's own stage")
+        .1
+        .split_once("\nFROM ")
+        .expect("a stage after the runner's build")
+        .0;
+    assert_eq!(runner.matches("cargo build --locked --release").count(), 1);
+    assert!(runner.contains("cargo build --locked --release -p b10x-substrate-conformance &&"));
+    assert_eq!(occurrences("conformance-runner"), 0);
     assert_eq!(
         DOCKERFILE.matches("cargo build --locked --release").count(),
-        2
+        3
     );
     assert!(DOCKERFILE.contains(" AS daemon\n"));
     assert!(DOCKERFILE.contains(" AS mcp\n"));
