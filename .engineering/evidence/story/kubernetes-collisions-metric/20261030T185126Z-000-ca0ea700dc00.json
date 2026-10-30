@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-30T18:51:26Z",
+  "actor": "human:timo",
+  "artifact": "story:kubernetes-collisions-metric",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "coordinator: three notes, no change (documented overcount, unreachable uid-less key, pre-existing late count)",
+    "review": "review-result:wave-2026-10-30-u2-u4-fix-adversary-pass-2",
+    "outcome": "no-op"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-30T18:31:28Z",
+  "actor": "human:timo",
+  "artifact": "story:unconfirmed-pod-deletion-ends-unknown",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "coordinator: fix unit a00bb417 merged as fed90691; acceptance wording amended; unreachable! window filed as story:exec-end-after-await-never-panics",
+    "review": "review-result:wave-2026-10-30-u4-adversary-pass-1",
+    "outcome": "fixed"
+  }
+}
