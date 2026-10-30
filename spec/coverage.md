@@ -90,7 +90,7 @@ from (id, root name, labels, origin, owner), the entry under the workspace root,
 `Create` (only as far as adoption collides with it), `Adopt` and `Destroy`. What the green check
 establishes:
 
-- The model validates under ESS 0.76.0, and `workspaces-suite.json` is its exact synthesized suite
+- The model validates under ESS 0.77.0, and `workspaces-suite.json` is its exact synthesized suite
   (18 scenarios) plus the five authored scenarios under `workspaces/scenarios/`. Synthesis refuses
   one obligation (`ESS-SYNTH-013`: no view row asserts `.count` of `RootName`).
 - All 23 scenarios pass against ESS's `interpreted` reference. That executes the model, not the
@@ -149,7 +149,7 @@ green check establishes:
 - `ess specify validate --path spec/host-processes` resolves the model, its actors and its 21
   authored scenarios.
 - `spec/host-processes-suite.json` is the exact `ess verify conform synthesize` output;
-  `cargo xtask check-ess` fails on drift. Under ESS 0.76.0 it holds 92 synthesized scenarios
+  `cargo xtask check-ess` fails on drift. Under ESS 0.77.0 it holds 92 synthesized scenarios
   and records 27 refusals: 23 for seven of the eight stream bindings, whose invocation synthesis
   cannot force and whose `drop` publishes nothing (ESS-SYNTH-010); 3 for branches and bindings
   whose arrangement passes through a row-set guard: the `AppendStreamEvent` branches `appended`
@@ -179,7 +179,7 @@ What it does not establish:
 `confinement/confinement.yaml` (domain `substrate.confinement`, ADR 0044) specifies the
 confinement contract of atlas ADR 0109 before any adapter code. What the green check establishes:
 
-- The model validates under ESS 0.76.0 with no warning, and `confinement-suite.json` is its exact
+- The model validates under ESS 0.77.0 with no warning, and `confinement-suite.json` is its exact
   synthesized suite (5 scenarios, 32 refusals) plus the 65 authored scenarios under
   `confinement/scenarios/`. Each of the 37 outcomes has at least one scenario, and each refused
   obligation an authored one ([`confinement/README.md`](confinement/README.md) says why synthesis
@@ -202,7 +202,7 @@ What it does not establish:
   rename them, so they name no adapter or lane and no adapter lane selects them; they check the
   model against the interpreted reference only. The same holds for the authored `model-*`
   scenarios. Adapter lanes run the authored scenarios.
-- **No full digest check.** ESS 0.76.0 has no pattern predicate, so the model checks that an image
+- **No full digest check.** ESS 0.77.0 has no pattern predicate, so the model checks that an image
   names `@sha256:`, ends with a lowercase hex character and is at least 73 characters long. That
   exactly 64 lowercase hex characters follow `@sha256:` is the `oci` and `pod` adapters' check.
 - **No probe.** Each scenario's open step states the adapter's declared set. Whether a host

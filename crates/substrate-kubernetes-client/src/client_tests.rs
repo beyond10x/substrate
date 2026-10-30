@@ -1362,3 +1362,561 @@ async fn an_unbounded_removal_that_has_read_a_pods_uid_ends_at_a_same_named_repl
     );
     assert_eq!(seen.uid(), Some(first_uid.as_str()));
 }
+
+/// A removal paced for a unit case: three tries a round, a millisecond apart.
+fn quickly(api: &mut Api) {
+    api.pacing = crate::Pacing {
+        poll: std::time::Duration::from_millis(1),
+        remove_attempts: 3,
+        notice: std::time::Duration::from_millis(1),
+    };
+}
+
+/// A 409 `Status` on a delete of the Pod `name` that is not a uid mismatch: an admission webhook
+/// that denies a DELETE chooses its own code, and this one chose 409 with the API's `Conflict`
+/// reason and `details` naming the Pod, as a uid mismatch's `Status` does.
+fn webhook_conflict(name: &str) -> Value {
+    json!({
+        "kind": "Status",
+        "apiVersion": "v1",
+        "metadata": {},
+        "status": "Failure",
+        "message": "admission webhook \"hold.example.invalid\" denied the request: the Pod is held",
+        "reason": "Conflict",
+        "details": {"name": name, "kind": "pods"},
+        "code": 409,
+    })
+}
+
+/// The removal's requests to the Pod at `path`, as `METHOD`, in order.
+fn calls_to(fake: &FakeCluster, path: &str) -> Vec<String> {
+    fake.requests()
+        .iter()
+        .filter_map(|request| {
+            let (method, target) = request.split_once(' ')?;
+            (target == path).then(|| method.to_owned())
+        })
+        .collect()
+}
+
+/// A 409 on a uid-preconditioned delete is not by itself the Pod gone: the API answers 409 for a
+/// failed precondition and for any conflict an admission webhook chooses to name one. The removal
+/// reads the name after it, and a name still holding the read uid is the Pod present: it deletes
+/// again, and only then is the Pod gone
+/// (`story:preconditioned-delete-409-is-not-a-uid-mismatch`).
+#[tokio::test]
+async fn a_409_whose_follow_up_read_still_shows_the_read_uid_is_not_the_pod_gone() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    quickly(&mut api);
+    let path = format!("{}/held", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("held"))
+        .await
+        .expect("created");
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    fake.fault(Fault::Answer {
+        method: Method::DELETE,
+        path: path.clone(),
+        status: 409,
+        body: webhook_conflict("held"),
+    });
+
+    let removed = api.remove_seen(&path, 1, &mut seen).await;
+
+    assert_eq!(
+        fake.object("pods", "held"),
+        None,
+        "a 409 whose follow-up read showed the read uid ended the removal with the Pod present \
+         (removed: {removed}; story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+    assert!(removed, "the second delete removed the Pod");
+    assert_eq!(
+        calls_to(&fake, &path),
+        ["DELETE", "GET", "DELETE", "GET"],
+        "the 409 is followed by a read of the name, and the read uid by another delete \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+}
+
+/// A conflict that persists while the name holds the read uid is never the Pod gone: the bounded
+/// removal tries its round, reads the name after each 409, and reports the Pod not removed, with
+/// the Pod untouched (`story:preconditioned-delete-409-is-not-a-uid-mismatch`).
+#[tokio::test]
+async fn a_409_that_persists_while_the_name_holds_the_read_uid_is_never_the_pod_gone() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    quickly(&mut api);
+    let path = format!("{}/stuck", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("stuck"))
+        .await
+        .expect("created");
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    for _ in 0..api.pacing.remove_attempts {
+        fake.fault(Fault::Answer {
+            method: Method::DELETE,
+            path: path.clone(),
+            status: 409,
+            body: webhook_conflict("stuck"),
+        });
+    }
+
+    let removed = api.remove_seen(&path, 1, &mut seen).await;
+
+    assert!(
+        !removed,
+        "a 409 with the read uid still at the name was reported gone \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+    assert_eq!(
+        fake.object("pods", "stuck")
+            .map(|object| object["metadata"]["uid"].clone()),
+        Some(first["metadata"]["uid"].clone()),
+        "the Pod is untouched"
+    );
+    assert_eq!(
+        calls_to(&fake, &path),
+        ["DELETE", "GET", "DELETE", "GET", "DELETE", "GET"],
+        "one delete and one read per try, and no more tries than the round's bound \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+}
+
+/// The unbounded removal holds the same rule: a 409 while the name holds the read uid does not end
+/// it, and it ends once the Pod is gone (`story:preconditioned-delete-409-is-not-a-uid-mismatch`).
+#[tokio::test]
+async fn an_unbounded_removal_does_not_end_at_a_409_while_the_name_holds_the_read_uid() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    quickly(&mut api);
+    let path = format!("{}/held-long", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("held-long"))
+        .await
+        .expect("created");
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    fake.fault(Fault::Answer {
+        method: Method::DELETE,
+        path: path.clone(),
+        status: 409,
+        body: webhook_conflict("held-long"),
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        api.remove_until_gone_seen(&path, 1, &mut seen),
+    )
+    .await
+    .expect("the removal ends once the Pod is gone");
+
+    assert_eq!(
+        fake.object("pods", "held-long"),
+        None,
+        "the unbounded removal ended at a 409 with the Pod present \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+}
+
+/// A 409 whose follow-up read finds the name empty is the Pod gone, and nothing is deleted after
+/// it (`story:preconditioned-delete-409-is-not-a-uid-mismatch`).
+#[tokio::test]
+async fn a_409_whose_follow_up_read_finds_the_name_empty_is_the_pod_gone() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    quickly(&mut api);
+    let path = format!("{}/vanished", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("vanished"))
+        .await
+        .expect("created");
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    assert_eq!(api.delete(&path, 1).await, Ok(false), "the fake removes it");
+    let before = calls_to(&fake, &path).len();
+    fake.fault(Fault::Answer {
+        method: Method::DELETE,
+        path: path.clone(),
+        status: 409,
+        body: webhook_conflict("vanished"),
+    });
+
+    let removed = api.remove_seen(&path, 1, &mut seen).await;
+
+    assert!(removed, "an empty name after a 409 is the Pod gone");
+    assert_eq!(
+        calls_to(&fake, &path)[before..],
+        ["DELETE", "GET"],
+        "the 409 is followed by one read and no other delete \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+}
+
+/// Adversary, u3: a 409 whose follow-up read the API answers 503 decides nothing, so a round of
+/// them is the Pod not confirmed gone, one delete and one read per try, the Pod untouched
+/// (`story:preconditioned-delete-409-is-not-a-uid-mismatch`).
+#[tokio::test]
+async fn adversary_a_409_then_a_read_answered_503_is_never_the_pod_gone() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    quickly(&mut api);
+    let path = format!("{}/unread", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("unread"))
+        .await
+        .expect("created");
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    for _ in 0..api.pacing.remove_attempts {
+        fake.fault(Fault::Answer {
+            method: Method::DELETE,
+            path: path.clone(),
+            status: 409,
+            body: webhook_conflict("unread"),
+        });
+        fake.fault(Fault::Answer {
+            method: Method::GET,
+            path: path.clone(),
+            status: 503,
+            body: json!({"kind": "Status", "status": "Failure", "reason": "ServiceUnavailable", "code": 503}),
+        });
+    }
+
+    let removed = api.remove_seen(&path, 1, &mut seen).await;
+
+    assert!(
+        !removed,
+        "a 409 whose read answered 503 was reported gone \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+    assert_eq!(
+        fake.object("pods", "unread")
+            .map(|object| object["metadata"]["uid"].clone()),
+        Some(first["metadata"]["uid"].clone()),
+        "the Pod is untouched"
+    );
+    assert_eq!(
+        calls_to(&fake, &path),
+        ["DELETE", "GET", "DELETE", "GET", "DELETE", "GET"],
+        "one delete and one read per try, and no more tries than the round's bound \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+}
+
+/// Adversary, u3: a 409 whose follow-up read gets no answer in time decides nothing either
+/// (`story:preconditioned-delete-409-is-not-a-uid-mismatch`).
+#[tokio::test]
+async fn adversary_a_409_then_a_read_that_times_out_is_never_the_pod_gone() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    quickly(&mut api);
+    api.timeout = std::time::Duration::from_millis(200);
+    let path = format!("{}/slow", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("slow"))
+        .await
+        .expect("created");
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    for _ in 0..api.pacing.remove_attempts {
+        fake.fault(Fault::Answer {
+            method: Method::DELETE,
+            path: path.clone(),
+            status: 409,
+            body: webhook_conflict("slow"),
+        });
+        fake.fault(Fault::Delay {
+            method: Method::GET,
+            path: path.clone(),
+            by: std::time::Duration::from_secs(2),
+        });
+    }
+
+    let removed = api.remove_seen(&path, 1, &mut seen).await;
+
+    assert!(
+        !removed,
+        "a 409 whose read timed out was reported gone \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+    assert!(
+        fake.object("pods", "slow").is_some(),
+        "the Pod is untouched"
+    );
+}
+
+/// Adversary, u3: a 409 whose follow-up read shows the read uid with a `deletionTimestamp` (a Pod
+/// terminating in its grace period) is the Pod present, not gone: the API still holds it and its
+/// container may still run (`story:preconditioned-delete-409-is-not-a-uid-mismatch`).
+#[tokio::test]
+async fn adversary_a_409_then_a_read_of_the_read_uid_terminating_is_not_the_pod_gone() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    quickly(&mut api);
+    let path = format!("{}/terminating", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("terminating"))
+        .await
+        .expect("created");
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    let mut terminating = fake.object("pods", "terminating").expect("stored");
+    terminating["metadata"]["deletionTimestamp"] = json!("2026-10-30T00:00:00Z");
+    terminating["metadata"]["deletionGracePeriodSeconds"] = json!(30);
+    for _ in 0..api.pacing.remove_attempts {
+        fake.fault(Fault::Answer {
+            method: Method::DELETE,
+            path: path.clone(),
+            status: 409,
+            body: webhook_conflict("terminating"),
+        });
+        fake.fault(Fault::Answer {
+            method: Method::GET,
+            path: path.clone(),
+            status: 200,
+            body: terminating.clone(),
+        });
+    }
+
+    let removed = api.remove_seen(&path, 1, &mut seen).await;
+
+    assert!(
+        !removed,
+        "a 409 whose read showed the read uid terminating was reported gone \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+    assert_eq!(
+        seen.uid(),
+        first["metadata"]["uid"].as_str(),
+        "the trace still holds the first Pod"
+    );
+    assert_eq!(
+        calls_to(&fake, &path),
+        ["DELETE", "GET", "DELETE", "GET", "DELETE", "GET"],
+        "one delete and one read per try (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+}
+
+/// Adversary, u3: a uid-mismatch 409 (the fake's own precondition check) whose follow-up read shows
+/// another uid ends the removal at once: one delete, one read, and no delete after it, so the
+/// replacement is never asked to go (`story:preconditioned-delete-409-is-not-a-uid-mismatch`).
+#[tokio::test]
+async fn adversary_a_409_then_a_read_of_another_uid_is_gone_after_one_delete_and_one_read() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    quickly(&mut api);
+    let path = format!("{}/swapped-once", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("swapped-once"))
+        .await
+        .expect("created");
+    let first_uid = first["metadata"]["uid"].as_str().expect("a uid").to_owned();
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    assert_eq!(
+        api.delete_preconditioned(&path, 1, &first_uid).await,
+        Ok(false)
+    );
+    let replacement = api
+        .create(&api.pods(), &pod("swapped-once"))
+        .await
+        .expect("replacement created");
+    let before = calls_to(&fake, &path).len();
+
+    let removed = api.remove_seen(&path, 1, &mut seen).await;
+
+    assert!(removed, "a name holding another uid is the Pod read gone");
+    assert_eq!(
+        calls_to(&fake, &path)[before..],
+        ["DELETE", "GET"],
+        "the uid-mismatch 409 is followed by one read and nothing else \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+    assert_eq!(
+        fake.object("pods", "swapped-once")
+            .map(|object| object["metadata"]["uid"].clone()),
+        Some(replacement["metadata"]["uid"].clone()),
+        "the replacement is untouched"
+    );
+}
+
+/// Adversary, u3: the unbounded removal against a 409 that persists while the name holds the read
+/// uid does not end, and deletes nothing: it is never the Pod gone, however long it runs
+/// (`story:preconditioned-delete-409-is-not-a-uid-mismatch`).
+#[tokio::test]
+async fn adversary_an_unbounded_removal_against_a_persistent_409_never_ends() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    api.pacing = crate::Pacing {
+        poll: std::time::Duration::from_millis(10),
+        remove_attempts: 3,
+        notice: std::time::Duration::from_millis(5),
+    };
+    let path = format!("{}/held-forever", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("held-forever"))
+        .await
+        .expect("created");
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    for _ in 0..200 {
+        fake.fault(Fault::Answer {
+            method: Method::DELETE,
+            path: path.clone(),
+            status: 409,
+            body: webhook_conflict("held-forever"),
+        });
+    }
+
+    let ended = tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        api.remove_until_gone_seen(&path, 1, &mut seen),
+    )
+    .await;
+
+    assert!(
+        ended.is_err(),
+        "the unbounded removal ended while every delete was refused 409 and the name held the \
+         read uid (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+    assert!(
+        fake.object("pods", "held-forever").is_some(),
+        "the Pod is untouched"
+    );
+    let deletes = calls_to(&fake, &path)
+        .iter()
+        .filter(|method| *method == "DELETE")
+        .count();
+    assert!(
+        (2..200).contains(&deletes),
+        "the removal kept deleting within its faults ({deletes} deletes)"
+    );
+}
+
+/// Security review of `story:preconditioned-delete-409-is-not-a-uid-mismatch`: a 409 whose
+/// follow-up read is not answered (an error status, or an answer lost) decides nothing, so it is
+/// never the Pod gone, within the round's bound, and the Pod stays untouched (invariant 3: a
+/// missing answer is not an optimistic one).
+#[tokio::test]
+async fn a_409_whose_follow_up_read_is_not_answered_is_never_the_pod_gone() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    quickly(&mut api);
+    let path = format!("{}/unread", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("unread"))
+        .await
+        .expect("created");
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    for _ in 0..api.pacing.remove_attempts {
+        fake.fault(Fault::Answer {
+            method: Method::DELETE,
+            path: path.clone(),
+            status: 409,
+            body: webhook_conflict("unread"),
+        });
+    }
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: path.clone(),
+        status: 500,
+        body: json!({"kind": "Status", "status": "Failure", "code": 500}),
+    });
+    fake.fault(Fault::DropAnswer {
+        method: Method::GET,
+        path: path.clone(),
+    });
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: path.clone(),
+        status: 503,
+        body: json!({"kind": "Status", "status": "Failure", "code": 503}),
+    });
+
+    let removed = api.remove_seen(&path, 1, &mut seen).await;
+
+    assert!(
+        !removed,
+        "a 409 whose follow-up read was not answered was reported gone \
+         (story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+    assert_eq!(
+        fake.object("pods", "unread")
+            .map(|object| object["metadata"]["uid"].clone()),
+        Some(first["metadata"]["uid"].clone()),
+        "the Pod is untouched"
+    );
+    assert_eq!(
+        calls_to(&fake, &path),
+        ["DELETE", "GET", "DELETE", "GET", "DELETE", "GET"],
+        "one delete and one read per try, within the round's bound"
+    );
+}
+
+/// Security review of `story:preconditioned-delete-409-is-not-a-uid-mismatch`: the delete the
+/// change now sends after a 409 still carries the read uid as `preconditions.uid`. A replacement
+/// stored under the name between the follow-up read (which still showed the read uid) and that
+/// delete is refused by the precondition, never deleted, and the removal ends at it as the Pod
+/// gone with the trace's uid unchanged.
+#[tokio::test]
+async fn the_delete_after_a_409_carries_the_read_uid_and_spares_a_late_replacement() {
+    let fake = start();
+    let mut api = client(&fake.kubeconfig());
+    quickly(&mut api);
+    let path = format!("{}/late", api.pods());
+    let first = api
+        .create(&api.pods(), &pod("late"))
+        .await
+        .expect("created");
+    let first_uid = first["metadata"]["uid"].as_str().expect("a uid").to_owned();
+    let mut seen = PodTrace::default();
+    assert!(seen.note(&first), "the first object is noted");
+    assert_eq!(
+        api.delete_preconditioned(&path, 1, &first_uid).await,
+        Ok(false),
+        "the first Pod goes"
+    );
+    let replacement = api
+        .create(&api.pods(), &pod("late"))
+        .await
+        .expect("replacement created");
+    assert_ne!(replacement["metadata"]["uid"], first["metadata"]["uid"]);
+    let before = calls_to(&fake, &path).len();
+    fake.fault(Fault::Answer {
+        method: Method::DELETE,
+        path: path.clone(),
+        status: 409,
+        body: webhook_conflict("late"),
+    });
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: path.clone(),
+        status: 200,
+        body: first.clone(),
+    });
+
+    let removed = api.remove_seen(&path, 1, &mut seen).await;
+
+    assert_eq!(
+        fake.object("pods", "late")
+            .map(|object| object["metadata"]["uid"].clone()),
+        Some(replacement["metadata"]["uid"].clone()),
+        "the delete after a 409 removed a same-named replacement: it did not carry the read uid \
+         (removed: {removed}; story:preconditioned-delete-409-is-not-a-uid-mismatch)"
+    );
+    assert!(removed, "a name holding another uid is the Pod read gone");
+    assert_eq!(
+        calls_to(&fake, &path)[before..],
+        ["DELETE", "GET", "DELETE", "GET"],
+        "the read uid after the 409 is deleted again, refused, and read once more"
+    );
+    assert_eq!(
+        seen.uid(),
+        Some(first_uid.as_str()),
+        "the removal took the replacement as its own Pod"
+    );
+}

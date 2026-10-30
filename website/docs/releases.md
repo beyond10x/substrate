@@ -15,39 +15,76 @@ What 0.16.1 first publishes is listed under 0.16.0 in the full changelog and sum
 
 <!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->
 
-## 0.16.1 (2026-10-29)
+## 0.17.0 (2026-10-30)
 
-Published by [release run 40949928365](https://github.com/beyond10x/substrate/actions/runs/40949928365)
-(attempt 2) for tag `0.16.1` at commit `f2fd606b88a0b778970e8babe9a96eb600cd57b2`. All four images,
-the chart and the binaries' `SHA256SUMS` were keyless-signed and verified against
-`release.yml@refs/tags/0.16.1` by the release workflow, and each digest resolved anonymously:
+Shared clean-room conformance arrives: design 31's remote runner certifies a deployed endpoint from
+outside it, and the Kubernetes namespace lane runs it as step 4. The namespace driver still refuses
+every exec start `exec.sandbox-unavailable`; admitting one needs design 30's neutral confinement
+families, which wait on an operator decision.
 
-- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.16.1` at `sha256:ab798921666cbbbcdbcc36da132b106dfcd7ee03bb7b0b5adcf7edbddc61ae88`.
-- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.25.0` at `sha256:6f31a62628ae3e084134f4fe47900eaf2fc1932ced61c54ca9498f39b9c7e322`, first published by this release.
-- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.16.1` at `sha256:77342f97515579f1c5b12c9aa4b6429d9e23d0dd9fbce97932ac34cb6346959d`, development-only.
-- Executor image: `ghcr.io/beyond10x/b10x-substrate-executor:0.16.1` at `sha256:e3ed53485640dc759760dd47eb08ec0eb9eea895aa8bcd630f60e5087ab6729e`, first published by this release.
-- Chart: `oci://ghcr.io/beyond10x/charts/b10x-substrate` `0.16.1` at `sha256:23b9f96f5fbfb5f3c4091f32f6d7c0da52a657fbcb185a25c5d2a7d7883f03a0`.
-- Binaries: `substrate-daemon-0.16.1-x86_64-unknown-linux-gnu.tar.gz` and `b10x-substrate-0.16.1-x86_64-unknown-linux-gnu.tar.gz`, listed in `SHA256SUMS` (`sha256:a5b3170fad432678b1da5f451145dc834d09e64b8c4d59ff6a16c3ba27aa49fc`) and signed in `SHA256SUMS.sigstore.json`.
-- The tag records `Confinement-lane:` 182, `Quota-lane:` 7, `Chart-lane:` 4 and `Namespace-lane:` 8, each at `f2fd606b`.
+### Added in 0.17.0
 
-Tag `0.16.0` points at commit `541cf55eb3efa7977aad6721f697668d1f029c28` and was not published.
-`release.yml` releases only a commit whose `gate.yml` run concluded `success`, and `main`'s gate on
-that commit ([run 40911403183](https://github.com/beyond10x/substrate/actions/runs/40911403183))
-failed `cargo xtask check-advisories` on RUSTSEC-2026-0418, which was published after the pull
-request's gate passed and before `main`'s ran. Release tags are write-once, so `0.16.0` cannot be
-moved. 0.16.1 is the first published release of everything listed under 0.16.0.
+- `b10x-substrate-conformance`, design 31's clean-room runner: it certifies one deployed endpoint
+  over HTTPS and WSS from outside it, pinned to `substrate-wire/0.25.0`, and writes `report.json`
+  with `report.json.sha256` under a closed schema (exit 0 passed, 1 failed, 2 invalid input, 3
+  harness failure, 4 incomplete). Build it with
+  `cargo build --release --locked -p b10x-substrate-conformance`; `cargo xtask check-packages`
+  holds that this build links no daemon, host driver or store. Guide: *Remote conformance*. No
+  release artifact (design 31 Q3).
+- The runner checks its input before the first request: `out-uncreatable` (the `--out` directory
+  is created at the start and removed again when the run stops without a report),
+  `token-command-unusable` and `restart-hook-unusable` (the program is not an absolute path to an
+  executable file) are exit 2 with no report. Its token command and restart hook start with only
+  the standard streams open.
+- Exit 3 (harness failure, no report) names `deadline-exceeded` (the handshake, the connect and the
+  final machine read run under `--deadline`), `token-fd-poisoned` (an exchange on `--token-fd`
+  timed out or answered an over-long line; every later fetch fails) and `report-outside-schema`
+  (the report is checked against its own schema before it is written). A chunk size or
+  `content-length` beyond the response bound is a malformed answer.
+- Cases fail by name instead of reading without bound: `events-page-shrank`,
+  `status-unrepresentable`, `session-output-exceeded` (64 KiB of session output). An endpoint whose
+  first `/v1/machine` body does not decode is exit 1 with a report: the failed case
+  `machine.envelope-decodes` (`envelope-undecodable`) and `capability_snapshot: null`.
+- The namespace lane's step 4 runs the runner against the `--driver kubernetes` daemon with a
+  crash restart hook, and the chart lane's hosted scenarios gain "clean-room runner" against
+  ordinal 0, with the report uploaded as the `clean-room-report` artifact. Step 4 counts a daemon
+  restart only when the exit was the SIGKILL its restart hook sent; any other daemon exit stops the
+  runner and fails the step (`daemon-exit-not-caused-by-hook`), and no exit at all is
+  `hook-caused-no-exit`. Both lanes refuse a report or runner output that holds the credential,
+  its body or the token prefix, and delete the report, its digest and the runner's log before
+  failing, so the `clean-room-report` artifact never carries them.
+- The operational listener of a daemon running `--driver kubernetes` serves
+  `substrate_kubernetes_collisions_total`, a counter with no labels: the objects the driver met
+  under a name it would use and did not create, each left untouched (design 34 § 4, the one
+  addition it makes to ADR 0045's catalogue). Each object is counted once, keyed on its kind, name
+  and uid, however often a provisional loop or a read meets it again; the driver remembers 4096
+  such objects, and past that a new one is counted every time it is met, so the series can
+  overcount but never misses an object. A foreign Pod met under an exec Pod's name at start is
+  counted too. Its scrape carries at most 583 samples. A host daemon publishes no such series and
+  its scrape is unchanged at 582. The driver port gains `Driver::backend_collisions`, `None` by
+  default.
 
-That includes the Kubernetes namespace driver of design 34 and ADR 0047, as a development profile.
-Exec on a cluster is unverified, and every exec start on the driver is refused
-`exec.sandbox-unavailable`. Shared clean-room conformance follows in the next release: the
-namespace lane reports its step 4 absent until `story:remote-clean-room-conformance` lands.
+### Changed in 0.17.0
 
-### Security in 0.16.1
+- Changed contract: the report schema `remote-conformance-report.v1` differs from the one design 31
+  published before this release. `capability_snapshot` and each snapshot read may be `null`; a
+  snapshot read records only a `sha256:` digest and an RFC 3339 time; `not_covered` also lists
+  every pinned registry operation no case names (`{"operation": …}`); a word (driver, driver
+  version) is at most 32 characters of `[0-9A-Za-z.+-]` starting alphanumeric, so it no longer
+  admits `_`. A driver version outside that fails `machine.envelope-decodes` with
+  `driver-version-unrepresentable`. A consumer that parsed reports against design 31's table must
+  accept `null` there.
+- Pinned ESS 0.77.0 across every specification and the CI gate (`ESS_VERSION` and `ESS_SHA256` in
+  `.github/workflows/gate.yml`); `cargo xtask check-ess` passes with unchanged scenario counts.
 
-- `libz-sys` is 1.1.31, taking the fix for
-  [RUSTSEC-2026-0418](https://rustsec.org/advisories/RUSTSEC-2026-0418.html); it reaches the
-  workspace through `curl-sys` and `libgit2-sys` under `substrate-host`.
-  `THIRD_PARTY_LICENSES.html` is regenerated for that revision. The advisory's build script prints
-  the build environment only when compiled with `cc` 1.6.0 or later. `Cargo.lock` held `cc` 1.4.4
-  at `0.16.0`, in every revision of it on `main` since 2026-09-25, and still does, so this
-  workspace's locked builds did not print it.
+### Fixed in 0.17.0
+
+- A Pod removal no longer treats a 409 on its uid-preconditioned delete as the Pod gone: it reads
+  the name, and retries while the Pod it read is still there. The Status of the 409 does not
+  decide, because an admission webhook sets its own.
+- Kubernetes driver: an exec Pod still holding its bound uid 60 s or more after the driver's
+  deletion was accepted ends the exec `unknown`, not `running`, even when that read already shows
+  the container terminated, so the end no longer depends on when the exec is first observed; the
+  garbage round keeps deleting it (design 28). A `kill` or `term` whose delete answer was lost
+  starts the same bound at the first read that shows the Pod's `deletionTimestamp`; before, such
+  an exec stayed `running` when no garbage round ran.

@@ -1,0 +1,577 @@
+{
+  "$defs": {
+    "code": {
+      "pattern": "^[a-z][a-z0-9.-]{0,127}$",
+      "type": "string"
+    },
+    "codes": {
+      "items": {
+        "$ref": "#/$defs/code"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "group": {
+      "enum": [
+        "machine",
+        "tls",
+        "tls-name",
+        "auth",
+        "auth-scope",
+        "workspace",
+        "unserved",
+        "recovery",
+        "exec",
+        "resources",
+        "sessions",
+        "events",
+        "retention-gap",
+        "restart",
+        "restart-exec",
+        "ops",
+        "cleanup"
+      ],
+      "type": "string"
+    },
+    "input": {
+      "enum": [
+        "forbidden-name",
+        "max-generated-events",
+        "narrowed-credential",
+        "ops-origin",
+        "restart-hook"
+      ],
+      "type": "string"
+    },
+    "inputs": {
+      "items": {
+        "$ref": "#/$defs/input"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "instant": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$",
+      "type": "string"
+    },
+    "scopes": {
+      "items": {
+        "enum": [
+          "exec",
+          "observe",
+          "workspaces"
+        ],
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "snapshot_read": {
+      "additionalProperties": false,
+      "properties": {
+        "probed_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "probed_at",
+        "snapshot"
+      ],
+      "type": [
+        "null",
+        "object"
+      ]
+    },
+    "word": {
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://beyond10x.github.io/substrate/schemas/remote-conformance-report.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The report of one clean-room conformance run against a deployed Substrate endpoint (design 31). Closed at every level: no member carries free text, a credential, a clear-text origin or name, a resource or operation id, argv, output bytes or a refusal message.",
+  "properties": {
+    "capability_snapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "config_generation": {
+          "$ref": "#/$defs/count"
+        },
+        "driver": {
+          "$ref": "#/$defs/word"
+        },
+        "driver_version": {
+          "$ref": "#/$defs/word"
+        },
+        "first": {
+          "$ref": "#/$defs/snapshot_read"
+        },
+        "last": {
+          "$ref": "#/$defs/snapshot_read"
+        }
+      },
+      "required": [
+        "config_generation",
+        "driver",
+        "driver_version",
+        "first",
+        "last"
+      ],
+      "type": [
+        "null",
+        "object"
+      ]
+    },
+    "cases": {
+      "items": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "else": {
+              "not": {
+                "required": [
+                  "absent"
+                ]
+              }
+            },
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "absent"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "absent"
+              ]
+            }
+          },
+          {
+            "else": {
+              "properties": {
+                "diagnostics": {
+                  "maxItems": 0
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "failed"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "diagnostics": {
+                  "minItems": 1
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "absent": {
+            "additionalProperties": false,
+            "properties": {
+              "facts": {
+                "$ref": "#/$defs/codes"
+              },
+              "inputs": {
+                "$ref": "#/$defs/inputs"
+              },
+              "reason": {
+                "enum": [
+                  "bound-exceeded",
+                  "fact-absent",
+                  "fact-unsatisfied",
+                  "input-not-declared",
+                  "scope-not-declared"
+                ],
+                "type": "string"
+              },
+              "scopes": {
+                "$ref": "#/$defs/scopes"
+              }
+            },
+            "required": [
+              "facts",
+              "inputs",
+              "reason",
+              "scopes"
+            ],
+            "type": "object"
+          },
+          "branch": {
+            "enum": [
+              "admitted",
+              "not-admitted"
+            ],
+            "type": "string"
+          },
+          "detection": {
+            "enum": [
+              "probed-at",
+              "probed-at-and-exec"
+            ],
+            "type": "string"
+          },
+          "diagnostics": {
+            "$ref": "#/$defs/codes"
+          },
+          "duration_ms": {
+            "$ref": "#/$defs/count"
+          },
+          "group": {
+            "$ref": "#/$defs/group"
+          },
+          "id": {
+            "$ref": "#/$defs/code"
+          },
+          "observed": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "$ref": "#/$defs/code"
+              },
+              "status": {
+                "maximum": 599,
+                "minimum": 100,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "code",
+              "status"
+            ],
+            "type": "object"
+          },
+          "requires": {
+            "additionalProperties": false,
+            "properties": {
+              "facts": {
+                "$ref": "#/$defs/codes"
+              },
+              "inputs": {
+                "$ref": "#/$defs/inputs"
+              },
+              "operations": {
+                "$ref": "#/$defs/codes"
+              },
+              "scopes": {
+                "$ref": "#/$defs/scopes"
+              }
+            },
+            "required": [
+              "facts",
+              "inputs",
+              "operations",
+              "scopes"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "absent",
+              "failed",
+              "passed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "diagnostics",
+          "duration_ms",
+          "group",
+          "id",
+          "requires",
+          "status"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "contract": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^substrate-wire/[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "name",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "declared": {
+      "additionalProperties": false,
+      "properties": {
+        "bounds": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_s": {
+              "maximum": 3600,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "io_timeout_s": {
+              "maximum": 60,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_generated_events": {
+              "maximum": 10000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "restart_timeout_s": {
+              "maximum": 600,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "deadline_s",
+            "io_timeout_s",
+            "max_generated_events",
+            "restart_timeout_s"
+          ],
+          "type": "object"
+        },
+        "forbidden_names": {
+          "$ref": "#/$defs/count"
+        },
+        "ops_origin": {
+          "type": "boolean"
+        },
+        "restart_hook": {
+          "type": "boolean"
+        },
+        "scopes": {
+          "$ref": "#/$defs/scopes",
+          "minItems": 1
+        },
+        "token_provider": {
+          "enum": [
+            "command",
+            "fd"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "bounds",
+        "forbidden_names",
+        "ops_origin",
+        "restart_hook",
+        "scopes",
+        "token_provider"
+      ],
+      "type": "object"
+    },
+    "endpoint": {
+      "additionalProperties": false,
+      "properties": {
+        "alpn": {
+          "enum": [
+            "http/1.1",
+            "none",
+            "other"
+          ],
+          "type": "string"
+        },
+        "leaf_certificate_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "leaf_not_after": {
+          "$ref": "#/$defs/instant"
+        },
+        "origin_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "server_name_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "tls_version": {
+          "enum": [
+            "TLSv1.2",
+            "TLSv1.3",
+            "other"
+          ],
+          "type": "string"
+        },
+        "trust_roots_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "alpn",
+        "leaf_certificate_sha256",
+        "leaf_not_after",
+        "origin_sha256",
+        "server_name_sha256",
+        "tls_version",
+        "trust_roots_sha256"
+      ],
+      "type": "object"
+    },
+    "format": {
+      "const": "b10x.substrate-remote-conformance-report.v1",
+      "type": "string"
+    },
+    "not_covered": {
+      "items": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "case": {
+                "enum": [
+                  "crash-after-dispatch",
+                  "crash-before-dispatch",
+                  "restart-no-redispatch"
+                ],
+                "type": "string"
+              },
+              "covered_by": {
+                "const": "crates/substrate-daemon/tests/contract_vectors.rs",
+                "type": "string"
+              }
+            },
+            "required": [
+              "case",
+              "covered_by"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "$ref": "#/$defs/code"
+              }
+            },
+            "required": [
+              "operation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    },
+    "run": {
+      "additionalProperties": false,
+      "properties": {
+        "finished_at": {
+          "$ref": "#/$defs/instant"
+        },
+        "label": {
+          "pattern": "^run-[0-9a-z]{26}$",
+          "type": "string"
+        },
+        "only": {
+          "items": {
+            "$ref": "#/$defs/group"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "partial": {
+          "type": "boolean"
+        },
+        "started_at": {
+          "$ref": "#/$defs/instant"
+        }
+      },
+      "required": [
+        "finished_at",
+        "label",
+        "only",
+        "partial",
+        "started_at"
+      ],
+      "type": "object"
+    },
+    "runner": {
+      "additionalProperties": false,
+      "properties": {
+        "source_revision": {
+          "pattern": "^([0-9a-f]{40}|unknown)$",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_revision",
+        "version"
+      ],
+      "type": "object"
+    },
+    "totals": {
+      "additionalProperties": false,
+      "properties": {
+        "absent": {
+          "$ref": "#/$defs/count"
+        },
+        "failed": {
+          "$ref": "#/$defs/count"
+        },
+        "passed": {
+          "$ref": "#/$defs/count"
+        }
+      },
+      "required": [
+        "absent",
+        "failed",
+        "passed"
+      ],
+      "type": "object"
+    },
+    "verdict": {
+      "enum": [
+        "failed",
+        "incomplete",
+        "passed"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "capability_snapshot",
+    "cases",
+    "contract",
+    "declared",
+    "endpoint",
+    "format",
+    "not_covered",
+    "run",
+    "runner",
+    "totals",
+    "verdict"
+  ],
+  "title": "Substrate remote conformance report v1",
+  "type": "object"
+}

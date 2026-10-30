@@ -2,13 +2,24 @@
 format: aep.planning-md/3
 id: story:kubernetes-collisions-metric
 kind: story
-status: draft
+status: implemented
 title: The operational listener exposes Kubernetes name collisions
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
 - depends_on: story:operational-health-and-telemetry
 - depends_on: story:kubernetes-namespace-workspace-and-exec-slice
-revision: 1
+scope:
+- confidence: cited
+  path: crates/substrate-daemon/src/app/health.rs
+- confidence: inferred
+  path: crates/substrate-daemon/tests/ops_listener
+- confidence: inferred
+  path: crates/substrate-kubernetes/src/ownership.rs
+revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 5}
+- {from: "proposed", to: "active", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 6}
+- {from: "active", to: "implemented", at: "2026-10-30T20:34:26Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: The operational listener exposes Kubernetes name collisions
 

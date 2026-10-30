@@ -102,6 +102,11 @@ impl substrate_host::Driver for NamespaceDriver {
         Ok(())
     }
 
+    /// Design 34 § 4: `substrate_kubernetes_collisions_total` on the operational listener.
+    fn backend_collisions(&self) -> Option<u64> {
+        Some(self.collisions_total())
+    }
+
     async fn start_exec(
         &self,
         id: &str,

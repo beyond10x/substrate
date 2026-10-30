@@ -148,7 +148,8 @@ listener closes.
 
 The metric set is fixed. Labels are closed sets: listener, route family, outcome class, refusal
 code, check, maintenance task and admission result. No subject, resource id, path, address or
-credential appears in a label or a value. A scrape carries at most 582 samples.
+credential appears in a label or a value. A scrape carries at most 582 samples on a host daemon
+and at most 583 samples on a daemon running `--driver kubernetes`.
 
 - **Build and readiness:** `substrate_build_info`, `substrate_ready`.
 - **Requests:** `substrate_http_requests_total`, `substrate_http_request_duration_seconds`,
@@ -162,6 +163,9 @@ credential appears in a label or a value. A scrape carries at most 582 samples.
   `substrate_maintenance_last_round_timestamp_seconds`.
 - **Hosted Identity:** `substrate_hosted_admissions_total`,
   `substrate_hosted_resolution_duration_seconds`.
+- **Kubernetes driver only:** `substrate_kubernetes_collisions_total`, the objects the driver met
+  under a name it would use and did not create. It leaves each one untouched. A host daemon does
+  not publish it.
 - **Process:** the standard `process_*` metrics.
 
 Every histogram uses the same 11 buckets, from 5 ms to 10 s.

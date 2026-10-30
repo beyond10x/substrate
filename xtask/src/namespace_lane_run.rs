@@ -2,24 +2,26 @@
 //! with `--driver kubernetes` on the workstation, the vectors' namespace lane, the driver-specific
 //! cases of ADR 0047 decision 13 and the cleanup assertions.
 //!
-//! The daemon listens on its Unix socket, not over TLS: the chart lane's Identity stub runs inside
-//! its cluster's daemon Pods (`xtask/src/chart_cluster.rs`) and offers nothing a workstation
-//! process can reuse. Every daemon the lane starts is the shipped binary, built from this checkout;
-//! the lane talks to it over its socket and to the cluster with the admin credential only to set a
-//! case up, to look at what the driver left and to release the namespace's Lease once the daemon
-//! that held it is stopped: the Role grants the driver no `delete` on Leases (decision 3), so a
-//! stopped daemon's claim would hold the namespace for 30 s, or for ever for another deployment.
+//! Every daemon the lane starts is the shipped binary, built from this checkout; the lane talks to
+//! it over its Unix socket and to the cluster with the admin credential only to set a case up, to
+//! look at what the driver left and to release the namespace's Lease once the daemon that held it
+//! is stopped: the Role grants the driver no `delete` on Leases (decision 3), so a stopped
+//! daemon's claim would hold the namespace for 30 s, or for ever for another deployment.
 //!
-//! Step 4, design 31's clean-room runner, does not exist in this wave (D186): it is named in
-//! [`ABSENT`] and never counted. A case the driver cannot reach on this wave is named there too,
-//! with its reason; every other case in [`cases`] must pass once.
+//! Step 4 runs design 31's clean-room runner, built with `-p` beside the daemon, against the
+//! lane's daemon served over TLS as well, with the chart lane's Identity stub on loopback
+//! (`xtask/src/chart_cluster.rs`); its restart hook kills the daemon, and the step starts it again
+//! on the same state, certificate and port. A case the driver cannot reach on this wave is named
+//! in [`ABSENT`] with its reason; every other case in [`cases`] must pass once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
+use std::io::Write as _;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -29,7 +31,7 @@ use substrate_kubernetes_client::{Api, ListForm};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 
-use crate::chart_cluster::output;
+use crate::chart_cluster::{Listener, Material, clean_room, output};
 use crate::namespace_lane_render as render;
 
 /// The driver's kubeconfig context extension (`crates/substrate-kubernetes/src/lib.rs`).
@@ -81,17 +83,30 @@ const REFUSAL_BOUND: Duration = Duration::from_secs(90);
 /// claims.
 const INVENTORY_BOUND: Duration = Duration::from_mins(3);
 
-/// The step 4 reason (D186).
-pub const STEP_FOUR_ABSENT: &str = "postponed to story:remote-clean-room-conformance (D186): \
-                                    design 31's clean-room runner does not exist in this wave";
+/// The name step 4's daemon certificate carries; the runner verifies it apart from the loopback
+/// address it dials.
+const RUNNER_SERVER_NAME: &str = "namespace-lane.substrate.test";
+/// A name step 4's daemon certificate does not carry, under which the runner must fail to verify.
+const RUNNER_FORBIDDEN_NAME: &str = "headless.namespace-lane.substrate.test";
+/// Step 4's restart hook, run argv-only by the runner as `kill -KILL <daemon pid>`: a crash, not
+/// the graceful path (design 31 § 7).
+const KILL_PROGRAM: &str = "/usr/bin/kill";
+/// The runner's own deadline in step 4: each workspace is a claim and a keeper Pod on kind.
+const RUNNER_DEADLINE: Duration = Duration::from_mins(30);
+/// The runner's bound on one call, its ceiling.
+const RUNNER_IO: Duration = Duration::from_mins(1);
+/// The runner's bound on the hook and the new probe: the kill, the Lease, [`SERVING_BOUND`].
+const RUNNER_RESTART: Duration = Duration::from_mins(10);
+/// The input step 4 leaves undeclared: the Identity stub resolves one credential and narrows
+/// none, so the provider answers `unsupported` for the narrowed purpose.
+const RUNNER_UNDECLARED: [&str; 1] = ["narrowed-credential"];
 /// Why every exec-dependent case is absent on this wave.
 pub const NO_EXEC: &str = "no exec is admitted on this wave: the driver never publishes \
                            confinement.no-egress (O3 did not hold on kind), so every exec start \
                            is refused exec.sandbox-unavailable before a Pod exists";
 
 /// The cases named absent, with their reasons; none is ever counted as passed.
-pub const ABSENT: [(&str, &str); 7] = [
-    ("S4 clean-room runner", STEP_FOUR_ABSENT),
+pub const ABSENT: [(&str, &str); 6] = [
     ("S6 quota exec.capacity", NO_EXEC),
     (
         "S6 restart: running exec reads unknown and its Pod is gone",
@@ -485,6 +500,21 @@ impl Daemon {
     ///
     /// The process does not start, or exits or creates no socket within 30 s.
     pub fn start(binary: &Path, directory: &Path, config: &Path, deployment: &str) -> Result<Self> {
+        Self::start_with(binary, directory, config, deployment, &[])
+    }
+
+    /// [`Daemon::start`] with `extra` arguments after the lane's own: step 4's TLS listener.
+    ///
+    /// # Errors
+    ///
+    /// The process does not start, or exits or creates no socket within 30 s.
+    pub fn start_with(
+        binary: &Path,
+        directory: &Path,
+        config: &Path,
+        deployment: &str,
+        extra: &[String],
+    ) -> Result<Self> {
         fs::create_dir_all(directory)?;
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
         let socket = directory.join("d.sock");
@@ -502,6 +532,7 @@ impl Daemon {
             .arg(directory.join("state.db"))
             .args(["--deployment", deployment, "--allow-uid"])
             .arg(nix_uid().to_string())
+            .args(extra)
             .env("NO_COLOR", "1")
             .env_remove("RUST_LOG")
             .env_remove("KUBECONFIG")
@@ -539,6 +570,36 @@ impl Daemon {
     /// Everything the daemon wrote to stderr so far.
     pub fn log(&self) -> String {
         fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// The running daemon's process id.
+    ///
+    /// # Errors
+    ///
+    /// It was stopped or has exited.
+    pub fn pid(&self) -> Result<u32> {
+        self.child
+            .as_ref()
+            .map(Child::id)
+            .ok_or_else(|| anyhow!("the daemon is not running"))
+    }
+
+    /// The status of an exit this call observed; `None` while the daemon runs, and for an exit an
+    /// earlier call already returned. An exited daemon is reaped here, so [`Daemon::stop`] never
+    /// signals its reused pid.
+    ///
+    /// # Errors
+    ///
+    /// The process could not be waited on.
+    pub fn exit_status(&mut self) -> Result<Option<ExitStatus>> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(None);
+        };
+        let status = child.try_wait()?;
+        if status.is_some() {
+            self.child = None;
+        }
+        Ok(status)
     }
 
     /// Stops the daemon with SIGINT, then SIGKILL after 15 s.
@@ -760,6 +821,105 @@ fn tail(log: &str) -> String {
     lines[lines.len().saturating_sub(8)..].join(" | ")
 }
 
+/// The clean-room runner `build_daemon` builds into the daemon's own directory.
+fn runner_beside(daemon: &Path) -> PathBuf {
+    daemon.with_file_name(clean_room::PACKAGE)
+}
+
+/// A loopback address no listener holds now.
+fn unused_loopback() -> Result<SocketAddr> {
+    Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()?)
+}
+
+/// Step 4's daemon arguments beside the lane's own: the production TLS listener with the
+/// generated chain and key, the loopback Identity stub and its CA, and the operational listener.
+fn tls_arguments(
+    address: SocketAddr,
+    ops: SocketAddr,
+    chain: &Path,
+    key: &Path,
+    identity: &str,
+    identity_ca: &Path,
+) -> Vec<String> {
+    [
+        ("--tls-listen", address.to_string()),
+        ("--tls-certificate-chain", chain.display().to_string()),
+        ("--tls-private-key", key.display().to_string()),
+        ("--hosted-identity-origin", identity.to_owned()),
+        (
+            "--hosted-identity-ca-bundle",
+            identity_ca.display().to_string(),
+        ),
+        ("--ops-listen", ops.to_string()),
+    ]
+    .into_iter()
+    .flat_map(|(flag, value)| [flag.to_owned(), value])
+    .collect()
+}
+
+/// Step 4's runner call: the loopback TLS address verified as [`RUNNER_SERVER_NAME`], the
+/// daemon's self-signed certificate as the one trust root, the kill of `pid` as the restart hook
+/// and the operational listener.
+fn runner_call<'a>(
+    address: SocketAddr,
+    ops: SocketAddr,
+    roots: &'a Path,
+    out: &'a Path,
+    pid: u32,
+) -> clean_room::Call<'a> {
+    clean_room::Call {
+        endpoint: format!("https://{address}/"),
+        trust_roots: roots,
+        server_name: RUNNER_SERVER_NAME,
+        forbidden_name: RUNNER_FORBIDDEN_NAME,
+        restart_hook: Some((KILL_PROGRAM, vec!["-KILL".to_owned(), pid.to_string()])),
+        ops_origin: Some(format!("http://{ops}")),
+        out,
+        deadline: RUNNER_DEADLINE,
+        io_timeout: RUNNER_IO,
+        restart_timeout: RUNNER_RESTART,
+    }
+}
+
+/// Why step 4's daemon exits are not exactly the one its restart hook caused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartFault {
+    /// No daemon exit was observed, so the hook restarted nothing.
+    HookCausedNoExit,
+    /// An exit other than the hook's one `SIGKILL` of the first daemon.
+    ExitNotCausedByHook,
+}
+
+impl std::fmt::Display for RestartFault {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::HookCausedNoExit => {
+                "hook-caused-no-exit: the restart hook ran but no daemon exit was observed"
+            }
+            Self::ExitNotCausedByHook => {
+                "daemon-exit-not-caused-by-hook: the daemon exited other than by the restart \
+                 hook's one SIGKILL of the first daemon"
+            }
+        })
+    }
+}
+
+/// The daemon restarts step 4 admits, from every daemon exit observed in order. The hook
+/// (`runner_call`) sends `SIGKILL` once, to the first daemon's pid, so exactly one exit, by
+/// `SIGKILL`, is the hook's; any further exit, or one by another cause, is not.
+///
+/// # Errors
+///
+/// The exits are not exactly that one.
+pub fn hook_restarts(exits: &[ExitStatus]) -> Result<usize, RestartFault> {
+    use std::os::unix::process::ExitStatusExt as _;
+    match exits {
+        [] => Err(RestartFault::HookCausedNoExit),
+        [only] if only.signal() == Some(libc::SIGKILL) => Ok(1),
+        _ => Err(RestartFault::ExitNotCausedByHook),
+    }
+}
+
 /// What steps 3 to 7 need.
 pub struct Steps<'a> {
     pub root: &'a Path,
@@ -811,6 +971,17 @@ pub fn build_daemon(root: &Path, stop: &AtomicBool) -> Result<PathBuf> {
         ]),
         stop,
     )?;
+    // Its own invocation with `-p` alone, so no other package unifies the SDK's linked-daemon
+    // feature back in (design 31 § 2).
+    output(
+        Command::new(&cargo).current_dir(root).args([
+            "build",
+            "--locked",
+            "-p",
+            clean_room::PACKAGE,
+        ]),
+        stop,
+    )?;
     let metadata: Value = serde_json::from_str(&output(
         Command::new(&cargo).current_dir(root).args([
             "metadata",
@@ -826,6 +997,8 @@ pub fn build_daemon(root: &Path, stop: &AtomicBool) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("cargo metadata names no target directory"))?;
     let binary = Path::new(target).join("debug/substrate-daemon");
     ensure!(binary.is_file(), "{} was not built", binary.display());
+    let runner = runner_beside(&binary);
+    ensure!(runner.is_file(), "{} was not built", runner.display());
     Ok(binary)
 }
 
@@ -874,6 +1047,10 @@ impl Steps<'_> {
                 return outcomes;
             }
         };
+        record(
+            "S4 clean-room runner",
+            to_case(self.step_four(binary, &lane_directory).await),
+        );
         record(
             "S5 runtime vectors, namespace lane",
             to_case(self.step_five().await),
@@ -962,6 +1139,117 @@ impl Steps<'_> {
                 "Unix socket, driver kubernetes, probed snapshot after {} s: {facts:?}",
                 started.elapsed().as_secs()
             ),
+        ))
+    }
+
+    /// Step 4: design 31's runner against the lane's daemon over TLS. Core groups must pass and
+    /// no case may fail; an absence is accepted only when the endpoint's facts or the runner's
+    /// bounds decided it, or for the narrowed credential the stub does not issue.
+    async fn step_four(&self, binary: &Path, directory: &Path) -> Result<String> {
+        let runner = runner_beside(binary);
+        ensure!(runner.is_file(), "{} was not built", runner.display());
+        ensure!(
+            Path::new(KILL_PROGRAM).is_file(),
+            "the restart hook {KILL_PROGRAM} does not exist"
+        );
+        let material = Material::generate(
+            vec![RUNNER_SERVER_NAME.to_owned()],
+            RUNNER_FORBIDDEN_NAME.to_owned(),
+            Ipv4Addr::LOCALHOST,
+        )?;
+        let identity = Listener::identity(Ipv4Addr::LOCALHOST, &material)?;
+        let tally = self
+            .certify(binary, &runner, directory, &material, &identity.origin())
+            .await;
+        identity.stop();
+        let released = self.release(self.namespace).await;
+        let evidence = tally?;
+        released?;
+        Ok(evidence)
+    }
+
+    async fn certify(
+        &self,
+        binary: &Path,
+        runner: &Path,
+        directory: &Path,
+        material: &Material,
+        identity: &str,
+    ) -> Result<String> {
+        let tls = self.work.join("clean-room");
+        fs::create_dir_all(&tls)?;
+        fs::set_permissions(&tls, fs::Permissions::from_mode(0o700))?;
+        let chain = tls.join("daemon.pem");
+        let key = tls.join("daemon-key.pem");
+        let identity_ca = tls.join("identity.pem");
+        fs::write(&chain, &material.daemon_pem)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key)?
+            .write_all(material.daemon_key_pem.as_bytes())?;
+        fs::write(&identity_ca, &material.identity_pem)?;
+        let address = unused_loopback()?;
+        let ops = unused_loopback()?;
+        let arguments = tls_arguments(address, ops, &chain, &key, identity, &identity_ca);
+        let start = || {
+            Daemon::start_with(
+                binary,
+                directory,
+                self.driver_config,
+                LANE_DEPLOYMENT,
+                &arguments,
+            )
+        };
+        let mut daemon = start()?;
+        daemon.serving(self.stop).await?;
+        let out = self.work.join("conformance-report");
+        let call = runner_call(address, ops, &chain, &out, daemon.pid()?);
+        let token = clean_room::TokenSocket::serve(material.credential.clone())?;
+        let mut running =
+            clean_room::spawn(runner, &call, &token, &self.work.join("conformance.log"))?;
+        let deadline = Instant::now() + call.bound();
+        let mut exits = Vec::new();
+        let exit = loop {
+            if let Some(status) = running.exited()? {
+                break status.code();
+            }
+            if self.stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                running.kill();
+                break None;
+            }
+            if let Some(status) = daemon.exit_status()? {
+                exits.push(status);
+                if hook_restarts(&exits) == Err(RestartFault::ExitNotCausedByHook) {
+                    running.kill();
+                    break None;
+                }
+                self.release(self.namespace).await?;
+                daemon = start()?;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        daemon.stop();
+        let answered = token.finish();
+        // An exit the hook did not cause stopped the runner: that, not the stopped run, is the
+        // failure. Otherwise the runner's verdict comes first, and only then the count.
+        let restarts = hook_restarts(&exits);
+        if let Err(fault @ RestartFault::ExitNotCausedByHook) = restarts {
+            bail!("step 4: {fault}");
+        }
+        let tally = clean_room::judge(
+            exit,
+            &out,
+            &self.work.join("conformance.log"),
+            &material.credential,
+            Some(&RUNNER_UNDECLARED),
+        )?;
+        let restarts = restarts.map_err(|fault| anyhow!("step 4: {fault}"))?;
+        Ok(format!(
+            "{}; the daemon was started again {restarts} time(s); {answered} credential \
+             request(s) answered",
+            clean_room::evidence(&tally)
         ))
     }
 
@@ -1626,7 +1914,7 @@ mod tests {
     }
 
     #[test]
-    fn every_role_verb_of_decision_three_is_a_case_and_step_four_is_absent_by_name() {
+    fn every_role_verb_of_decision_three_is_a_case_and_step_four_must_pass() {
         let names = cases();
         assert_eq!(role_verbs().len(), 17, "decision 3 grants 17 verbs");
         for (resource, verb) in role_verbs() {
@@ -1635,8 +1923,11 @@ mod tests {
                 "{resource} {verb}"
             );
         }
-        assert!(ABSENT.contains(&("S4 clean-room runner", STEP_FOUR_ABSENT)));
-        assert!(STEP_FOUR_ABSENT.contains("postponed to story:remote-clean-room-conformance"));
+        assert!(names.contains(&"S4 clean-room runner".to_owned()));
+        assert!(
+            !ABSENT.iter().any(|(absent, _)| absent.starts_with("S4")),
+            "step 4 is run, never declared absent, once the runner exists"
+        );
         for unused in ["persistentvolumeclaims list", "networkpolicies get"] {
             let name = format!("S6 Role without {unused}");
             assert!(
@@ -1654,15 +1945,64 @@ mod tests {
         assert_eq!(verdict(&passing()), None);
     }
 
+    /// Finding `namespace-lane-restarts-unpinned`: the hook sends `SIGKILL` to the first daemon
+    /// once, so step 4 admits exactly that one exit; any other exit, or none, fails by name.
+    #[test]
+    fn step_four_admits_exactly_the_daemon_exit_its_restart_hook_caused() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let killed = ExitStatus::from_raw(libc::SIGKILL);
+        let terminated = ExitStatus::from_raw(libc::SIGTERM);
+        let exited = ExitStatus::from_raw(1 << 8);
+        assert_eq!(hook_restarts(&[killed]), Ok(1));
+        assert_eq!(
+            hook_restarts(&[]),
+            Err(RestartFault::HookCausedNoExit),
+            "a run whose hook killed nothing was not restarted by it"
+        );
+        assert_eq!(
+            hook_restarts(&[killed, killed]),
+            Err(RestartFault::ExitNotCausedByHook),
+            "the hook names the first daemon's pid; a second exit is not its doing"
+        );
+        for status in [terminated, exited] {
+            assert_eq!(
+                hook_restarts(&[status]),
+                Err(RestartFault::ExitNotCausedByHook),
+                "{status}: the hook sends SIGKILL only"
+            );
+        }
+        assert!(
+            RestartFault::ExitNotCausedByHook
+                .to_string()
+                .contains("daemon-exit-not-caused-by-hook")
+        );
+        assert!(
+            RestartFault::HookCausedNoExit
+                .to_string()
+                .contains("hook-caused-no-exit")
+        );
+    }
+
     #[test]
     fn an_absent_case_reported_passed_a_failure_or_a_missing_case_is_no_record() {
         let mut passed_absent = passing();
-        let step_four = passed_absent
+        let quota = passed_absent
+            .iter_mut()
+            .find(|(name, _)| name == "S6 quota exec.capacity")
+            .expect("an absent case");
+        quota.1 = Case::Passed("ran".to_owned());
+        assert!(verdict(&passed_absent).is_some_and(|fault| fault.contains("exec.capacity")));
+
+        let mut step_four_absent = passing();
+        let step_four = step_four_absent
             .iter_mut()
             .find(|(name, _)| name == "S4 clean-room runner")
             .expect("step 4");
-        step_four.1 = Case::Passed("ran".to_owned());
-        assert!(verdict(&passed_absent).is_some_and(|fault| fault.contains("S4")));
+        step_four.1 = Case::Absent("postponed".to_owned());
+        assert!(
+            verdict(&step_four_absent)
+                .is_some_and(|fault| fault.contains("S4 clean-room runner is not declared absent"))
+        );
 
         let mut failed = passing();
         failed[0].1 = Case::Failed("no snapshot".to_owned());
@@ -1679,6 +2019,75 @@ mod tests {
         let mut twice = passing();
         twice.push(twice[0].clone());
         assert!(verdict(&twice).is_some_and(|fault| fault.contains("more than once")));
+    }
+
+    /// Step 4's runner: dialled on loopback, verified under the certificate's own name and
+    /// refused under one it does not carry, restarted by `kill -KILL` of the daemon's pid, argv
+    /// only, and bounded within the runner's own ceilings (3600 s, 60 s, 600 s).
+    #[test]
+    fn step_four_runs_the_runner_built_beside_the_daemon_with_a_kill_hook_within_its_ceilings() {
+        assert_eq!(
+            runner_beside(Path::new("/w/target/debug/substrate-daemon")),
+            Path::new("/w/target/debug/b10x-substrate-conformance")
+        );
+        let address: SocketAddr = "127.0.0.1:4443".parse().expect("address");
+        let ops: SocketAddr = "127.0.0.1:9090".parse().expect("address");
+        let call = runner_call(
+            address,
+            ops,
+            Path::new("/w/clean-room/daemon.pem"),
+            Path::new("/w/conformance-report"),
+            4242,
+        );
+        let argv = clean_room::argv(&call, 9);
+        let after = |flag: &str| {
+            argv.iter()
+                .position(|argument| argument == flag)
+                .map(|index| argv[index + 1].as_str())
+        };
+        assert_eq!(after("--endpoint"), Some("https://127.0.0.1:4443/"));
+        assert_eq!(after("--server-name"), Some(RUNNER_SERVER_NAME));
+        assert_eq!(after("--forbidden-name"), Some(RUNNER_FORBIDDEN_NAME));
+        assert_eq!(after("--trust-roots"), Some("/w/clean-room/daemon.pem"));
+        assert_eq!(after("--restart-hook"), Some("/usr/bin/kill"));
+        assert_eq!(after("--ops-origin"), Some("http://127.0.0.1:9090"));
+        assert_eq!(after("--token-fd"), Some("9"));
+        let hook: Vec<&str> = argv
+            .windows(2)
+            .filter(|pair| pair[0] == "--restart-hook-arg")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(hook, ["-KILL", "4242"]);
+        assert!(RUNNER_DEADLINE.as_secs() <= 3_600);
+        assert!(RUNNER_IO.as_secs() <= 60);
+        assert!(RUNNER_RESTART.as_secs() <= 600 && RUNNER_RESTART > SERVING_BOUND);
+        assert_ne!(RUNNER_SERVER_NAME, RUNNER_FORBIDDEN_NAME);
+
+        let daemon = tls_arguments(
+            address,
+            ops,
+            Path::new("/w/chain.pem"),
+            Path::new("/w/key.pem"),
+            "https://127.0.0.1:7000",
+            Path::new("/w/identity.pem"),
+        );
+        assert_eq!(
+            daemon,
+            [
+                "--tls-listen",
+                "127.0.0.1:4443",
+                "--tls-certificate-chain",
+                "/w/chain.pem",
+                "--tls-private-key",
+                "/w/key.pem",
+                "--hosted-identity-origin",
+                "https://127.0.0.1:7000",
+                "--hosted-identity-ca-bundle",
+                "/w/identity.pem",
+                "--ops-listen",
+                "127.0.0.1:9090",
+            ]
+        );
     }
 
     #[test]

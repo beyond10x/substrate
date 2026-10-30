@@ -298,10 +298,10 @@ trailing newline; `xtask/src/json.rs`), atomically, so its digest follows from i
 | `run` | `started_at`, `finished_at`, run label, `partial` |
 | `endpoint` | SHA-256 of the origin and of the verified server name, TLS version, ALPN, SHA-256 of the leaf certificate and of the declared trust roots, leaf `not_after` |
 | `contract` | advertised name and SHA-256 |
-| `capability_snapshot` | the wire `snapshot` and `probed_at` at the first and last read, `driver`, `driver_version`, `config_generation`; recorded only (§ 3, step 3) |
+| `capability_snapshot` | the wire `snapshot` and `probed_at` at the first and last read, `driver`, `driver_version`, `config_generation`; recorded only (§ 3, step 3). A read outside the schema's patterns is `null` and fails `machine.envelope-decodes`; an undecodable first read makes the whole member `null` |
 | `declared` | scopes; which inputs were declared (restart hook, ops origin, how many forbidden names); bounds |
 | `cases[]` | `id`, `group`, `status`, `reason` when absent, `requires`, diagnostic codes, observed status and code for an unserved case, `duration_ms` |
-| `not_covered[]` | case id and the in-repository reference that covers it (§ 4) |
+| `not_covered[]` | case id and the in-repository reference that covers it (§ 4); and every pinned registry operation no case of the run names, derived from `operations.json` |
 | `totals`, `verdict` | `passed`, `failed`, `absent`; `passed`, `failed` or `incomplete` |
 
 **Endpoint identity is hashed.** A per-pod name carries the Kubernetes namespace (ADR 0046 K1), and

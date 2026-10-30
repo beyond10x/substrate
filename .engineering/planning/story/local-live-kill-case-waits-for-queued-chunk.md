@@ -6,7 +6,12 @@ status: draft
 title: The local live-kill adversary case waits for its chunk to be queued
 relations:
 - decomposes: epic:confinement-contract-family
-revision: 1
+scope:
+- confidence: cited
+  path: crates/substrate-host/tests/ess_confinement_local.rs
+- confidence: cited
+  path: crates/substrate-host/tests/support/mod.rs
+revision: 3
 ---
 # Story: The local live-kill adversary case waits for its chunk to be queued
 

@@ -42,6 +42,7 @@ pub(crate) const PAGES: &[(&str, &str, &str)] = &[
     ("guides/rust-sdk", "Rust SDK", "Guides"),
     ("guides/cli", "Command line", "Guides"),
     ("guides/mcp-adapter", "MCP adapter", "Guides"),
+    ("guides/remote-conformance", "Remote conformance", "Guides"),
     ("reference/contracts", "Contracts overview", "Reference"),
     ("reference/contract", "Wire contract", "Reference"),
     ("releases", "Release notes", "Reference"),

@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-30T20:34:26Z",
+  "actor": "human:timo",
+  "artifact": "story:preconditioned-delete-409-is-not-a-uid-mismatch",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local scoped wave gate on wave/2026-10-30-remote-conformance at 32518215: fmt, check-ess, check-docs, tests of conformance, kubernetes-client, kubernetes, host, daemon (lib and 5 targets) and xtask, clippy -D warnings, 8 xtask checks; all exit 0",
+    "reference": "32518215"
+  }
+}

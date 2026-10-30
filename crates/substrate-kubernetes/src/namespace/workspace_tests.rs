@@ -837,6 +837,82 @@ async fn a_lost_or_foreign_keeper_fails_every_file_route_and_is_never_called() {
     assert!(s.executor.fs_ops().is_empty());
 }
 
+/// `story:kubernetes-collisions-metric`: the driver port answers the count the operational
+/// listener serves as `substrate_kubernetes_collisions_total` (design 34 § 4). A PVC of another
+/// deployment already holds the workspace's PVC name: the create meets it, it is one collision,
+/// the port's count moves from 0 to exactly 1, and the object is left as it was.
+#[tokio::test]
+async fn one_collision_on_the_api_moves_the_ports_collision_count_by_exactly_one() {
+    let s = setup();
+    assert_eq!(Driver::backend_collisions(&s.driver), Some(0));
+    let foreign = s
+        .fake
+        .seed(
+            "persistentvolumeclaims",
+            json!({"metadata": {"name": pvc_name(), "labels": {
+                MANAGED_BY_LABEL: MANAGED_BY,
+                DEPLOYMENT_LABEL: names::deployment_label("deploy-b"),
+            }}}),
+        )
+        .expect("a same-named PVC of another deployment");
+    let outcome = s.create().await;
+    assert!(
+        !matches!(outcome, DispatchOutcome::Observed(_)),
+        "a foreign PVC is never adopted"
+    );
+    assert_eq!(Driver::backend_collisions(&s.driver), Some(1));
+    assert_eq!(
+        s.fake.object("persistentvolumeclaims", &pvc_name()),
+        Some(foreign),
+        "a collision is never modified"
+    );
+    assert!(s.deletes().is_empty(), "{:?}", s.deletes());
+    assert_eq!(
+        s.ledger.row(&pvc_name()).uid,
+        None,
+        "a collision binds nothing"
+    );
+}
+
+/// Adversary, `story:kubernetes-collisions-metric`: the series' help text and the port's doc say
+/// it counts *objects* met under a name the driver would use. One foreign PVC is one object.
+/// The create meets it once; the daemon's provisional loop (`reconcile_provisional_workspaces`,
+/// every maintenance round) and every `workspace.get` then observe the same `unknown` workspace
+/// again, and each observation meets the same untouched object. The count must stay at 1.
+#[tokio::test]
+async fn the_same_foreign_pvc_observed_again_is_still_one_collision() {
+    let s = setup();
+    s.fake
+        .seed(
+            "persistentvolumeclaims",
+            json!({"metadata": {"name": pvc_name(), "labels": {
+                MANAGED_BY_LABEL: MANAGED_BY,
+                DEPLOYMENT_LABEL: names::deployment_label("deploy-b"),
+            }}}),
+        )
+        .expect("a same-named PVC of another deployment");
+    let created = s.create().await;
+    assert!(
+        matches!(created, DispatchOutcome::OutcomeUnknown(_)),
+        "{}",
+        outcome(&created)
+    );
+    assert_eq!(Driver::backend_collisions(&s.driver), Some(1));
+    for round in 0..3 {
+        let error = s
+            .observe()
+            .await
+            .expect_err("a foreign PVC never makes the workspace ready");
+        assert!(error.retriable, "round {round}: {error:?}");
+    }
+    assert_eq!(
+        Driver::backend_collisions(&s.driver),
+        Some(1),
+        "story:kubernetes-collisions-metric: one foreign object re-observed by the provisional \
+         loop is still one object met, as the series' help text states"
+    );
+}
+
 #[tokio::test]
 async fn destroy_removes_exec_pods_then_the_keeper_then_the_pvc_and_is_pending_until_absent() {
     let s = setup();

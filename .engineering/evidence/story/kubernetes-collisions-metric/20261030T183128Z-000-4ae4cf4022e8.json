@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-30T18:31:28Z",
+  "actor": "human:timo",
+  "artifact": "story:kubernetes-collisions-metric",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "coordinator: fix unit 7ea75a55 (count once by kind, name, uid; exec-start arm), guide 1a36bf66, merged as fed90691; split proof accepted; bind arm infeasible",
+    "review": "review-result:wave-2026-10-30-u2-adversary-pass-1",
+    "outcome": "fixed"
+  }
+}
