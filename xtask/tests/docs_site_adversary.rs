@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// Every docs page, as `PAGES` in `xtask/src/docs.rs` lists it.
-const PAGES: [&str; 20] = [
+const PAGES: [&str; 21] = [
     "index",
     "getting-started",
     "use-cases",
@@ -28,6 +28,7 @@ const PAGES: [&str; 20] = [
     "guides/rust-sdk",
     "guides/cli",
     "guides/mcp-adapter",
+    "guides/remote-conformance",
     "reference/contracts",
     "reference/contract",
     "releases",
@@ -331,7 +332,7 @@ fn the_hand_built_site_is_accepted_and_inventories_exactly_the_published_routes(
     let (_dir, root, site) = built_site();
     let output = provenance(&root, &site);
     assert!(output.status.success(), "{}", shown(&output));
-    assert_eq!(inventory_paths(&site).len(), 21);
+    assert_eq!(inventory_paths(&site).len(), 22);
 }
 
 /// The former build wrote exactly the start page and `PAGES`, and its test held the inventory to
