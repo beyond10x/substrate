@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-30T18:09:42Z",
+  "actor": "human:timo",
+  "artifact": "story:preconditioned-delete-409-is-not-a-uid-mismatch",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "coordinator: acceptance amended in 7e3c1b87d (the GET decides); the two pre-existing notes match design 28 and need no change",
+    "review": "review-result:wave-2026-10-30-u3-security-pass-1",
+    "outcome": "fixed"
+  }
+}
