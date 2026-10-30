@@ -1158,12 +1158,12 @@ impl Steps<'_> {
             Ipv4Addr::LOCALHOST,
         )?;
         let identity = Listener::identity(Ipv4Addr::LOCALHOST, &material)?;
-        let certified = self
+        let tally = self
             .certify(binary, &runner, directory, &material, &identity.origin())
             .await;
         identity.stop();
         let released = self.release(self.namespace).await;
-        let evidence = certified?;
+        let evidence = tally?;
         released?;
         Ok(evidence)
     }
@@ -1238,7 +1238,7 @@ impl Steps<'_> {
         if let Err(fault @ RestartFault::ExitNotCausedByHook) = restarts {
             bail!("step 4: {fault}");
         }
-        let certified = clean_room::judge(
+        let tally = clean_room::judge(
             exit,
             &out,
             &self.work.join("conformance.log"),
@@ -1249,7 +1249,7 @@ impl Steps<'_> {
         Ok(format!(
             "{}; the daemon was started again {restarts} time(s); {answered} credential \
              request(s) answered",
-            clean_room::evidence(&certified)
+            clean_room::evidence(&tally)
         ))
     }
 

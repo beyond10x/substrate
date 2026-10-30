@@ -2850,18 +2850,18 @@ fn clean_room_run(lane: &Lane<'_>, material: &Material) -> Result<Outcome> {
     let exit = running.wait(call.bound(), lane.stop)?;
     drop(forward);
     let answered = token.finish();
-    let certified = clean_room::judge(exit, &out, &log, &material.credential, None)?;
-    println!("{}", clean_room::summary(&certified));
+    let tally = clean_room::judge(exit, &out, &log, &material.credential, None)?;
+    println!("{}", clean_room::summary(&tally));
     if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
         let mut file = fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(path)?;
-        file.write_all(clean_room::summary(&certified).as_bytes())?;
+        file.write_all(clean_room::summary(&tally).as_bytes())?;
     }
     Ok(Outcome::Passed(format!(
         "{}; {answered} credential request(s) answered",
-        clean_room::evidence(&certified)
+        clean_room::evidence(&tally)
     )))
 }
 
@@ -3104,7 +3104,7 @@ pub(crate) mod clean_room {
 
     /// What a lane keeps from a passed run.
     #[derive(Debug, PartialEq, Eq)]
-    pub struct Certified {
+    pub struct Tally {
         pub passed: u64,
         /// Each absent case and its reason, in the report's order.
         pub absent: Vec<(String, String)>,
@@ -3149,7 +3149,7 @@ pub(crate) mod clean_room {
         exit: Option<i32>,
         report: Option<&Value>,
         undeclared: Option<&[&str]>,
-    ) -> Result<Certified, String> {
+    ) -> Result<Tally, String> {
         let code = exit.ok_or(
             "the runner did not exit within its bound or a signal ended it, so it wrote no verdict",
         )?;
@@ -3223,7 +3223,7 @@ pub(crate) mod clean_room {
         let passed = report["totals"]["passed"]
             .as_u64()
             .ok_or("the report states no passed total")?;
-        Ok(Certified {
+        Ok(Tally {
             passed,
             absent: absent
                 .iter()
@@ -3264,7 +3264,7 @@ pub(crate) mod clean_room {
         log: &Path,
         credential: &str,
         undeclared: Option<&[&str]>,
-    ) -> Result<Certified> {
+    ) -> Result<Tally> {
         let report = fs::read(out.join("report.json")).ok();
         let digest = fs::read(out.join("report.json.sha256")).ok();
         let printed = fs::read(log).unwrap_or_default();
@@ -3316,28 +3316,28 @@ pub(crate) mod clean_room {
     }
 
     /// The step's evidence: the totals and every absent case with its reason.
-    pub fn evidence(certified: &Certified) -> String {
-        let absent: Vec<String> = certified
+    pub fn evidence(tally: &Tally) -> String {
+        let absent: Vec<String> = tally
             .absent
             .iter()
             .map(|(id, reason)| format!("{id} ({reason})"))
             .collect();
         format!(
             "verdict passed, {} passed, {} absent: {}",
-            certified.passed,
-            certified.absent.len(),
+            tally.passed,
+            tally.absent.len(),
             absent.join(", ")
         )
     }
 
     /// The job summary's block: the totals and the absent set, unpinned (design 31 § 7).
-    pub fn summary(certified: &Certified) -> String {
+    pub fn summary(tally: &Tally) -> String {
         let mut text = format!(
             "### Clean-room runner\n\nverdict passed: {} passed, {} absent\n\n",
-            certified.passed,
-            certified.absent.len()
+            tally.passed,
+            tally.absent.len()
         );
-        for (id, reason) in &certified.absent {
+        for (id, reason) in &tally.absent {
             let _ = writeln!(text, "- `{id}`: {reason}");
         }
         text
@@ -3352,7 +3352,7 @@ pub(crate) mod clean_room {
 
         use serde_json::{Value, json};
 
-        use super::{Call, Certified, TokenSocket, answer, argv, carries, verdict};
+        use super::{Call, Tally, TokenSocket, answer, argv, carries, verdict};
 
         fn report(verdict: &str, cases: &Value) -> Value {
             json!({"verdict": verdict, "totals": {"passed": 2, "failed": 0, "absent": 1}, "cases": cases})
@@ -3487,7 +3487,7 @@ pub(crate) mod clean_room {
             ]);
             assert_eq!(
                 verdict(Some(0), Some(&report("passed", &cases)), Some(&[])),
-                Ok(Certified {
+                Ok(Tally {
                     passed: 2,
                     absent: vec![("exec.run-output".to_owned(), "fact-absent".to_owned())],
                 })
