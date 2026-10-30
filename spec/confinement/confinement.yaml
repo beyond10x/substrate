@@ -295,7 +295,7 @@ commands:
   # `confinement.adapter-unserved` (the `adapter-unserved` branch). The model takes this decision;
   # no source states it.
   # UNMAPPED: `OpenAdapter` accepts `inner` beside an adapter other than `systemd`, and `systemd`
-  # without `inner`. Refusing either at open made ESS 0.76.0 synthesis refuse every admission
+  # without `inner`. Refusing either at open made ESS 0.77.0 synthesis refuse every admission
   # (ESS-SYNTH-002), so the model leaves both to the S0 contract's open. Open question.
   # UNMAPPED: ADR 0109 decision 2 and this story make every refusal an audit record
   # (`ProfileRefused`, carrying the adapter and the family or fact named). ESS refuses an event on
@@ -341,7 +341,7 @@ commands:
       # `systemd` around `linux` on a scope opened around `local` and the reverse, an `inner`
       # beside an adapter opened without one, and `systemd` requested without the `inner` it was
       # opened around. The branch reads the opened row's stored `inner` beside the requested one; it
-      # never compares the requested `adapter` identity with a literal (ESS 0.76.0 synthesis ignores
+      # never compares the requested `adapter` identity with a literal (ESS 0.77.0 synthesis ignores
       # such a guard, beyond10x/ess#693). Each comparison sits behind a presence test, so no guard
       # compares an absent `inner` (ESS reads that as unknown and decides no branch).
       - name: adapter-unserved
@@ -370,7 +370,7 @@ commands:
       # `image_digest_pinned` (`oci`, `pod`) refuses a reference that names no `sha256` digest.
       # UNMAPPED: an `oci` or `pod` profile with no image at all. The model refuses it as unpinned
       # (no digest is named; invariant 3, fail closed); no source says so. Open question.
-      # A pinned reference ends `@sha256:` and exactly 64 lowercase hex characters. ESS 0.76.0 has
+      # A pinned reference ends `@sha256:` and exactly 64 lowercase hex characters. ESS 0.77.0 has
       # no pattern predicate and no substring, so the model states every part of that it can: the
       # reference names `@sha256:`, ends with a lowercase hex character, and is long enough to hold
       # a one-character name, `@sha256:` and 64 characters (73). That `@sha256:` is exactly the 64
