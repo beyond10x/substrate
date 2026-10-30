@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:unconfirmed-pod-deletion-ends-unknown
 kind: story
-status: active
+status: implemented
 title: A deletion the kubelet does not confirm within 60 s ends as Unknown
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
@@ -14,10 +14,11 @@ scope:
   path: crates/substrate-kubernetes/src/exec_tests.rs
 - confidence: inferred
   path: docs/design/34-kubernetes-namespace-driver.md
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 5}
 - {from: "proposed", to: "active", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 6}
+- {from: "active", to: "implemented", at: "2026-10-30T20:34:27Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: A deletion the kubelet does not confirm within 60 s ends as Unknown
 

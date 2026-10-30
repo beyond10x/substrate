@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-30T20:25:03Z",
+  "actor": "human:timo",
+  "artifact": "story:remote-clean-room-conformance",
+  "kind": "story",
+  "revision": 16,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "fixed in c58b4ac9 and af3fd6cd, merged ad931064; red 11 to 0, conformance lib 28, adversary 8, hostile 4, local 2",
+    "review": "review-result:wave-2026-10-30-u1-adversary-pass-1",
+    "outcome": "fixed"
+  }
+}

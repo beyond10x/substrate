@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:preconditioned-delete-409-is-not-a-uid-mismatch
 kind: story
-status: active
+status: implemented
 title: A 409 on a preconditioned Pod delete is told apart from a uid mismatch
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
@@ -14,10 +14,11 @@ scope:
   path: crates/substrate-kubernetes-client/src/client_tests.rs
 - confidence: inferred
   path: crates/substrate-kubernetes-client/src/fake.rs
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 7}
 - {from: "proposed", to: "active", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 8}
+- {from: "active", to: "implemented", at: "2026-10-30T20:34:26Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: A 409 on a preconditioned Pod delete is told apart from a uid mismatch
 
