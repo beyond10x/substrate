@@ -37,7 +37,7 @@ use substrate_wire::{
 use crate::logs::{self, EXECUTOR_PROTOCOL, RunEnd};
 use crate::names::{self, DEPLOYMENT_LABEL, MANAGED_BY, MANAGED_BY_LABEL};
 use crate::namespace::workspace::is_quota_refusal;
-use crate::ownership::{Ownership, ownership};
+use crate::ownership::{Foreign, Ownership, ownership};
 use crate::pod::{self, ExecPod, KILL_GRACE_SECONDS, RunBounds, TERM_GRACE_SECONDS};
 use crate::{API_FAILED, NamespaceDriver, Removal};
 
@@ -390,11 +390,7 @@ impl NamespaceDriver {
             Ok(Some(object)) => match ownership(&object, Some(row), self.deployment_label()) {
                 Ownership::Ours { .. } => self.bind(row, object),
                 Ownership::Collision(reason) => {
-                    tracing::warn!(reason, "an exec Pod's name is held and left untouched");
-                    DispatchOutcome::NotDispatched(DriverError::failed(
-                        API_FAILED,
-                        format!("the exec Pod's name is held by another object: {reason}"),
-                    ))
+                    DispatchOutcome::NotDispatched(self.held_by_another(&object, &reason))
                 }
             },
             Ok(None) => DispatchOutcome::OutcomeUnknown(DriverError::failed(
@@ -607,14 +603,15 @@ impl NamespaceDriver {
             return Err(DriverError::not_found());
         };
         let uid = match ownership(&pod, Some(&row), self.deployment_label()) {
-            Ownership::Collision(reason) => return Err(self.held_by_another(&reason)),
+            Ownership::Collision(reason) => return Err(self.held_by_another(&pod, &reason)),
             Ownership::Ours { uid, adopt: false } => uid,
             Ownership::Ours { uid, adopt: true } => match self.ledger().bind_uid(&name, &uid)? {
                 UidBinding::Bound => uid,
                 other => {
-                    return Err(
-                        self.held_by_another(&format!("{name:?} could not be adopted: {other:?}"))
-                    );
+                    return Err(self.held_by_another(
+                        &pod,
+                        &format!("{name:?} could not be adopted: {other:?}"),
+                    ));
                 }
             },
         };
@@ -650,10 +647,10 @@ impl NamespaceDriver {
         recovered
     }
 
-    /// § 4: an object under an exec Pod's name that is not ours is counted, never modified, and
-    /// the exec stays as it is recorded.
-    fn held_by_another(&self, reason: &str) -> DriverError {
-        self.collision(reason);
+    /// § 4: an object under an exec Pod's name that is not ours, met at a start or at restart
+    /// reconciliation, is counted once, never modified, and the exec stays as it is recorded.
+    fn held_by_another(&self, object: &Value, reason: &str) -> DriverError {
+        self.collision(Some(Foreign::of(BackendRole::Pod, object)), reason);
         DriverError::failed(
             API_FAILED,
             format!("the exec Pod's name is held by an object that is not ours: {reason}"),

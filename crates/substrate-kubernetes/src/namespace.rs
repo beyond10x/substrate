@@ -17,7 +17,7 @@ use substrate_kubernetes_client::{Api, ApiError, ListForm, RUN_CONTAINER, kubeco
 use crate::binding::Binding;
 use crate::config::{self, NamespaceConfig};
 use crate::lease::{self, Clock, LeaseClaim, MonotonicClock};
-use crate::ownership::{Ownership, ownership};
+use crate::ownership::{COLLISIONS_REMEMBERED, Collisions, Foreign, Ownership, ownership};
 use crate::policy::{self, PolicySet, hex};
 use crate::{
     API_FAILED, CAPABILITY_STALE, CONFIG_INVALID, LEASE_FOREIGN, LEASE_HELD,
@@ -88,7 +88,7 @@ pub struct NamespaceDriver {
     /// await.
     renewed: Mutex<Option<Instant>>,
     binding: Mutex<Option<Binding>>,
-    collisions: AtomicU64,
+    collisions: Collisions,
     incomplete_reviews: AtomicU64,
     execs: crate::exec::Execs,
     probe: Mutex<probe::ProbeState>,
@@ -174,7 +174,7 @@ impl NamespaceDriver {
             claim: tokio::sync::Mutex::new(claim),
             renewed: Mutex::new(None),
             binding: Mutex::new(None),
-            collisions: AtomicU64::new(0),
+            collisions: Collisions::default(),
             incomplete_reviews: AtomicU64::new(0),
             execs: crate::exec::Execs::default(),
             probe: Mutex::new(probe::ProbeState::default()),
@@ -449,15 +449,17 @@ impl NamespaceDriver {
             self.ledger.settle(&row.name)?;
             return Ok(Removal::Absent);
         };
+        let foreign = || Some(Foreign::of(row.role, &object));
         let uid = match ownership(&object, Some(row), &self.deployment_label) {
-            Ownership::Collision(reason) => return Ok(self.collision(&reason)),
+            Ownership::Collision(reason) => return Ok(self.collision(foreign(), &reason)),
             Ownership::Ours { uid, adopt: false } => uid,
             Ownership::Ours { uid, adopt: true } => match self.ledger.bind_uid(&row.name, &uid)? {
                 UidBinding::Bound => uid,
                 other => {
-                    return Ok(
-                        self.collision(&format!("{:?} could not be adopted: {other:?}", row.name))
-                    );
+                    return Ok(self.collision(
+                        foreign(),
+                        &format!("{:?} could not be adopted: {other:?}", row.name),
+                    ));
                 }
             },
         };
@@ -479,10 +481,19 @@ impl NamespaceDriver {
                 _ => {}
             },
             Err(error) if error.status() == Some(409) => {
-                return Ok(self.collision(&format!(
-                    "{:?} was replaced between its read and its deletion",
-                    row.name
-                )));
+                // The replacement is read once so it is counted as the object it is, and not
+                // again when the next removal reads it under the uid rule.
+                let replacement = match self.api.get(&path).await {
+                    Ok(Some(replacement)) => Some(Foreign::of(row.role, &replacement)),
+                    Ok(None) | Err(_) => None,
+                };
+                return Ok(self.collision(
+                    replacement,
+                    &format!(
+                        "{:?} was replaced between its read and its deletion",
+                        row.name
+                    ),
+                ));
             }
             Err(error) => return Err(api_failed(&error)),
         }
@@ -511,18 +522,23 @@ impl NamespaceDriver {
         }
     }
 
-    pub(crate) fn collision(&self, reason: &str) -> Removal {
-        self.collisions.fetch_add(1, Ordering::Relaxed);
+    /// § 4: `object`, met under a name the driver would use and not ours, is logged and left
+    /// untouched, and counted once however often it is met again (`None`: an object the driver
+    /// could not read, counted every time; [`COLLISIONS_REMEMBERED`] bounds what is remembered).
+    pub(crate) fn collision(&self, object: Option<Foreign>, reason: &str) -> Removal {
+        let counted = self.collisions.meet(object, COLLISIONS_REMEMBERED);
         tracing::warn!(
             reason,
+            counted,
             "a backend object collides with the ledger and is left untouched"
         );
         Removal::Collision
     }
 
-    /// Collisions seen since this process started: `substrate_kubernetes_collisions_total`.
+    /// Foreign objects met since this process started, each counted once:
+    /// `substrate_kubernetes_collisions_total`.
     pub fn collisions_total(&self) -> u64 {
-        self.collisions.load(Ordering::Relaxed)
+        self.collisions.total()
     }
 
     /// Rules reviews that answered `incomplete: true` since this process started.
