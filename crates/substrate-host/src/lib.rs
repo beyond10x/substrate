@@ -542,6 +542,15 @@ pub trait Driver: Send + Sync {
         None
     }
 
+    /// How many objects this driver has met, since the process started, under a name it would
+    /// use and did not create: each logged, never modified (design 34 § 4). The operational
+    /// listener serves it as `substrate_kubernetes_collisions_total`, the one series design 34
+    /// § 4 adds to ADR 0045's closed catalogue. `None`, the default, is a driver that creates no
+    /// backend object outside its host, and no series is published.
+    fn backend_collisions(&self) -> Option<u64> {
+        None
+    }
+
     async fn create_workspace(
         &self,
         id: &str,

@@ -837,6 +837,43 @@ async fn a_lost_or_foreign_keeper_fails_every_file_route_and_is_never_called() {
     assert!(s.executor.fs_ops().is_empty());
 }
 
+/// `story:kubernetes-collisions-metric`: the driver port answers the count the operational
+/// listener serves as `substrate_kubernetes_collisions_total` (design 34 § 4). A PVC of another
+/// deployment already holds the workspace's PVC name: the create meets it, it is one collision,
+/// the port's count moves from 0 to exactly 1, and the object is left as it was.
+#[tokio::test]
+async fn one_collision_on_the_api_moves_the_ports_collision_count_by_exactly_one() {
+    let s = setup();
+    assert_eq!(Driver::backend_collisions(&s.driver), Some(0));
+    let foreign = s
+        .fake
+        .seed(
+            "persistentvolumeclaims",
+            json!({"metadata": {"name": pvc_name(), "labels": {
+                MANAGED_BY_LABEL: MANAGED_BY,
+                DEPLOYMENT_LABEL: names::deployment_label("deploy-b"),
+            }}}),
+        )
+        .expect("a same-named PVC of another deployment");
+    let outcome = s.create().await;
+    assert!(
+        !matches!(outcome, DispatchOutcome::Observed(_)),
+        "a foreign PVC is never adopted"
+    );
+    assert_eq!(Driver::backend_collisions(&s.driver), Some(1));
+    assert_eq!(
+        s.fake.object("persistentvolumeclaims", &pvc_name()),
+        Some(foreign),
+        "a collision is never modified"
+    );
+    assert!(s.deletes().is_empty(), "{:?}", s.deletes());
+    assert_eq!(
+        s.ledger.row(&pvc_name()).uid,
+        None,
+        "a collision binds nothing"
+    );
+}
+
 #[tokio::test]
 async fn destroy_removes_exec_pods_then_the_keeper_then_the_pvc_and_is_pending_until_absent() {
     let s = setup();
