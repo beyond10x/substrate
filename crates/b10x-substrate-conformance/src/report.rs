@@ -1,0 +1,337 @@
+//! The report (design 31 § 6): format `b10x.substrate-remote-conformance-report.v1`, closed at
+//! every level, written in deterministic form (sorted keys, two-space indent, trailing newline)
+//! and atomically, with its SHA-256 beside it.
+
+use std::fs::{DirBuilder, File, OpenOptions};
+use std::io::Write as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::path::Path;
+
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::probe::sha256_hex;
+
+pub const FORMAT: &str = "b10x.substrate-remote-conformance-report.v1";
+
+/// A case's status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Status {
+    Passed,
+    Failed,
+    Absent,
+}
+
+/// Why a case is absent: one of a closed set (§ 3, step 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AbsentReason {
+    FactAbsent,
+    FactUnsatisfied,
+    ScopeNotDeclared,
+    InputNotDeclared,
+    BoundExceeded,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Absent {
+    pub reason: AbsentReason,
+    pub facts: Vec<String>,
+    pub inputs: Vec<String>,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Requires {
+    pub operations: Vec<String>,
+    pub facts: Vec<String>,
+    pub scopes: Vec<String>,
+    pub inputs: Vec<String>,
+}
+
+/// The status and code an unserved request was answered with, recorded without judgement.
+#[derive(Debug, Clone, Serialize)]
+pub struct Observed {
+    pub status: u16,
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Case {
+    pub id: String,
+    pub group: String,
+    pub status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub absent: Option<Absent>,
+    pub requires: Requires,
+    pub diagnostics: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed: Option<Observed>,
+    /// The branch a dropped response took: `admitted` or `not-admitted` (§ 4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// What detected a restart: `probed-at`, or `probed-at-and-exec` (§ 4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detection: Option<String>,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Runner {
+    pub version: String,
+    pub source_revision: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Run {
+    pub started_at: String,
+    pub finished_at: String,
+    pub label: String,
+    pub partial: bool,
+    pub only: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Endpoint {
+    pub origin_sha256: String,
+    pub server_name_sha256: String,
+    pub tls_version: String,
+    pub alpn: String,
+    pub leaf_certificate_sha256: String,
+    pub trust_roots_sha256: String,
+    pub leaf_not_after: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Contract {
+    pub name: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SnapshotRead {
+    pub snapshot: String,
+    pub probed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CapabilitySnapshot {
+    pub first: SnapshotRead,
+    pub last: SnapshotRead,
+    pub driver: String,
+    pub driver_version: String,
+    pub config_generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Bounds {
+    pub deadline_s: u64,
+    pub io_timeout_s: u64,
+    pub restart_timeout_s: u64,
+    pub max_generated_events: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Declared {
+    pub scopes: Vec<String>,
+    pub token_provider: String,
+    pub restart_hook: bool,
+    pub ops_origin: bool,
+    pub forbidden_names: u64,
+    pub bounds: Bounds,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NotCovered {
+    pub case: String,
+    pub covered_by: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct Totals {
+    pub passed: u64,
+    pub failed: u64,
+    pub absent: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verdict {
+    Passed,
+    Failed,
+    Incomplete,
+}
+
+impl Verdict {
+    /// The exit code of a run with this verdict (§ 3; § 11 Q2).
+    pub const fn exit_code(self) -> u8 {
+        match self {
+            Self::Passed => 0,
+            Self::Failed => 1,
+            Self::Incomplete => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Report {
+    pub format: String,
+    pub runner: Runner,
+    pub run: Run,
+    pub endpoint: Endpoint,
+    pub contract: Contract,
+    pub capability_snapshot: CapabilitySnapshot,
+    pub declared: Declared,
+    pub cases: Vec<Case>,
+    pub not_covered: Vec<NotCovered>,
+    pub totals: Totals,
+    pub verdict: Verdict,
+}
+
+/// The crash windows only fault injection inside the daemon reaches (§ 4).
+pub fn not_covered() -> Vec<NotCovered> {
+    [
+        "crash-before-dispatch",
+        "crash-after-dispatch",
+        "restart-no-redispatch",
+    ]
+    .into_iter()
+    .map(|case| NotCovered {
+        case: case.to_owned(),
+        covered_by: "crates/substrate-daemon/tests/contract_vectors.rs".to_owned(),
+    })
+    .collect()
+}
+
+/// Totals and verdict: failed if any case failed; passed if none failed, the run is not partial
+/// and every core case passed; incomplete otherwise.
+pub fn judge(cases: &[Case], core_groups: &[&str], partial: bool) -> (Totals, Verdict) {
+    let mut totals = Totals::default();
+    for case in cases {
+        match case.status {
+            Status::Passed => totals.passed += 1,
+            Status::Failed => totals.failed += 1,
+            Status::Absent => totals.absent += 1,
+        }
+    }
+    let core_passed = cases
+        .iter()
+        .filter(|case| core_groups.contains(&case.group.as_str()))
+        .all(|case| case.status == Status::Passed);
+    let verdict = if totals.failed > 0 {
+        Verdict::Failed
+    } else if core_passed && !partial {
+        Verdict::Passed
+    } else {
+        Verdict::Incomplete
+    };
+    (totals, verdict)
+}
+
+/// The value with every object's keys in sorted order.
+fn sorted(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, sorted(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
+        other => other,
+    }
+}
+
+/// The deterministic bytes of a report.
+pub fn render(report: &Report) -> serde_json::Result<Vec<u8>> {
+    let value = sorted(serde_json::to_value(report)?);
+    let mut bytes = serde_json::to_vec_pretty(&value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Creates `out` (mode 0700; it must not exist).
+pub fn create_out(out: &Path) -> std::io::Result<()> {
+    DirBuilder::new().mode(0o700).create(out)
+}
+
+/// Writes `report.json` atomically and `report.json.sha256` in `sha256sum` form.
+pub fn write(out: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic(out, "report.json", bytes)?;
+    let digest = format!("{}  report.json\n", sha256_hex(bytes));
+    write_atomic(out, "report.json.sha256", digest.as_bytes())
+}
+
+fn write_atomic(out: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let staging = out.join(format!(".{name}.partial"));
+    let mut file: File = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&staging)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&staging, out.join(name))?;
+    File::open(out)?.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{Case, Requires, Status, Verdict, judge, sorted};
+
+    fn case(group: &str, status: Status) -> Case {
+        Case {
+            id: format!("{group}.case"),
+            group: group.to_owned(),
+            status,
+            absent: None,
+            requires: Requires::default(),
+            diagnostics: Vec::new(),
+            observed: None,
+            branch: None,
+            detection: None,
+            duration_ms: 0,
+        }
+    }
+
+    #[test]
+    fn the_verdict_needs_every_core_case_passed_and_no_failure() {
+        let core = ["machine"];
+        let passed = [
+            case("machine", Status::Passed),
+            case("exec", Status::Absent),
+        ];
+        assert_eq!(judge(&passed, &core, false).1, Verdict::Passed);
+        assert_eq!(judge(&passed, &core, true).1, Verdict::Incomplete);
+        let absent_core = [case("machine", Status::Absent)];
+        assert_eq!(judge(&absent_core, &core, false).1, Verdict::Incomplete);
+        let failed = [
+            case("machine", Status::Passed),
+            case("exec", Status::Failed),
+        ];
+        let (totals, verdict) = judge(&failed, &core, false);
+        assert_eq!(verdict, Verdict::Failed);
+        assert_eq!((totals.passed, totals.failed, totals.absent), (1, 1, 0));
+        assert_eq!(
+            [Verdict::Passed, Verdict::Failed, Verdict::Incomplete].map(Verdict::exit_code),
+            [0, 1, 4]
+        );
+    }
+
+    #[test]
+    fn rendering_sorts_keys_at_every_level() {
+        let value = sorted(json!({"b": {"d": 1, "c": [{"f": 1, "e": 2}]}, "a": 0}));
+        assert_eq!(
+            serde_json::to_string(&value).expect("render"),
+            r#"{"a":0,"b":{"c":[{"e":2,"f":1}],"d":1}}"#
+        );
+    }
+}

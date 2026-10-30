@@ -102,6 +102,16 @@
         "value": 13.5
       }
     },
+    "page:guides/remote-conformance": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 50.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 1.0
+      }
+    },
     "page:guides/run-a-command": {
       "reading_load.max": {
         "tolerance": 0,
