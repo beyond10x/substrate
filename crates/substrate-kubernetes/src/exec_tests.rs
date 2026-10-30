@@ -694,6 +694,36 @@ async fn a_held_name_is_a_retriable_failure_and_its_holder_is_untouched() {
     assert_eq!(rig.ledger.row(&name).uid, None);
 }
 
+/// Adversary, `story:kubernetes-collisions-metric`: an exec start that meets a foreign Pod under
+/// the exec Pod's name is exactly the object the series' help text describes ("met under a name
+/// it would use and did not create, each left untouched"), and § 4 says such an object is counted.
+/// The scrape must show it.
+#[tokio::test]
+async fn a_held_exec_pod_name_at_start_is_one_collision_on_the_port() {
+    let rig = rig().await;
+    assert_eq!(
+        substrate_host::Driver::backend_collisions(&rig.driver),
+        Some(0)
+    );
+    let name = names::exec_pod(DEPLOYMENT, "exec_held_counted");
+    let holder = rig
+        .fake
+        .seed("pods", json!({"metadata": {"name": name}, "spec": {}}))
+        .expect("a foreign Pod holds the name");
+    let DispatchOutcome::NotDispatched(_) =
+        rig.start("exec_held_counted", &input(&["/bin/true"])).await
+    else {
+        panic!("a held name was dispatched");
+    };
+    assert_eq!(rig.pod(&name), Some(holder), "the holder is untouched");
+    assert_eq!(
+        substrate_host::Driver::backend_collisions(&rig.driver),
+        Some(1),
+        "story:kubernetes-collisions-metric: a foreign Pod under the exec Pod's name at start is a \
+         collision (design 34 § 4) and the port's count must move by one"
+    );
+}
+
 /// § 4: a create whose answer was lost after the API stored the Pod is adopted by its operation
 /// annotation, and the start is observed.
 #[tokio::test]
