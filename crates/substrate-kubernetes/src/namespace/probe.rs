@@ -14,8 +14,8 @@
 //! - `confinement.whole-tree-kill` from the heartbeat: the child saw its grandchild's heartbeat
 //!   move, and the keeper's `fs stat` sees it unchanged for [`HEARTBEAT_STILL`] after the end.
 //! - `confinement.no-egress` from the child's three egress attempts: each one, at the address the
-//!   driver named, was stopped inside the Pod, denied or without a route
-//!   ([`EgressOutcome::blocked`]; a timeout never counts, D333), and only while the bound policy
+//!   driver named, was denied inside the Pod, `EPERM` or `EACCES` ([`EgressOutcome::blocked`]; a
+//!   timeout or a missing route never counts, D333, D334), and only while the bound policy
 //!   set holds no policy beside the default-deny one that allows egress.
 //!
 //! The child is told what to observe through [`TARGETS_ENV`]; the Kubernetes Service host it
@@ -827,8 +827,8 @@ fn first_line(bytes: &[u8]) -> (&[u8], &[u8]) {
 }
 
 /// § 6.2 row 5: exactly the three attempts, in order, each at the address the driver named (the
-/// nameserver's at port 53, its host the child's resolver's), each stopped: denied or without a
-/// route ([`EgressOutcome::blocked`]). A timed-out attempt never counts (D333).
+/// nameserver's at port 53, its host the child's resolver's), each denied inside the Pod
+/// ([`EgressOutcome::blocked`]). A timed-out or no-route attempt never counts (D333, D334).
 /// Without a Kubernetes Service host there is no first attempt to hold, so nothing is proved.
 fn no_egress(observed: &Observed, targets: &ProbeTargets) -> bool {
     let Some(host) = targets.kubernetes_service_host else {

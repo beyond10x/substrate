@@ -11,8 +11,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 The wire states what a confinement adapter proves, never its name (design 30, ADR 0048), and the
 Kubernetes namespace driver admits an exec start on the confinement its probe observed. Exec is
-admitted only on a cluster whose network plugin stops the probe's egress attempts inside the Pod
-(`EPERM`, `EACCES`, `ENETUNREACH` or `EHOSTUNREACH`). A plugin that drops denied packets silently,
+admitted only on a cluster whose network plugin denies the probe's egress attempts inside the Pod
+(`EPERM` or `EACCES`). A plugin that drops denied packets silently,
 kind's among them, leaves `confinement.no-egress` absent, and exec stays refused
 `exec.sandbox-unavailable` as in 0.17.0.
 
@@ -60,10 +60,12 @@ kind's among them, leaves `confinement.no-egress` absent, and exec stays refused
   `.output-read`, `.wait`, `.workspace`, `.limits` and `.audit` when the Pod ended with its
   frames, its applied bounds and an exit record that agrees with the API;
   `confinement.whole-tree-kill` when the keeper sees the heartbeat unchanged for 2 s after the
-  container shows `terminated`; and `confinement.no-egress` when all three attempts were stopped
-  inside the Pod (denied, or no route) and no NetworkPolicy in the bound set other than the
+  container shows `terminated`; and `confinement.no-egress` when all three attempts were denied
+  inside the Pod (`EPERM`, `EACCES`) and no NetworkPolicy in the bound set other than the
   default-deny one has an egress rule. A timed-out attempt never counts: on a kind cluster whose
-  egress was observed open, one probe timed out all three attempts while another reached them.
+  egress was observed open, one probe timed out all three attempts while another reached them. A
+  no-route attempt (`ENETUNREACH`, `EHOSTUNREACH`) never counts either: a remote router or an
+  address of the wrong family answers the same.
   Any egress-allowing policy withholds the fact, whichever Pods it selects. Each lapses with the
   proof. It never states the four Linux `exec.*` facts.
 
@@ -72,7 +74,8 @@ kind's among them, leaves `confinement.no-egress` absent, and exec stays refused
 - A namespace-driver daemon admits an exec start when its snapshot states
   `confinement.family.process-run`, `.wait`, `.output-read` and `.limits`,
   `confinement.whole-tree-kill` and `confinement.no-egress` (design 34 § 6.4). Only a network
-  plugin that stops the probe's attempts inside the Pod yields `confinement.no-egress`. On a plugin
+  plugin that denies the probe's attempts inside the Pod (`EPERM`, `EACCES`) yields
+  `confinement.no-egress`. On a plugin
   that does not enforce the NetworkPolicy, or drops denied packets silently (kind's default plugin
   either way), the fact stays absent and every exec start is still `exec.sandbox-unavailable`
   (501), as in 0.17.0. Inferred, not verified: kind's plugin may enforce NetworkPolicy only after

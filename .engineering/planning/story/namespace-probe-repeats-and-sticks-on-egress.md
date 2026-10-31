@@ -11,7 +11,8 @@ tags:
 relations:
 - informed_by: approval-record:d333-timeout-never-proves-no-egress
 - depends_on: story:namespace-probe-never-proves-no-egress-from-a-timeout
-revision: 2
+- informed_by: approval-record:d334-only-a-local-denial-proves-blocked
+revision: 3
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-31T18:33:19Z", actor: "human:timo", revision: 2}
 ---
@@ -41,3 +42,11 @@ start window is bounded, is decided when this story is picked, not now.
 ## Acceptance
 
 To be stated with the design 34 amendment.
+
+## No route since D334
+
+Since D334 (`approval-record:d334-only-a-local-denial-proves-blocked`), only `EPERM` or `EACCES`
+counts as blocked: `ENETUNREACH` and `EHOSTUNREACH` can come from a remote router's ICMP host or
+net unreachable or from an address of the wrong family. This story also decides whether reading
+an attempt's errno together with its elapsed time can tell a local no-route (answered at once,
+inside the Pod) from a remote one, and if so how `no_egress()` reads it.

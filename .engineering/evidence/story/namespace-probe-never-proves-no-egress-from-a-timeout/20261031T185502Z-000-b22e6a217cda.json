@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-31T18:55:02Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-probe-never-proves-no-egress-from-a-timeout",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "D334: cargo test -p b10x-substrate-executor --lib (10 passed) and -p b10x-substrate-kubernetes --lib (124 passed), clippy -D warnings, fmt; red before the change: 2 executor and 2 kubernetes cases (commit before this one)",
+    "reference": "crates/substrate-kubernetes/src/namespace/probe_tests.rs"
+  }
+}

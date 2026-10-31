@@ -1235,8 +1235,8 @@ async fn whole_tree_kill_is_absent_unless_the_heartbeat_moved_and_then_stood_sti
     assert_eq!(families(&unreported), [Some(true); 7]);
 }
 
-/// § 6.2 row 5: no egress needs every one of the three attempts, in order, to have been denied or
-/// found no route, at the addresses the driver named. A reached, refused or timed-out attempt, an
+/// § 6.2 row 5: no egress needs every one of the three attempts, in order, to have been denied,
+/// at the addresses the driver named. A reached, refused, timed-out or no-route attempt, an
 /// attempt that was never made, another address, and an observation that does not read leave it
 /// absent.
 #[tokio::test]
@@ -1328,7 +1328,7 @@ async fn no_egress_is_absent_unless_all_three_attempts_failed_at_the_named_addre
 /// Security review, wave 2026-10-31: one probe after the namespace's policy set gained `policy`
 /// beside the default-deny one, the driver reopened over it (§ 14 Q1 B binds the whole set), and
 /// the probe child reporting what a child the policy does not reach reports: all three attempts
-/// were denied or found no route. Answers the snapshot and the probe Pod the kubelet ran.
+/// were denied. Answers the snapshot and the probe Pod the kubelet ran.
 async fn probe_beside(policy: Value) -> (CapabilitySnapshot, Value) {
     let observation = Observation {
         heartbeat: false,

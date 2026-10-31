@@ -349,8 +349,8 @@ Its limits, stated plainly:
   families, `confinement.whole-tree-kill` and `confinement.no-egress` from what it observed, and an
   exec is admitted on design 34 § 6.4's six facts. A missing one keeps every exec start
   `exec.sandbox-unavailable` (501). `confinement.no-egress` needs each of the probe's three egress
-  attempts stopped inside the Pod (`EPERM`, `EACCES`, `ENETUNREACH` or `EHOSTUNREACH`); a
-  timed-out attempt never counts. So exec is admitted only on a network plugin that denies locally.
+  attempts denied inside the Pod (`EPERM` or `EACCES`); a timed-out or no-route attempt never
+  counts. So exec is admitted only on a network plugin that denies locally.
   A plugin that drops denied packets silently, kind's default plugin among them, leaves the fact
   absent and exec refused, as in 0.17.0. The lane has not yet observed a plugin that denies
   locally. Inferred, not verified: kind's plugin may enforce NetworkPolicy only after a Pod's first

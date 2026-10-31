@@ -271,8 +271,8 @@ What it does not do yet:
   exec start is admitted only when all six facts of design 34 § 6.4 are present; otherwise it is
   refused `exec.sandbox-unavailable`. The four Linux confinement facts are never published.
 - **Exec needs a network plugin that denies locally.** `confinement.no-egress` needs each of the
-  probe's three egress attempts stopped inside the Pod (`EPERM`, `EACCES`, `ENETUNREACH` or
-  `EHOSTUNREACH`); a timed-out attempt never counts. A plugin that drops denied packets silently,
+  probe's three egress attempts denied inside the Pod (`EPERM` or `EACCES`); a timed-out or
+  no-route attempt never counts. A plugin that drops denied packets silently,
   kind's default plugin among them, leaves the fact absent, and exec stays refused as in 0.17.0.
   On kind a Pod under the default-deny policy still reached the API server, and another probe
   timed out all three attempts. No plugin that denies locally has been observed by the lane yet.

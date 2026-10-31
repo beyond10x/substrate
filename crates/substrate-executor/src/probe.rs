@@ -18,7 +18,7 @@
 //!   Kubernetes Service host on port 443, a DNS query to the first `nameserver` of
 //!   [`ProbeTargets::resolv_conf`], and TCP to [`ProbeTargets::egress_probe_address`]. Each is
 //!   reported with its outcome; the driver states `confinement.no-egress` only when every one is
-//!   [`EgressOutcome::blocked`]: stopped inside the Pod, never merely timed out.
+//!   [`EgressOutcome::blocked`]: denied inside the Pod, never merely timed out or without a route.
 
 use std::io::{self, Read as _};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
@@ -207,13 +207,14 @@ pub enum EgressOutcome {
 
 impl EgressOutcome {
     /// Whether the attempt was stopped inside the Pod, where the probe can see it: it was denied
-    /// (`EPERM`, `EACCES`) or found no route (`ENETUNREACH`, `EHOSTUNREACH`). A timed-out attempt
-    /// is not: silence cannot tell a dropped packet from a network that was not ready or a target
-    /// that never answers, and on a kind cluster whose egress was observed open all three attempts
-    /// once timed out (D332, D333). A reached or refused attempt, any other error and an unread
-    /// target are not either.
+    /// (`EPERM`, `EACCES`). A timed-out attempt is not: silence cannot tell a dropped packet from
+    /// a network that was not ready or a target that never answers, and on a kind cluster whose
+    /// egress was observed open all three attempts once timed out (D332, D333). An attempt without
+    /// a route (`ENETUNREACH`, `EHOSTUNREACH`) is not either: a remote router's ICMP or an address
+    /// of the wrong family answers the same (D334). A reached or refused attempt, any other error
+    /// and an unread target are not either.
     pub const fn blocked(self) -> bool {
-        matches!(self, Self::Unreachable | Self::Denied)
+        matches!(self, Self::Denied)
     }
 }
 

@@ -61,8 +61,8 @@ four Linux confinement facts nor `confinement.no-egress`; from 0.18.0 (ADR 0048,
 the probe publishes the families, whole-tree kill and no egress it observed and admits an exec on
 them (`capability_snapshot`,
 `crates/substrate-kubernetes/src/namespace/probe.rs`). `confinement.no-egress` needs each egress
-attempt stopped inside the Pod (`EPERM`, `EACCES`, `ENETUNREACH`, `EHOSTUNREACH`); a timeout never
-counts (D333), so a plugin that drops denied packets silently keeps exec refused as in 0.17.0. On
+attempt denied inside the Pod (`EPERM`, `EACCES`); a timeout (D333) or a missing route (D334) never
+counts, so a plugin that drops denied packets silently keeps exec refused as in 0.17.0. On
 kind the lane observed egress open (O3 did not hold) and one probe time out all three attempts;
 no plugin that denies locally has been observed yet. Inferred, not verified: kind's plugin may
 enforce NetworkPolicy only after a Pod's first moments. On the integration branch of wave
