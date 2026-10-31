@@ -842,3 +842,13 @@ memory, so it does not survive a restart (§ 5, the signal row).
 - § 11: the `exec.inline-capsule` and `exec.signals` fact names are checker literals, with no wire constant.
 - § 12 U13: the lane runs on a workstation (D182).
 - § 15: in-cluster configuration is not wired, and the watch and garbage rounds run on no timer.
+
+## Amendments of 2026-10-31
+
+- § 6.2: the driver tells `probe-child` its targets in the run spec's one variable `SUBSTRATE_PROBE_TARGETS` (the heartbeat path, the Service host, `/etc/resolv.conf`, `egress_probe_address`); the child writes its observation as one JSON line after the argv line, which keeps its bytes.
+- § 6.2: the child's environment is only the spec's (§ 7.3), so the Service host is the keeper's `KUBERNETES_SERVICE_HOST`, stated in its `fs check` answer when it is an IP address; without it `confinement.no-egress` stays absent.
+- § 6.2: the probe Pod mounts the probe's volume writable, so the grandchild can write the heartbeat.
+- § 6.2: `probe-child` exits; its grandchild leaves its session, ignores `TERM`, `HUP` and `INT` and never exits on its own. Whole-tree kill also needs the child to report that it saw the heartbeat move within 2 s; the keeper's two `fs stat` answers 2 s apart must be present and equal.
+- § 6.2: an attempt "fails" when it timed out, found no route or was denied locally; a reset or port-unreachable answer, any other error and a target the child could not read leave `confinement.no-egress` absent. The attempts must be the three, in order, at the Service host's port 443, a nameserver's port 53 and `egress_probe_address`.
+- § 6.2: the families also need the exit record to agree with the API's exit code; the heartbeat and the egress observation count only from a run whose argv read back byte for byte.
+- § 7.1: the observation line and the check's `kubernetes_service_host` keep `substrate-executor/1`: the release equality already pins the executor to the driver.

@@ -2,6 +2,7 @@
 
 #![cfg(target_os = "linux")]
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,147 @@ fn probe_child_writes_its_whole_argv_as_one_json_line_and_exits_0() {
         substrate_executor::probe::report(&argv)
     );
     assert!(output.stderr.is_empty());
+}
+
+/// The pid and beat the probe grandchild's heartbeat file holds.
+fn heartbeat(path: &Path) -> Option<(libc::pid_t, u64)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let (pid, beat) = text.strip_suffix('\n')?.split_once(' ')?;
+    Some((pid.parse().ok()?, beat.parse().ok()?))
+}
+
+/// Kills the probe grandchild when the case ends, passed or not: outside a PID namespace nothing
+/// else ever does.
+struct Grandchild(libc::pid_t);
+
+impl Drop for Grandchild {
+    fn drop(&mut self) {
+        // SAFETY: kill takes integers only; the pid is the grandchild this case's child forked.
+        unsafe {
+            libc::kill(self.0, libc::SIGKILL);
+        }
+    }
+}
+
+/// `probe-child` with targets, as the probe Pod runs it, its stdout read to the end on a thread
+/// so a descendant that kept the pipe open fails the case instead of hanging it.
+fn probe_child_with(targets: &str) -> (Option<i32>, String, Vec<u8>) {
+    let mut child = Command::new(EXECUTOR)
+        .arg(substrate_executor::probe::PROBE_CHILD)
+        .args(substrate_executor::probe::PROBE_ARGUMENTS)
+        .env_clear()
+        .env(substrate_executor::probe::TARGETS_ENV, targets)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("executor");
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let (sender, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = String::new();
+        let mut err = Vec::new();
+        let read = std::io::Read::read_to_string(&mut stdout, &mut out)
+            .and_then(|_| std::io::Read::read_to_end(&mut stderr, &mut err));
+        let _ = sender.send(read.map(|_| (out, err)));
+    });
+    let status = child.wait().expect("the child ends");
+    let (stdout, stderr) = received
+        .recv_timeout(Duration::from_secs(10))
+        .expect("no descendant of the child holds its stdout or stderr open")
+        .expect("both streams read");
+    (status.code(), stdout, stderr)
+}
+
+#[test]
+fn probe_child_with_targets_writes_its_argv_line_then_what_it_observed() {
+    use substrate_executor::probe::{
+        EgressOutcome, EgressTarget, HEARTBEAT_FILE, Observation, PROBE_ARGUMENTS, PROBE_CHILD,
+        ProbeTargets, report,
+    };
+
+    let volume = tempfile::tempdir().expect("the probe's volume");
+    let beating = volume.path().join(HEARTBEAT_FILE);
+    let resolv = volume.path().join("resolv.conf");
+    std::fs::write(&resolv, "search cluster.local\n").expect("a resolver without a nameserver");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("an egress listener");
+    let egress = listener.local_addr().expect("its address");
+    let targets = ProbeTargets {
+        heartbeat: beating.to_str().expect("utf-8").to_owned(),
+        kubernetes_service_host: None,
+        resolv_conf: resolv.to_str().expect("utf-8").to_owned(),
+        egress_probe_address: egress,
+    };
+    let (code, stdout, stderr) = probe_child_with(&targets.encode());
+    let grandchild = heartbeat(&beating).map(|(pid, _)| Grandchild(pid));
+    assert_eq!(code, Some(0));
+    assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+
+    let mut argv = vec![EXECUTOR, PROBE_CHILD];
+    argv.extend(PROBE_ARGUMENTS);
+    let argv_line = report(&argv);
+    let observed = stdout
+        .strip_prefix(&argv_line)
+        .unwrap_or_else(|| panic!("the argv line keeps its bytes and comes first: {stdout:?}"));
+    let observation = Observation::parse_line(observed)
+        .unwrap_or_else(|| panic!("one observation line follows: {observed:?}"));
+    assert!(
+        observation.heartbeat,
+        "the grandchild's heartbeat was seen to move"
+    );
+    let seen: Vec<_> = observation
+        .egress
+        .iter()
+        .map(|attempt| (attempt.target, attempt.address, attempt.outcome))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (EgressTarget::KubernetesService, None, EgressOutcome::Unread),
+            (EgressTarget::Nameserver, None, EgressOutcome::Unread),
+            (
+                EgressTarget::EgressProbe,
+                Some(egress),
+                EgressOutcome::Reached
+            ),
+        ]
+    );
+
+    // Outside a PID namespace nothing kills the grandchild: it beats on after its parent ended,
+    // in a session of its own, through TERM.
+    let grandchild = grandchild.expect("the heartbeat names the grandchild");
+    let (pid, before) = heartbeat(&beating).expect("a heartbeat");
+    assert_eq!(pid, grandchild.0);
+    // SAFETY: getsid and kill take integers only; the pid is this case's grandchild.
+    assert_eq!(
+        unsafe { libc::getsid(pid) },
+        pid,
+        "it leads its own session"
+    );
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    std::thread::sleep(Duration::from_millis(500));
+    let (_, after) = heartbeat(&beating).expect("a heartbeat after TERM");
+    assert!(
+        after > before,
+        "the heartbeat moves past TERM: {before} -> {after}"
+    );
+}
+
+#[test]
+fn probe_child_with_targets_it_cannot_read_writes_only_its_argv_line() {
+    use substrate_executor::probe::{PROBE_ARGUMENTS, PROBE_CHILD, report};
+
+    let (code, stdout, stderr) = probe_child_with("{\"shell\":\"/bin/sh\"}");
+    assert_eq!(code, Some(0));
+    assert!(stderr.is_empty());
+    let mut argv = vec![EXECUTOR, PROBE_CHILD];
+    argv.extend(PROBE_ARGUMENTS);
+    assert_eq!(
+        stdout,
+        report(&argv),
+        "nothing is observed for unreadable targets"
+    );
 }
 
 #[test]

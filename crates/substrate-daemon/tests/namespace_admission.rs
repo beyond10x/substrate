@@ -8,10 +8,12 @@
 //! address `capsule`), and the host, which publishes the capsule fact whenever it publishes the
 //! four, answers exactly as before.
 //!
-//! The current bundle carries `confinement.no-egress` and none of the neutral families, so no
-//! snapshot can state the neutral set yet: `confinement.no-egress` alone is never admission. A
-//! fixture driver publishes each fact set and counts every start it receives, so a refusal is
-//! shown to be made before dispatch.
+//! Bundle `0.26.0` carries every fact of the neutral set, and the namespace driver publishes each
+//! from its probe's observation. All six admit a start; any one missing is
+//! `exec.sandbox-unavailable` exactly as no fact at all is, and `confinement.no-egress` alone is
+//! never admission. A fixture driver publishes each fact set and counts every start it receives,
+//! so an admitted start is shown to reach the driver, where the namespace driver creates its Pod,
+//! and a refusal to be made before dispatch.
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;
@@ -44,11 +46,51 @@ const SNAPSHOT: &str = "sha256:ddddddddddddddddddddddddddddddddddddddddddddddddd
 enum Facts {
     /// The four Linux facts, with or without `exec.inline-capsule`.
     Linux { capsule: bool },
-    /// What a namespace driver can state in this bundle: `confinement.no-egress` and argv-only,
-    /// no Linux fact and no capsule fact.
+    /// `confinement.no-egress` and argv-only alone: no Linux fact, no family, no whole-tree kill
+    /// and no capsule fact.
     NoEgressOnly,
+    /// What a namespace driver whose probe observed everything states: the seven families of
+    /// design 34 § 6.2, whole-tree kill and no egress, no Linux fact and no capsule fact; with
+    /// `missing`, all of that but one fact of design 34 § 6.4's neutral set.
+    Neutral { missing: Option<NeutralFact> },
     /// Neither set.
     Neither,
+}
+
+/// The six facts of design 34 § 6.4's neutral set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NeutralFact {
+    ProcessRun,
+    Wait,
+    OutputRead,
+    Limits,
+    WholeTreeKill,
+    NoEgress,
+}
+
+impl NeutralFact {
+    const ALL: [Self; 6] = [
+        Self::ProcessRun,
+        Self::Wait,
+        Self::OutputRead,
+        Self::Limits,
+        Self::WholeTreeKill,
+        Self::NoEgress,
+    ];
+}
+
+/// The namespace driver's observed facts, `missing` left absent.
+fn neutral(facts: &mut substrate_wire::CapabilityFacts, missing: Option<NeutralFact>) {
+    let stated = |fact: NeutralFact| (missing != Some(fact)).then_some(true);
+    facts.confinement_family_process_run = stated(NeutralFact::ProcessRun);
+    facts.confinement_family_process_watch = Some(true);
+    facts.confinement_family_output_read = stated(NeutralFact::OutputRead);
+    facts.confinement_family_wait = stated(NeutralFact::Wait);
+    facts.confinement_family_workspace = Some(true);
+    facts.confinement_family_limits = stated(NeutralFact::Limits);
+    facts.confinement_family_audit = Some(true);
+    facts.confinement_whole_tree_kill = stated(NeutralFact::WholeTreeKill);
+    facts.confinement_no_egress = stated(NeutralFact::NoEgress);
 }
 
 struct Fixture {
@@ -70,7 +112,7 @@ impl Driver for Fixture {
         facts.exec_argv_only = Some(true);
         let (linux, capsule) = match self.facts {
             Facts::Linux { capsule } => (true, capsule),
-            Facts::NoEgressOnly | Facts::Neither => (false, false),
+            Facts::NoEgressOnly | Facts::Neutral { .. } | Facts::Neither => (false, false),
         };
         facts.exec_namespaces = linux.then_some(substrate_wire::NamespaceFacts {
             user: true,
@@ -88,6 +130,9 @@ impl Driver for Fixture {
         facts.exec_cgroup_kill = linux.then_some(true);
         facts.exec_no_egress = linux.then_some(true);
         facts.confinement_no_egress = matches!(self.facts, Facts::NoEgressOnly).then_some(true);
+        if let Facts::Neutral { missing } = self.facts {
+            neutral(facts, missing);
+        }
         facts.exec_inline_capsule = capsule.then_some(ExecutionCapsuleFacts {
             mount: substrate_wire::EXECUTION_CAPSULE_MOUNT.to_owned(),
             max_files: substrate_wire::MAX_EXECUTION_CAPSULE_FILES,
@@ -344,8 +389,48 @@ async fn the_four_linux_facts_admit_a_start_and_it_reaches_the_driver() {
     assert_eq!(harness.starts(), 1, "{response:?}");
 }
 
+/// Design 34 § 6.4: the neutral set admits a start without any Linux fact, and the start reaches
+/// the driver.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_six_neutral_facts_admit_a_start_and_it_reaches_the_driver() {
+    let harness = Harness::open(Facts::Neutral { missing: None });
+    let response = harness.start("01JNSADMISSIONNEUTRAL001", false).await;
+    assert_eq!(harness.starts(), 1, "{response:?}");
+}
+
+/// Any one of the six missing is the neutral set missing: the start is refused as with no fact at
+/// all, `exec.sandbox-unavailable` (501), and never dispatched (invariant 3). The three families
+/// the set does not name stay published, so they admit nothing on their own.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_neutral_fact_missing_is_sandbox_unavailable_and_never_dispatched() {
+    for (index, fact) in NeutralFact::ALL.into_iter().enumerate() {
+        let harness = Harness::open(Facts::Neutral {
+            missing: Some(fact),
+        });
+        let operation = format!("01JNSADMISSIONMISSING{index:03}");
+        let response = harness.start(&operation, false).await;
+        assert_refused(&response, "exec.sandbox-unavailable", "exec.namespaces");
+        assert_eq!(response.1["error"]["retriable"], false, "{fact:?}");
+        assert_eq!(harness.starts(), 0, "{fact:?}");
+    }
+}
+
+/// A capsule on the neutral set: the confinement check passes, and the capsule check after it
+/// refuses, because the namespace driver publishes no `exec.inline-capsule`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capsule_on_the_neutral_set_is_inline_capsule_unserved_before_dispatch() {
+    let harness = Harness::open(Facts::Neutral { missing: None });
+    let response = harness.start("01JNSADMISSIONNEUTRALCAP", true).await;
+    assert_refused(
+        &response,
+        substrate_wire::EXEC_INLINE_CAPSULE_UNSERVED,
+        "capsule",
+    );
+    assert_eq!(harness.starts(), 0);
+}
+
 /// `confinement.no-egress` alone is not the neutral set: without the families and whole-tree
-/// kill, which this bundle cannot state, the start is refused as before and never dispatched.
+/// kill the start is refused as before and never dispatched.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_egress_alone_is_sandbox_unavailable_and_never_dispatched() {
     let harness = Harness::open(Facts::NoEgressOnly);
