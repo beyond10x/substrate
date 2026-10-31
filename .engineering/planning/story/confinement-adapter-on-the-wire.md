@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:confinement-adapter-on-the-wire
 kind: story
-status: active
+status: implemented
 title: The wire states what the confinement adapter proves, never its name
 summary: 'Design 30: a successor bundle publishes confinement families and properties as facts, lets a start require them, and keeps driver as host.'
 owner: substrate
@@ -12,10 +12,11 @@ tags:
 - wire
 relations:
 - informed_by: epic:confinement-contract-family
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-31T11:27:59Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-31T11:28:48Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-31T16:30:11Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 # Story: the wire states what the confinement adapter proves, never its name
 

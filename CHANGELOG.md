@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-10-31
+
+The wire states what a confinement adapter proves, never its name (design 30, ADR 0048), and the
+Kubernetes namespace driver admits an exec start on the confinement its probe observed. On a
+cluster whose network plugin does not enforce NetworkPolicy, `confinement.no-egress` stays absent
+and exec is still refused `exec.sandbox-unavailable`.
+
 ### Added
 
 - Development contract bundle `substrate-wire/0.26.0` (design 30, ADR 0048), now advertised by the

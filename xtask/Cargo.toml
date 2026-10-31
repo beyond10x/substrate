@@ -21,8 +21,8 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-substrate-kubernetes-client = { package = "b10x-substrate-kubernetes-client", path = "../crates/substrate-kubernetes-client", version = "=0.17.0" }
-substrate-wire = { package = "b10x-substrate-wire", path = "../crates/substrate-wire", version = "=0.17.0" }
+substrate-kubernetes-client = { package = "b10x-substrate-kubernetes-client", path = "../crates/substrate-kubernetes-client", version = "=0.18.0" }
+substrate-wire = { package = "b10x-substrate-wire", path = "../crates/substrate-wire", version = "=0.18.0" }
 tempfile.workspace = true
 tokio.workspace = true
 toml.workspace = true

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:namespace-driver-admits-an-exec-on-observed-confinement
 kind: story
-status: active
+status: implemented
 title: A namespace driver admits an exec on the confinement it observed
 owner: substrate
 tags:
@@ -11,10 +11,11 @@ tags:
 relations:
 - informed_by: story:confinement-adapter-on-the-wire
 - depends_on: story:confinement-adapter-on-the-wire
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-31T11:27:59Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-31T11:28:48Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-31T16:30:11Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: a namespace driver admits an exec on the confinement it observed
 

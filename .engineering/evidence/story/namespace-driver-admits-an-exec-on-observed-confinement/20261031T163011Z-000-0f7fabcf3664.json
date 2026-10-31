@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-31T16:30:11Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-driver-admits-an-exec-on-observed-confinement",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local final gate at f0c1f0c6 (touched crates release tests and clippy, scripts/gate.sh static): EXIT=0; CI Full gate on pull request 202: success",
+    "reference": "commit:1c5985c3"
+  }
+}
