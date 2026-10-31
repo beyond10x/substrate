@@ -2085,7 +2085,7 @@ impl Material {
         })
     }
 
-    fn client(&self) -> Result<Arc<ClientConfig>> {
+    pub(crate) fn client(&self) -> Result<Arc<ClientConfig>> {
         let mut roots = RootCertStore::empty();
         roots.add(self.daemon_der.clone())?;
         Ok(Arc::new(

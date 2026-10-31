@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- The clean-room runner no longer fails `workspace.destroy` and `events.commit-order` on an
+  endpoint that leaves a destroy to reconciliation, as the namespace driver does while the keeper
+  Pod terminates: a retriable `operation.outcome-unknown` is read through `GET /v1/ops/{op}` until
+  terminal, and the closing cleanup waits out a `destroying` workspace instead of destroying it
+  again.
+- After the restart hook, the runner selects the restart and cleanup cases on a machine snapshot
+  read once `/readyz` answers, not on the first one whose `probed_at` moved, which a restarted
+  namespace daemon serves before its driver's facts.
+- Step 4 of `cargo xtask namespace-lane observe` destroys every workspace its runner's subject
+  still holds and waits until the lane deployment owns no Pod or claim, whatever the run's
+  verdict, so steps 5 and 6 never meet the namespace quota because of step 4.
+
 ## [0.17.0] — 2026-10-30
 
 Shared clean-room conformance arrives: design 31's remote runner certifies a deployed endpoint from

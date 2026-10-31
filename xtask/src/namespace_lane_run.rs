@@ -1286,8 +1286,14 @@ impl Steps<'_> {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
+        // Whatever the verdict, step 4's workspaces go before step 5 starts.
+        let swept = self.sweep(&mut daemon, start, address, material).await;
         daemon.stop();
         let answered = token.finish();
+        let swept = match swept {
+            Ok(swept) => self.left_by_step_four().await.map(|()| swept),
+            Err(error) => Err(error),
+        };
         // An exit the hook did not cause stopped the runner: that, not the stopped run, is the
         // failure. Otherwise the runner's verdict comes first, and only then the count.
         let restarts = hook_restarts(&exits);
@@ -1302,11 +1308,57 @@ impl Steps<'_> {
             Some(&RUNNER_UNDECLARED),
         )?;
         let restarts = restarts.map_err(|fault| anyhow!("step 4: {fault}"))?;
+        let swept = swept.context("step 4 left workspaces behind")?;
         Ok(format!(
             "{}; the daemon was started again {restarts} time(s); {answered} credential \
-             request(s) answered",
-            clean_room::evidence(&tally)
+             request(s) answered; {} workspace(s) swept after the run",
+            clean_room::evidence(&tally),
+            swept.len()
         ))
+    }
+
+    /// Step 4's sweep through its own daemon, started again when the run left it stopped.
+    async fn sweep(
+        &self,
+        daemon: &mut Daemon,
+        start: impl Fn() -> Result<Daemon>,
+        address: SocketAddr,
+        material: &Material,
+    ) -> Result<Vec<String>> {
+        if daemon.exit_status()?.is_some() || daemon.pid().is_err() {
+            self.release(self.namespace).await?;
+            *daemon = start()?;
+        }
+        let client = material.client()?;
+        let credential = material.credential.clone();
+        tokio::task::spawn_blocking(move || {
+            sweep_workspaces(
+                &mut |method, path, body| {
+                    tls_call(address, &client, &credential, (method, path, body))
+                },
+                ABSENCE_BOUND,
+                Duration::from_secs(2),
+            )
+        })
+        .await?
+    }
+
+    /// The lane deployment owns no Pod or claim once step 4's sweep is done, within
+    /// [`ABSENCE_BOUND`].
+    async fn left_by_step_four(&self) -> Result<()> {
+        let deadline = Instant::now() + ABSENCE_BOUND;
+        loop {
+            let left = self.owned_by(LANE_DEPLOYMENT).await?;
+            if left.is_empty() {
+                return Ok(());
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "{LANE_DEPLOYMENT} still owns {left:?} {} s after step 4's sweep",
+                ABSENCE_BOUND.as_secs()
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     /// Step 5: the vectors' namespace lane, selected by the driver's kubeconfig; its count must
@@ -1938,6 +1990,146 @@ fn to_case(result: Result<String>) -> Case {
     }
 }
 
+/// One request to a daemon: the status and the JSON body.
+pub type Call<'a> = dyn FnMut(&str, &str, Option<&Value>) -> Result<(u16, Value)> + 'a;
+
+/// Step 4's sweep: every workspace the runner's subject holds is destroyed through the daemon
+/// and reads absent within `bound`, whatever the run's verdict, so steps 5 and 6 never meet the
+/// namespace quota because of step 4. The workspaces come from a reconciliation snapshot, the
+/// public listing of the subject's current resources. A destroy the driver leaves to
+/// reconciliation answers `operation.outcome-unknown` and is waited out (design 34 § 5); a
+/// `destroying` workspace is only waited out, never destroyed again under a fresh id (design 01
+/// § 6.2). The swept ids.
+///
+/// # Errors
+///
+/// A request failed, a destroy was refused, or a workspace still read present after `bound`.
+pub fn sweep_workspaces(
+    call: &mut Call<'_>,
+    bound: Duration,
+    pause: Duration,
+) -> Result<Vec<String>> {
+    let (status, created) = call("POST", "/v1/reconciliation-snapshots", Some(&json!({})))?;
+    ensure!(
+        status == 201,
+        "the reconciliation snapshot answered {status}: {}",
+        code_of(&created)
+    );
+    let snapshot = created["result"]["id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("the reconciliation snapshot names no id: {created}"))?
+        .to_owned();
+    let mut held = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut path = format!("/v1/reconciliation-snapshots/{snapshot}?limit=1000");
+        if let Some(cursor) = &cursor {
+            let _ = write!(path, "&cursor={}", url_encoded(cursor));
+        }
+        let (status, page) = call("GET", &path, None)?;
+        ensure!(
+            status == 200,
+            "the snapshot page answered {status}: {}",
+            code_of(&page)
+        );
+        for item in page["result"]["items"].as_array().into_iter().flatten() {
+            if item["kind"] == "workspace"
+                && let Some(id) = item["id"].as_str()
+            {
+                let state = item["value"]["state"].as_str().unwrap_or_default();
+                held.push((id.to_owned(), state.to_owned()));
+            }
+        }
+        match page["result"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    for (id, state) in &held {
+        if state == "destroying" || state == "destroyed" {
+            continue;
+        }
+        let body = json!({"op": ulid::Ulid::generate().to_string(), "input": {}});
+        let (status, answer) = call("DELETE", &format!("/v1/workspaces/{id}"), Some(&body))?;
+        let code = code_of(&answer);
+        let settled = matches!(
+            (status, code.as_str()),
+            (200 | 404, _) | (500, OUTCOME_UNKNOWN) | (409, "workspace.not-ready")
+        );
+        ensure!(settled, "destroying {id} answered {status} {code}");
+    }
+    let deadline = Instant::now() + bound;
+    for (id, _) in &held {
+        loop {
+            let (status, answer) = call("GET", &format!("/v1/workspaces/{id}"), None)?;
+            if status == 404 || answer["result"]["state"] == "destroyed" {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "{id} still read {status} {} {} s after step 4's sweep began",
+                answer["result"]["state"],
+                bound.as_secs()
+            );
+            std::thread::sleep(pause);
+        }
+    }
+    Ok(held.into_iter().map(|(id, _)| id).collect())
+}
+
+/// One request to the TLS daemon step 4 started, as the runner's subject: `credential` is the
+/// bearer the lane's Identity stub resolves to it.
+///
+/// # Errors
+///
+/// No connection, a TLS failure, or an answer without a status line or a JSON body.
+pub fn tls_call(
+    address: SocketAddr,
+    client: &std::sync::Arc<rustls::ClientConfig>,
+    credential: &str,
+    request: (&str, &str, Option<&Value>),
+) -> Result<(u16, Value)> {
+    let (method, path, body) = request;
+    let stream = std::net::TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(RUNNER_IO))?;
+    let server = rustls::pki_types::ServerName::try_from(RUNNER_SERVER_NAME.to_owned())?;
+    let connection = rustls::ClientConnection::new(std::sync::Arc::clone(client), server)?;
+    let mut tls = rustls::StreamOwned::new(connection, stream);
+    let payload = body.map(Value::to_string).unwrap_or_default();
+    let content = if payload.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "content-type: application/json\r\ncontent-length: {}\r\n",
+            payload.len()
+        )
+    };
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nhost: {RUNNER_SERVER_NAME}\r\nauthorization: Bearer \
+         {credential}\r\n{content}connection: close\r\n\r\n{payload}"
+    );
+    std::io::Write::write_all(&mut tls, request.as_bytes())?;
+    let mut answer = Vec::new();
+    if let Err(error) = std::io::Read::read_to_end(&mut tls, &mut answer)
+        && (error.kind() != std::io::ErrorKind::UnexpectedEof || answer.is_empty())
+    {
+        return Err(anyhow!("{method} {path}: {error}"));
+    }
+    let boundary = answer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("{method} {path}: no response head"))?;
+    let head = String::from_utf8_lossy(&answer[..boundary]);
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .ok_or_else(|| anyhow!("{method} {path}: no status line"))?;
+    let body: Value = serde_json::from_slice(&answer[boundary + 4..])
+        .with_context(|| format!("{method} {path}: the body is not JSON"))?;
+    Ok((status, body))
+}
+
 fn url_encoded(text: &str) -> String {
     text.bytes()
         .map(|byte| match byte {
@@ -2396,5 +2588,154 @@ mod tests {
             inventory_difference(&before, &after),
             ["PersistentVolumeList gained pvc-1"]
         );
+    }
+
+    /// The runner's subject as the namespace daemon serves it: a destroy the driver leaves to
+    /// reconciliation answers `operation.outcome-unknown` and reads absent a few reads later; a
+    /// second destroy of a `destroying` workspace is refused `workspace.not-ready`.
+    #[derive(Default)]
+    struct Subject {
+        /// Each workspace's state and the reads left until it reads absent once destroying.
+        workspaces: BTreeMap<String, (String, u32)>,
+        deletes: Vec<String>,
+        /// A destroy of this workspace is refused with this status and code.
+        refuse: Option<(String, u16, &'static str)>,
+        /// This workspace never reads absent.
+        stuck: Option<String>,
+    }
+
+    impl Subject {
+        fn holding(states: &[(&str, &str)]) -> Self {
+            Self {
+                workspaces: states
+                    .iter()
+                    .map(|(id, state)| ((*id).to_owned(), ((*state).to_owned(), 2)))
+                    .collect(),
+                ..Self::default()
+            }
+        }
+
+        fn answer(&mut self, method: &str, path: &str) -> (u16, Value) {
+            let (route, query) = path.split_once('?').unwrap_or((path, ""));
+            let failure = |status, code: &str| (status, json!({"error": {"code": code}}));
+            let segments: Vec<&str> = route.trim_start_matches("/v1/").split('/').collect();
+            match (method, segments.as_slice()) {
+                ("POST", ["reconciliation-snapshots"]) => {
+                    (201, json!({"result": {"id": "snap_1"}}))
+                }
+                ("GET", ["reconciliation-snapshots", "snap_1"]) => {
+                    // One workspace per page, so the sweep must follow the cursor.
+                    let after: usize = query
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix("cursor=c"))
+                        .and_then(|seq| seq.parse().ok())
+                        .unwrap_or(0);
+                    let items: Vec<Value> = self
+                        .workspaces
+                        .iter()
+                        .skip(after)
+                        .take(1)
+                        .map(|(id, (state, _))| {
+                            json!({"kind": "workspace", "id": id, "value": {"state": state}})
+                        })
+                        .collect();
+                    let next =
+                        (after + 1 < self.workspaces.len()).then(|| format!("c{}", after + 1));
+                    (
+                        200,
+                        json!({"result": {"items": items, "next_cursor": next}}),
+                    )
+                }
+                ("DELETE", ["workspaces", id]) => {
+                    let id = *id;
+                    self.deletes.push(id.to_owned());
+                    if let Some((refused, status, code)) = &self.refuse
+                        && refused == id
+                    {
+                        return failure(*status, code);
+                    }
+                    match self.workspaces.get_mut(id) {
+                        None => failure(404, "resource.not-found"),
+                        Some((state, _)) if state == "destroying" => {
+                            failure(409, "workspace.not-ready")
+                        }
+                        Some((state, _)) => {
+                            "destroying".clone_into(state);
+                            failure(500, OUTCOME_UNKNOWN)
+                        }
+                    }
+                }
+                ("GET", ["workspaces", id]) => {
+                    let id = *id;
+                    let stuck = self.stuck.as_deref() == Some(id);
+                    match self.workspaces.get_mut(id) {
+                        None => failure(404, "resource.not-found"),
+                        Some((state, reads)) if state == "destroying" && !stuck => {
+                            if *reads == 0 {
+                                self.workspaces.remove(id);
+                                return failure(404, "resource.not-found");
+                            }
+                            *reads -= 1;
+                            (200, json!({"result": {"id": id, "state": "destroying"}}))
+                        }
+                        Some((state, _)) => (200, json!({"result": {"id": id, "state": state}})),
+                    }
+                }
+                _ => failure(404, "resource.not-found"),
+            }
+        }
+    }
+
+    fn sweep(subject: &mut Subject, bound: Duration) -> Result<Vec<String>> {
+        sweep_workspaces(
+            &mut |method, path, _| Ok(subject.answer(method, path)),
+            bound,
+            Duration::ZERO,
+        )
+    }
+
+    /// story:clean-room-destroy-settles-on-the-namespace-driver: step 4 leaves no workspace of
+    /// its own behind. Each one the subject holds is destroyed once and waited out until it reads
+    /// absent; one already `destroying` is only waited out (design 01 § 6.2: never a second
+    /// destroy under a fresh id).
+    #[test]
+    fn step_four_destroys_every_workspace_its_subject_holds_and_waits_until_each_is_absent() {
+        let mut subject =
+            Subject::holding(&[("ws_a", "ready"), ("ws_b", "ready"), ("ws_c", "destroying")]);
+        let swept = sweep(&mut subject, Duration::from_secs(5)).expect("the sweep settles");
+        assert!(
+            subject.workspaces.is_empty(),
+            "step 4 left {:?} for steps 5 and 6",
+            subject.workspaces.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(swept, ["ws_a", "ws_b", "ws_c"]);
+        assert_eq!(
+            subject.deletes,
+            ["ws_a", "ws_b"],
+            "each ready workspace is destroyed once, and the destroying one not at all"
+        );
+    }
+
+    /// A destroy refused for another reason, and a workspace that never reads absent, fail the
+    /// sweep by name instead of passing a step that left a workspace behind.
+    #[test]
+    fn a_refused_destroy_or_a_workspace_that_stays_fails_the_sweep_by_name() {
+        let mut refused = Subject::holding(&[("ws_a", "ready")]);
+        refused.refuse = Some(("ws_a".to_owned(), 403, "auth.forbidden"));
+        let error = format!(
+            "{:#}",
+            sweep(&mut refused, Duration::from_secs(5)).expect_err("a refusal fails")
+        );
+        assert!(
+            error.contains("ws_a") && error.contains("auth.forbidden"),
+            "{error}"
+        );
+        let mut stuck = Subject::holding(&[("ws_a", "ready")]);
+        stuck.stuck = Some("ws_a".to_owned());
+        let error = format!(
+            "{:#}",
+            sweep(&mut stuck, Duration::from_millis(50)).expect_err("a stuck one fails")
+        );
+        assert!(error.contains("ws_a"), "{error}");
     }
 }
