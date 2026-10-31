@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-31T22:38:58Z",
+  "actor": "human:timo",
+  "artifact": "approval-record:d337-namespace-lane-s6-s7-fix-wave",
+  "kind": "approval-record",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "adversary red case a_store_failure_binding_the_probe_pod_is_not_named_kubernetes_api_failed green after the create arm keeps error.code; cargo test -p b10x-substrate-kubernetes --lib 127 passed",
+    "review": "review-result:wave-2026-10-31-d337-adversary-pass-1",
+    "outcome": "fixed"
+  }
+}

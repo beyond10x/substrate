@@ -2512,6 +2512,31 @@ mod tests {
         );
     }
 
+    /// D337 S6a: the lines the probe writes when the Role lacks `pods/log` `get` refuse the
+    /// `pods/log` verb case by code and by each missing run fact; the line alone it wrote at
+    /// 620e89ce (no code, no fact) refused nothing.
+    #[test]
+    fn a_refused_pod_log_read_refuses_the_verb_case() {
+        let before = "2026-10-31T19:40:02.112Z  WARN substrate_kubernetes::namespace::probe: \
+                      the probe Pod's run proved nothing why=\"the exec's log answered 403: pods \
+                      \\\"sbx-pr-x-pod\\\" is forbidden: cannot get resource \\\"pods/log\\\"\"\n";
+        let after = "2026-10-31T21:50:02.112Z  WARN substrate_kubernetes::namespace::probe: \
+                     the probe Pod's run proved nothing code=\"kubernetes.api-failed\" \
+                     why=\"the exec's log answered 403: pods \\\"sbx-pr-x-pod\\\" is forbidden\"\n\
+                     2026-10-31T21:50:02.113Z  WARN substrate_kubernetes::namespace::probe: \
+                     confinement.family.process-run was not proved: the probe Pod's run proved \
+                     nothing\n";
+        let missing = BTreeSet::from(["confinement.family.process-run".to_owned()]);
+        assert!(verb_refusal(&missing, &named_codes(before), &unproved_facts(before)).is_none());
+        assert_eq!(
+            unproved_facts(after),
+            BTreeSet::from(["confinement.family.process-run".to_owned()])
+        );
+        let refused = verb_refusal(&missing, &named_codes(after), &unproved_facts(after))
+            .expect("the probe's warnings refuse the case");
+        assert!(refused.contains("kubernetes.api-failed"), "{refused}");
+    }
+
     #[test]
     fn a_missing_fact_is_refused_by_a_code_or_by_its_own_unproved_warn() {
         let set = |names: &[&str]| -> BTreeSet<String> {

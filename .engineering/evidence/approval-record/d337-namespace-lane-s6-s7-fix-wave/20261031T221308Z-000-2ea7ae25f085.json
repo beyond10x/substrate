@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-31T22:13:08Z",
+  "actor": "human:timo",
+  "artifact": "approval-record:d337-namespace-lane-s6-s7-fix-wave",
+  "kind": "approval-record",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p b10x-substrate-kubernetes --lib (125 passed) and cargo test -p xtask --bin xtask -- namespace_lane_run (18 passed) at 08ee7733; a_refused_pod_log_names_its_reason_and_each_unproved_fact red at 5db94a9e without the fix (warning carried no code)",
+    "reference": "08ee7733"
+  }
+}

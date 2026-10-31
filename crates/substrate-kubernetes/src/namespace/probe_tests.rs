@@ -1632,3 +1632,312 @@ async fn three_local_denials_publish_no_egress() {
     .await;
     assert_eq!(facts.confinement_no_egress, Some(true));
 }
+
+thread_local! {
+    /// The buffer [`CapturedLog`] holds on this thread, if any.
+    static CAPTURE: std::cell::RefCell<Option<Arc<Mutex<Vec<u8>>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Writes into this thread's [`CAPTURE`], and nowhere when it holds none.
+struct ThreadWriter;
+
+impl std::io::Write for ThreadWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        CAPTURE.with(|capture| {
+            if let Some(lines) = capture.borrow().as_ref() {
+                lock(lines).extend_from_slice(buf);
+            }
+        });
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Every line the driver logs on this thread while it is held, as `tracing`'s plain formatter
+/// writes them. The subscriber is the process's global one, installed once: a scoped default
+/// races the other tests' first use of a callsite, which can cache its interest as never.
+struct CapturedLog {
+    lines: Arc<Mutex<Vec<u8>>>,
+}
+
+impl CapturedLog {
+    fn start() -> Self {
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(|| ThreadWriter)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).expect("one global subscriber");
+        });
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        CAPTURE.with(|capture| *capture.borrow_mut() = Some(Arc::clone(&lines)));
+        Self { lines }
+    }
+
+    /// The captured `WARN` lines.
+    fn warnings(&self) -> Vec<String> {
+        String::from_utf8(lock(&self.lines).clone())
+            .expect("utf-8 log")
+            .lines()
+            .filter(|line| line.contains("WARN"))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+impl Drop for CapturedLog {
+    fn drop(&mut self) {
+        CAPTURE.with(|capture| *capture.borrow_mut() = None);
+    }
+}
+
+/// D337 S6a: a Role without `pods/log` `get` leaves the probe Pod's run unread. The run's facts
+/// stay absent, and the log says why at `warn`: the reason code `kubernetes.api-failed`, and each
+/// fact the run would have proved as "<fact> was not proved", so an operator (and the namespace
+/// lane) can tell a refused read from a run that proved less.
+#[tokio::test]
+async fn a_refused_pod_log_names_its_reason_and_each_unproved_fact() {
+    let observation = Observation {
+        heartbeat: true,
+        egress: blocked(),
+    };
+    let rig = rig_with(
+        Play::observing(&observation, Heartbeat::Stopped),
+        None,
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    rig.fake.refuse_logs(
+        403,
+        "pods \"probe\" is forbidden: User \"system:serviceaccount:substrate:substrate-driver\" \
+         cannot get resource \"pods/log\" in API group \"\" in the namespace \"substrate\"",
+    );
+    let log = CapturedLog::start();
+    rig.driver.probe().await.expect("the probe runs");
+    let snapshot = rig.machine();
+    let facts = &snapshot.facts;
+    assert_never_published(&snapshot);
+    assert_eq!(families(facts), [None; 7]);
+    assert_eq!(facts.exec_argv_only, None);
+    assert_eq!(facts.confinement_whole_tree_kill, None);
+    assert_eq!(facts.confinement_no_egress, None);
+
+    let warnings = log.warnings();
+    assert!(
+        warnings.iter().any(
+            |line| line.contains("code=\"kubernetes.api-failed\"") && line.contains("pods/log")
+        ),
+        "no warning names kubernetes.api-failed with the API's answer: {warnings:#?}"
+    );
+    let run_facts = SEVEN_FAMILIES.iter().map(|family| family.fact()).chain([
+        "exec.argv-only",
+        substrate_wire::CONFINEMENT_WHOLE_TREE_KILL_FACT,
+        substrate_wire::CONFINEMENT_NO_EGRESS_FACT,
+    ]);
+    for fact in run_facts {
+        let stated = format!(" {fact} was not proved");
+        assert!(
+            warnings.iter().any(|line| line.contains(&stated)),
+            "no warning says {fact} was not proved: {warnings:#?}"
+        );
+    }
+}
+
+/// Adversary cases for D337 S6a: the reason code the probe Pod's failed run names, on the other
+/// paths into `RunFailed::api`.
+mod adversary_d337 {
+    use std::sync::Weak;
+
+    use substrate_host::{BackendLedger, BackendName, BackendRecord, DriverError, UidBinding};
+
+    use super::*;
+    use crate::driver_tests::driver_over_any;
+
+    /// The daemon's store failing the one write that binds the probe Pod's uid, as
+    /// `StoreBackendLedger::bind_uid` answers any store error (`state.store-failed`); every other
+    /// call is `inner`'s.
+    struct StoreFailsProbePodBind {
+        inner: Arc<MemoryLedger>,
+    }
+
+    impl BackendLedger for StoreFailsProbePodBind {
+        fn recorded(&self, kind: BackendKind, id: &str) -> Result<Vec<BackendRecord>, DriverError> {
+            self.inner.recorded(kind, id)
+        }
+
+        fn bind_uid(&self, name: &str, uid: &str) -> Result<UidBinding, DriverError> {
+            let probe_pod = self.inner.unsettled(None)?.into_iter().any(|row| {
+                row.name == name && row.kind == BackendKind::Probe && row.role == BackendRole::Pod
+            });
+            if probe_pod {
+                return Err(DriverError::failed(
+                    "state.store-failed",
+                    "Durable state operation failed.",
+                ));
+            }
+            self.inner.bind_uid(name, uid)
+        }
+
+        fn settle(&self, name: &str) -> Result<bool, DriverError> {
+            self.inner.settle(name)
+        }
+
+        fn reserve_probe(&self, nonce: &str, names: &[BackendName]) -> Result<(), DriverError> {
+            self.inner.reserve_probe(nonce, names)
+        }
+
+        fn unsettled(&self, after: Option<&str>) -> Result<Vec<BackendRecord>, DriverError> {
+            self.inner.unsettled(after)
+        }
+    }
+
+    /// The keeper's handshake and its whole check, as [`rig_with`] answers them; `on_check` runs
+    /// once the check is answered, before the probe Pod is created.
+    fn answer_keeper(fake: &FakeCluster, on_check: impl Fn() + Send + Sync + 'static) {
+        fake.set_exec(move |request: ExecRequest| {
+            let command: Vec<&str> = request.command.iter().map(String::as_str).collect();
+            match command.as_slice() {
+                ["/substrate-executor", "version"] => ExecAnswer {
+                    stdout: format!("{}\n", Handshake::current().line()).into_bytes(),
+                    ..ExecAnswer::default()
+                },
+                ["/substrate-executor", "fs"]
+                    if matches!(
+                        read_request(&mut request.stdin.as_slice()),
+                        Ok((Request::Check {}, _))
+                    ) =>
+                {
+                    let mut stdout = Vec::new();
+                    Response::Ok {
+                        value: check_with_host(SERVICE_HOST),
+                        omitted_entries: 0,
+                    }
+                    .write_to(&mut stdout)
+                    .expect("the check answer is written");
+                    on_check();
+                    ExecAnswer {
+                        stdout,
+                        ..ExecAnswer::default()
+                    }
+                }
+                _ => ExecAnswer {
+                    exit_code: 2,
+                    ..ExecAnswer::default()
+                },
+            }
+        });
+    }
+
+    /// The line that says the probe Pod's run proved nothing, and why.
+    fn run_line(warnings: &[String]) -> String {
+        warnings
+            .iter()
+            .find(|line| {
+                line.contains("the probe Pod's run proved nothing") && line.contains("why=")
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("no warning says why the run proved nothing: {warnings:#?}"))
+    }
+
+    /// A store write that failed after the API stored the probe Pod is not the API's failure:
+    /// the run's warning names the code the create was answered with, `state.store-failed`,
+    /// which its own `why` already states, and not `kubernetes.api-failed`.
+    #[tokio::test]
+    async fn a_store_failure_binding_the_probe_pod_is_not_named_kubernetes_api_failed() {
+        let fake = Arc::new(passing_fake());
+        let clock = ManualClock::new();
+        let inner = Arc::new(MemoryLedger::default());
+        let driver = driver_over_any(
+            &fake,
+            &clock,
+            Arc::new(StoreFailsProbePodBind {
+                inner: Arc::clone(&inner),
+            }),
+        );
+        driver.open().await.expect("the driver opens");
+        answer_keeper(&fake, || {});
+        let root = tempfile::tempdir().expect("a temporary PVC");
+        let kubelet = tokio::spawn(play_kubelet(
+            admin(&fake),
+            Arc::clone(&fake),
+            Play::of(Child::Exact),
+            Arc::new(Mutex::new(Vec::new())),
+            root.path().to_path_buf(),
+        ));
+        let log = CapturedLog::start();
+        driver.probe().await.expect("the probe runs");
+        kubelet.abort();
+        assert_eq!(Driver::machine(&driver).facts.exec_argv_only, None);
+        let run = run_line(&log.warnings());
+        assert!(
+            run.contains("state.store-failed"),
+            "the run failed on the store write: {run}"
+        );
+        assert!(
+            run.contains("code=\"state.store-failed\"")
+                && !run.contains("code=\"kubernetes.api-failed\""),
+            "a failed store write is named an API failure: {run}"
+        );
+    }
+
+    /// The probe Pod's create refused by RBAC (the other path the fix names): the run's warning
+    /// names `kubernetes.api-failed` with the API's answer, and each run fact as not proved.
+    #[tokio::test]
+    async fn a_refused_probe_pod_create_names_its_reason_and_each_unproved_fact() {
+        let fake = Arc::new(passing_fake());
+        let clock = ManualClock::new();
+        let (driver, _ledger) = driver(&fake, &clock);
+        driver.open().await.expect("the driver opens");
+        let weak: Weak<FakeCluster> = Arc::downgrade(&fake);
+        answer_keeper(&fake, move || {
+            if let Some(fake) = weak.upgrade() {
+                fake.fault(Fault::Answer {
+                    method: Method::POST,
+                    path: "/api/v1/namespaces/substrate/pods".to_owned(),
+                    status: 403,
+                    body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "Forbidden", "code": 403,
+                        "message": "pods is forbidden: User \"system:serviceaccount:substrate:substrate-driver\" cannot create resource \"pods\" in API group \"\" in the namespace \"substrate\""}),
+                });
+            }
+        });
+        let root = tempfile::tempdir().expect("a temporary PVC");
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let kubelet = tokio::spawn(play_kubelet(
+            admin(&fake),
+            Arc::clone(&fake),
+            Play::of(Child::Exact),
+            Arc::clone(&ran),
+            root.path().to_path_buf(),
+        ));
+        let log = CapturedLog::start();
+        driver.probe().await.expect("the probe runs");
+        kubelet.abort();
+        assert!(lock(&ran).is_empty(), "the probe Pod was never created");
+        let snapshot = Driver::machine(&driver);
+        assert_eq!(families(&snapshot.facts), [None; 7]);
+        assert_eq!(snapshot.facts.exec_argv_only, None);
+        let warnings = log.warnings();
+        let run = run_line(&warnings);
+        assert!(
+            run.contains("code=\"kubernetes.api-failed\"") && run.contains("cannot create"),
+            "{run}"
+        );
+        for fact in SEVEN_FAMILIES.iter().map(|family| family.fact()).chain([
+            "exec.argv-only",
+            substrate_wire::CONFINEMENT_WHOLE_TREE_KILL_FACT,
+            substrate_wire::CONFINEMENT_NO_EGRESS_FACT,
+        ]) {
+            let stated = format!(" {fact} was not proved");
+            assert!(
+                warnings.iter().any(|line| line.contains(&stated)),
+                "no warning says {fact} was not proved: {warnings:#?}"
+            );
+        }
+    }
+}

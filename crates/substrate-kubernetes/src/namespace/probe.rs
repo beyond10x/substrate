@@ -48,8 +48,9 @@ use substrate_executor::spec::RunSpec;
 use substrate_host::{BackendKind, BackendRecord, BackendRole};
 use substrate_kubernetes_client::{RUN_CONTAINER, container_state};
 use substrate_wire::{
-    CapabilityFacts, CapabilitySnapshot, ExecLimits, HostDriverKind, MAX_FILE_BYTES, MAX_IO_BYTES,
-    MAX_LIST_ITEMS, Signal, StreamBoundsFacts,
+    CONFINEMENT_NO_EGRESS_FACT, CONFINEMENT_WHOLE_TREE_KILL_FACT, CapabilityFacts,
+    CapabilitySnapshot, ConfinementFamily, ExecLimits, HostDriverKind, MAX_FILE_BYTES,
+    MAX_IO_BYTES, MAX_LIST_ITEMS, Signal, StreamBoundsFacts,
 };
 
 use super::files::CallFailure;
@@ -112,6 +113,45 @@ pub(crate) struct ObservedProofs {
     whole_tree_kill: bool,
     /// `confinement.no-egress`.
     no_egress: bool,
+}
+
+/// Every fact the probe Pod's run proves ([`RunProofs`]), each named in the warning that says it
+/// was not proved when the run proved nothing (D337).
+const RUN_FACTS: [&str; 10] = [
+    ConfinementFamily::ProcessRun.fact(),
+    ConfinementFamily::ProcessWatch.fact(),
+    ConfinementFamily::OutputRead.fact(),
+    ConfinementFamily::Wait.fact(),
+    ConfinementFamily::Workspace.fact(),
+    ConfinementFamily::Limits.fact(),
+    ConfinementFamily::Audit.fact(),
+    "exec.argv-only",
+    CONFINEMENT_WHOLE_TREE_KILL_FACT,
+    CONFINEMENT_NO_EGRESS_FACT,
+];
+
+/// Why the probe Pod's run proved nothing: a call the run needed failed, named by its reason
+/// `code` (the API's refusal is `kubernetes.api-failed`, the Pod's create keeps the code it failed
+/// with), or the run itself gave no proof (`code` absent).
+struct RunFailed {
+    code: Option<&'static str>,
+    why: String,
+}
+
+impl RunFailed {
+    /// The API refused, or left unknown, a call the run needed: `kubernetes.api-failed`.
+    fn api(why: String) -> Self {
+        Self {
+            code: Some(API_FAILED),
+            why,
+        }
+    }
+}
+
+impl From<String> for RunFailed {
+    fn from(why: String) -> Self {
+        Self { code: None, why }
+    }
 }
 
 /// The workspace facts the keeper's `fs check` proved (design 34 § 6.2), each from its own answer.
@@ -483,8 +523,15 @@ impl NamespaceDriver {
             .await
         {
             Ok(run) => run,
-            Err(why) => {
-                tracing::warn!(why, "the probe Pod's run proved nothing");
+            Err(RunFailed { code, why }) => {
+                if let Some(code) = code {
+                    tracing::warn!(code, why, "the probe Pod's run proved nothing");
+                } else {
+                    tracing::warn!(why, "the probe Pod's run proved nothing");
+                }
+                for fact in RUN_FACTS {
+                    tracing::warn!("{fact} was not proved: the probe Pod's run proved nothing");
+                }
                 RunProofs::default()
             }
         };
@@ -522,7 +569,7 @@ impl NamespaceDriver {
         keeper: &str,
         row: &BackendRecord,
         kubernetes_service_host: Option<IpAddr>,
-    ) -> Result<RunProofs, String> {
+    ) -> Result<RunProofs, RunFailed> {
         let mut argv = vec![
             format!("{EXECUTOR_MOUNT}/substrate-executor"),
             PROBE_CHILD.to_owned(),
@@ -565,7 +612,7 @@ impl NamespaceDriver {
         row: &BackendRecord,
         argv: &[String],
         targets: &ProbeTargets,
-    ) -> Result<(RunEnd, Option<i64>), String> {
+    ) -> Result<(RunEnd, Option<i64>), RunFailed> {
         let node = self.scheduled_node(keeper).await?;
         let config = &self.config;
         let output_limit = pod::output_limit_bytes(config.container_log_max_bytes);
@@ -603,7 +650,10 @@ impl NamespaceDriver {
         let uid = match self.create_recorded(row, &self.api.pods(), rendered).await {
             Created::Bound(uid) => uid,
             Created::Refused(error) | Created::Unknown(error) => {
-                return Err(format!("the probe Pod: {}: {}", error.code, error.message));
+                return Err(RunFailed {
+                    code: Some(error.code),
+                    why: format!("the probe Pod: {}: {}", error.code, error.message),
+                });
             }
         };
         let bound = Duration::from_secs(bounds.deadline_seconds) + self.api.timeout + PROBE_SLACK;
@@ -614,17 +664,21 @@ impl NamespaceDriver {
             .await
         {
             LogRead::Read(bytes) => bytes,
-            LogRead::Overlong => return Err("the probe's log passes its budget".to_owned()),
-            LogRead::Gone => return Err("the probe's log is gone".to_owned()),
-            LogRead::Unreadable(why) => return Err(why),
-            LogRead::NotOurs => return Err("the probe Pod's name holds another uid".to_owned()),
+            LogRead::Overlong => return Err("the probe's log passes its budget".to_owned().into()),
+            LogRead::Gone => return Err("the probe's log is gone".to_owned().into()),
+            LogRead::Unreadable(why) => return Err(RunFailed::api(why)),
+            LogRead::NotOurs => {
+                return Err("the probe Pod's name holds another uid".to_owned().into());
+            }
         };
         let decoded = logs::decode(&log, bounds.output_bytes)
             .map_err(|why| format!("the probe's log: {why}"))?;
         if decoded.applied.memory_bytes != Some(spec.memory_bytes)
             || decoded.applied.cpu_millicores != Some(spec.cpu_millicores)
         {
-            return Err("the probe Pod's applied bounds are not its spec's".to_owned());
+            return Err("the probe Pod's applied bounds are not its spec's"
+                .to_owned()
+                .into());
         }
         Ok((decoded.end, code))
     }

@@ -281,6 +281,23 @@ pub(crate) fn driver_over(
     .expect("the configuration loads")
 }
 
+/// A driver over any `ledger`, as the daemon's store-backed one stands in for it: a ledger whose
+/// store write fails is not a [`MemoryLedger`] (adversary, D337 S6a).
+pub(crate) fn driver_over_any(
+    fake: &FakeCluster,
+    clock: &Arc<ManualClock>,
+    ledger: Arc<dyn BackendLedger>,
+) -> NamespaceDriver {
+    let bytes = kubeconfig_with(fake, Some(extension()));
+    NamespaceDriver::parse_with_clock(
+        &bytes,
+        DEPLOYMENT,
+        ledger,
+        Arc::clone(clock) as Arc<dyn Clock>,
+    )
+    .expect("the configuration loads")
+}
+
 fn lease(fake: &FakeCluster) -> Value {
     fake.object("leases", LEASE_NAME).expect("the Lease exists")
 }

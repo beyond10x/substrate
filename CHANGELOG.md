@@ -88,6 +88,14 @@ kind's among them, leaves `confinement.no-egress` absent, and exec stays refused
   `loom-intake-slice/src/confinement.rs`) must adapt when its substrate pin moves, even though it
   uses the host API in process.
 
+### Fixed
+
+- When the namespace driver's probe Pod run proves nothing, its `warn` says why: the reason code
+  `kubernetes.api-failed` when the API refused or lost a call the run needed (a Role without
+  `pods/log` `get` among them), the code the probe Pod's create failed with (such as
+  `state.store-failed`), and one line per run fact, "`<fact>` was not proved". Before, the
+  one warning named neither, and the run's facts went absent without a stated reason.
+
 ## [0.17.0] — 2026-10-31
 
 Shared clean-room conformance arrives: design 31's remote runner certifies a deployed endpoint from

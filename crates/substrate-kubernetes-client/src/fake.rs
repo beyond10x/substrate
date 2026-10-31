@@ -202,6 +202,7 @@ struct Store {
     requests: Vec<String>,
     rules: Vec<Value>,
     logs: BTreeMap<String, Vec<u8>>,
+    log_refusal: Option<(u16, String)>,
     restricted: bool,
 }
 
@@ -399,6 +400,12 @@ impl FakeCluster {
     /// The log `pods/log` answers for the Pod `pod`.
     pub fn set_log(&self, pod: &str, log: &[u8]) {
         self.store().logs.insert(pod.to_owned(), log.to_vec());
+    }
+
+    /// Every `pods/log` read from now on is refused `status` `Forbidden` with `message`, as the
+    /// API answers a Role without `pods/log` `get`.
+    pub fn refuse_logs(&self, status: u16, message: &str) {
+        self.store().log_refusal = Some((status, message.to_owned()));
     }
 
     /// Whether Pod Security admission enforces `restricted` from now on. Off, the default, admits
@@ -1072,6 +1079,9 @@ impl Shared {
             .is_some_and(|pods| pods.contains_key(name))
         {
             return Err(not_found("pods", name));
+        }
+        if let Some((status, message)) = &store.log_refusal {
+            return Err(Refusal::new(*status, "Forbidden", message.clone()));
         }
         let mut log = store.logs.get(name).cloned().unwrap_or_default();
         if let Some(limit) = first("limitBytes").and_then(|limit| limit.parse::<usize>().ok()) {
