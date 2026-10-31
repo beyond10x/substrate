@@ -2,14 +2,15 @@
 format: aep.planning-md/3
 id: story:clean-room-destroy-settles-on-the-namespace-driver
 kind: story
-status: active
+status: implemented
 title: The clean-room runner's destroy and commit-order cases settle on the namespace driver
 relations:
 - informed_by: story:remote-clean-room-conformance
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-30T23:39:43Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-30T23:39:43Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-31T02:22:51Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: The clean-room runner's destroy and commit-order cases settle on the namespace driver
 
