@@ -361,6 +361,63 @@ async fn only_a_kubernetes_daemon_serves_the_collision_series() {
     );
 }
 
+/// Design 30 § 6, ADR 0048 D7: the operational listener of a host daemon names the confinement
+/// adapter it opened, `linux`, in `substrate_adapter_info`, a gauge that is always 1. A daemon
+/// running `--driver kubernetes` opens no confinement adapter, so its scrape carries no such
+/// series, and neither does any client answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_daemon_that_opened_a_confinement_adapter_names_it_to_the_operator() {
+    let (_directory, base) = tree();
+    let path = base.join("other/kubeconfig.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&unreachable_kubeconfig(Some(extension()))).expect("kubeconfig"),
+    )
+    .expect("write kubeconfig");
+    let ops = unused_address();
+    let mut namespace = config(&base, path);
+    namespace.ops = Some(OpsListenerConfig {
+        listen: ops,
+        require_facts: Vec::new(),
+    });
+    let daemon = tokio::spawn(serve(namespace));
+    let scrape = metrics_once_listening(ops).await;
+    daemon.abort();
+    assert!(scrape.ends_with("# EOF\n"), "{scrape}");
+    assert!(!scrape.contains("substrate_adapter"), "{scrape}");
+
+    let (_host_directory, host_base) = tree();
+    std::fs::create_dir(host_base.join("workspaces")).expect("workspaces");
+    let host_ops = unused_address();
+    let mut host = DaemonConfig::minimum(
+        host_base.join("other/api.sock"),
+        host_base.join("state/state.db"),
+        host_base.join("workspaces"),
+        "d",
+        vec![nix::unistd::getuid().as_raw()],
+    );
+    host.ops = Some(OpsListenerConfig {
+        listen: host_ops,
+        require_facts: Vec::new(),
+    });
+    let host_daemon = tokio::spawn(serve(host));
+    let host_scrape = metrics_once_listening(host_ops).await;
+    host_daemon.abort();
+    let adapter = host_scrape
+        .lines()
+        .filter(|line| line.contains("substrate_adapter_info"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        adapter,
+        [
+            "# TYPE substrate_adapter_info gauge",
+            "# HELP substrate_adapter_info The confinement adapter this daemon opened.",
+            "substrate_adapter_info{adapter=\"linux\"} 1",
+        ],
+        "{host_scrape}"
+    );
+}
+
 /// The first `/metrics` body the operational listener answers `200` with, within 10 s.
 async fn metrics_once_listening(ops: std::net::SocketAddr) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);

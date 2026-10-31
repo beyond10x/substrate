@@ -91,6 +91,7 @@ confinement/mod.rs: pub const RENDER_UNSERVED: &str = "confinement.render-unserv
 confinement/mod.rs: pub const WRITABLE_SUBTREE_GIT: &str = "confinement.writable-subtree-git";
 confinement/mod.rs: pub const OUTPUT_RETENTION_UNSERVED: &str = "confinement.output-retention-unserved";
 confinement/mod.rs: pub const ADAPTERS: [AdapterName; 6] = [AdapterName::Local, AdapterName::Linux, AdapterName::Macos, AdapterName::Systemd, AdapterName::Oci, AdapterName::Pod];
+confinement/mod.rs: impl AdapterName > pub const fn name(&self) -> &'static str
 confinement/mod.rs: #[derive(Debug, Clone)] pub enum AdapterRequest
 confinement/mod.rs: enum AdapterRequest > Local(local::LocalRequest),
 confinement/mod.rs: enum AdapterRequest > Linux(Box<linux::LinuxRequest>),

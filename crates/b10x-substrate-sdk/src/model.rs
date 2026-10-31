@@ -57,6 +57,28 @@ impl From<substrate_wire::CapabilitySnapshot> for Machine {
     }
 }
 
+impl Machine {
+    /// The confinement families the daemon serves, in ADR 0044 decision 1's order (design 30
+    /// § 4.3). A family the daemon does not publish is not served; nothing names the adapter.
+    #[must_use]
+    pub fn served_families(&self) -> Vec<substrate_wire::ConfinementFamily> {
+        substrate_wire::ConfinementFamily::ALL
+            .into_iter()
+            .filter(|family| self.facts.serves_family(*family))
+            .collect()
+    }
+
+    /// The confinement properties the daemon proves, in the `Fact` order of
+    /// `spec/confinement/` (design 30 § 4.3). An unpublished property is not proved.
+    #[must_use]
+    pub fn proved_properties(&self) -> Vec<substrate_wire::ConfinementProperty> {
+        substrate_wire::ConfinementProperty::ALL
+            .into_iter()
+            .filter(|property| self.facts.proves(*property))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum WorkspaceState {
@@ -826,5 +848,61 @@ impl<'de> Deserialize<'de> for LinkedChildConfig {
             bubblewrap: fields.bubblewrap,
             event_retention: fields.event_retention,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Machine;
+    use substrate_wire::{
+        CapabilityFacts, CapabilitySnapshot, ConfinementFamily, ConfinementProperty, HostDriverKind,
+    };
+
+    fn machine(facts: CapabilityFacts) -> Machine {
+        Machine::from(CapabilitySnapshot {
+            snapshot: "sha256:00".to_owned(),
+            driver: HostDriverKind::Host,
+            driver_version: "0.0.0".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::DateTime::UNIX_EPOCH,
+            valid_until: None,
+            facts,
+        })
+    }
+
+    /// Design 30 § 4.3: a published `true` is served or proved; an absent fact is neither, and
+    /// the helpers keep the wire order rather than the order facts were set in.
+    #[test]
+    fn the_machine_names_the_served_families_and_proved_properties_in_wire_order() {
+        assert!(
+            machine(CapabilityFacts::default())
+                .served_families()
+                .is_empty()
+        );
+        assert!(
+            machine(CapabilityFacts::default())
+                .proved_properties()
+                .is_empty()
+        );
+        let facts = CapabilityFacts {
+            confinement_family_audit: Some(true),
+            confinement_family_workspace: Some(true),
+            confinement_family_limits: None,
+            confinement_private_tmpdir: Some(true),
+            confinement_whole_tree_kill: Some(true),
+            ..CapabilityFacts::default()
+        };
+        let machine = machine(facts);
+        assert_eq!(
+            machine.served_families(),
+            [ConfinementFamily::Workspace, ConfinementFamily::Audit]
+        );
+        assert_eq!(
+            machine.proved_properties(),
+            [
+                ConfinementProperty::WholeTreeKill,
+                ConfinementProperty::PrivateTmpdir
+            ]
+        );
     }
 }

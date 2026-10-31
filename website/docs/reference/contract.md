@@ -164,7 +164,13 @@ duplicate or an empty object is `request.schema-invalid`. The first required fam
 snapshot does not serve is `confinement.family-unserved` and the first required property it does
 not prove is `confinement.fact-unserved`, each `501` with class `unserved`, recorded as refused
 and never dispatched. The applied record echoes `requires`, and its `cgroup` is optional: present
-whenever a cgroup was applied, as on every host run.
+whenever a cgroup was applied, as on every host run. A host daemon publishes what its `linux`
+adapter proved, from the facts it already probes: `audit` always; `workspace` with guarded
+workspace I/O; and, on a host with the exec confinement floor, `process-run`, `process-watch`,
+`output-read`, `wait` and `limits`, `filesystem-view` where read-only roots and files are proved,
+`network-egress` where an egress aperture is declared, and the properties `whole-tree-kill`,
+`ipc-socket-allowlist` and `ipc-signals-contained`. It never publishes `network-ingress`, and the
+API never names the adapter.
 
 ### `0.25.0`
 

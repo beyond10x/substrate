@@ -17,10 +17,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   that names families and properties, and two refusals are published at 501 with a vector each:
   `confinement.family-unserved` and `confinement.fact-unserved`. `substrate-wire` exports
   `ConfinementFamily`, `ConfinementProperty`, `ConfinementRequires`,
-  `validate_confinement_requires` and `confinement_requires_refusal`. The host daemon publishes
-  none of the new facts yet and does not check `requires` yet, so its answers do not change.
-- `/metrics` on the operational listener names the two new refusal codes: a host daemon's scrape
-  holds at most 584 samples and a `--driver kubernetes` daemon's at most 585.
+  `validate_confinement_requires` and `confinement_requires_refusal`.
+- The host daemon publishes the `linux` adapter's family and property facts, each derived from a
+  proof it already makes: `audit` always, `workspace` with guarded workspace I/O, and with the exec
+  floor `process-run`, `process-watch`, `output-read`, `wait`, `limits`, `filesystem-view` (with
+  read-only roots and files), `network-egress` (with a declared aperture), `whole-tree-kill`,
+  `ipc-socket-allowlist` and `ipc-signals-contained`. It never publishes `network-ingress`. The
+  capability snapshot digest now binds the adapter, so the host's snapshot id changes once.
+- Exec and session starts check `sandbox.requires` right after `exec.capability-stale`: an empty
+  list or a repeated name is `request.schema-invalid` (422), the first unserved family
+  `confinement.family-unserved` (501), the first unproved property `confinement.fact-unserved`
+  (501), each recorded as refused before dispatch. The host driver applies the same check, and an
+  admitted run's applied record echoes `requires`. A start without `requires` is unchanged.
+- `Machine::served_families` and `Machine::proved_properties` in the Rust SDK, which also
+  re-exports `ConfinementFamily`, `ConfinementProperty` and `ConfinementRequires`.
+- `/metrics` on the operational listener names the two new refusal codes and, on a host daemon
+  only, `substrate_adapter_info{adapter="linux"} 1` (ADR 0048 D7): the operator sees the adapter
+  name, the API never does. A `--driver kubernetes` daemon opens no adapter and has no such series.
+  Each scrape holds at most 585 samples.
+- The runtime vectors check the published facts and the `requires` refusals: the portable lane
+  counts 124 cases and the delegated lane 189.
 - The namespace driver's probe observes confinement (design 34 § 6.2). Its probe Pod now mounts
   the probe's volume writable and carries one environment variable, `SUBSTRATE_PROBE_TARGETS`.
   `probe-child` forks a grandchild that rewrites `substrate-probe-heartbeat` in the volume every
@@ -41,8 +57,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `confinement.whole-tree-kill` and `confinement.no-egress` (design 34 § 6.4). On a cluster whose
   network plugin does not enforce the NetworkPolicy, an attempt is reached or refused,
   `confinement.no-egress` stays absent and every exec start is still `exec.sandbox-unavailable`
-  (501). The host driver publishes none of these facts and admits as before.
-
+  (501). The host driver never states `confinement.no-egress` and admits as before.
 - `AppliedConfinement.cgroup` is `Option<String>` and is optional in the bundle, present whenever
   the adapter applied a cgroup; the host driver applies one to every run, so its records keep their
   bytes. The applied record gains an optional `requires` echo.

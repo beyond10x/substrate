@@ -147,11 +147,15 @@ The four readiness checks:
 listener closes.
 
 The metric set is fixed. Labels are closed sets: listener, route family, outcome class, refusal
-code, check, maintenance task and admission result. No subject, resource id, path, address or
-credential appears in a label or a value. A scrape carries at most 584 samples on a host daemon
-and at most 585 samples on a daemon running `--driver kubernetes`.
+code, check, maintenance task, admission result and confinement adapter. No subject, resource id,
+path, address or credential appears in a label or a value. A scrape carries at most 585 samples on
+a host daemon and at most 585 samples on a daemon running `--driver kubernetes`.
 
 - **Build and readiness:** `substrate_build_info`, `substrate_ready`.
+- **Host daemon only:** `substrate_adapter_info{adapter}`, always `1`, naming the confinement
+  adapter that confines this daemon's runs (`linux` for the host driver). Only the operator sees
+  the name: the API states which confinement families and properties the daemon proved, never the
+  adapter. A `--driver kubernetes` daemon opens no adapter and does not publish it.
 - **Requests:** `substrate_http_requests_total`, `substrate_http_request_duration_seconds`,
   `substrate_refusals_total`.
 - **Dispatch:** `substrate_dispatch_total`, `substrate_dispatch_duration_seconds`.
