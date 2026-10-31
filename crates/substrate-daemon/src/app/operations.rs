@@ -536,18 +536,30 @@ pub(super) fn validate_exec_input(
 }
 
 /// Exec admission (ADR 0047 N6, design 34 § 6.4): the four Linux facts, or design 30's neutral
-/// set — the four `confinement.family.*` facts, `confinement.whole-tree-kill` and
-/// `confinement.no-egress`.
+/// set — `confinement.family.process-run`, `.wait`, `.output-read` and `.limits`,
+/// `confinement.whole-tree-kill` and `confinement.no-egress`, each present and `true`.
 ///
-/// The published bundle carries `confinement.no-egress` and neither the families nor whole-tree
-/// kill, so no snapshot can state the neutral set yet and only the Linux arm can admit. A
-/// snapshot that carries `confinement.no-egress` alone is not admission: a missing guarantee is a
-/// refusal, never an optimistic reading of a partial set (invariant 3).
+/// The host driver states the Linux arm and the namespace driver the neutral one. A snapshot that
+/// carries part of either is not admission: a missing guarantee is a refusal, never an optimistic
+/// reading of a partial set (invariant 3).
 fn confinement_proved(facts: &substrate_wire::CapabilityFacts) -> bool {
-    facts.exec_namespaces.is_some()
+    use substrate_wire::{ConfinementFamily, ConfinementProperty};
+
+    let linux = facts.exec_namespaces.is_some()
         && facts.exec_cgroup_limits.is_some()
         && facts.exec_cgroup_kill == Some(true)
-        && facts.exec_no_egress == Some(true)
+        && facts.exec_no_egress == Some(true);
+    let neutral = [
+        ConfinementFamily::ProcessRun,
+        ConfinementFamily::Wait,
+        ConfinementFamily::OutputRead,
+        ConfinementFamily::Limits,
+    ]
+    .into_iter()
+    .all(|family| facts.serves_family(family))
+        && facts.proves(ConfinementProperty::WholeTreeKill)
+        && facts.confinement_no_egress == Some(true);
+    linux || neutral
 }
 
 /// The published row for an inline capsule a driver does not serve, read from the wire crate's

@@ -1,22 +1,36 @@
 //! The capability probe and the snapshot it backs (design 34 § 6.2, § 6.3, § 12 U10).
 //!
 //! One probe creates a PVC, a keeper and one exec Pod under rows reserved by nonce, observes what
-//! it can, and removes the three under the uid rule. It proves `workspace.openat2-beneath`,
-//! `workspace.guarded-io` and `workspace.atomic-replace` from the keeper's `fs check`, each from
-//! its own answer ([`WorkspaceProofs::from_check`]), and `exec.argv-only` from the probe Pod's
-//! `probe-child` reading back the argv the driver sent, byte for byte.
+//! it can, and removes the three under the uid rule. Each fact stands on its own observation:
+//!
+//! - `workspace.openat2-beneath`, `workspace.guarded-io` and `workspace.atomic-replace` from the
+//!   keeper's `fs check`, each from its own answer ([`WorkspaceProofs::from_check`]).
+//! - `exec.argv-only` from the probe Pod's `probe-child` reading back the argv the driver sent as
+//!   its first line, byte for byte.
+//! - design 30's seven families `process-run`, `process-watch`, `output-read`, `wait`,
+//!   `workspace`, `limits` and `audit` from the Pod's end: its container shown `terminated`, its
+//!   log decoded into frames, its `applied` record the spec's bounds, and its exit record the
+//!   API's exit code.
+//! - `confinement.whole-tree-kill` from the heartbeat: the child saw its grandchild's heartbeat
+//!   move, and the keeper's `fs stat` sees it unchanged for [`HEARTBEAT_STILL`] after the end.
+//! - `confinement.no-egress` from the child's three egress attempts: each one, at the address the
+//!   driver named, failed with nothing answering ([`EgressOutcome::blocked`]).
+//!
+//! The child is told what to observe through [`TARGETS_ENV`]; the Kubernetes Service host it
+//! dials is the one the keeper's own environment states, because the child's environment is only
+//! what the driver computed. The heartbeat and the egress attempts count only from a run whose
+//! argv read back byte for byte.
 //!
 //! What it never publishes: `exec.namespaces`, `exec.cgroup-limits`, `exec.cgroup-kill` and
-//! `exec.no-egress`, which a namespace cannot state; design 30's families and
-//! `confinement.whole-tree-kill`, which the current bundle does not carry; and
-//! `confinement.no-egress`, because O3 did not hold on the lane, so nothing here observes it.
-//! Each stays absent, and admission refuses an exec without them (invariant 3).
+//! `exec.no-egress`, which a namespace cannot state, and every family and property § 6.2 has no
+//! row for. Each stays absent, and admission refuses an exec without what it needs (invariant 3).
 //!
 //! A proof lasts until `valid_until`, the next run plus 60 s, and only under the binding and the
 //! Lease it was taken under: a failed or late probe, a lost Lease or a new binding leaves the
 //! facts absent, never stale.
 
 use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,7 +38,10 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use substrate_executor::frame::ExitRecord;
 use substrate_executor::message::Request;
-use substrate_executor::probe::{PROBE_ARGUMENTS, PROBE_CHILD, report};
+use substrate_executor::probe::{
+    EgressOutcome, EgressTarget, HEARTBEAT_FILE, KUBERNETES_SERVICE_PORT, NAMESERVER_PORT,
+    Observation as Observed, PROBE_ARGUMENTS, PROBE_CHILD, ProbeTargets, TARGETS_ENV, report,
+};
 use substrate_executor::spec::RunSpec;
 use substrate_host::{BackendKind, BackendRecord, BackendRole};
 use substrate_kubernetes_client::{RUN_CONTAINER, container_state};
@@ -39,7 +56,7 @@ use super::{NamespaceDriver, Removal, lock, refusal};
 use crate::exec::{LogRead, shows_end, uid_of};
 use crate::lease::RENEW_EVERY;
 use crate::logs::{self, RunEnd};
-use crate::pod::{self, EXECUTOR_MOUNT, ExecPod, KILL_GRACE_SECONDS, RunBounds};
+use crate::pod::{self, EXECUTOR_MOUNT, ExecPod, KILL_GRACE_SECONDS, RunBounds, WORKSPACE_MOUNT};
 use crate::{API_FAILED, EXECUTOR_HANDSHAKE_FAILED, StartupRefusal, names, policy};
 
 /// What a probe that failed waits before the next attempt: long enough not to churn the
@@ -56,6 +73,13 @@ const PROBE_OUTPUT_BYTES: u64 = 65_536;
 const PROBE_POLL: Duration = Duration::from_millis(200);
 /// What the end may take beyond the probe's own deadline: scheduling, image pulls and the API.
 const PROBE_SLACK: Duration = Duration::from_mins(1);
+/// How long the heartbeat must stand still after the end (§ 6.2).
+pub const HEARTBEAT_STILL: Duration = Duration::from_secs(2);
+/// The resolver configuration whose nameserver the probe child queries (§ 6.2).
+const RESOLV_CONF: &str = "/etc/resolv.conf";
+/// The workspace name the keeper's `stat` of the heartbeat states; the keeper's volume root is
+/// the one workspace it serves, whatever the name.
+const PROBE_WORKSPACE: &str = "probe";
 
 /// One probe's proofs, bound to the binding generation and the Lease epoch it ran under.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +89,27 @@ pub(crate) struct Probed {
     at: DateTime<Utc>,
     valid_until: DateTime<Utc>,
     workspace: WorkspaceProofs,
+    run: RunProofs,
+}
+
+/// What the probe Pod's run proved (design 34 § 6.2 rows 2 to 5), each on its own observation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RunProofs {
+    /// `exec.argv-only`.
     argv_only: bool,
+    /// The seven families of § 6.2 row 3.
+    families: bool,
+    /// What the child's observation line and the heartbeat after the end proved.
+    observed: ObservedProofs,
+}
+
+/// The two properties of § 6.2 rows 4 and 5.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ObservedProofs {
+    /// `confinement.whole-tree-kill`.
+    whole_tree_kill: bool,
+    /// `confinement.no-egress`.
+    no_egress: bool,
 }
 
 /// The workspace facts the keeper's `fs check` proved (design 34 § 6.2), each from its own answer.
@@ -103,7 +147,7 @@ pub(crate) struct ProbeState {
 /// What one run observed.
 struct Observation {
     workspace: WorkspaceProofs,
-    argv_only: bool,
+    run: RunProofs,
 }
 
 impl NamespaceDriver {
@@ -166,7 +210,7 @@ impl NamespaceDriver {
                     at: now,
                     valid_until: now + interval + VALIDITY_SLACK,
                     workspace: observation.workspace,
-                    argv_only: observation.argv_only,
+                    run: observation.run,
                 });
                 state.next_at = Some(now + interval);
                 Ok(())
@@ -289,7 +333,10 @@ impl NamespaceDriver {
             .as_ref()
             .map_or_else(WorkspaceProofs::default, |proved| proved.workspace);
         let guarded = workspace.guarded_io;
-        let argv_only = proved.as_ref().is_some_and(|proved| proved.argv_only);
+        let run = proved
+            .as_ref()
+            .map_or_else(RunProofs::default, |proved| proved.run);
+        let families = run.families.then_some(true);
         let output_limit = pod::output_limit_bytes(self.config.container_log_max_bytes);
         let facts = CapabilityFacts {
             events_pull: Some(true),
@@ -308,12 +355,19 @@ impl NamespaceDriver {
             workspace_max_file_bytes: guarded.then_some(MAX_FILE_BYTES),
             workspace_read_limit_bytes: guarded.then_some(MAX_IO_BYTES),
             workspace_list_limit_items: guarded.then_some(MAX_LIST_ITEMS),
-            exec_argv_only: argv_only.then_some(true),
+            exec_argv_only: run.argv_only.then_some(true),
             exec_output_limit_bytes: (serving && output_limit > 0).then_some(output_limit),
             exec_max_current: serving.then_some(self.config.max_current_execs),
             exec_signals: serving.then(|| vec![Signal::Term, Signal::Kill]),
-            // O3 did not hold on the lane: nothing here observes it, so it is never published.
-            confinement_no_egress: None,
+            confinement_family_process_run: families,
+            confinement_family_process_watch: families,
+            confinement_family_output_read: families,
+            confinement_family_wait: families,
+            confinement_family_workspace: families,
+            confinement_family_limits: families,
+            confinement_family_audit: families,
+            confinement_whole_tree_kill: run.observed.whole_tree_kill.then_some(true),
+            confinement_no_egress: run.observed.no_egress.then_some(true),
             ..CapabilityFacts::default()
         };
         let valid_until = proved.as_ref().map(|proved| proved.valid_until);
@@ -383,35 +437,36 @@ impl NamespaceDriver {
         self.await_handshake(&keeper.name)
             .await
             .map_err(|error| refusal(EXECUTOR_HANDSHAKE_FAILED, error.message))?;
-        let workspace = match self
+        let (workspace, service_host) = match self
             .keeper_call(&keeper.name, &Request::Check {}, &[])
             .await
         {
-            Ok((answer, _)) => WorkspaceProofs::from_check(&answer),
+            Ok((answer, _)) => (
+                WorkspaceProofs::from_check(&answer),
+                kubernetes_service_host(&answer),
+            ),
             Err(CallFailure::Unanswered(why)) => {
                 tracing::warn!(why, "the probe keeper's check went unanswered");
-                WorkspaceProofs::default()
+                (WorkspaceProofs::default(), None)
             }
             Err(CallFailure::Failed(error)) => {
                 tracing::warn!(code = error.code, "the probe keeper's check failed");
-                WorkspaceProofs::default()
+                (WorkspaceProofs::default(), None)
             }
         };
         sent.push(pod.name.clone());
-        let argv_only = match self
-            .probe_argv(nonce, &pvc.name, &pvc_uid, &keeper.name, &pod)
+        let claim = (pvc.name.as_str(), pvc_uid.as_str());
+        let run = match self
+            .probe_run(nonce, claim, &keeper.name, &pod, service_host)
             .await
         {
-            Ok(()) => true,
+            Ok(run) => run,
             Err(why) => {
-                tracing::warn!(why, "exec.argv-only was not proved");
-                false
+                tracing::warn!(why, "the probe Pod's run proved nothing");
+                RunProofs::default()
             }
         };
-        Ok(Observation {
-            workspace,
-            argv_only,
-        })
+        Ok(Observation { workspace, run })
     }
 
     async fn create_probe_object(
@@ -434,23 +489,62 @@ impl NamespaceDriver {
         }
     }
 
-    /// The probe Pod on the keeper's node: `probe-child` under the executor, its log decoded, its
-    /// applied bounds and its exit held to the spec, and its stdout held to the report of the
-    /// argv sent.
-    async fn probe_argv(
+    /// The probe Pod's run (§ 6.2 rows 2 to 5): `probe-child` under the executor, told its
+    /// targets. The end proves the families and the first line `exec.argv-only` ([`read_run`]);
+    /// the observation line after it, with the heartbeat the keeper reads after the end, proves the
+    /// two properties.
+    async fn probe_run(
         &self,
         nonce: &str,
-        pvc: &str,
-        pvc_uid: &str,
+        claim: (&str, &str),
         keeper: &str,
         row: &BackendRecord,
-    ) -> Result<(), String> {
-        let node = self.scheduled_node(keeper).await?;
+        kubernetes_service_host: Option<IpAddr>,
+    ) -> Result<RunProofs, String> {
         let mut argv = vec![
             format!("{EXECUTOR_MOUNT}/substrate-executor"),
             PROBE_CHILD.to_owned(),
         ];
         argv.extend(PROBE_ARGUMENTS.map(str::to_owned));
+        let targets = ProbeTargets {
+            heartbeat: format!("{WORKSPACE_MOUNT}/{HEARTBEAT_FILE}"),
+            kubernetes_service_host,
+            resolv_conf: RESOLV_CONF.to_owned(),
+            egress_probe_address: self.config.egress_probe_address,
+        };
+        let (end, code) = self
+            .run_probe_pod(nonce, claim, keeper, row, &argv, &targets)
+            .await?;
+        let (argv_only, observed) = read_run(end, code, &argv)?;
+        let observed = if let Some(observed) = observed {
+            ObservedProofs {
+                no_egress: no_egress(&observed, &targets),
+                whole_tree_kill: observed.heartbeat && self.heartbeat_stood_still(keeper).await,
+            }
+        } else {
+            tracing::warn!("the probe child reported no observation; neither property holds");
+            ObservedProofs::default()
+        };
+        Ok(RunProofs {
+            argv_only,
+            families: true,
+            observed,
+        })
+    }
+
+    /// The probe Pod on the keeper's node, on the probe's volume, writable for the heartbeat: its
+    /// decoded end and the API's exit code, once its log decoded and its applied bounds are the
+    /// spec's.
+    async fn run_probe_pod(
+        &self,
+        nonce: &str,
+        (pvc, pvc_uid): (&str, &str),
+        keeper: &str,
+        row: &BackendRecord,
+        argv: &[String],
+        targets: &ProbeTargets,
+    ) -> Result<(RunEnd, Option<i64>), String> {
+        let node = self.scheduled_node(keeper).await?;
         let config = &self.config;
         let output_limit = pod::output_limit_bytes(config.container_log_max_bytes);
         let limits = ExecLimits {
@@ -463,8 +557,8 @@ impl NamespaceDriver {
         let bounds = RunBounds::resolve(&limits, config.pod_pids_limit, output_limit)
             .map_err(|why| format!("the probe's bounds: {why}"))?;
         let spec = RunSpec {
-            argv: argv.clone(),
-            env: BTreeMap::new(),
+            argv: argv.to_vec(),
+            env: BTreeMap::from([(TARGETS_ENV.to_owned(), targets.encode())]),
             memory_bytes: bounds.memory_bytes,
             cpu_millicores: bounds.millicores,
             output_bytes: bounds.output_bytes,
@@ -482,7 +576,7 @@ impl NamespaceDriver {
             spec_parts: spec.encode_parts(),
             bounds,
             container_log_max_bytes: config.container_log_max_bytes,
-            read_only: true,
+            read_only: false,
         });
         let uid = match self.create_recorded(row, &self.api.pods(), rendered).await {
             Created::Bound(uid) => uid,
@@ -510,24 +604,35 @@ impl NamespaceDriver {
         {
             return Err("the probe Pod's applied bounds are not its spec's".to_owned());
         }
-        match decoded.end {
-            RunEnd::Exit {
-                stdout,
-                stderr,
-                stdout_truncated: false,
-                stderr_truncated: false,
-                record: ExitRecord::Code(0),
-            } if code == Some(0) && stderr.is_empty() && stdout == report(&argv).as_bytes() => {
-                Ok(())
-            }
-            RunEnd::Exit { .. } => {
-                Err("the probe child's argv did not read back byte for byte".to_owned())
-            }
-            RunEnd::Refused(refused) => Err(format!("the probe child was refused: {refused:?}")),
-            RunEnd::SpawnFailed { errno } => {
-                Err(format!("the probe child could not start: errno {errno}"))
-            }
+        Ok((decoded.end, code))
+    }
+
+    /// Whether the keeper sees the heartbeat present and unchanged across [`HEARTBEAT_STILL`].
+    async fn heartbeat_stood_still(&self, keeper: &str) -> bool {
+        let Some(before) = self.heartbeat(keeper).await else {
+            tracing::warn!("the keeper reads no heartbeat; whole-tree kill is not proved");
+            return false;
+        };
+        tokio::time::sleep(HEARTBEAT_STILL).await;
+        let still = self.heartbeat(keeper).await.as_ref() == Some(&before);
+        if !still {
+            tracing::warn!("the heartbeat moved after the end; whole-tree kill is not proved");
         }
+        still
+    }
+
+    /// The heartbeat file's size and digest as the keeper's `fs stat` reads them, or `None` when
+    /// it is absent or the call failed.
+    async fn heartbeat(&self, keeper: &str) -> Option<(u64, String)> {
+        let request = Request::Stat {
+            workspace: PROBE_WORKSPACE.to_owned(),
+            path: HEARTBEAT_FILE.to_owned(),
+        };
+        let (answer, _) = self.keeper_call(keeper, &request, &[]).await.ok()?;
+        Some((
+            answer["size"].as_u64()?,
+            answer["sha256"].as_str()?.to_owned(),
+        ))
     }
 
     /// The keeper's node, once the scheduler has bound it, within [`CREATE_BOUND`].
@@ -639,6 +744,88 @@ impl NamespaceDriver {
             ),
         }
     }
+}
+
+/// § 6.2 rows 2 and 3 from the probe Pod's decoded end and the API's exit code: whether the
+/// argv read back as the first line, byte for byte, and the observation line after it, read
+/// only then. An end that is no exit, or whose record is not the API's code, proves no family
+/// and is the error.
+fn read_run(
+    end: RunEnd,
+    code: Option<i64>,
+    argv: &[String],
+) -> Result<(bool, Option<Observed>), String> {
+    let (stdout, clean) = match end {
+        RunEnd::Exit {
+            stdout,
+            stderr,
+            stdout_truncated,
+            stderr_truncated,
+            record: ExitRecord::Code(recorded),
+        } if code == Some(i64::from(recorded)) => (
+            stdout,
+            recorded == 0 && !stdout_truncated && !stderr_truncated && stderr.is_empty(),
+        ),
+        RunEnd::Exit { record, .. } => {
+            return Err(format!(
+                "the probe Pod's exit record {record:?} is not the API's exit code {code:?}"
+            ));
+        }
+        RunEnd::Refused(refused) => {
+            return Err(format!("the probe child was refused: {refused:?}"));
+        }
+        RunEnd::SpawnFailed { errno } => {
+            return Err(format!("the probe child could not start: errno {errno}"));
+        }
+    };
+    let (first, rest) = first_line(&stdout);
+    let argv_only = clean && first == report(argv).as_bytes();
+    if !argv_only {
+        tracing::warn!("exec.argv-only was not proved: the argv did not read back byte for byte");
+        return Ok((false, None));
+    }
+    let observed = std::str::from_utf8(rest)
+        .ok()
+        .and_then(Observed::parse_line);
+    Ok((true, observed))
+}
+
+/// The Kubernetes Service host the keeper's check states, when it states an IP address.
+fn kubernetes_service_host(answer: &Value) -> Option<IpAddr> {
+    answer["kubernetes_service_host"].as_str()?.parse().ok()
+}
+
+/// `bytes` split after its first newline; all of it is the first line when it has none.
+fn first_line(bytes: &[u8]) -> (&[u8], &[u8]) {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(bytes.len(), |newline| newline + 1);
+    bytes.split_at(end)
+}
+
+/// § 6.2 row 5: exactly the three attempts, in order, each at the address the driver named (the
+/// nameserver's at port 53, its host the child's resolver's), each failed with nothing answering.
+/// Without a Kubernetes Service host there is no first attempt to hold, so nothing is proved.
+fn no_egress(observed: &Observed, targets: &ProbeTargets) -> bool {
+    let Some(host) = targets.kubernetes_service_host else {
+        return false;
+    };
+    let [kubernetes, nameserver, egress] = observed.egress.as_slice() else {
+        return false;
+    };
+    let named = kubernetes.target == EgressTarget::KubernetesService
+        && kubernetes.address == Some(SocketAddr::new(host, KUBERNETES_SERVICE_PORT))
+        && nameserver.target == EgressTarget::Nameserver
+        && nameserver
+            .address
+            .is_some_and(|address| address.port() == NAMESERVER_PORT)
+        && egress.target == EgressTarget::EgressProbe
+        && egress.address == Some(targets.egress_probe_address);
+    named
+        && [kubernetes, nameserver, egress]
+            .iter()
+            .all(|attempt| EgressOutcome::blocked(attempt.outcome))
 }
 
 const fn removal_order(role: BackendRole) -> u8 {

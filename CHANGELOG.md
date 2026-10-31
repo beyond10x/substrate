@@ -21,8 +21,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   none of the new facts yet and does not check `requires` yet, so its answers do not change.
 - `/metrics` on the operational listener names the two new refusal codes: a host daemon's scrape
   holds at most 584 samples and a `--driver kubernetes` daemon's at most 585.
+- The namespace driver's probe observes confinement (design 34 § 6.2). Its probe Pod now mounts
+  the probe's volume writable and carries one environment variable, `SUBSTRATE_PROBE_TARGETS`.
+  `probe-child` forks a grandchild that rewrites `substrate-probe-heartbeat` in the volume every
+  100 ms, and makes three egress attempts of at most 3 s each: TCP to the Kubernetes Service host
+  the keeper's environment states, port 443; a DNS query to `/etc/resolv.conf`'s first
+  nameserver; TCP to `egress_probe_address`. Each probe run takes about 5 s longer. The snapshot
+  then states the seven families `confinement.family.process-run`, `.process-watch`,
+  `.output-read`, `.wait`, `.workspace`, `.limits` and `.audit` when the Pod ended with its
+  frames, its applied bounds and an exit record that agrees with the API;
+  `confinement.whole-tree-kill` when the keeper sees the heartbeat unchanged for 2 s after the
+  container shows `terminated`; and `confinement.no-egress` when all three attempts failed with
+  nothing answering. Each lapses with the proof. It never states the four Linux `exec.*` facts.
 
 ### Changed
+
+- A namespace-driver daemon admits an exec start when its snapshot states
+  `confinement.family.process-run`, `.wait`, `.output-read` and `.limits`,
+  `confinement.whole-tree-kill` and `confinement.no-egress` (design 34 § 6.4). On a cluster whose
+  network plugin does not enforce the NetworkPolicy, an attempt is reached or refused,
+  `confinement.no-egress` stays absent and every exec start is still `exec.sandbox-unavailable`
+  (501). The host driver publishes none of these facts and admits as before.
 
 - `AppliedConfinement.cgroup` is `Option<String>` and is optional in the bundle, present whenever
   the adapter applied a cgroup; the host driver applies one to every run, so its records keep their

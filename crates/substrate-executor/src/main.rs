@@ -39,17 +39,26 @@ fn main() -> ExitCode {
 
 /// The probe Pod's child (design 34 § 6.2): writes the argv it received, `argv[0]` included, as
 /// one JSON line. An argument that is not UTF-8 is written lossily, so it can never read back as
-/// the argv the driver sent.
+/// the argv the driver sent. When its environment states readable probe targets, it then starts
+/// the heartbeat grandchild, makes the egress attempts and writes what it observed as a second
+/// line; unreadable targets observe nothing.
 #[cfg(target_os = "linux")]
 fn probe_child() -> ExitCode {
     use std::io::Write as _;
+    use substrate_executor::probe::{ProbeTargets, TARGETS_ENV, observe, report};
 
     let argv: Vec<String> = std::env::args_os()
         .map(|part| part.to_string_lossy().into_owned())
         .collect();
-    let line = substrate_executor::probe::report(&argv);
+    let mut text = report(&argv);
+    let targets = std::env::var_os(TARGETS_ENV)
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| ProbeTargets::parse(&value).ok());
+    if let Some(targets) = targets {
+        text.push_str(&observe(&targets).line());
+    }
     let mut out = std::io::stdout().lock();
-    match out.write_all(line.as_bytes()).and_then(|()| out.flush()) {
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
     }
