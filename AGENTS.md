@@ -310,7 +310,7 @@ a list, and the six lexical writable-root refusals (422) of ADR 0038 with
 `exec.writable-roots-host-unserved` and `exec.writable-roots-git-unserved` (501), which both lanes
 answer for a host root the daemon did not declare and for every Git root, and the portable lane
 also for the one host root the runner declares, which it cannot prove without confinement — across
-119 cases, and its delegated lane 182, whose four writable-root cases bind that declared root and
+124 cases, and its delegated lane 189, whose four writable-root cases bind that declared root and
 check the host side: the write lands, its parent and sibling do not change, a working directory
 beneath the mount runs there, and the declared path swapped for a symlink is
 `exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and five roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 4}`, four roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a fifth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a
@@ -323,6 +323,15 @@ one before dispatch, each recorded as refused. Both lanes also hold four omitted
 FIFO beside a file is named by the `x-b10x-omitted-entries` header, count 1, on the v1 directory
 page and on the v2 tree both under its limit and when the limit truncates it, and once the FIFO is gone
 neither listing carries the header and the tree is not truncated.
+Both lanes also hold design 30's `sandbox.requires` cases (bundle `0.26.0`): the machine
+publishes the families and properties the `linux` adapter proved and never an adapter name
+(portable: `workspace` and `audit`; delegated: every family but `network-ingress`, with
+`whole-tree-kill`, `ipc-socket-allowlist` and `ipc-signals-contained`), a start requiring
+`network-ingress` is `confinement.family-unserved` (501), one requiring a property not proved
+`confinement.fact-unserved` (501), and an unknown name, `{}`, an empty list and a duplicate are
+`request.schema-invalid` (422), each recorded as refused; the delegated lane also runs one admitted
+start whose applied record echoes `requires`, and refuses a session start requiring
+`network-ingress`.
 Both totals include
 one route/refusal probe for every operation in the promoted registry (the seven host-process routes
 of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on

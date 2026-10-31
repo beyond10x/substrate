@@ -1316,7 +1316,7 @@ impl ProcessRuntime {
 
         let applied_capsule = capsule.as_ref().map(|value| value.applied.clone());
         let applied = AppliedConfinement {
-            requires: None,
+            requires: input.sandbox.requires.clone(),
             writable_roots: applied_writable_roots,
             capability_snapshot: self.capability.snapshot.clone(),
             cgroup: Some(cgroup.name().to_owned()),
@@ -2416,6 +2416,9 @@ impl ProcessRuntime {
                 "capability_snapshot",
             ));
         }
+        // The applied record echoes `sandbox.requires`, so the driver checks it too: a caller that
+        // reaches the driver without the daemon is never told a requirement held unchecked.
+        admit_confinement_requires(&input.sandbox, &self.capability.facts)?;
         // Where `workspace.is_dir()` stood, which followed a link. The pinned directory is the one
         // bubblewrap binds, so an entry replaced after adopt is refused by name before any mount,
         // and the writable subtrees are checked beneath it, never by walking the path.
@@ -3913,6 +3916,32 @@ fn sandbox_unavailable() -> DriverError {
     )
 }
 
+/// The driver's half of design 30 § 4.4: the wire crate's rule and refusal, as the daemon answers
+/// it, read against the facts this driver published.
+fn admit_confinement_requires(
+    sandbox: &substrate_wire::ConfinementRequest,
+    facts: &substrate_wire::CapabilityFacts,
+) -> Result<(), DriverError> {
+    let Some(requires) = sandbox.requires.as_ref() else {
+        return Ok(());
+    };
+    if substrate_wire::validate_confinement_requires(requires).is_err() {
+        return Err(DriverError::refused(
+            "request.schema-invalid",
+            "The confinement requirement is empty or names a family or fact twice.",
+            "sandbox.requires",
+        ));
+    }
+    match substrate_wire::confinement_requires_refusal(requires, facts) {
+        Some((refusal, message)) => Err(DriverError::unserved(
+            refusal.code,
+            message,
+            refusal.address.unwrap_or("sandbox.requires"),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The driver's half of ADR 0038 admission: the wire crate's rule and refusal, as the daemon
 /// answers it.
 fn admit_writable_roots(
@@ -5199,6 +5228,106 @@ mod tests {
             panic!("stale snapshot must refuse before dispatch");
         };
         assert_eq!(error.code, "exec.capability-stale");
+    }
+
+    /// Design 30 § 4.4 at the driver: the applied record echoes `sandbox.requires`, so a start
+    /// that reaches the driver without the daemon is refused by the same rule, by name, before
+    /// anything is touched; one that names no requirement goes on to the workspace as before.
+    #[tokio::test]
+    async fn the_driver_refuses_a_requirement_its_snapshot_does_not_state() {
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 7,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts {
+                confinement_family_workspace: Some(true),
+                confinement_family_audit: Some(true),
+                ..CapabilityFacts::default()
+            },
+        };
+        let runtime = ProcessRuntime::new(HostConfig::minimum("/does/not/exist"), capability)
+            .expect("runtime");
+        let start = |requires: serde_json::Value| {
+            let mut sandbox = serde_json::json!({
+                "require": true,
+                "profile": "workspace",
+                "network": "none",
+                "capability_snapshot": snapshot,
+            });
+            if !requires.is_null() {
+                sandbox["requires"] = requires;
+            }
+            serde_json::from_value::<ExecStartInput>(serde_json::json!({
+                "workspace": "ws_test",
+                "argv": ["/usr/bin/true"],
+                "env": {"allow": [], "set": {}},
+                "sandbox": sandbox,
+                "limits": {
+                    "timeout_ms": 5_000,
+                    "output_bytes": 65_536,
+                    "processes": 16,
+                    "memory_bytes": 67_108_864,
+                    "cpu_millis": 1_000,
+                },
+                "wait": false,
+            }))
+            .expect("start input")
+        };
+        for (requires, code, address) in [
+            (
+                serde_json::json!({"families": ["workspace", "network-ingress"]}),
+                substrate_wire::CONFINEMENT_FAMILY_UNSERVED,
+                "sandbox.requires.families",
+            ),
+            (
+                serde_json::json!({"families": ["audit"], "facts": ["whole-tree-kill"]}),
+                substrate_wire::CONFINEMENT_FACT_UNSERVED,
+                "sandbox.requires.facts",
+            ),
+            (
+                serde_json::json!({"families": []}),
+                "request.schema-invalid",
+                "sandbox.requires",
+            ),
+        ] {
+            let DispatchOutcome::NotDispatched(error) = runtime
+                .start(
+                    "ex_test",
+                    std::path::Path::new("/does/not/exist"),
+                    &start(requires),
+                )
+                .await
+            else {
+                panic!("an unmet requirement must refuse before dispatch");
+            };
+            assert_eq!(
+                (error.code, error.address.as_deref()),
+                (code, Some(address))
+            );
+        }
+        for requires in [
+            serde_json::Value::Null,
+            serde_json::json!({"families": ["workspace", "audit"]}),
+        ] {
+            let DispatchOutcome::NotDispatched(error) = runtime
+                .start(
+                    "ex_test",
+                    std::path::Path::new("/does/not/exist"),
+                    &start(requires),
+                )
+                .await
+            else {
+                panic!("a missing workspace must refuse before dispatch");
+            };
+            assert!(
+                !error.code.starts_with("confinement.") && error.code != "request.schema-invalid",
+                "{error:?}"
+            );
+        }
     }
 
     /// Runs `action` and returns its result with the number of times the kernel reported `path`

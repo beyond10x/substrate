@@ -457,6 +457,7 @@ pub(super) fn validate_exec_input(
             false,
         ));
     }
+    check_confinement_requires(&facts, &input.sandbox, mutation, request_id)?;
     check_egress_aperture(&facts, &input.sandbox, mutation, request_id)?;
     check_secret_slots(&facts, mutation, request_id)?;
     check_read_only_files(&facts, mutation, request_id)?;
@@ -528,6 +529,39 @@ pub(super) fn validate_exec_input(
             ErrorClass::Unserved,
             refusal.code,
             refusal.message,
+            refusal.address,
+            false,
+        ));
+    }
+    Ok(())
+}
+
+/// `sandbox.requires` (design 30 § 4.4, ADR 0048 D4), read against the snapshot the start just
+/// proved current: an empty list or a repeated name is `request.schema-invalid` (422), then the
+/// first family the snapshot does not serve is `confinement.family-unserved` (501), then the first
+/// property it does not prove is `confinement.fact-unserved` (501). The caller records each as
+/// refused before any dispatch. A start that names no requirement is admitted as before.
+fn check_confinement_requires(
+    facts: &substrate_wire::CapabilityFacts,
+    sandbox: &substrate_wire::ConfinementRequest,
+    mutation: &BoundMutation<ExecStartInput>,
+    request_id: &str,
+) -> Result<(), Response> {
+    let Some(requires) = sandbox.requires.as_ref() else {
+        return Ok(());
+    };
+    if substrate_wire::validate_confinement_requires(requires).is_err() {
+        return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
+    }
+    if let Some((refusal, message)) = substrate_wire::confinement_requires_refusal(requires, facts)
+    {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            refusal.code,
+            &message,
             refusal.address,
             false,
         ));

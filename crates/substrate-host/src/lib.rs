@@ -551,6 +551,14 @@ pub trait Driver: Send + Sync {
         None
     }
 
+    /// The confinement adapter this driver opened (design 30 § 4.2). Only the operational
+    /// listener names it, as `substrate_adapter_info` (ADR 0048 D7); the client wire states what
+    /// it proved, never its name. `None`, the default, is a driver that opens no confinement
+    /// adapter, such as the Kubernetes namespace driver, and no series is published.
+    fn confinement_adapter(&self) -> Option<confinement::AdapterName> {
+        None
+    }
+
     async fn create_workspace(
         &self,
         id: &str,
@@ -1288,6 +1296,12 @@ impl Driver for HostDriver {
 
     fn machine(&self) -> CapabilitySnapshot {
         self.capability.clone()
+    }
+
+    /// The host driver confines every run with the `linux` adapter's mechanisms, and its
+    /// snapshot binds that adapter (`probe::SnapshotMaterial`).
+    fn confinement_adapter(&self) -> Option<confinement::AdapterName> {
+        Some(confinement::AdapterName::Linux)
     }
 
     fn workspace_root_identity(&self, id: &str) -> Result<String, DriverError> {
