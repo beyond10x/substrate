@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:namespace-probe-never-proves-no-egress-from-a-timeout
 kind: story
-status: active
+status: implemented
 title: The namespace probe never proves no-egress from a timed-out attempt
 owner: substrate
 tags:
@@ -10,10 +10,11 @@ tags:
 - kubernetes
 relations:
 - informed_by: approval-record:d333-timeout-never-proves-no-egress
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-31T18:33:18Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-31T18:33:18Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-31T18:51:32Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 # Story: the namespace probe never proves no-egress from a timed-out attempt
 
