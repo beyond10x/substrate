@@ -18,7 +18,7 @@
 //!   Kubernetes Service host on port 443, a DNS query to the first `nameserver` of
 //!   [`ProbeTargets::resolv_conf`], and TCP to [`ProbeTargets::egress_probe_address`]. Each is
 //!   reported with its outcome; the driver states `confinement.no-egress` only when every one is
-//!   [`EgressOutcome::blocked`].
+//!   [`EgressOutcome::blocked`]: denied inside the Pod, never merely timed out or without a route.
 
 use std::io::{self, Read as _};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
@@ -206,11 +206,15 @@ pub enum EgressOutcome {
 }
 
 impl EgressOutcome {
-    /// Whether the attempt failed without anything beyond the Pod answering it: it timed out,
-    /// found no route, or was denied. A reached or refused attempt, any other error and an unread
-    /// target are not.
+    /// Whether the attempt was stopped inside the Pod, where the probe can see it: it was denied
+    /// (`EPERM`, `EACCES`). A timed-out attempt is not: silence cannot tell a dropped packet from
+    /// a network that was not ready or a target that never answers, and on a kind cluster whose
+    /// egress was observed open all three attempts once timed out (D332, D333). An attempt without
+    /// a route (`ENETUNREACH`, `EHOSTUNREACH`) is not either: a remote router's ICMP or an address
+    /// of the wrong family answers the same (D334). A reached or refused attempt, any other error
+    /// and an unread target are not either.
     pub const fn blocked(self) -> bool {
-        matches!(self, Self::TimedOut | Self::Unreachable | Self::Denied)
+        matches!(self, Self::Denied)
     }
 }
 
@@ -456,7 +460,7 @@ mod tests {
 
     use super::{
         ArgvReport, EgressAttempt, EgressOutcome, EgressTarget, Observation, PROBE_ARGUMENTS,
-        ProbeTargets, attempt_dns, attempt_tcp, nameserver, report,
+        ProbeTargets, attempt_dns, attempt_tcp, classify, nameserver, report,
     };
 
     const SHORT: Duration = Duration::from_millis(300);
@@ -536,7 +540,10 @@ mod tests {
         let started = std::time::Instant::now();
         let timed_out = attempt_dns(Some(silent.local_addr().expect("its address")), SHORT);
         assert_eq!(timed_out.outcome, EgressOutcome::TimedOut, "{timed_out:?}");
-        assert!(timed_out.outcome.blocked());
+        assert!(
+            !timed_out.outcome.blocked(),
+            "silence never proves the attempt was stopped (D333)"
+        );
         assert!(started.elapsed() >= SHORT, "the attempt waited its bound");
         assert!(started.elapsed() < SHORT * 4, "and not much longer");
 
@@ -561,12 +568,8 @@ mod tests {
     }
 
     #[test]
-    fn only_a_timeout_no_route_or_a_local_denial_is_blocked() {
-        let blocked = [
-            EgressOutcome::TimedOut,
-            EgressOutcome::Unreachable,
-            EgressOutcome::Denied,
-        ];
+    fn only_a_local_denial_is_blocked_never_a_timeout_or_a_missing_route() {
+        let blocked = [EgressOutcome::Denied];
         for outcome in [
             EgressOutcome::Reached,
             EgressOutcome::Refused,
@@ -577,6 +580,35 @@ mod tests {
             EgressOutcome::Unread,
         ] {
             assert_eq!(outcome.blocked(), blocked.contains(&outcome), "{outcome:?}");
+        }
+    }
+
+    /// Each raw errno lands in its outcome, so a timeout (`ETIMEDOUT`, `EAGAIN`) can never be
+    /// moved into a counted arm unnoticed (D333 adversary finding).
+    #[test]
+    fn each_raw_errno_is_classified_and_only_a_local_denial_is_blocked() {
+        for (errno, expected) in [
+            (libc::ECONNREFUSED, EgressOutcome::Refused),
+            (libc::ETIMEDOUT, EgressOutcome::TimedOut),
+            (libc::EAGAIN, EgressOutcome::TimedOut),
+            (libc::ENETUNREACH, EgressOutcome::Unreachable),
+            (libc::EHOSTUNREACH, EgressOutcome::Unreachable),
+            (libc::EPERM, EgressOutcome::Denied),
+            (libc::EACCES, EgressOutcome::Denied),
+            (libc::ECONNRESET, EgressOutcome::Failed),
+        ] {
+            let outcome = classify(&std::io::Error::from_raw_os_error(errno));
+            assert_eq!(outcome, expected, "errno {errno}");
+            assert_eq!(
+                outcome.blocked(),
+                matches!(errno, libc::EPERM | libc::EACCES),
+                "errno {errno}: only a local denial is blocked (D334)"
+            );
+        }
+        for kind in [std::io::ErrorKind::TimedOut, std::io::ErrorKind::WouldBlock] {
+            let outcome = classify(&std::io::Error::from(kind));
+            assert_eq!(outcome, EgressOutcome::TimedOut, "{kind:?}");
+            assert!(!outcome.blocked(), "{kind:?}");
         }
     }
 

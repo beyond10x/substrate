@@ -1310,3 +1310,57 @@ fn adversary_one_object_met_concurrently_is_counted_once() {
     });
     assert_eq!(collisions.total(), 1 + 16);
 }
+
+/// Adversary, D333: the kernel answers a TCP connect to a broadcast or multicast address
+/// `ENETUNREACH` before any packet is sent (`tcp_v4_connect`, `tcp_v6_connect`), whatever network
+/// plugin or `NetworkPolicy` is in force, so such an `egress_probe_address` can never test egress.
+/// Since D334 `Unreachable` no longer counts as stopped, but an address that cannot test anything
+/// is still a configuration error, refused as loopback and unspecified addresses are.
+#[test]
+fn adversary_d333_a_broadcast_or_multicast_egress_probe_address_is_refused() {
+    use substrate_executor::probe::{ATTEMPT_BOUND, EgressOutcome, EgressTarget, attempt_tcp};
+
+    let fake = FakeCluster::start("substrate", TOKEN).expect("the fake starts");
+    for address in [
+        "255.255.255.255:443",
+        "224.0.0.1:443",
+        "239.255.0.1:443",
+        "[ff02::1]:443",
+    ] {
+        let attempt = attempt_tcp(
+            EgressTarget::EgressProbe,
+            Some(address.parse().expect("an address")),
+            ATTEMPT_BOUND,
+        );
+        assert_eq!(
+            attempt.outcome,
+            EgressOutcome::Unreachable,
+            "the precondition: {address} is unreachable with no policy at all: {attempt:?}"
+        );
+        assert!(
+            !attempt.outcome.blocked(),
+            "and it does not count as stopped (D334)"
+        );
+
+        let mut extension = extension();
+        extension["egress_probe_address"] = json!(address);
+        let refusal = load(&kubeconfig_with(&fake, Some(extension)), DEPLOYMENT)
+            .err()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{address}: admitted as egress_probe_address, so the probe's third attempt is \
+                     Unreachable on any cluster and tests nothing"
+                )
+            });
+        assert_eq!(
+            refusal.code, CONFIG_INVALID,
+            "{address}: {}",
+            refusal.message
+        );
+        assert!(
+            refusal.message.contains("egress_probe_address"),
+            "{address}: {}",
+            refusal.message
+        );
+    }
+}

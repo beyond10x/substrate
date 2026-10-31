@@ -1067,24 +1067,25 @@ fn attempt(target: EgressTarget, address: &str, outcome: EgressOutcome) -> Egres
     }
 }
 
-/// What a child under an enforcing default-deny policy reports: each attempt failed with nothing
-/// answering, at the addresses the driver named and the nameserver its resolver names.
+/// What a child under a default-deny policy its plugin enforces inside the Pod reports: each
+/// attempt was denied before it left (`EPERM`, `EACCES`), at the addresses the driver
+/// named and the nameserver its resolver names. A timed-out or no-route attempt proves nothing (D333, D334).
 fn blocked() -> Vec<EgressAttempt> {
     vec![
         attempt(
             EgressTarget::KubernetesService,
             "10.96.0.1:443",
-            EgressOutcome::TimedOut,
+            EgressOutcome::Denied,
         ),
         attempt(
             EgressTarget::Nameserver,
             "10.96.0.10:53",
-            EgressOutcome::TimedOut,
+            EgressOutcome::Denied,
         ),
         attempt(
             EgressTarget::EgressProbe,
             "192.0.2.10:443",
-            EgressOutcome::Unreachable,
+            EgressOutcome::Denied,
         ),
     ]
 }
@@ -1234,8 +1235,8 @@ async fn whole_tree_kill_is_absent_unless_the_heartbeat_moved_and_then_stood_sti
     assert_eq!(families(&unreported), [Some(true); 7]);
 }
 
-/// § 6.2 row 5: no egress needs every one of the three attempts, in order, to have failed with
-/// nothing answering, at the addresses the driver named. A reached or refused attempt, an
+/// § 6.2 row 5: no egress needs every one of the three attempts, in order, to have been denied,
+/// at the addresses the driver named. A reached, refused, timed-out or no-route attempt, an
 /// attempt that was never made, another address, and an observation that does not read leave it
 /// absent.
 #[tokio::test]
@@ -1327,7 +1328,7 @@ async fn no_egress_is_absent_unless_all_three_attempts_failed_at_the_named_addre
 /// Security review, wave 2026-10-31: one probe after the namespace's policy set gained `policy`
 /// beside the default-deny one, the driver reopened over it (§ 14 Q1 B binds the whole set), and
 /// the probe child reporting what a child the policy does not reach reports: all three attempts
-/// failed with nothing answering. Answers the snapshot and the probe Pod the kubelet ran.
+/// were denied. Answers the snapshot and the probe Pod the kubelet ran.
 async fn probe_beside(policy: Value) -> (CapabilitySnapshot, Value) {
     let observation = Observation {
         heartbeat: false,
@@ -1469,4 +1470,165 @@ async fn adversary_w1031_an_expanded_argv_voids_the_heartbeat_and_the_egress_obs
         (None, None),
         "an observation from a run whose argv did not read back proves nothing"
     );
+}
+
+/// Linux errno values as the traced attempts recorded them.
+const EPERM: i32 = 1;
+const EAGAIN: i32 = 11;
+const EACCES: i32 = 13;
+const ENETUNREACH: i32 = 101;
+const ECONNREFUSED: i32 = 111;
+const EHOSTUNREACH: i32 = 113;
+
+/// The three attempts of one traced probe, with the errno and elapsed time the trace recorded.
+fn traced(outcomes: [(EgressOutcome, Option<i32>, u64); 3]) -> Vec<EgressAttempt> {
+    let [kubernetes, nameserver, egress] = outcomes;
+    [
+        (EgressTarget::KubernetesService, "10.96.0.1:443", kubernetes),
+        (EgressTarget::Nameserver, "10.96.0.10:53", nameserver),
+        (EgressTarget::EgressProbe, "192.0.2.10:443", egress),
+    ]
+    .into_iter()
+    .map(
+        |(target, address, (outcome, errno, elapsed_ms))| EgressAttempt {
+            errno,
+            elapsed_ms,
+            ..attempt(target, address, outcome)
+        },
+    )
+    .collect()
+}
+
+/// D332 trace 1 (`approval-record:d332-no-egress-fix-wave`), kind at `3b3998c8`: the Kubernetes
+/// Service and the nameserver answered and the egress probe address refused. Egress is open, and
+/// `confinement.no-egress` stays absent.
+#[tokio::test]
+async fn d332_trace_one_reached_reached_refused_withholds_no_egress() {
+    let observation = Observation {
+        heartbeat: true,
+        egress: traced([
+            (EgressOutcome::Reached, None, 0),
+            (EgressOutcome::Reached, None, 21),
+            (EgressOutcome::Refused, Some(ECONNREFUSED), 0),
+        ]),
+    };
+    let facts = facts_after(
+        Play::observing(&observation, Heartbeat::Stopped),
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    assert_eq!(
+        families(&facts),
+        [Some(true); 7],
+        "the control: the run proved its end"
+    );
+    assert_eq!(facts.confinement_no_egress, None);
+}
+
+/// D332 trace 2 (`approval-record:d332-no-egress-fix-wave`), kind at `3b3998c8`: all three
+/// attempts timed out while the lane's own Pod under the same default-deny policy reached all three
+/// targets. Silence is not a denial: a timeout never proves the attempt was stopped (D333, option
+/// A), so `confinement.no-egress` stays absent.
+#[tokio::test]
+async fn d332_trace_two_three_timeouts_withhold_no_egress() {
+    let observation = Observation {
+        heartbeat: true,
+        egress: traced([
+            (EgressOutcome::TimedOut, None, 3_001),
+            (EgressOutcome::TimedOut, Some(EAGAIN), 3_058),
+            (EgressOutcome::TimedOut, None, 3_001),
+        ]),
+    };
+    let facts = facts_after(
+        Play::observing(&observation, Heartbeat::Stopped),
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    assert_eq!(
+        families(&facts),
+        [Some(true); 7],
+        "the control: the run proved its end"
+    );
+    assert_eq!(
+        facts.confinement_whole_tree_kill,
+        Some(true),
+        "the control: the heartbeat proof is untouched"
+    );
+    assert_eq!(
+        facts.confinement_no_egress, None,
+        "three timed-out attempts published confinement.no-egress"
+    );
+}
+
+/// D333: one timeout among two local denials is still silence, and withholds the fact.
+#[tokio::test]
+async fn one_timeout_among_local_denials_withholds_no_egress() {
+    for position in 0..3 {
+        let mut outcomes = [
+            (EgressOutcome::Denied, Some(EPERM), 0),
+            (EgressOutcome::Denied, Some(EACCES), 0),
+            (EgressOutcome::Denied, Some(EPERM), 0),
+        ];
+        outcomes[position] = (EgressOutcome::TimedOut, None, 3_000);
+        let observation = Observation {
+            heartbeat: true,
+            egress: traced(outcomes),
+        };
+        let facts = facts_after(
+            Play::observing(&observation, Heartbeat::Stopped),
+            Some(check_with_host(SERVICE_HOST)),
+        )
+        .await;
+        assert_eq!(facts.confinement_no_egress, None, "timeout at {position}");
+    }
+}
+
+/// D334: one attempt without a route among two local denials withholds the fact. `ENETUNREACH`
+/// and `EHOSTUNREACH` can come from a remote router's ICMP or an address of the wrong family, so
+/// they do not prove the attempt was stopped inside the Pod.
+#[tokio::test]
+async fn one_no_route_attempt_among_local_denials_withholds_no_egress() {
+    for errno in [ENETUNREACH, EHOSTUNREACH] {
+        for (position, elapsed_ms) in [(0, 0), (1, 0), (2, 0), (2, 3_000)] {
+            let mut outcomes = [
+                (EgressOutcome::Denied, Some(EPERM), 0),
+                (EgressOutcome::Denied, Some(EACCES), 0),
+                (EgressOutcome::Denied, Some(EPERM), 0),
+            ];
+            outcomes[position] = (EgressOutcome::Unreachable, Some(errno), elapsed_ms);
+            let observation = Observation {
+                heartbeat: true,
+                egress: traced(outcomes),
+            };
+            let facts = facts_after(
+                Play::observing(&observation, Heartbeat::Stopped),
+                Some(check_with_host(SERVICE_HOST)),
+            )
+            .await;
+            assert_eq!(
+                facts.confinement_no_egress, None,
+                "errno {errno} at {position} after {elapsed_ms} ms"
+            );
+        }
+    }
+}
+
+/// D334: three attempts each denied before they left the Pod (`EPERM`, `EACCES`) publish the
+/// fact.
+#[tokio::test]
+async fn three_local_denials_publish_no_egress() {
+    let observation = Observation {
+        heartbeat: true,
+        egress: traced([
+            (EgressOutcome::Denied, Some(EPERM), 0),
+            (EgressOutcome::Denied, Some(EACCES), 0),
+            (EgressOutcome::Denied, Some(EPERM), 0),
+        ]),
+    };
+    let facts = facts_after(
+        Play::observing(&observation, Heartbeat::Stopped),
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    assert_eq!(facts.confinement_no_egress, Some(true));
 }
