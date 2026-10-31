@@ -2161,14 +2161,12 @@ mod tests {
             .collect()
     }
 
-    /// A stand-in daemon: a script that ignores the lane's arguments and creates no socket, as
-    /// the shipped daemon does with `--tls-listen`; it sleeps, or exits at once with `exit`.
-    fn stand_in(directory: &Path, exit: bool) -> PathBuf {
-        let path = directory.join("daemon");
-        let body = if exit { "exit 7" } else { "exec sleep 60" };
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write the stand-in");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("make it executable");
-        path
+    /// A stand-in daemon that ignores the lane's arguments and creates no socket, as the shipped
+    /// daemon does with `--tls-listen`: `/bin/true`, or `/bin/false` when it must fail. A system
+    /// program, not a script the test writes: an executable written while another test forks
+    /// can be held open for writing by that child, and its `exec` then fails `ETXTBSY`.
+    fn stand_in(fails: bool) -> PathBuf {
+        PathBuf::from(if fails { "/bin/false" } else { "/bin/true" })
     }
 
     /// An operational listener that answers every request with `status`.
@@ -2191,7 +2189,7 @@ mod tests {
     #[test]
     fn a_tls_daemon_is_ready_by_its_readyz_though_it_creates_no_socket() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let binary = stand_in(directory.path(), false);
+        let binary = stand_in(false);
         let ops = ops_answering("200 OK");
         let started = Instant::now();
         let daemon = Daemon::start_with(
@@ -2222,7 +2220,7 @@ mod tests {
     #[test]
     fn a_daemon_that_exits_before_its_readyz_answers_is_named() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let binary = stand_in(directory.path(), true);
+        let binary = stand_in(true);
         let ops = unused_loopback().expect("a free port");
         let error = Daemon::start_with(
             &binary,
@@ -2233,8 +2231,8 @@ mod tests {
             Ready::Ops(ops),
         )
         .err()
-        .expect("an exited daemon is refused")
-        .to_string();
+        .expect("an exited daemon is refused");
+        let error = format!("{error:#}");
         assert!(
             error.contains("exited before it was ready"),
             "unexpected: {error}"
