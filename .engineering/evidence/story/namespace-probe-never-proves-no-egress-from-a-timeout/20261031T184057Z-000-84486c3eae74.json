@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-31T18:40:57Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-probe-never-proves-no-egress-from-a-timeout",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p b10x-substrate-kubernetes --lib (122 passed) and -p b10x-substrate-executor --lib (9 passed), clippy -D warnings, fmt; red before the fix: d332_trace_two_three_timeouts_withhold_no_egress, one_timeout_among_local_denials_withholds_no_egress",
+    "reference": "crates/substrate-kubernetes/src/namespace/probe_tests.rs"
+  }
+}

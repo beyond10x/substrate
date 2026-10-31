@@ -4,7 +4,8 @@ The b10x execution data plane. It turns one Linux host into a governed service f
 workspaces, bounded processes and sessions, durable operations, leases, and observed state.
 Workloads, images, volumes and endpoints remain future resource families. A Kubernetes namespace
 driver ships from 0.16.1 as a development profile; it serves workspaces, and from 0.18.0 it admits an
-exec only where its probe observed confinement, egress denial included.
+exec only where its probe observed confinement, including egress attempts denied inside the Pod. A
+network plugin that drops denied packets silently, kind's among them, keeps exec refused as in 0.17.0.
 
 The problem it removes: anything that wants to run a command on behalf of somebody else has to
 build confinement, quotas, durable lifecycle state and honest reporting for itself, and usually
@@ -71,7 +72,7 @@ that no accepted text states the write-once-tag motive.
 | Recovery | Durable operation reservation before dispatch, stored answers, bounded events and reconciliation snapshots |
 | Transport | Personal Unix peer identity or explicit-root TLS 1.3 HTTPS/WSS with online hosted Identity admission |
 | Rust SDK and MCP | Typed clients and bounded tools over the daemon's authenticated service contract |
-| Drivers | The Linux host driver; from 0.16.1, the Kubernetes namespace driver, a development profile, which serves empty workspaces and, from 0.18.0, admits an exec only on the six confinement facts its probe observed (otherwise `exec.sandbox-unavailable`) |
+| Drivers | The Linux host driver; from 0.16.1, the Kubernetes namespace driver, a development profile, which serves empty workspaces and, from 0.18.0, admits an exec only on the six confinement facts its probe observed (otherwise `exec.sandbox-unavailable`), so only where the network plugin denies egress inside the Pod; on kind exec stays refused |
 | Capability limits | Execution, PTY, Git, storage quotas and metrics depend on the running daemon's verified facts |
 | Model and derivation | Explicit wire types and frozen contract bundles; authored CLI, handlers and transitions, with an initial [ESS accepted-operation projection](spec/README.md), not whole-system derivation |
 
@@ -347,9 +348,13 @@ Its limits, stated plainly:
 - **Exec is admitted only on observed confinement.** From 0.18.0 the probe publishes design 30's
   families, `confinement.whole-tree-kill` and `confinement.no-egress` from what it observed, and an
   exec is admitted on design 34 § 6.4's six facts. A missing one keeps every exec start
-  `exec.sandbox-unavailable` (501). On kind's default plugin no enforced egress denial was observed,
-  so `confinement.no-egress` stays absent there and exec there is still refused; exec on a cluster
-  whose plugin enforces NetworkPolicy is not yet observed by the lane.
+  `exec.sandbox-unavailable` (501). `confinement.no-egress` needs each of the probe's three egress
+  attempts stopped inside the Pod (`EPERM`, `EACCES`, `ENETUNREACH` or `EHOSTUNREACH`); a
+  timed-out attempt never counts. So exec is admitted only on a network plugin that denies locally.
+  A plugin that drops denied packets silently, kind's default plugin among them, leaves the fact
+  absent and exec refused, as in 0.17.0. The lane has not yet observed a plugin that denies
+  locally. Inferred, not verified: kind's plugin may enforce NetworkPolicy only after a Pod's first
+  moments.
 - **Shared clean-room conformance runs as the lane's step 4.** `cargo xtask namespace-lane
   observe` runs design 34's observations and steps 3 to 7 on a kind cluster of its own; step 4 runs
   the remote runner `b10x-substrate-conformance` (design 31) against the `--driver kubernetes`

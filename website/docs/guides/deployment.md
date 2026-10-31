@@ -270,9 +270,14 @@ What it does not do yet:
   families, `confinement.whole-tree-kill` and `confinement.no-egress` from what it observed, and an
   exec start is admitted only when all six facts of design 34 § 6.4 are present; otherwise it is
   refused `exec.sandbox-unavailable`. The four Linux confinement facts are never published.
-- **Exec on a cluster is unverified.** On kind a Pod under the default-deny policy still reached
-  the API server, so no enforced egress denial was observed and `confinement.no-egress` stays
-  absent.
+- **Exec needs a network plugin that denies locally.** `confinement.no-egress` needs each of the
+  probe's three egress attempts stopped inside the Pod (`EPERM`, `EACCES`, `ENETUNREACH` or
+  `EHOSTUNREACH`); a timed-out attempt never counts. A plugin that drops denied packets silently,
+  kind's default plugin among them, leaves the fact absent, and exec stays refused as in 0.17.0.
+  On kind a Pod under the default-deny policy still reached the API server, and another probe
+  timed out all three attempts. No plugin that denies locally has been observed by the lane yet.
+  Inferred, not verified: kind's plugin may enforce NetworkPolicy only after a Pod's first
+  moments.
 - **Shared clean-room conformance follows in the next release.** The namespace lane reports that
   step absent until `story:remote-clean-room-conformance` lands.
 

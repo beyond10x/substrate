@@ -1067,19 +1067,20 @@ fn attempt(target: EgressTarget, address: &str, outcome: EgressOutcome) -> Egres
     }
 }
 
-/// What a child under an enforcing default-deny policy reports: each attempt failed with nothing
-/// answering, at the addresses the driver named and the nameserver its resolver names.
+/// What a child under a default-deny policy its plugin enforces inside the Pod reports: each
+/// attempt was stopped before it left (denied or without a route), at the addresses the driver
+/// named and the nameserver its resolver names. A timed-out attempt proves nothing (D333).
 fn blocked() -> Vec<EgressAttempt> {
     vec![
         attempt(
             EgressTarget::KubernetesService,
             "10.96.0.1:443",
-            EgressOutcome::TimedOut,
+            EgressOutcome::Denied,
         ),
         attempt(
             EgressTarget::Nameserver,
             "10.96.0.10:53",
-            EgressOutcome::TimedOut,
+            EgressOutcome::Denied,
         ),
         attempt(
             EgressTarget::EgressProbe,
@@ -1488,11 +1489,13 @@ fn traced(outcomes: [(EgressOutcome, Option<i32>, u64); 3]) -> Vec<EgressAttempt
         (EgressTarget::EgressProbe, "192.0.2.10:443", egress),
     ]
     .into_iter()
-    .map(|(target, address, (outcome, errno, elapsed_ms))| EgressAttempt {
-        errno,
-        elapsed_ms,
-        ..attempt(target, address, outcome)
-    })
+    .map(
+        |(target, address, (outcome, errno, elapsed_ms))| EgressAttempt {
+            errno,
+            elapsed_ms,
+            ..attempt(target, address, outcome)
+        },
+    )
     .collect()
 }
 
@@ -1514,7 +1517,11 @@ async fn d332_trace_one_reached_reached_refused_withholds_no_egress() {
         Some(check_with_host(SERVICE_HOST)),
     )
     .await;
-    assert_eq!(families(&facts), [Some(true); 7], "the control: the run proved its end");
+    assert_eq!(
+        families(&facts),
+        [Some(true); 7],
+        "the control: the run proved its end"
+    );
     assert_eq!(facts.confinement_no_egress, None);
 }
 
@@ -1537,7 +1544,11 @@ async fn d332_trace_two_three_timeouts_withhold_no_egress() {
         Some(check_with_host(SERVICE_HOST)),
     )
     .await;
-    assert_eq!(families(&facts), [Some(true); 7], "the control: the run proved its end");
+    assert_eq!(
+        families(&facts),
+        [Some(true); 7],
+        "the control: the run proved its end"
+    );
     assert_eq!(
         facts.confinement_whole_tree_kill,
         Some(true),

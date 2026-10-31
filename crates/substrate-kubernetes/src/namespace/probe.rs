@@ -14,8 +14,9 @@
 //! - `confinement.whole-tree-kill` from the heartbeat: the child saw its grandchild's heartbeat
 //!   move, and the keeper's `fs stat` sees it unchanged for [`HEARTBEAT_STILL`] after the end.
 //! - `confinement.no-egress` from the child's three egress attempts: each one, at the address the
-//!   driver named, failed with nothing answering ([`EgressOutcome::blocked`]), and only while the
-//!   bound policy set holds no policy beside the default-deny one that allows egress.
+//!   driver named, was stopped inside the Pod, denied or without a route
+//!   ([`EgressOutcome::blocked`]; a timeout never counts, D333), and only while the bound policy
+//!   set holds no policy beside the default-deny one that allows egress.
 //!
 //! The child is told what to observe through [`TARGETS_ENV`]; the Kubernetes Service host it
 //! dials is the one the keeper's own environment states, because the child's environment is only
