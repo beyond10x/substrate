@@ -1632,3 +1632,119 @@ async fn three_local_denials_publish_no_egress() {
     .await;
     assert_eq!(facts.confinement_no_egress, Some(true));
 }
+
+thread_local! {
+    /// The buffer [`CapturedLog`] holds on this thread, if any.
+    static CAPTURE: std::cell::RefCell<Option<Arc<Mutex<Vec<u8>>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Writes into this thread's [`CAPTURE`], and nowhere when it holds none.
+struct ThreadWriter;
+
+impl std::io::Write for ThreadWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        CAPTURE.with(|capture| {
+            if let Some(lines) = capture.borrow().as_ref() {
+                lock(lines).extend_from_slice(buf);
+            }
+        });
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Every line the driver logs on this thread while it is held, as `tracing`'s plain formatter
+/// writes them. The subscriber is the process's global one, installed once: a scoped default
+/// races the other tests' first use of a callsite, which can cache its interest as never.
+struct CapturedLog {
+    lines: Arc<Mutex<Vec<u8>>>,
+}
+
+impl CapturedLog {
+    fn start() -> Self {
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(|| ThreadWriter)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).expect("one global subscriber");
+        });
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        CAPTURE.with(|capture| *capture.borrow_mut() = Some(Arc::clone(&lines)));
+        Self { lines }
+    }
+
+    /// The captured `WARN` lines.
+    fn warnings(&self) -> Vec<String> {
+        String::from_utf8(lock(&self.lines).clone())
+            .expect("utf-8 log")
+            .lines()
+            .filter(|line| line.contains("WARN"))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+impl Drop for CapturedLog {
+    fn drop(&mut self) {
+        CAPTURE.with(|capture| *capture.borrow_mut() = None);
+    }
+}
+
+/// D337 S6a: a Role without `pods/log` `get` leaves the probe Pod's run unread. The run's facts
+/// stay absent, and the log says why at `warn`: the reason code `kubernetes.api-failed`, and each
+/// fact the run would have proved as "<fact> was not proved", so an operator (and the namespace
+/// lane) can tell a refused read from a run that proved less.
+#[tokio::test]
+async fn a_refused_pod_log_names_its_reason_and_each_unproved_fact() {
+    let observation = Observation {
+        heartbeat: true,
+        egress: blocked(),
+    };
+    let rig = rig_with(
+        Play::observing(&observation, Heartbeat::Stopped),
+        None,
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    rig.fake.refuse_logs(
+        403,
+        "pods \"probe\" is forbidden: User \"system:serviceaccount:substrate:substrate-driver\" \
+         cannot get resource \"pods/log\" in API group \"\" in the namespace \"substrate\"",
+    );
+    let log = CapturedLog::start();
+    rig.driver.probe().await.expect("the probe runs");
+    let snapshot = rig.machine();
+    let facts = &snapshot.facts;
+    assert_never_published(&snapshot);
+    assert_eq!(families(facts), [None; 7]);
+    assert_eq!(facts.exec_argv_only, None);
+    assert_eq!(facts.confinement_whole_tree_kill, None);
+    assert_eq!(facts.confinement_no_egress, None);
+
+    let warnings = log.warnings();
+    assert!(
+        warnings.iter().any(
+            |line| line.contains("code=\"kubernetes.api-failed\"") && line.contains("pods/log")
+        ),
+        "no warning names kubernetes.api-failed with the API's answer: {warnings:#?}"
+    );
+    let run_facts = SEVEN_FAMILIES.iter().map(|family| family.fact()).chain([
+        "exec.argv-only",
+        substrate_wire::CONFINEMENT_WHOLE_TREE_KILL_FACT,
+        substrate_wire::CONFINEMENT_NO_EGRESS_FACT,
+    ]);
+    for fact in run_facts {
+        let stated = format!(" {fact} was not proved");
+        assert!(
+            warnings.iter().any(|line| line.contains(&stated)),
+            "no warning says {fact} was not proved: {warnings:#?}"
+        );
+    }
+}
