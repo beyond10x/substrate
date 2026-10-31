@@ -24,7 +24,7 @@ products / agent / Flux / autodev
 | driver | state | serves |
 |---|---|---|
 | host (`substrate-host`) | released | workspaces, confined exec, sessions, host processes |
-| Kubernetes namespace (`substrate-kubernetes`, [ADR 0047](../adr/0047-a-kubernetes-namespace-driver-serves-workspaces-on-pvcs-and-execs-as-pods.md)) | released in 0.16.1 as a development profile | empty workspaces on a PVC with a keeper Pod; every exec start is refused `exec.sandbox-unavailable` until its probe proves confinement |
+| Kubernetes namespace (`substrate-kubernetes`, [ADR 0047](../adr/0047-a-kubernetes-namespace-driver-serves-workspaces-on-pvcs-and-execs-as-pods.md)) | released in 0.16.1 as a development profile | empty workspaces on a PVC with a keeper Pod; from 0.18.0 an exec is admitted only on the confinement its probe observed, otherwise `exec.sandbox-unavailable` |
 | Docker | proposed | none |
 
 A daemon runs exactly one driver, chosen by `--driver` and never by a request. The namespace

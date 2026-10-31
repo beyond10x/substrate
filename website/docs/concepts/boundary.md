@@ -43,7 +43,7 @@ or unbounded.”
 ## One contract, capability-gated behavior
 
 The released drivers are the Linux host driver and, from 0.16.1, a Kubernetes namespace driver, a
-development profile that refuses every exec start.
+development profile that admits an exec only on the confinement its probe observed.
 
 The contract separates each driver's resource model from
 backend-specific enforcement. A caller should ask which capabilities this daemon

@@ -266,8 +266,10 @@ first released in 0.16.1.
 
 What it does not do yet:
 
-- **Exec is not served.** The probe proves neither the four Linux confinement facts nor
-  `confinement.no-egress`, so every exec start is refused `exec.sandbox-unavailable`.
+- **Exec is served only on observed confinement.** From 0.18.0 the probe publishes the confinement
+  families, `confinement.whole-tree-kill` and `confinement.no-egress` from what it observed, and an
+  exec start is admitted only when all six facts of design 34 § 6.4 are present; otherwise it is
+  refused `exec.sandbox-unavailable`. The four Linux confinement facts are never published.
 - **Exec on a cluster is unverified.** On kind a Pod under the default-deny policy still reached
   the API server, so no enforced egress denial was observed and `confinement.no-egress` stays
   absent.
@@ -356,7 +358,7 @@ absent from the snapshot keeps the daemon unready until it restarts.
 | `workspace.adopt` | `workspace.adopt-unserved` (501), before any name is looked up |
 | a workspace storage quota | `workspace.storage-quota-unserved` (501) |
 | a workspace source other than empty | `workspace.source-unserved` (501) |
-| any exec start | `exec.sandbox-unavailable` (501) |
+| an exec start whose snapshot lacks any of the six observed confinement facts | `exec.sandbox-unavailable` (501) |
 
 A lost Lease makes every fact absent. After a restart, a workspace whose claim is found and whose
 keeper answers its handshake is ready again, and an exec still running reads `unknown` and its Pod
