@@ -2019,6 +2019,7 @@ mod tests {
 
     fn sandbox_request(network: NetworkMode, name: Option<&str>) -> ConfinementRequest {
         ConfinementRequest {
+            requires: None,
             capability_snapshot: "sha256:".to_owned() + &"0".repeat(64),
             network,
             aperture: name.map(str::to_owned),

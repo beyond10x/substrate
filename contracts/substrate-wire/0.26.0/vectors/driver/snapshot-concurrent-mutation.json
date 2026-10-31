@@ -1,0 +1,52 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "snapshot.page",
+      "snapshot": "snap_01JPHASE3VECTOR"
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "snapshot.stable-pagination"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "stable": true,
+      "through_seq": 8
+    }
+  },
+  "id": "snapshot-pages-ignore-concurrent-live-mutation",
+  "layer": "driver",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/live_row_in_snapshot",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "snapshot",
+      "name": "mutation-after-barrier",
+      "state": {
+        "live_seq": 9,
+        "through_seq": 8
+      }
+    }
+  ]
+}

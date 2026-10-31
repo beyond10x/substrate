@@ -7,6 +7,70 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Development contract bundle `substrate-wire/0.26.0` (design 30, ADR 0048), now advertised by the
+  daemon, the Rust SDK and the conformance runner. It adds no route. A capability snapshot may
+  state one optional fact per confinement family (`confinement.family.process-run` to
+  `confinement.family.audit`) and per mechanism-neutral property (`confinement.whole-tree-kill`
+  and six more), each `true` or absent. Both starts accept an optional closed `sandbox.requires`
+  that names families and properties, and two refusals are published at 501 with a vector each:
+  `confinement.family-unserved` and `confinement.fact-unserved`. `substrate-wire` exports
+  `ConfinementFamily`, `ConfinementProperty`, `ConfinementRequires`,
+  `validate_confinement_requires` and `confinement_requires_refusal`.
+- The host daemon publishes the `linux` adapter's family and property facts, each derived from a
+  proof it already makes: `audit` always, `workspace` with guarded workspace I/O, and with the exec
+  floor `process-run`, `process-watch`, `output-read`, `wait`, `limits`, `filesystem-view` (with
+  read-only roots and files), `network-egress` (with a declared aperture), `whole-tree-kill`,
+  `ipc-socket-allowlist` and `ipc-signals-contained`. It never publishes `network-ingress`. The
+  capability snapshot digest now binds the adapter, so the host's snapshot id changes once.
+- Exec and session starts check `sandbox.requires`. A requirement outside the schema (an empty
+  object or list, a repeated or unknown name, a `null` list) is `request.schema-invalid` (422)
+  with the other request-shape checks, before `exec.capability-stale`. After the stale check, the
+  first unserved family is `confinement.family-unserved` (501) and the first unproved property
+  `confinement.fact-unserved` (501), each recorded as refused before dispatch and before any
+  field-specific check. The host driver checks `requires` at the same two points, so it names
+  the same refusal the daemon does; for that its stale check now also precedes read-only roots,
+  read-only files, workspace access and secret slots, as the daemon's does. An admitted run's
+  applied record echoes `requires` on both drivers. A start without `requires` is unchanged.
+- `Machine::served_families` and `Machine::proved_properties` in the Rust SDK, which also
+  re-exports `ConfinementFamily`, `ConfinementProperty` and `ConfinementRequires`.
+- `/metrics` on the operational listener names the two new refusal codes and, on a host daemon
+  only, `substrate_adapter_info{adapter="linux"} 1` (ADR 0048 D7): the operator sees the adapter
+  name, the API never does. A `--driver kubernetes` daemon opens no adapter and has no such series.
+  Each scrape holds at most 585 samples.
+- The runtime vectors check the published facts and the `requires` refusals: the portable lane
+  counts 124 cases and the delegated lane 189.
+- The namespace driver's probe observes confinement (design 34 § 6.2). Its probe Pod now mounts
+  the probe's volume writable and carries one environment variable, `SUBSTRATE_PROBE_TARGETS`.
+  `probe-child` forks a grandchild that rewrites `substrate-probe-heartbeat` in the volume every
+  100 ms, and makes three egress attempts of at most 3 s each: TCP to the Kubernetes Service host
+  the keeper's environment states, port 443; a DNS query to `/etc/resolv.conf`'s first
+  nameserver; TCP to `egress_probe_address`. Each probe run takes about 5 s longer. The snapshot
+  then states the seven families `confinement.family.process-run`, `.process-watch`,
+  `.output-read`, `.wait`, `.workspace`, `.limits` and `.audit` when the Pod ended with its
+  frames, its applied bounds and an exit record that agrees with the API;
+  `confinement.whole-tree-kill` when the keeper sees the heartbeat unchanged for 2 s after the
+  container shows `terminated`; and `confinement.no-egress` when all three attempts failed with
+  nothing answering and no NetworkPolicy in the bound set other than the default-deny one has an
+  egress rule. Any such policy withholds the fact, whichever Pods it selects. Each lapses with the
+  proof. It never states the four Linux `exec.*` facts.
+
+### Changed
+
+- A namespace-driver daemon admits an exec start when its snapshot states
+  `confinement.family.process-run`, `.wait`, `.output-read` and `.limits`,
+  `confinement.whole-tree-kill` and `confinement.no-egress` (design 34 § 6.4). On a cluster whose
+  network plugin does not enforce the NetworkPolicy, an attempt is reached or refused,
+  `confinement.no-egress` stays absent and every exec start is still `exec.sandbox-unavailable`
+  (501). The host driver never states `confinement.no-egress` and admits as before.
+- `AppliedConfinement.cgroup` is `Option<String>` and is optional in the bundle, present whenever
+  the adapter applied a cgroup; the host driver applies one to every run, so its records keep their
+  bytes. The applied record gains an optional `requires` echo. A crate that constructs or
+  exhaustively destructures the Rust type `AppliedConfinement` (loom does, in
+  `loom-intake-slice/src/confinement.rs`) must adapt when its substrate pin moves, even though it
+  uses the host API in process.
+
 ## [0.17.0] — 2026-10-31
 
 Shared clean-room conformance arrives: design 31's remote runner certifies a deployed endpoint from

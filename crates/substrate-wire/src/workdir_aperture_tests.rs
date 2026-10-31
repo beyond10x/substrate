@@ -441,9 +441,10 @@ fn an_applied_aperture_list_is_an_array_whose_elements_carry_listen() {
 #[test]
 fn the_applied_confinement_reports_the_workdir_only_when_one_was_set() {
     let mut confinement = AppliedConfinement {
+        requires: None,
         writable_roots: Vec::new(),
         capability_snapshot: format!("sha256:{}", "7".repeat(64)),
-        cgroup: "substrate/exec".to_owned(),
+        cgroup: Some("substrate/exec".to_owned()),
         filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
         network: AppliedNetwork::None,
         profile: SandboxProfile::Workspace,

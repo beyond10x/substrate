@@ -309,6 +309,7 @@ fn seed_streaming_exec(store: &Arc<Store>) {
         state: ExecState::Exited,
         observed_at: Utc::now(),
         requested: ConfinementRequest {
+            requires: None,
             capability_snapshot: "cap_metrics_adversary".to_owned(),
             network: NetworkMode::None,
             aperture: None,

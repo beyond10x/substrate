@@ -3,7 +3,8 @@
 The b10x execution data plane. It turns one Linux host into a governed service for confined
 workspaces, bounded processes and sessions, durable operations, leases, and observed state.
 Workloads, images, volumes and endpoints remain future resource families. A Kubernetes namespace
-driver ships from 0.16.1 as a development profile; it serves workspaces and refuses every exec.
+driver ships from 0.16.1 as a development profile; it serves workspaces, and from 0.18.0 it admits an
+exec only where its probe observed confinement, egress denial included.
 
 The problem it removes: anything that wants to run a command on behalf of somebody else has to
 build confinement, quotas, durable lifecycle state and honest reporting for itself, and usually
@@ -70,7 +71,7 @@ that no accepted text states the write-once-tag motive.
 | Recovery | Durable operation reservation before dispatch, stored answers, bounded events and reconciliation snapshots |
 | Transport | Personal Unix peer identity or explicit-root TLS 1.3 HTTPS/WSS with online hosted Identity admission |
 | Rust SDK and MCP | Typed clients and bounded tools over the daemon's authenticated service contract |
-| Drivers | The Linux host driver; from 0.16.1, the Kubernetes namespace driver, a development profile, which serves empty workspaces and refuses every exec start `exec.sandbox-unavailable` |
+| Drivers | The Linux host driver; from 0.16.1, the Kubernetes namespace driver, a development profile, which serves empty workspaces and, from 0.18.0, admits an exec only on the six confinement facts its probe observed (otherwise `exec.sandbox-unavailable`) |
 | Capability limits | Execution, PTY, Git, storage quotas and metrics depend on the running daemon's verified facts |
 | Model and derivation | Explicit wire types and frozen contract bundles; authored CLI, handlers and transitions, with an initial [ESS accepted-operation projection](spec/README.md), not whole-system derivation |
 
@@ -103,7 +104,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
-| contract bundles 0.5.0–0.25.0 | `cargo xtask check-bundles 0.5.0 … 0.25.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
+| contract bundles 0.5.0–0.26.0 | `cargo xtask check-bundles 0.5.0 … 0.26.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -169,7 +170,7 @@ without running anything, and `scripts/delegated-lane.sh` ends with it so a gree
 cannot be read as covering these cases.
 
 `cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
-meta-validates every Draft 2020-12 schema offline, across all twenty-five released bundles. Classification
+meta-validates every Draft 2020-12 schema offline, across all twenty-six released bundles. Classification
 used to live in a Python module the four checkers imported — shared live machinery, not any one
 bundle's reproducibility proof — so it moved with the rest of the tooling, and the four checkers no
 longer do it. They verify everything else about the bundles they froze.
@@ -343,10 +344,12 @@ more, and publishes `driver: kubernetes` with only the facts its own probe prove
 
 Its limits, stated plainly:
 
-- **Exec is refused.** The probe proves neither the four Linux confinement facts nor
-  `confinement.no-egress`, so every exec start is `exec.sandbox-unavailable` (501). Exec Pods are
-  implemented but unverified on a real cluster: on kind no enforced egress denial was observed,
-  so `confinement.no-egress` stays absent.
+- **Exec is admitted only on observed confinement.** From 0.18.0 the probe publishes design 30's
+  families, `confinement.whole-tree-kill` and `confinement.no-egress` from what it observed, and an
+  exec is admitted on design 34 § 6.4's six facts. A missing one keeps every exec start
+  `exec.sandbox-unavailable` (501). On kind's default plugin no enforced egress denial was observed,
+  so `confinement.no-egress` stays absent there and exec there is still refused; exec on a cluster
+  whose plugin enforces NetworkPolicy is not yet observed by the lane.
 - **Shared clean-room conformance runs as the lane's step 4.** `cargo xtask namespace-lane
   observe` runs design 34's observations and steps 3 to 7 on a kind cluster of its own; step 4 runs
   the remote runner `b10x-substrate-conformance` (design 31) against the `--driver kubernetes`

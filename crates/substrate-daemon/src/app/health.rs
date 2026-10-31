@@ -239,7 +239,7 @@ impl Check {
 /// Every code `substrate_refusals_total` names: the codes the wire crate names as constants.
 /// Any other code is counted as `other`. `tests::the_refusal_codes_are_the_wire_constants` holds
 /// this list to the wire crate's source, so a constant added there fails until it is added here.
-const REFUSAL_CODES: [&str; 110] = [
+const REFUSAL_CODES: [&str; 112] = [
     substrate_wire::EXEC_METRICS_UNSERVED,
     substrate_wire::EXEC_SCRATCH_QUOTA_UNSERVED,
     substrate_wire::EXEC_SCRATCH_QUOTA_LIMIT,
@@ -350,6 +350,8 @@ const REFUSAL_CODES: [&str; 110] = [
     substrate_wire::EXEC_INLINE_CAPSULE_UNSERVED,
     substrate_wire::EXEC_SIGNAL_UNSERVED,
     substrate_wire::WORKSPACE_ADOPT_UNSERVED,
+    substrate_wire::CONFINEMENT_FAMILY_UNSERVED,
+    substrate_wire::CONFINEMENT_FACT_UNSERVED,
 ];
 
 /// One counter per label combination.
@@ -517,6 +519,8 @@ impl Telemetry {
 
     /// `collisions` is what the driver port answers (`Driver::backend_collisions`): a driver that
     /// creates no backend object answers `None` and its scrape carries no collision series.
+    /// `adapter` is the name of the confinement adapter the driver opened
+    /// (`Driver::confinement_adapter`); a driver that opens none carries no adapter series.
     #[allow(clippy::too_many_lines)] // The closed catalogue, in the order ADR 0045 states it.
     fn render(
         &self,
@@ -524,6 +528,7 @@ impl Telemetry {
         process: Option<&ProcessStats>,
         output_stalls: u64,
         collisions: Option<u64>,
+        adapter: Option<&str>,
     ) -> String {
         let mut out = Exposition::default();
         out.family("substrate_build_info", "gauge", "The running binary.");
@@ -535,6 +540,16 @@ impl Telemetry {
             ],
             1,
         );
+        // ADR 0048 D7: the operator, and only the operator, learns which adapter confines this
+        // daemon's runs. The client wire states the facts it proved and never the name.
+        if let Some(adapter) = adapter {
+            out.family(
+                "substrate_adapter_info",
+                "gauge",
+                "The confinement adapter this daemon opened.",
+            );
+            out.sample("substrate_adapter_info", &[("adapter", adapter)], 1);
+        }
         out.family(
             "substrate_ready",
             "gauge",
@@ -1049,6 +1064,10 @@ impl Operations {
                     process_stats().as_ref(),
                     (self.output_stalls)(),
                     self.app.driver.backend_collisions(),
+                    self.app
+                        .driver
+                        .confinement_adapter()
+                        .map(|adapter| adapter.name()),
                 );
                 plain(StatusCode::OK, Some(OPENMETRICS), exposition.into_bytes())
             }
@@ -1208,8 +1227,18 @@ mod tests {
     /// more per refusal code the wire crate names plus `other`.
     const SERIES_WITHOUT_REFUSALS: usize = 471;
     const SERIES_MAXIMUM: usize = SERIES_WITHOUT_REFUSALS + REFUSAL_CODES.len() + 1;
-    /// A daemon whose driver counts collisions (design 34 § 4) carries one series more.
+    /// A host daemon names the confinement adapter it opened (design 30 § 6, ADR 0048 D7) in one
+    /// series more.
+    const HOST_SERIES_MAXIMUM: usize = SERIES_MAXIMUM + 1;
+    /// A daemon whose driver counts collisions (design 34 § 4) carries one series more, and opens
+    /// no confinement adapter.
     const KUBERNETES_SERIES_MAXIMUM: usize = SERIES_MAXIMUM + 1;
+    /// The adapter series a host daemon adds, exactly.
+    const ADAPTER_GOLDEN: [&str; 3] = [
+        "# TYPE substrate_adapter_info gauge",
+        "# HELP substrate_adapter_info The confinement adapter this daemon opened.",
+        "substrate_adapter_info{adapter=\"linux\"} 1",
+    ];
 
     fn every_check_passes() -> Readiness {
         Readiness {
@@ -1236,23 +1265,41 @@ mod tests {
     }
 
     /// A fresh registry's scrape with every check passing, process metrics and no stall, for a
-    /// driver whose collision count is `collisions`.
-    fn scrape(collisions: Option<u64>) -> String {
-        Telemetry::default().render(every_check_passes(), Some(&process()), 0, collisions)
+    /// driver that opened the adapter `adapter` names and whose collision count is `collisions`.
+    fn scrape(adapter: Option<&str>, collisions: Option<u64>) -> String {
+        Telemetry::default().render(
+            every_check_passes(),
+            Some(&process()),
+            0,
+            collisions,
+            adapter,
+        )
+    }
+
+    /// The host driver's scrape: it opened `linux` and counts no collisions.
+    fn host_scrape() -> String {
+        scrape(Some("linux"), None)
     }
 
     #[test]
     fn the_series_count_is_pinned_at_its_maximum() {
         let telemetry = Telemetry::default();
-        let exposition = telemetry.render(every_check_passes(), Some(&process()), 0, None);
-        assert_eq!(SERIES_MAXIMUM, 582);
-        assert_eq!(samples(&exposition).len(), SERIES_MAXIMUM);
+        let exposition = telemetry.render(
+            every_check_passes(),
+            Some(&process()),
+            0,
+            None,
+            Some("linux"),
+        );
+        assert_eq!(SERIES_MAXIMUM, 584);
+        assert_eq!(HOST_SERIES_MAXIMUM, 585);
+        assert_eq!(samples(&exposition).len(), HOST_SERIES_MAXIMUM);
         let refusals = samples(&exposition)
             .iter()
             .filter(|line| line.starts_with("substrate_refusals_total"))
             .count();
         assert_eq!(refusals, REFUSAL_CODES.len() + 1);
-        assert!(SERIES_MAXIMUM - refusals < 500);
+        assert!(HOST_SERIES_MAXIMUM - refusals < 500);
         // Recording into every family adds no series: every combination is already published.
         telemetry.refusal("an.unnamed-code-with-a-path-/srv/secret");
         telemetry.admission(
@@ -1260,18 +1307,45 @@ mod tests {
             Some(Duration::from_millis(3)),
         );
         telemetry.maintenance_round(MaintenanceTask::Containment, Duration::from_secs(20));
-        let recorded = telemetry.render(every_check_passes(), Some(&process()), 3, None);
-        assert_eq!(samples(&recorded).len(), SERIES_MAXIMUM);
+        let recorded = telemetry.render(
+            every_check_passes(),
+            Some(&process()),
+            3,
+            None,
+            Some("linux"),
+        );
+        assert_eq!(samples(&recorded).len(), HOST_SERIES_MAXIMUM);
         assert!(!recorded.contains("/srv/secret"));
         assert!(recorded.contains("substrate_refusals_total{code=\"other\"} 1\n"));
         assert!(recorded.contains("substrate_output_stalls_total 3\n"));
+    }
+
+    /// Each sample's name with the names of its labels, `name{label,…}`, once per distinct set.
+    fn label_sets(exposition: &str) -> BTreeSet<String> {
+        let mut label_sets = BTreeSet::new();
+        for sample in samples(exposition) {
+            let name = sample.split(['{', ' ']).next().expect("sample name");
+            let labels = sample
+                .split_once('{')
+                .and_then(|(_, rest)| rest.split_once('}'))
+                .map(|(labels, _)| {
+                    labels
+                        .split(',')
+                        .map(|pair| pair.split_once('=').expect("label pair").0)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            label_sets.insert(format!("{name}{{{labels}}}"));
+        }
+        label_sets
     }
 
     /// The metric names, types and label sets are the ADR's catalogue exactly. Changing one
     /// changes this test, the deployment guide and the changelog together.
     #[test]
     fn the_metric_names_and_label_sets_are_the_catalogue() {
-        let exposition = scrape(None);
+        let exposition = host_scrape();
         let families = exposition
             .lines()
             .filter_map(|line| line.strip_prefix("# TYPE "))
@@ -1280,6 +1354,7 @@ mod tests {
             families,
             [
                 "substrate_build_info gauge",
+                "substrate_adapter_info gauge",
                 "substrate_ready gauge",
                 "substrate_http_requests counter",
                 "substrate_http_request_duration_seconds histogram",
@@ -1302,28 +1377,14 @@ mod tests {
                 "process_start_time_seconds gauge",
             ]
         );
-        let mut label_sets = BTreeSet::new();
-        for sample in samples(&exposition) {
-            let name = sample.split(['{', ' ']).next().expect("sample name");
-            let labels = sample
-                .split_once('{')
-                .and_then(|(_, rest)| rest.split_once('}'))
-                .map(|(labels, _)| {
-                    labels
-                        .split(',')
-                        .map(|pair| pair.split_once('=').expect("label pair").0)
-                        .collect::<Vec<_>>()
-                        .join(",")
-                })
-                .unwrap_or_default();
-            label_sets.insert(format!("{name}{{{labels}}}"));
-        }
+        let label_sets = label_sets(&exposition);
         let expected = [
             "process_cpu_seconds_total{}",
             "process_max_fds{}",
             "process_open_fds{}",
             "process_resident_memory_bytes{}",
             "process_start_time_seconds{}",
+            "substrate_adapter_info{adapter}",
             "substrate_build_info{version,contract_bundle}",
             "substrate_connections_limit{listener}",
             "substrate_connections_open{listener}",
@@ -1374,14 +1435,50 @@ mod tests {
         );
     }
 
+    /// Design 30 § 6 (ADR 0048 D7): the one place an adapter's name appears, on the operator's
+    /// listener only. A daemon whose driver opened a confinement adapter carries one gauge, always
+    /// 1, labelled with the adapter's name, right after the build information; every other line is
+    /// the scrape of a driver that opened none, which carries no adapter line at all.
+    #[test]
+    fn the_adapter_series_names_the_opened_adapter_only_when_one_was_opened() {
+        let host = host_scrape();
+        let none = scrape(None, None);
+        let added = host
+            .lines()
+            .filter(|line| !none.lines().any(|kept| kept == *line))
+            .collect::<Vec<_>>();
+        assert_eq!(added, ADAPTER_GOLDEN);
+        let without = host
+            .lines()
+            .filter(|line| !ADAPTER_GOLDEN.contains(line))
+            .collect::<Vec<_>>();
+        assert_eq!(without, none.lines().collect::<Vec<_>>());
+        assert!(!none.contains("substrate_adapter"), "{none}");
+        let families = host
+            .lines()
+            .filter_map(|line| line.strip_prefix("# TYPE "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            families[..3],
+            [
+                "substrate_build_info gauge",
+                "substrate_adapter_info gauge",
+                "substrate_ready gauge"
+            ]
+        );
+        assert_eq!(samples(&none).len(), SERIES_MAXIMUM);
+    }
+
     /// Design 34 § 4's one addition to the catalogue, on a daemon whose driver answers
     /// `Driver::backend_collisions`: its name, type, help text and empty label set, after the
     /// hosted families and before the process ones. Every other line of the scrape is the host
-    /// scrape's, byte for byte, and a host driver's scrape carries no collision line at all.
+    /// scrape's, byte for byte, but for the adapter series the namespace driver does not carry
+    /// because it opens no confinement adapter, and a host driver's scrape carries no collision
+    /// line at all.
     #[test]
     fn the_kubernetes_collisions_series_is_the_one_addition_a_namespace_driver_makes() {
-        let host = scrape(None);
-        let namespace = scrape(Some(0));
+        let host = host_scrape();
+        let namespace = scrape(None, Some(0));
         let golden = [
             "# TYPE substrate_kubernetes_collisions counter",
             "# HELP substrate_kubernetes_collisions Objects the Kubernetes driver met under a name \
@@ -1397,8 +1494,14 @@ mod tests {
             .lines()
             .filter(|line| !golden.contains(line))
             .collect::<Vec<_>>();
-        assert_eq!(without, host.lines().collect::<Vec<_>>());
+        assert_eq!(
+            without,
+            host.lines()
+                .filter(|line| !ADAPTER_GOLDEN.contains(line))
+                .collect::<Vec<_>>()
+        );
         assert!(!host.contains("substrate_kubernetes"), "{host}");
+        assert!(!namespace.contains("substrate_adapter"), "{namespace}");
         let families = namespace
             .lines()
             .filter_map(|line| line.strip_prefix("# TYPE "))
@@ -1415,15 +1518,15 @@ mod tests {
             )
         );
         assert_eq!(samples(&namespace).len(), KUBERNETES_SERIES_MAXIMUM);
-        assert_eq!(KUBERNETES_SERIES_MAXIMUM, 583);
+        assert_eq!(KUBERNETES_SERIES_MAXIMUM, 585);
     }
 
     /// The scrape states the driver's count as it is, so one more collision is one more on the
     /// scrape, and nothing else on it moves.
     #[test]
     fn the_collision_sample_moves_by_exactly_what_the_driver_counted() {
-        let before = scrape(Some(4));
-        let after = scrape(Some(5));
+        let before = scrape(None, Some(4));
+        let after = scrape(None, Some(5));
         let moved = before
             .lines()
             .zip(after.lines())
@@ -1796,7 +1899,7 @@ mod tests {
             super::Outcome::Failure(ErrorClass::Unserved)
         );
         telemetry.refusal(substrate_wire::EXEC_WORKDIR_UNSERVED);
-        let exposition = telemetry.render(every_check_passes(), None, 0, None);
+        let exposition = telemetry.render(every_check_passes(), None, 0, None, None);
         assert!(
             exposition.contains("substrate_refusals_total{code=\"exec.workdir-unserved\"} 1\n")
         );
@@ -1810,9 +1913,15 @@ mod tests {
     fn a_failure_answer_without_a_code_is_counted_as_other() {
         let telemetry = Telemetry::default();
         telemetry.unnamed_refusal();
-        let exposition = telemetry.render(every_check_passes(), Some(&process()), 0, None);
+        let exposition = telemetry.render(
+            every_check_passes(),
+            Some(&process()),
+            0,
+            None,
+            Some("linux"),
+        );
         assert!(exposition.contains("substrate_refusals_total{code=\"other\"} 1\n"));
-        assert_eq!(samples(&exposition).len(), SERIES_MAXIMUM);
+        assert_eq!(samples(&exposition).len(), HOST_SERIES_MAXIMUM);
     }
 
     /// The fact names `--ops-require-fact` accepts are exactly `CapabilityFacts`' keys: every
@@ -1844,7 +1953,7 @@ mod tests {
         let telemetry = Telemetry::default();
         telemetry.maintenance_round(MaintenanceTask::Containment, Duration::from_millis(1));
         telemetry.maintenance_round(MaintenanceTask::Containment, Duration::from_secs(20));
-        let exposition = telemetry.render(every_check_passes(), None, 0, None);
+        let exposition = telemetry.render(every_check_passes(), None, 0, None, None);
         for expected in [
             "substrate_maintenance_round_duration_seconds_bucket{task=\"containment\",le=\"10.0\"} 1\n",
             "substrate_maintenance_round_duration_seconds_bucket{task=\"containment\",le=\"+Inf\"} 2\n",

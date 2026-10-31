@@ -147,11 +147,15 @@ The four readiness checks:
 listener closes.
 
 The metric set is fixed. Labels are closed sets: listener, route family, outcome class, refusal
-code, check, maintenance task and admission result. No subject, resource id, path, address or
-credential appears in a label or a value. A scrape carries at most 582 samples on a host daemon
-and at most 583 samples on a daemon running `--driver kubernetes`.
+code, check, maintenance task, admission result and confinement adapter. No subject, resource id,
+path, address or credential appears in a label or a value. A scrape carries at most 585 samples on
+a host daemon and at most 585 samples on a daemon running `--driver kubernetes`.
 
 - **Build and readiness:** `substrate_build_info`, `substrate_ready`.
+- **Host daemon only:** `substrate_adapter_info{adapter}`, always `1`, naming the confinement
+  adapter that confines this daemon's runs (`linux` for the host driver). Only the operator sees
+  the name: the API states which confinement families and properties the daemon proved, never the
+  adapter. A `--driver kubernetes` daemon opens no adapter and does not publish it.
 - **Requests:** `substrate_http_requests_total`, `substrate_http_request_duration_seconds`,
   `substrate_refusals_total`.
 - **Dispatch:** `substrate_dispatch_total`, `substrate_dispatch_duration_seconds`.
@@ -262,8 +266,10 @@ first released in 0.16.1.
 
 What it does not do yet:
 
-- **Exec is not served.** The probe proves neither the four Linux confinement facts nor
-  `confinement.no-egress`, so every exec start is refused `exec.sandbox-unavailable`.
+- **Exec is served only on observed confinement.** From 0.18.0 the probe publishes the confinement
+  families, `confinement.whole-tree-kill` and `confinement.no-egress` from what it observed, and an
+  exec start is admitted only when all six facts of design 34 § 6.4 are present; otherwise it is
+  refused `exec.sandbox-unavailable`. The four Linux confinement facts are never published.
 - **Exec on a cluster is unverified.** On kind a Pod under the default-deny policy still reached
   the API server, so no enforced egress denial was observed and `confinement.no-egress` stays
   absent.
@@ -352,7 +358,7 @@ absent from the snapshot keeps the daemon unready until it restarts.
 | `workspace.adopt` | `workspace.adopt-unserved` (501), before any name is looked up |
 | a workspace storage quota | `workspace.storage-quota-unserved` (501) |
 | a workspace source other than empty | `workspace.source-unserved` (501) |
-| any exec start | `exec.sandbox-unavailable` (501) |
+| an exec start whose snapshot lacks any of the six observed confinement facts | `exec.sandbox-unavailable` (501) |
 
 A lost Lease makes every fact absent. After a restart, a workspace whose claim is found and whose
 keeper answers its handshake is ready again, and an exec still running reads `unknown` and its Pod

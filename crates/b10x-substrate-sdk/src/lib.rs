@@ -41,13 +41,14 @@ pub use model::{
     WorkspaceState,
 };
 pub use substrate_wire::{
-    AppliedConfinement, DigestedFileSlice, DirectoryEntry, DirectoryEntryKind, DirectoryPage,
-    ExecMeasurement, ExecUsage, ExecutionCapsuleInput, ExpectedFileState, FileEditInput,
-    FileMutationResult, FilePatchInput, GitBaselineFile, GitChange, GitChangeSet, GitChangeSide,
-    GitChangeStatus, GitChangesQuery, GitSource, GitSourceEnvelope, LinePatchEdit,
-    MAX_EVENT_PAGE_ITEMS, MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS, MAX_PTY_WINDOW_COLUMNS,
-    MAX_PTY_WINDOW_ROWS, MAX_SNAPSHOT_PAGE_ITEMS, MetricsResourceKind, PipeSessionCapabilities,
-    ProcessStreamEnd, ProcessStreamGap, ProcessStreamItem, ProcessStreamItemKind, PtyWindow,
+    AppliedConfinement, ConfinementFamily, ConfinementProperty, ConfinementRequires,
+    DigestedFileSlice, DirectoryEntry, DirectoryEntryKind, DirectoryPage, ExecMeasurement,
+    ExecUsage, ExecutionCapsuleInput, ExpectedFileState, FileEditInput, FileMutationResult,
+    FilePatchInput, GitBaselineFile, GitChange, GitChangeSet, GitChangeSide, GitChangeStatus,
+    GitChangesQuery, GitSource, GitSourceEnvelope, LinePatchEdit, MAX_EVENT_PAGE_ITEMS,
+    MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS, MAX_PTY_WINDOW_COLUMNS, MAX_PTY_WINDOW_ROWS,
+    MAX_SNAPSHOT_PAGE_ITEMS, MetricsResourceKind, PipeSessionCapabilities, ProcessStreamEnd,
+    ProcessStreamGap, ProcessStreamItem, ProcessStreamItemKind, PtyWindow,
     RESOURCE_USAGE_SAMPLE_INTERVAL_MS, ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest,
     SessionAttachmentState, SessionMode, SnapshotMetadata, SnapshotPage, StorageLimit,
     TextMatchPolicy, UnifiedDiff, WorkspaceAccess, WorkspaceTree, WorkspaceTreeEntry,
@@ -1400,6 +1401,7 @@ impl PipeSessionBuilder {
                 set: self.environment,
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: self.workspace.client.machine().capability_snapshot,
                 network: self.network,
                 aperture: self.aperture,
@@ -1843,6 +1845,7 @@ impl CommandBuilder {
                 set: self.environment,
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot,
                 network: self.network,
                 aperture: self.aperture,
@@ -2230,6 +2233,7 @@ mod tests {
                 set: BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                 network: substrate_wire::NetworkMode::None,
                 aperture: None,
@@ -2288,7 +2292,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.25.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.26.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(

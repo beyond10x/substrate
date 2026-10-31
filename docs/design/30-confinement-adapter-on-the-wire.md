@@ -1,8 +1,9 @@
 # Design 30: what the wire says about the confinement adapter
 
-Status: proposed, 2026-10-28. Owned by `story:confinement-adapter-on-the-wire`. Carried, once
-accepted, by a successor bundle `0.25.0` or the next free version after it (`0.24.0` is taken by
-an open change). No code before acceptance (invariant 8).
+Status: accepted, 2026-10-31, with the recommended answer to each of D1 to D10 of § 9
+([ADR 0048](../../adr/0048-the-wire-states-what-a-confinement-adapter-proves-never-its-name.md)).
+Proposed 2026-10-28. Owned by `story:confinement-adapter-on-the-wire`. Carried by the successor
+bundle `0.26.0`, the next free version under D10: `0.25.0` is design 34 § 11's.
 
 Invariant 8 asks for a design before a contract change. This note settles the question the
 confinement epic left open: what the wire states about which adapter served a request, and how a
@@ -257,8 +258,10 @@ AGENTS.md invariant 6 records it. Every released bundle stays byte for byte.
   `confines_execution` keeps working on Linux and correctly withholds `run` on macOS, because
   `exec.cgroup-limits` is absent there. Moving it to `confinement.family.limits` is harness's own
   change after its pin moves. Not done here.
-- **loom and takt** use the host API in process. They are unaffected and may keep naming adapters
-  there.
+- **loom and takt** use the host API in process and may keep naming adapters there. The Rust type
+  `AppliedConfinement` gains `requires` and its `cgroup` becomes `Option<String>`, so a crate
+  that constructs or exhaustively destructures it (loom does, in
+  `loom-intake-slice/src/confinement.rs`) must adapt when its substrate pin moves.
 - **mantle** is unaffected until its SDK pin moves. Its fixtures' `"driver": "host"` stays valid.
 
 ## 9. Decisions left open, each with a recommendation

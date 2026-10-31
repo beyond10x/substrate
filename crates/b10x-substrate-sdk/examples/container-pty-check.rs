@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }).await.map_err(|_| "observed metrics deadline expired")??;
         let exec = client.get_exec(&exec_id).await?;
-        let cgroup = Path::new("/sys/fs/cgroup").join(&exec.observation().applied.as_ref().ok_or("missing applied isolation")?.cgroup);
+        let cgroup = Path::new("/sys/fs/cgroup").join(exec.observation().applied.as_ref().ok_or("missing applied isolation")?.cgroup.as_deref().ok_or("missing exec cgroup")?);
         let pids: Vec<u32> = std::fs::read_to_string(cgroup.join("cgroup.procs"))?.split_whitespace().map(str::parse).collect::<Result<_, _>>()?;
         require(pids.len() >= 2, "running PTY has no process tree")?;
         let descendant: u32 = String::from_utf8(workspace.read_file("descendant.pid", 0, 32).await?.bytes)?.trim().parse()?;

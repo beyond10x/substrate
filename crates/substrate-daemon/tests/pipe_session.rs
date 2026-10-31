@@ -274,6 +274,7 @@ impl Driver for PipeFixtureDriver {
                 observed_at: Utc::now(),
                 requested: input.exec.sandbox.clone(),
                 applied: Some(AppliedConfinement {
+                    requires: None,
                     writable_roots: Vec::new(),
                     workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
                     read_only_roots: Vec::new(),
@@ -281,7 +282,7 @@ impl Driver for PipeFixtureDriver {
                     secret_slots: Vec::new(),
                     workdir: None,
                     capability_snapshot: SNAPSHOT.to_owned(),
-                    cgroup: format!("fixture-{id}"),
+                    cgroup: Some(format!("fixture-{id}")),
                     filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
                     network: AppliedNetwork::None,
                     profile: SandboxProfile::Workspace,
@@ -1768,6 +1769,7 @@ async fn the_two_entry_points_name_one_refusal_for_a_pty_start_that_earns_two() 
                 set: std::collections::BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: driver.machine().snapshot.clone(),
                 network: substrate_wire::NetworkMode::None,
                 aperture: None,

@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: decision-blocker:namespace-exec-needs-design-30
 kind: decision-blocker
-status: open
+status: cleared
 title: Accept design 30, so the namespace driver can admit an exec
 relations:
 - blocks: story:confinement-adapter-on-the-wire
-revision: 1
+revision: 3
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-31T11:27:17Z", actor: "human:timo", revision: 2}
 ---
 # Decision blocker: accept design 30, so the namespace driver can admit an exec
 
@@ -50,3 +52,10 @@ B builds a second shape for the same facts, and C leaves the blocker in place.
 
 Filed 2026-10-30 by the substrate wave session (wave 2026-10-30), because no proposed story in this
 store covers the exec refusal.
+
+## Answer
+
+Cleared 2026-10-31 with option **A**. The operator's answer, verbatim: "take decissions like the
+above for me (A)". Recorded in `approval-record:design-30-accepted` and
+[ADR 0048](../../../adr/0048-the-wire-states-what-a-confinement-adapter-proves-never-its-name.md);
+design 30 is `accepted`, and its bundle is `0.26.0` (D10).

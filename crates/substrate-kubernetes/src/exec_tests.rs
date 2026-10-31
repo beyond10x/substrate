@@ -274,6 +274,7 @@ fn input(argv: &[&str]) -> ExecStartInput {
             set: BTreeMap::from([("GREETING".to_owned(), "$(HOME) $$".to_owned())]),
         },
         sandbox: ConfinementRequest {
+            requires: None,
             capability_snapshot: SNAPSHOT.to_owned(),
             network: NetworkMode::None,
             aperture: None,
@@ -1844,5 +1845,65 @@ async fn adversary_a_deletion_the_driver_did_not_ask_for_starts_no_bound() {
     );
 }
 
+/// Security review, wave 2026-10-31 (design 30 § 4.4, ADR 0048 D4): the daemon now admits a
+/// namespace-driver start on the neutral set (design 34 § 6.4), so this driver's applied record
+/// reaches the client wire. A start carrying `sandbox.requires` that the daemon checked and
+/// admitted is echoed in the applied record, as the host driver echoes it.
+#[tokio::test]
+async fn security_the_applied_record_echoes_the_requires_the_start_carried() {
+    let rig = rig().await;
+    let mut start = input(&["/bin/true"]);
+    start.sandbox.requires = Some(substrate_wire::ConfinementRequires {
+        families: Some(vec![
+            substrate_wire::ConfinementFamily::ProcessRun,
+            substrate_wire::ConfinementFamily::Limits,
+        ]),
+        facts: Some(vec![substrate_wire::ConfinementProperty::WholeTreeKill]),
+    });
+    let observation = rig.started("exec_requires", &start).await;
+    let applied = observation
+        .resource
+        .applied
+        .expect("a running exec states what was applied");
+    assert_eq!(
+        applied.requires, start.sandbox.requires,
+        "ADR 0048 D4: the applied record echoes `requires` when the start carried it"
+    );
+}
+
 #[path = "restart_tests.rs"]
 mod restart;
+
+/// Adversary, wave 2026-10-31 (design 30 § 4.4, claim 2): the applied record echoes exactly the
+/// `sandbox.requires` that was checked. Design 34 § 6.4 now admits an exec on the neutral set, so
+/// a start whose requirement the daemon checked and found held reaches this driver; the record it
+/// observes must say which requirement held, as the host driver's does.
+#[tokio::test]
+async fn adversary_w1031_the_applied_record_echoes_the_starts_requires() {
+    let rig = rig().await;
+    let requires = substrate_wire::ConfinementRequires {
+        families: Some(vec![
+            substrate_wire::ConfinementFamily::ProcessRun,
+            substrate_wire::ConfinementFamily::Limits,
+        ]),
+        facts: Some(vec![substrate_wire::ConfinementProperty::WholeTreeKill]),
+    };
+    let mut start = input(&["/bin/true"]);
+    start.sandbox.requires = Some(requires.clone());
+    let observation = rig.started("exec_requires", &start).await;
+    assert_eq!(
+        observation.resource.requested.requires.as_ref(),
+        Some(&requires),
+        "the requested half keeps the start's sandbox"
+    );
+    let applied = observation
+        .resource
+        .applied
+        .as_ref()
+        .expect("a running exec has an applied record");
+    assert_eq!(
+        applied.requires.as_ref(),
+        Some(&requires),
+        "design 30 § 4.4: the applied record echoes the requires that was checked"
+    );
+}

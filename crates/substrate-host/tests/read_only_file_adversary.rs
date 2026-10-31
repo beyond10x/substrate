@@ -98,6 +98,7 @@ fn exec_input(
             set: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
         },
         sandbox: ConfinementRequest {
+            requires: None,
             capability_snapshot: snapshot.to_owned(),
             network: NetworkMode::None,
             aperture: None,

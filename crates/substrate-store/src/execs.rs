@@ -1004,6 +1004,7 @@ mod tests {
                 state,
                 observed_at: "2026-08-13T12:00:01Z".parse().expect("time"),
                 requested: ConfinementRequest {
+                    requires: None,
                     capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                     network: NetworkMode::None,
                     aperture: None,

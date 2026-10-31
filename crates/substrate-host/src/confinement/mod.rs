@@ -107,6 +107,23 @@ pub const ADAPTERS: [AdapterName; 6] = [
     AdapterName::Pod,
 ];
 
+impl AdapterName {
+    /// The adapter's name as `spec/confinement` spells it. The client wire never carries it
+    /// (design 30 § 3, ADR 0048 D1); the operational listener's `substrate_adapter_info` label
+    /// does (D7).
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::Local => "local",
+            Self::Macos => "macos",
+            Self::Oci => "oci",
+            Self::Pod => "pod",
+            Self::Systemd => "systemd",
+        }
+    }
+}
+
 /// What `open` is asked for. Each request type lives beside its adapter.
 #[derive(Debug, Clone)]
 pub enum AdapterRequest {
@@ -916,6 +933,17 @@ mod tests {
     use super::*;
 
     const REASON: &str = "the test admits a profile on purpose";
+
+    /// The operator's label is the generated name, never a second spelling of it.
+    #[test]
+    fn an_adapters_name_is_its_contract_word() {
+        for adapter in ADAPTERS {
+            assert_eq!(
+                serde_json::to_value(&adapter).expect("adapter name serializes"),
+                serde_json::json!(adapter.name())
+            );
+        }
+    }
 
     fn scoped(subtrees: &[&str]) -> WorkspaceAccess {
         WorkspaceAccess::Scoped {

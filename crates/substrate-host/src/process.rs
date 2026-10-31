@@ -1316,9 +1316,10 @@ impl ProcessRuntime {
 
         let applied_capsule = capsule.as_ref().map(|value| value.applied.clone());
         let applied = AppliedConfinement {
+            requires: input.sandbox.requires.clone(),
             writable_roots: applied_writable_roots,
             capability_snapshot: self.capability.snapshot.clone(),
-            cgroup: cgroup.name().to_owned(),
+            cgroup: Some(cgroup.name().to_owned()),
             filesystem: if applied_capsule.is_some() {
                 AppliedFilesystem::WorkspaceReadWriteCapsuleReadOnlySystemReadOnly
             } else {
@@ -2390,6 +2391,19 @@ impl ProcessRuntime {
                 "exec",
             ));
         }
+        // The applied record echoes `sandbox.requires`, so the driver checks it too: a caller that
+        // reaches the driver without the daemon is never told a requirement held unchecked. In
+        // the daemon's order: its shape, then the stale snapshot, then what the snapshot serves,
+        // before every field-specific check, so both name the same refusal for one start.
+        admit_requires_shape(&input.sandbox)?;
+        if input.sandbox.capability_snapshot != self.capability.snapshot {
+            return Err(DriverError::refused(
+                "exec.capability-stale",
+                "The admitted capability snapshot is stale.",
+                "capability_snapshot",
+            ));
+        }
+        admit_confinement_requires(&input.sandbox, &self.capability.facts)?;
         let read_only_roots = Self::admit_read_only_roots(
             &input.read_only_roots,
             self.capability.facts.exec_read_only_roots.as_ref(),
@@ -2408,13 +2422,6 @@ impl ProcessRuntime {
             self.capability.facts.secrets_slots.as_ref(),
             &input.secret_slots,
         )?;
-        if input.sandbox.capability_snapshot != self.capability.snapshot {
-            return Err(DriverError::refused(
-                "exec.capability-stale",
-                "The admitted capability snapshot is stale.",
-                "capability_snapshot",
-            ));
-        }
         // Where `workspace.is_dir()` stood, which followed a link. The pinned directory is the one
         // bubblewrap binds, so an entry replaced after adopt is refused by name before any mount,
         // and the writable subtrees are checked beneath it, never by walking the path.
@@ -3912,6 +3919,40 @@ fn sandbox_unavailable() -> DriverError {
     )
 }
 
+/// The lexical half of design 30 § 4.4, the wire crate's rule: request shape, so the driver
+/// answers it before the stale snapshot, as the daemon does.
+fn admit_requires_shape(sandbox: &substrate_wire::ConfinementRequest) -> Result<(), DriverError> {
+    match sandbox.requires.as_ref() {
+        Some(requires) if substrate_wire::validate_confinement_requires(requires).is_err() => {
+            Err(DriverError::refused(
+                "request.schema-invalid",
+                "The confinement requirement is empty or names a family or fact twice.",
+                "sandbox.requires",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The serving half of design 30 § 4.4: the wire crate's refusal, as the daemon answers it, read
+/// against the facts this driver published.
+fn admit_confinement_requires(
+    sandbox: &substrate_wire::ConfinementRequest,
+    facts: &substrate_wire::CapabilityFacts,
+) -> Result<(), DriverError> {
+    let Some(requires) = sandbox.requires.as_ref() else {
+        return Ok(());
+    };
+    match substrate_wire::confinement_requires_refusal(requires, facts) {
+        Some((refusal, message)) => Err(DriverError::unserved(
+            refusal.code,
+            message,
+            refusal.address.unwrap_or("sandbox.requires"),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The driver's half of ADR 0038 admission: the wire crate's rule and refusal, as the daemon
 /// answers it.
 fn admit_writable_roots(
@@ -4632,6 +4673,7 @@ mod tests {
                 state: substrate_wire::ExecState::Running,
                 observed_at: chrono::Utc::now(),
                 requested: substrate_wire::ConfinementRequest {
+                    requires: None,
                     capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                     network: NetworkMode::None,
                     aperture: None,
@@ -4671,9 +4713,10 @@ mod tests {
                 signal: None,
             });
             observation.resource.applied = Some(substrate_wire::AppliedConfinement {
+                requires: None,
                 writable_roots: Vec::new(),
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
-                cgroup: "ex_workdir".to_owned(),
+                cgroup: Some("ex_workdir".to_owned()),
                 filesystem: substrate_wire::AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
                 network: substrate_wire::AppliedNetwork::None,
                 profile: SandboxProfile::Workspace,
@@ -4755,6 +4798,7 @@ mod tests {
         apertures: &[&str],
     ) -> substrate_wire::ConfinementRequest {
         substrate_wire::ConfinementRequest {
+            requires: None,
             capability_snapshot: format!("sha256:{}", "0".repeat(64)),
             network: NetworkMode::Aperture,
             aperture: aperture.map(str::to_owned),
@@ -4887,6 +4931,7 @@ mod tests {
         let published = crate::egress::egress_apertures_fact(&config.egress_apertures, true)
             .expect("a verified mechanism publishes");
         let sandbox = substrate_wire::ConfinementRequest {
+            requires: None,
             capability_snapshot: format!("sha256:{}", "7".repeat(64)),
             network: NetworkMode::Aperture,
             aperture: Some("model".to_owned()),
@@ -5164,6 +5209,7 @@ mod tests {
                 set: BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: format!("sha256:{}", "8".repeat(64)),
                 network: NetworkMode::None,
                 aperture: None,
@@ -5193,6 +5239,106 @@ mod tests {
             panic!("stale snapshot must refuse before dispatch");
         };
         assert_eq!(error.code, "exec.capability-stale");
+    }
+
+    /// Design 30 § 4.4 at the driver: the applied record echoes `sandbox.requires`, so a start
+    /// that reaches the driver without the daemon is refused by the same rule, by name, before
+    /// anything is touched; one that names no requirement goes on to the workspace as before.
+    #[tokio::test]
+    async fn the_driver_refuses_a_requirement_its_snapshot_does_not_state() {
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 7,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts {
+                confinement_family_workspace: Some(true),
+                confinement_family_audit: Some(true),
+                ..CapabilityFacts::default()
+            },
+        };
+        let runtime = ProcessRuntime::new(HostConfig::minimum("/does/not/exist"), capability)
+            .expect("runtime");
+        let start = |requires: serde_json::Value| {
+            let mut sandbox = serde_json::json!({
+                "require": true,
+                "profile": "workspace",
+                "network": "none",
+                "capability_snapshot": snapshot,
+            });
+            if !requires.is_null() {
+                sandbox["requires"] = requires;
+            }
+            serde_json::from_value::<ExecStartInput>(serde_json::json!({
+                "workspace": "ws_test",
+                "argv": ["/usr/bin/true"],
+                "env": {"allow": [], "set": {}},
+                "sandbox": sandbox,
+                "limits": {
+                    "timeout_ms": 5_000,
+                    "output_bytes": 65_536,
+                    "processes": 16,
+                    "memory_bytes": 67_108_864,
+                    "cpu_millis": 1_000,
+                },
+                "wait": false,
+            }))
+            .expect("start input")
+        };
+        for (requires, code, address) in [
+            (
+                serde_json::json!({"families": ["workspace", "network-ingress"]}),
+                substrate_wire::CONFINEMENT_FAMILY_UNSERVED,
+                "sandbox.requires.families",
+            ),
+            (
+                serde_json::json!({"families": ["audit"], "facts": ["whole-tree-kill"]}),
+                substrate_wire::CONFINEMENT_FACT_UNSERVED,
+                "sandbox.requires.facts",
+            ),
+            (
+                serde_json::json!({"families": []}),
+                "request.schema-invalid",
+                "sandbox.requires",
+            ),
+        ] {
+            let DispatchOutcome::NotDispatched(error) = runtime
+                .start(
+                    "ex_test",
+                    std::path::Path::new("/does/not/exist"),
+                    &start(requires),
+                )
+                .await
+            else {
+                panic!("an unmet requirement must refuse before dispatch");
+            };
+            assert_eq!(
+                (error.code, error.address.as_deref()),
+                (code, Some(address))
+            );
+        }
+        for requires in [
+            serde_json::Value::Null,
+            serde_json::json!({"families": ["workspace", "audit"]}),
+        ] {
+            let DispatchOutcome::NotDispatched(error) = runtime
+                .start(
+                    "ex_test",
+                    std::path::Path::new("/does/not/exist"),
+                    &start(requires),
+                )
+                .await
+            else {
+                panic!("a missing workspace must refuse before dispatch");
+            };
+            assert!(
+                !error.code.starts_with("confinement.") && error.code != "request.schema-invalid",
+                "{error:?}"
+            );
+        }
     }
 
     /// Runs `action` and returns its result with the number of times the kernel reported `path`
@@ -5377,6 +5523,7 @@ mod tests {
                 set: BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: snapshot,
                 network: NetworkMode::None,
                 aperture: None,
@@ -5658,6 +5805,7 @@ mod tests {
                 set: BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: snapshot.to_owned(),
                 network: NetworkMode::None,
                 aperture: None,
@@ -8453,6 +8601,7 @@ mod adversary_unknown_exec_retry {
                 set: std::collections::BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: snapshot.to_owned(),
                 network: NetworkMode::None,
                 aperture: None,

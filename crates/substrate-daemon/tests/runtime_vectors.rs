@@ -48,9 +48,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.25.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.26.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "853d7365a56f0d8dc97fe5feb87ce57285a34bbf7a0f6eb05616d6010fc4fc00";
+    "f6216ea867d743b8efbfddb86b7097ddcddd261a10dbca3f7a775ba1a6687403";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2983,7 +2983,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.25.0/operations.json");
+            .join("contracts/substrate-wire/0.26.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -3638,6 +3638,8 @@ async fn check_http_journey(
     passed += check_workdir_and_aperture_list_shape(daemon, &workspace, &snapshot).await;
     passed +=
         check_writable_roots_refused(daemon, &workspace, &snapshot, cgroup_root.is_some()).await;
+    passed +=
+        check_confinement_requires(daemon, &workspace, &snapshot, cgroup_root.is_some()).await;
 
     if let Some(cgroup_root) = cgroup_root {
         passed += check_confined_writable_roots(daemon, &workspace, &snapshot, writable).await;
@@ -7243,12 +7245,333 @@ async fn check_git_root_refusals(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Confinement families, properties and `sandbox.requires` (design 30, ADR 0048)
+// ---------------------------------------------------------------------------------------------
+
+/// `linux`'s families on a host that proves the exec floor, with the apertures this runner
+/// declares, in ADR 0044's order (design 30 § 4.3): every family but `network-ingress`.
+const LINUX_FAMILIES: [&str; 9] = [
+    "process-run",
+    "process-watch",
+    "output-read",
+    "wait",
+    "workspace",
+    "filesystem-view",
+    "network-egress",
+    "limits",
+    "audit",
+];
+/// `linux`'s mechanism-neutral properties, in the `Fact` order.
+const LINUX_PROPERTIES: [&str; 3] = [
+    "whole-tree-kill",
+    "ipc-socket-allowlist",
+    "ipc-signals-contained",
+];
+/// Without a delegated cgroup no exec floor is proved: guarded workspace I/O and the audit record
+/// are all that stand.
+const PORTABLE_FAMILIES: [&str; 2] = ["workspace", "audit"];
+/// Names `driver_version` never carries (design 30 § 4.1).
+const ADAPTER_AND_MECHANISM_NAMES: [&str; 8] = [
+    "linux",
+    "macos",
+    "local",
+    "systemd",
+    "oci",
+    "pod",
+    "bubblewrap",
+    "seatbelt",
+];
+
+/// An exec start of `/usr/bin/true` whose `sandbox` carries `requires`.
+fn exec_requiring(workspace: &str, snapshot: &str, wait: bool, requires: Value) -> Value {
+    let mut input = ExecInput::new(workspace, snapshot, &["/usr/bin/true"], wait).build();
+    input["sandbox"]["requires"] = requires;
+    input
+}
+
+/// Design 30 §§ 4.3 and 4.4 on the shipped daemon: the families and properties the host
+/// published, each `true`, and no adapter or mechanism name anywhere on the machine; then a start
+/// that requires what the snapshot does not hold, refused by the first family or property's name
+/// before dispatch and recorded as refused, and a malformed `requires` refused as schema-invalid.
+/// Delegated, a run admitted under `requires` echoes it on its applied record, and a session start
+/// is held to `requires` as an exec start is.
+#[allow(clippy::too_many_lines)] // One case per refusal, in the order the daemon checks them.
+async fn check_confinement_requires(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    delegated: bool,
+) -> usize {
+    let mut passed = 0;
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_requires_machine", None)
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    let facts = machine["result"]["facts"]
+        .as_object()
+        .expect("facts object");
+    let published = |prefix: &str| {
+        let mut names = facts
+            .iter()
+            .filter_map(|(name, value)| {
+                let name = name.strip_prefix(prefix)?;
+                assert_eq!(
+                    value,
+                    &json!(true),
+                    "{prefix}{name} is published true or absent"
+                );
+                (!name.starts_with("family.")).then(|| name.to_owned())
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    let sorted = |names: &[&str]| {
+        let mut names = names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    let (families, properties) = if delegated {
+        (sorted(&LINUX_FAMILIES), sorted(&LINUX_PROPERTIES))
+    } else {
+        (sorted(&PORTABLE_FAMILIES), Vec::new())
+    };
+    assert_eq!(published("confinement.family."), families, "{machine}");
+    assert_eq!(published("confinement."), properties, "{machine}");
+    assert_eq!(machine["result"]["driver"], "host");
+    assert!(machine["result"].get("adapter").is_none(), "{machine}");
+    let version = text(&machine["result"]["driver_version"]).to_ascii_lowercase();
+    for name in ADAPTER_AND_MECHANISM_NAMES {
+        assert!(
+            !version.contains(name),
+            "driver_version names {name}: {version}"
+        );
+    }
+    passed += 1;
+
+    // The first unserved family in ADR 0044's order, whatever order the start wrote: `limits` is
+    // listed first and is unserved on the portable lane too, but `network-ingress` precedes it.
+    let operation = "01JDESIGN30FAMILYUNSERVED";
+    let refused = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_requires_family",
+            Some(&mutation(
+                operation,
+                &exec_requiring(
+                    workspace,
+                    snapshot,
+                    false,
+                    json!({ "families": ["limits", "network-ingress"] }),
+                ),
+            )),
+        )
+        .await;
+    expect_error_at(
+        &refused,
+        501,
+        "confinement.family-unserved",
+        "sandbox.requires.families",
+    );
+    assert_eq!(
+        refused.1["error"]["message"],
+        "Confinement family network-ingress is not served by this driver.",
+        "{}",
+        refused.1
+    );
+    assert_eq!(
+        ledger_row(daemon, operation, "req_requires_family_ledger").await["state"],
+        "refused"
+    );
+    passed += 1;
+
+    // Families first, then the first unproved property in the `Fact` order: `whole-tree-kill`
+    // without a delegated cgroup, `private-tmpdir` (which `linux` never proves) with one.
+    let operation = "01JDESIGN30FACTUNSERVED01";
+    let refused = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_requires_fact",
+            Some(&mutation(
+                operation,
+                &exec_requiring(
+                    workspace,
+                    snapshot,
+                    false,
+                    json!({
+                        "families": ["workspace"],
+                        "facts": ["private-tmpdir", "whole-tree-kill"]
+                    }),
+                ),
+            )),
+        )
+        .await;
+    expect_error_at(
+        &refused,
+        501,
+        "confinement.fact-unserved",
+        "sandbox.requires.facts",
+    );
+    let unproved = if delegated {
+        "private-tmpdir"
+    } else {
+        "whole-tree-kill"
+    };
+    assert_eq!(
+        refused.1["error"]["message"],
+        format!("Confinement fact {unproved} is not proved by this driver."),
+        "{}",
+        refused.1
+    );
+    assert_eq!(
+        ledger_row(daemon, operation, "req_requires_fact_ledger").await["state"],
+        "refused"
+    );
+    passed += 1;
+
+    // An unknown name is outside the closed enum.
+    let operation = "01JDESIGN30UNKNOWNNAME001";
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_requires_unknown",
+                Some(&mutation(
+                    operation,
+                    &exec_requiring(
+                        workspace,
+                        snapshot,
+                        false,
+                        json!({ "families": ["teleport"] }),
+                    ),
+                )),
+            )
+            .await,
+        422,
+        "request.schema-invalid",
+    );
+    assert_eq!(
+        ledger_row(daemon, operation, "req_requires_unknown_ledger").await["state"],
+        "refused"
+    );
+    passed += 1;
+
+    // What the enums cannot say: an empty requirement, an empty list and a name listed twice.
+    for (index, requires) in [
+        json!({}),
+        json!({ "facts": [] }),
+        json!({ "families": ["audit", "audit"] }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let operation = format!("01JDESIGN30MALFORMED000{index}");
+        let request_id = format!("req_requires_malformed_{index}");
+        expect_error_at(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    &request_id,
+                    Some(&mutation(
+                        &operation,
+                        &exec_requiring(workspace, snapshot, false, requires.clone()),
+                    )),
+                )
+                .await,
+            422,
+            "request.schema-invalid",
+            "input",
+        );
+        assert_eq!(
+            ledger_row(daemon, &operation, &format!("{request_id}_ledger")).await["state"],
+            "refused",
+            "{requires}"
+        );
+    }
+    passed += 1;
+
+    if !delegated {
+        return passed;
+    }
+
+    // Admitted under `requires`: every family and property it names holds, the run executes, and
+    // its applied record echoes the requirement it was held to beside the cgroup it applied.
+    let requires = json!({
+        "families": ["process-run", "limits"],
+        "facts": ["whole-tree-kill", "ipc-signals-contained"]
+    });
+    let (status, executed) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_requires_admitted",
+            Some(&mutation(
+                "01JDESIGN30ADMITTED00001",
+                &exec_requiring(workspace, snapshot, true, requires.clone()),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{executed}");
+    assert_eq!(executed["result"]["state"], "exited", "{executed}");
+    assert_eq!(executed["result"]["exit"], EXITED_CLEANLY(), "{executed}");
+    assert_eq!(executed["result"]["requested"]["requires"], requires);
+    assert_eq!(executed["result"]["applied"]["requires"], requires);
+    assert!(
+        executed["result"]["applied"]["cgroup"].is_string(),
+        "{executed}"
+    );
+    passed += 1;
+
+    // A session start embeds the exec start's `sandbox` (design 27), so it is held to the same
+    // requirement and refused by the same name before dispatch.
+    let operation = "01JDESIGN30SESSIONFAMILY1";
+    expect_error_at(
+        &daemon
+            .call(
+                "POST",
+                "/v1/sessions",
+                "req_requires_session",
+                Some(&mutation(
+                    operation,
+                    &session_with_exec_field(
+                        exec_requiring(
+                            workspace,
+                            snapshot,
+                            false,
+                            json!({ "families": ["network-ingress"] }),
+                        ),
+                        "lease_ttl_ms",
+                        json!(60_000),
+                    ),
+                )),
+            )
+            .await,
+        501,
+        "confinement.family-unserved",
+        "sandbox.requires.families",
+    );
+    assert_eq!(
+        ledger_row(daemon, operation, "req_requires_session_ledger").await["state"],
+        "refused"
+    );
+    passed += 1;
+    passed
+}
+
+// ---------------------------------------------------------------------------------------------
 // The lane
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 119;
-const DELEGATED_CASES: usize = 182;
+const PORTABLE_CASES: usize = 124;
+const DELEGATED_CASES: usize = 189;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

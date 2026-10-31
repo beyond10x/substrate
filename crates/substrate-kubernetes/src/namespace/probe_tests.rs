@@ -4,19 +4,28 @@
 //! (or, in the negative case, of an argv something expanded). The keeper's `fs` calls run the real
 //! executor against a temporary directory. Every case runs once, in seconds.
 
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use substrate_executor::Handshake;
-use substrate_executor::frame::{Applied, Control, ExitRecord, Frame, Stream};
+use substrate_executor::frame::{Applied, Control, ExitRecord, Frame, Refusal, Stream};
 use substrate_executor::message::{Request, Response, read_request};
+use substrate_executor::probe::{
+    EgressAttempt, EgressOutcome, EgressTarget, HEARTBEAT_FILE, Observation, ProbeTargets,
+    TARGETS_ENV,
+};
 use substrate_executor::serve::{open_workspace, serve};
 use substrate_executor::spec::RunSpec;
 use substrate_host::{BackendKind, BackendRole, Driver, DriverErrorClass};
 use substrate_kubernetes_client::fake::{ExecAnswer, ExecRequest, FakeCluster, Fault};
 use substrate_kubernetes_client::{Api, ListForm, Method};
-use substrate_wire::{CapabilitySnapshot, HostDriverKind, Signal};
+use substrate_wire::{
+    CapabilityFacts, CapabilitySnapshot, ConfinementFamily, ConfinementProperty, HostDriverKind,
+    Signal,
+};
 
 use super::NamespaceDriver;
 use crate::driver_tests::{
@@ -40,14 +49,70 @@ enum Child {
     Expanded,
 }
 
+/// How the played kubelet runs the probe Pod: its child's argv line, the observation line that
+/// follows it, what becomes of the heartbeat file in the probe's volume, and how the run ends.
+#[derive(Clone)]
+struct Play {
+    child: Child,
+    observed: Option<String>,
+    heartbeat: Heartbeat,
+    end: End,
+}
+
+impl Play {
+    /// The default run: the argv read back, no observation line, no heartbeat, exit 0.
+    const fn of(child: Child) -> Self {
+        Self {
+            child,
+            observed: None,
+            heartbeat: Heartbeat::Absent,
+            end: End::Exit,
+        }
+    }
+
+    fn observing(observation: &Observation, heartbeat: Heartbeat) -> Self {
+        Self {
+            observed: Some(observation.line()),
+            heartbeat,
+            ..Self::of(Child::Exact)
+        }
+    }
+}
+
+/// The heartbeat file the probe's targets name, as the played kubelet leaves it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Heartbeat {
+    /// Never written: the keeper's `stat` finds nothing.
+    Absent,
+    /// Written before the container shows `terminated`, never again.
+    Stopped,
+    /// Written every 100 ms, before and after the container shows `terminated`.
+    Moving,
+}
+
+/// How the played probe Pod ends.
+#[derive(Clone, Copy, Debug)]
+enum End {
+    /// The executor's frames, its exit record agreeing with the API's exit code 0.
+    Exit,
+    /// The executor read other bounds back and refused the run, exit 125.
+    LimitsUnapplied,
+    /// A line that is not a frame follows the applied record.
+    NotAFrame,
+    /// The exit record states 0 while the API shows exit code 1.
+    CodeDisagrees,
+    /// The Pod is deleted before its container shows an end.
+    Gone,
+}
+
 struct Rig {
     fake: Arc<FakeCluster>,
     clock: Arc<ManualClock>,
     driver: NamespaceDriver,
     ledger: Arc<MemoryLedger>,
-    /// The argv of every probe Pod the kubelet ran, in order.
-    ran: Arc<Mutex<Vec<Vec<String>>>>,
-    _root: tempfile::TempDir,
+    /// Every probe Pod the kubelet ran, as the driver created it, in order.
+    ran: Arc<Mutex<Vec<Value>>>,
+    root: tempfile::TempDir,
     kubelet: tokio::task::JoinHandle<()>,
 }
 
@@ -65,16 +130,26 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// and handshake (or `handshake`, when a case states another line), and whose kubelet plays
 /// `child`.
 async fn rig(child: Child, handshake: Option<String>) -> Rig {
-    rig_with(child, handshake, None).await
+    rig_with(Play::of(child), handshake, None).await
 }
 
 /// [`rig`] whose keeper answers `check` with `check` instead of running the executor's proofs,
 /// as an executor that proves less, or answers in an older shape, would.
 async fn rig_answering_check(child: Child, check: Value) -> Rig {
-    rig_with(child, None, Some(check)).await
+    rig_with(Play::of(child), None, Some(check)).await
 }
 
-async fn rig_with(child: Child, handshake: Option<String>, check: Option<Value>) -> Rig {
+/// The keeper's whole check, stating the Kubernetes Service host its environment holds.
+fn check_with_host(host: &str) -> Value {
+    json!({
+        "openat2_beneath": true,
+        "symlink_escape_refused": true,
+        "atomic_replace": true,
+        "kubernetes_service_host": host,
+    })
+}
+
+async fn rig_with(play: Play, handshake: Option<String>, check: Option<Value>) -> Rig {
     let fake = Arc::new(passing_fake());
     let clock = ManualClock::new();
     let (driver, ledger) = driver(&fake, &clock);
@@ -131,8 +206,9 @@ async fn rig_with(child: Child, handshake: Option<String>, check: Option<Value>)
     let kubelet = tokio::spawn(play_kubelet(
         admin(&fake),
         Arc::clone(&fake),
-        child,
+        play,
         Arc::clone(&ran),
+        root.path().to_path_buf(),
     ));
     Rig {
         fake,
@@ -140,17 +216,19 @@ async fn rig_with(child: Child, handshake: Option<String>, check: Option<Value>)
         driver,
         ledger,
         ran,
-        _root: root,
+        root,
         kubelet,
     }
 }
 
-/// Binds every probe keeper to `NODE` and ends every probe Pod with the log `child` makes.
+/// Binds every probe keeper to `NODE` and ends every probe Pod as `play` states, writing its
+/// heartbeat into `volume`, the directory the keeper's `fs` calls serve.
 async fn play_kubelet(
     admin: Api,
     fake: Arc<FakeCluster>,
-    child: Child,
-    ran: Arc<Mutex<Vec<Vec<String>>>>,
+    play: Play,
+    ran: Arc<Mutex<Vec<Value>>>,
+    volume: PathBuf,
 ) {
     loop {
         let listed = admin
@@ -176,11 +254,23 @@ async fn play_kubelet(
                 }
                 Some("pod") => {
                     let spec = run_spec(&pod);
-                    lock(&ran).push(spec.argv.clone());
-                    fake.set_log(&name, &probe_log(&spec, child));
+                    lock(&ran).push(pod.clone());
+                    if play.heartbeat != Heartbeat::Absent {
+                        beat(&spec, &volume, play.heartbeat);
+                    }
+                    if let End::Gone = play.end {
+                        let _ = admin.delete(&path, 0).await;
+                        continue;
+                    }
+                    fake.set_log(&name, &probe_log(&spec, &play));
+                    let code = match play.end {
+                        End::LimitsUnapplied => 125,
+                        End::CodeDisagrees => 1,
+                        End::Exit | End::NotAFrame | End::Gone => 0,
+                    };
                     pod["status"] = json!({
                         "phase": "Succeeded",
-                        "containerStatuses": [{"name": "run", "state": {"terminated": {"exitCode": 0, "reason": "Completed"}}}],
+                        "containerStatuses": [{"name": "run", "state": {"terminated": {"exitCode": code, "reason": "Completed"}}}],
                     });
                     let _ = admin.update(&path, &pod).await;
                 }
@@ -202,31 +292,79 @@ fn run_spec(pod: &Value) -> RunSpec {
     RunSpec::decode_parts(&command[2..]).expect("the spec decodes")
 }
 
-/// The log the executor writes for `probe-child` under `spec`: its bounds read back as applied,
-/// the child's report, and exit 0.
-fn probe_log(spec: &RunSpec, child: Child) -> Vec<u8> {
+/// The targets the driver stated in the probe Pod's run spec.
+fn targets_of(spec: &RunSpec) -> ProbeTargets {
+    ProbeTargets::parse(
+        spec.env
+            .get(TARGETS_ENV)
+            .expect("the spec states the targets"),
+    )
+    .expect("the targets parse")
+}
+
+/// Writes the heartbeat the probe's targets name into `volume`, once for [`Heartbeat::Stopped`]
+/// and every 100 ms from now on for [`Heartbeat::Moving`], as the probe child's grandchild would.
+fn beat(spec: &RunSpec, volume: &std::path::Path, heartbeat: Heartbeat) {
+    let named = targets_of(spec).heartbeat;
+    let file = volume.join(
+        named
+            .strip_prefix("/workspace/")
+            .expect("the heartbeat is in the probe's volume"),
+    );
+    std::fs::write(&file, "7 0\n").expect("the heartbeat is written");
+    if heartbeat == Heartbeat::Moving {
+        tokio::spawn(async move {
+            for beat in 1_u64.. {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if std::fs::write(&file, format!("7 {beat}\n")).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+}
+
+/// The log the executor writes for `probe-child` under `spec` as `play` states: its bounds read
+/// back as applied, the child's argv line and its observation line, and exit 0.
+fn probe_log(spec: &RunSpec, play: &Play) -> Vec<u8> {
     let mut argv = spec.argv.clone();
-    if let Child::Expanded = child {
+    if let Child::Expanded = play.child {
         for part in &mut argv {
             *part = part.replace("$(HOME)", "/var/empty");
         }
     }
-    let frames = [
-        Frame::Control(Control::Applied(Applied {
-            memory_bytes: Some(spec.memory_bytes),
-            cpu_millicores: Some(spec.cpu_millicores),
-            pids_max: Some("max".to_owned()),
-        })),
+    let mut stdout = substrate_executor::probe::report(&argv).into_bytes();
+    if let Some(observed) = &play.observed {
+        stdout.extend_from_slice(observed.as_bytes());
+    }
+    let unapplied = matches!(play.end, End::LimitsUnapplied);
+    let applied = Frame::Control(Control::Applied(Applied {
+        memory_bytes: Some(spec.memory_bytes + u64::from(unapplied)),
+        cpu_millicores: Some(spec.cpu_millicores),
+        pids_max: Some("max".to_owned()),
+    }));
+    let mut log = Vec::new();
+    let mut push = |line: &str| {
+        log.extend_from_slice(line.as_bytes());
+        log.push(b'\n');
+    };
+    push(&applied.encode().expect("a frame encodes"));
+    if unapplied {
+        let refused = Frame::Control(Control::Refused(Refusal::LimitsUnapplied));
+        push(&refused.encode().expect("a frame encodes"));
+        return log;
+    }
+    if let End::NotAFrame = play.end {
+        push("the child wrote this line itself");
+    }
+    for frame in [
         Frame::Output {
             stream: Stream::Stdout,
-            bytes: substrate_executor::probe::report(&argv).into_bytes(),
+            bytes: stdout,
         },
         Frame::Control(Control::Exit(ExitRecord::Code(0))),
-    ];
-    let mut log = Vec::new();
-    for frame in &frames {
-        log.extend_from_slice(frame.encode().expect("a frame encodes").as_bytes());
-        log.push(b'\n');
+    ] {
+        push(&frame.encode().expect("a frame encodes"));
     }
     log
 }
@@ -250,10 +388,27 @@ impl Rig {
     }
 }
 
+/// What this driver never publishes, whatever its probe observed: the four Linux facts, and every
+/// family and property § 6.2 has no row for.
 fn assert_never_published(snapshot: &CapabilitySnapshot) {
     let facts = &snapshot.facts;
     assert_eq!(snapshot.driver, HostDriverKind::Kubernetes);
-    assert_eq!(facts.confinement_no_egress, None, "O3 did not hold");
+    for family in ConfinementFamily::ALL {
+        if !SEVEN_FAMILIES.contains(&family) {
+            assert!(
+                !facts.serves_family(family),
+                "{family:?} is never published"
+            );
+        }
+    }
+    for property in ConfinementProperty::ALL {
+        if property != ConfinementProperty::WholeTreeKill {
+            assert!(!facts.proves(property), "{property:?} is never published");
+        }
+    }
+    assert_eq!(facts.confinement_family_filesystem_view, None);
+    assert_eq!(facts.confinement_family_network_egress, None);
+    assert_eq!(facts.confinement_family_network_ingress, None);
     assert_eq!(facts.exec_namespaces, None);
     assert_eq!(facts.exec_cgroup_limits, None);
     assert_eq!(facts.exec_cgroup_kill, None);
@@ -262,6 +417,40 @@ fn assert_never_published(snapshot: &CapabilitySnapshot) {
     assert_eq!(facts.exec_workspace_scoped_write, None);
     assert_eq!(facts.workspace_storage_quota, None);
     assert_eq!(facts.process_host, None);
+}
+
+/// The seven families § 6.2 row 3 publishes, in [`ConfinementFamily::ALL`]'s order.
+const SEVEN_FAMILIES: [ConfinementFamily; 7] = [
+    ConfinementFamily::ProcessRun,
+    ConfinementFamily::ProcessWatch,
+    ConfinementFamily::OutputRead,
+    ConfinementFamily::Wait,
+    ConfinementFamily::Workspace,
+    ConfinementFamily::Limits,
+    ConfinementFamily::Audit,
+];
+
+/// The seven families as the snapshot states them: all `Some(true)` or all absent.
+fn families(facts: &CapabilityFacts) -> [Option<bool>; 7] {
+    [
+        facts.confinement_family_process_run,
+        facts.confinement_family_process_watch,
+        facts.confinement_family_output_read,
+        facts.confinement_family_wait,
+        facts.confinement_family_workspace,
+        facts.confinement_family_limits,
+        facts.confinement_family_audit,
+    ]
+}
+
+/// Neither observed property: a run whose child observed nothing proves neither.
+fn assert_no_observed_property(snapshot: &CapabilitySnapshot) {
+    let facts = &snapshot.facts;
+    assert_eq!(facts.confinement_no_egress, None, "no egress was observed");
+    assert_eq!(
+        facts.confinement_whole_tree_kill, None,
+        "no heartbeat was observed"
+    );
 }
 
 fn assert_daemon_facts(snapshot: &CapabilitySnapshot) {
@@ -290,6 +479,8 @@ fn assert_no_driver_facts(snapshot: &CapabilitySnapshot) {
     assert_eq!(facts.exec_max_current, None);
     assert_eq!(facts.exec_signals, None);
     assert_eq!(facts.exec_output_limit_bytes, None);
+    assert_eq!(families(facts), [None; 7]);
+    assert_no_observed_property(snapshot);
     assert_eq!(snapshot.valid_until, None);
 }
 
@@ -298,15 +489,24 @@ async fn a_probe_publishes_what_it_observed_and_never_a_linux_or_egress_fact() {
     let rig = rig(Child::Exact, None).await;
     let before = rig.machine();
     assert_never_published(&before);
+    assert_no_observed_property(&before);
     assert_daemon_facts(&before);
     assert_eq!(before.facts.exec_argv_only, None);
+    assert_eq!(families(&before.facts), [None; 7]);
 
     rig.driver.probe().await.expect("the probe runs");
 
     let snapshot = rig.machine();
     let facts = &snapshot.facts;
     assert_never_published(&snapshot);
+    // The played child writes its argv line and no observation, as on a cluster nothing confines.
+    assert_no_observed_property(&snapshot);
     assert_daemon_facts(&snapshot);
+    assert_eq!(
+        families(facts),
+        [Some(true); 7],
+        "the Pod ended, its frames decoded and its applied record is its spec's"
+    );
     assert_eq!(facts.workspace_guarded_io, Some(true));
     assert_eq!(facts.workspace_openat2_beneath, Some(true));
     assert_eq!(facts.workspace_atomic_replace, Some(true));
@@ -343,7 +543,10 @@ async fn a_probe_publishes_what_it_observed_and_never_a_linux_or_egress_fact() {
     );
 
     // The Pod ran the probe child with the argv no shell or expansion may change.
-    let ran = lock(&rig.ran).clone();
+    let ran: Vec<Vec<String>> = lock(&rig.ran)
+        .iter()
+        .map(|pod| run_spec(pod).argv)
+        .collect();
     assert_eq!(
         ran,
         [vec![
@@ -354,6 +557,20 @@ async fn a_probe_publishes_what_it_observed_and_never_a_linux_or_egress_fact() {
             "a b",
             "\u{e9}",
         ]]
+    );
+    // Its spec states what the child observes, and the volume its heartbeat goes to is writable.
+    let pod = lock(&rig.ran)[0].clone();
+    let targets = targets_of(&run_spec(&pod));
+    assert_eq!(targets.heartbeat, format!("/workspace/{HEARTBEAT_FILE}"));
+    assert_eq!(targets.resolv_conf, "/etc/resolv.conf");
+    assert_eq!(
+        targets.egress_probe_address,
+        "192.0.2.10:443".parse::<SocketAddr>().expect("an address")
+    );
+    assert_eq!(run_spec(&pod).env.len(), 1, "the targets and nothing else");
+    assert_eq!(
+        pod["spec"]["containers"][0]["volumeMounts"][0],
+        json!({"name": "workspace", "mountPath": "/workspace", "readOnly": false})
     );
     // Its three objects are gone and every row is settled.
     let rows = rig.ledger.rows_of(BackendKind::Probe);
@@ -589,6 +806,7 @@ async fn a_probe_in_flight_across_a_lost_and_retaken_lease_does_not_stand_for_st
         let fake = Arc::clone(&rig.fake);
         let ran = Arc::clone(&rig.ran);
         let release = Arc::clone(&release);
+        let volume = rig.root.path().to_path_buf();
         tokio::spawn(async move {
             // Schedules the probe keeper, and holds the probe Pod unended until released.
             while !release.load(std::sync::atomic::Ordering::SeqCst) {
@@ -609,7 +827,7 @@ async fn a_probe_in_flight_across_a_lost_and_retaken_lease_does_not_stand_for_st
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            play_kubelet(admin, fake, Child::Exact, ran).await;
+            play_kubelet(admin, fake, Play::of(Child::Exact), ran, volume).await;
         })
     };
     let lapse = async {
@@ -834,4 +1052,421 @@ async fn each_workspace_fact_is_published_from_its_own_proof_of_the_check() {
         "atomic_replace": null,
     });
     assert_eq!(workspace_facts_for(not_booleans).await, [None, None, None]);
+}
+
+/// The cluster address the keeper's environment states for the Kubernetes Service.
+const SERVICE_HOST: &str = "10.96.0.1";
+
+fn attempt(target: EgressTarget, address: &str, outcome: EgressOutcome) -> EgressAttempt {
+    EgressAttempt {
+        target,
+        address: Some(address.parse().expect("an address")),
+        outcome,
+        errno: None,
+        elapsed_ms: 3_000,
+    }
+}
+
+/// What a child under an enforcing default-deny policy reports: each attempt failed with nothing
+/// answering, at the addresses the driver named and the nameserver its resolver names.
+fn blocked() -> Vec<EgressAttempt> {
+    vec![
+        attempt(
+            EgressTarget::KubernetesService,
+            "10.96.0.1:443",
+            EgressOutcome::TimedOut,
+        ),
+        attempt(
+            EgressTarget::Nameserver,
+            "10.96.0.10:53",
+            EgressOutcome::TimedOut,
+        ),
+        attempt(
+            EgressTarget::EgressProbe,
+            "192.0.2.10:443",
+            EgressOutcome::Unreachable,
+        ),
+    ]
+}
+
+/// The facts one probe publishes when the kubelet plays `play` and the keeper's check answers
+/// `check` (the real executor's when `None`). None of them is ever a Linux fact.
+async fn facts_after(play: Play, check: Option<Value>) -> CapabilityFacts {
+    let rig = rig_with(play, None, check).await;
+    rig.driver.probe().await.expect("the probe runs");
+    let snapshot = rig.machine();
+    assert_never_published(&snapshot);
+    snapshot.facts
+}
+
+/// § 6.2 and § 6.4: a probe whose Pod ended with its frames and bounds, whose heartbeat stood
+/// still after the end, and whose three egress attempts all failed publishes design 34 § 6.4's
+/// neutral set, beside the seven families; the facts lapse with the proof.
+#[tokio::test]
+async fn a_probe_that_observed_all_of_it_publishes_the_neutral_set_until_valid_until() {
+    let observation = Observation {
+        heartbeat: true,
+        egress: blocked(),
+    };
+    let rig = rig_with(
+        Play::observing(&observation, Heartbeat::Stopped),
+        None,
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    rig.driver.probe().await.expect("the probe runs");
+    let snapshot = rig.machine();
+    let facts = &snapshot.facts;
+    assert_never_published(&snapshot);
+    assert_eq!(families(facts), [Some(true); 7]);
+    assert_eq!(facts.confinement_whole_tree_kill, Some(true));
+    assert_eq!(facts.confinement_no_egress, Some(true));
+    assert_eq!(
+        facts.exec_argv_only,
+        Some(true),
+        "the argv line keeps its bytes"
+    );
+    for family in [
+        ConfinementFamily::ProcessRun,
+        ConfinementFamily::Wait,
+        ConfinementFamily::OutputRead,
+        ConfinementFamily::Limits,
+    ] {
+        assert!(facts.serves_family(family), "{family:?}");
+    }
+    assert!(facts.proves(ConfinementProperty::WholeTreeKill));
+
+    // The child was told to dial the host the keeper's environment states.
+    let pod = lock(&rig.ran)[0].clone();
+    assert_eq!(
+        targets_of(&run_spec(&pod)).kubernetes_service_host,
+        Some(SERVICE_HOST.parse().expect("an address"))
+    );
+
+    // The proof lapses at `valid_until`, the observed facts with it.
+    rig.clock.set(INTERVAL + SLACK);
+    let lapsed = rig.machine();
+    assert_eq!(families(&lapsed.facts), [None; 7]);
+    assert_no_observed_property(&lapsed);
+}
+
+/// § 6.2 row 3: the Pod's end, its decoded frames and its applied bounds each hold the seven
+/// families; any one failing leaves all seven absent, whatever the argv proof says.
+#[tokio::test]
+async fn the_seven_families_are_absent_when_the_end_the_frames_or_the_applied_bounds_fail() {
+    for end in [
+        End::LimitsUnapplied,
+        End::NotAFrame,
+        End::CodeDisagrees,
+        End::Gone,
+    ] {
+        let play = Play {
+            end,
+            ..Play::of(Child::Exact)
+        };
+        let facts = facts_after(play, None).await;
+        assert_eq!(families(&facts), [None; 7], "{end:?}");
+        assert_eq!(facts.exec_argv_only, None, "{end:?}");
+        assert_eq!(
+            facts.workspace_guarded_io,
+            Some(true),
+            "{end:?}: the keeper proved its own"
+        );
+    }
+    let expanded = facts_after(Play::of(Child::Expanded), None).await;
+    assert_eq!(
+        families(&expanded),
+        [Some(true); 7],
+        "an argv that did not read back is the argv proof's, not the families'"
+    );
+    assert_eq!(expanded.exec_argv_only, None);
+}
+
+/// § 6.2 row 4: whole-tree kill needs the child to have seen its grandchild's heartbeat move and
+/// the keeper to see it stand still for 2 s after the end. A heartbeat that moves on, one the
+/// keeper cannot read, and one the child never saw move leave it absent.
+#[tokio::test]
+async fn whole_tree_kill_is_absent_unless_the_heartbeat_moved_and_then_stood_still() {
+    let moving = Observation {
+        heartbeat: true,
+        egress: blocked(),
+    };
+    let facts = facts_after(
+        Play::observing(&moving, Heartbeat::Moving),
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    assert_eq!(
+        facts.confinement_whole_tree_kill, None,
+        "the heartbeat moves on"
+    );
+    assert_eq!(
+        facts.confinement_no_egress,
+        Some(true),
+        "each property stands on its own observation"
+    );
+
+    let unread = facts_after(Play::observing(&moving, Heartbeat::Absent), None).await;
+    assert_eq!(
+        unread.confinement_whole_tree_kill, None,
+        "no heartbeat to read"
+    );
+
+    let never_moved = Observation {
+        heartbeat: false,
+        egress: blocked(),
+    };
+    let still = facts_after(Play::observing(&never_moved, Heartbeat::Stopped), None).await;
+    assert_eq!(
+        still.confinement_whole_tree_kill, None,
+        "the child never saw a grandchild beat"
+    );
+
+    let unreported = Play {
+        heartbeat: Heartbeat::Stopped,
+        ..Play::of(Child::Exact)
+    };
+    let unreported = facts_after(unreported, None).await;
+    assert_eq!(
+        unreported.confinement_whole_tree_kill, None,
+        "no observation line"
+    );
+    assert_eq!(families(&unreported), [Some(true); 7]);
+}
+
+/// § 6.2 row 5: no egress needs every one of the three attempts, in order, to have failed with
+/// nothing answering, at the addresses the driver named. A reached or refused attempt, an
+/// attempt that was never made, another address, and an observation that does not read leave it
+/// absent.
+#[tokio::test]
+async fn no_egress_is_absent_unless_all_three_attempts_failed_at_the_named_addresses() {
+    let held = Observation {
+        heartbeat: false,
+        egress: blocked(),
+    };
+    let check = || Some(check_with_host(SERVICE_HOST));
+    let facts = facts_after(Play::observing(&held, Heartbeat::Absent), check()).await;
+    assert_eq!(facts.confinement_no_egress, Some(true), "the control");
+    assert_eq!(facts.confinement_whole_tree_kill, None);
+
+    let mut cases: Vec<(String, Play, Option<Value>)> = Vec::new();
+    let mut with = |why: &str, change: &dyn Fn(&mut Vec<EgressAttempt>)| {
+        let mut egress = blocked();
+        change(&mut egress);
+        let observation = Observation {
+            heartbeat: false,
+            egress,
+        };
+        cases.push((
+            why.to_owned(),
+            Play::observing(&observation, Heartbeat::Absent),
+            check(),
+        ));
+    };
+    for index in 0..3 {
+        with(&format!("attempt {index} reached"), &|egress| {
+            egress[index].outcome = EgressOutcome::Reached;
+        });
+    }
+    with("the egress probe refused", &|egress| {
+        egress[2].outcome = EgressOutcome::Refused;
+    });
+    with("the nameserver attempt failed otherwise", &|egress| {
+        egress[1].outcome = EgressOutcome::Failed;
+    });
+    with("the nameserver was not read", &|egress| {
+        egress[1].address = None;
+        egress[1].outcome = EgressOutcome::Unread;
+    });
+    with("another egress address", &|egress| {
+        egress[2].address = Some("192.0.2.11:443".parse().expect("an address"));
+    });
+    with("another Kubernetes Service address", &|egress| {
+        egress[0].address = Some("10.96.0.2:443".parse().expect("an address"));
+    });
+    with("the Kubernetes Service on another port", &|egress| {
+        egress[0].address = Some("10.96.0.1:6443".parse().expect("an address"));
+    });
+    with("an attempt missing", &|egress| {
+        egress.remove(1);
+    });
+    with("the attempts out of order", &|egress| egress.swap(0, 2));
+    cases.push((
+        "the keeper states no Kubernetes Service host".to_owned(),
+        Play::observing(&held, Heartbeat::Absent),
+        Some(json!({
+            "openat2_beneath": true,
+            "symlink_escape_refused": true,
+            "atomic_replace": true,
+        })),
+    ));
+    for (why, line) in [
+        ("an observation that is not one", "{\"heartbeat\":false}\n"),
+        (
+            "two observation lines",
+            &format!("{}{}", held.line(), held.line()),
+        ),
+        ("an observation without its newline", held.line().trim_end()),
+    ] {
+        cases.push((
+            why.to_owned(),
+            Play {
+                observed: Some(line.to_owned()),
+                ..Play::of(Child::Exact)
+            },
+            check(),
+        ));
+    }
+    for (why, play, check) in cases {
+        let facts = facts_after(play, check).await;
+        assert_eq!(facts.confinement_no_egress, None, "{why}");
+        assert_eq!(families(&facts), [Some(true); 7], "{why}");
+    }
+}
+
+/// Security review, wave 2026-10-31: one probe after the namespace's policy set gained `policy`
+/// beside the default-deny one, the driver reopened over it (§ 14 Q1 B binds the whole set), and
+/// the probe child reporting what a child the policy does not reach reports: all three attempts
+/// failed with nothing answering. Answers the snapshot and the probe Pod the kubelet ran.
+async fn probe_beside(policy: Value) -> (CapabilitySnapshot, Value) {
+    let observation = Observation {
+        heartbeat: false,
+        egress: blocked(),
+    };
+    let rig = rig_with(
+        Play::observing(&observation, Heartbeat::Absent),
+        None,
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    let before = rig.driver.binding().expect("bound at open").digest();
+    rig.fake
+        .seed("networkpolicies", policy)
+        .expect("the additional policy is stored");
+    rig.driver
+        .open()
+        .await
+        .expect("the driver reopens over a set whose default-deny policy still denies");
+    assert_ne!(
+        rig.driver.binding().expect("bound again").digest(),
+        before,
+        "the added policy is in the bound set"
+    );
+    rig.driver.probe().await.expect("the probe runs");
+    let snapshot = rig.machine();
+    assert_eq!(
+        families(&snapshot.facts),
+        [Some(true); 7],
+        "the control: the probe Pod ran and ended as its spec says"
+    );
+    let pod = lock(&rig.ran)[0].clone();
+    (snapshot, pod)
+}
+
+/// Security review, wave 2026-10-31 (invariant 3, design 34 § 6.2 row 5 and § 14 Q1 B): an
+/// operator lets the exec Pods reach the network with a policy that selects them by the label
+/// every exec Pod carries, `b10x-substrate/exec`. The probe Pod carries `b10x-substrate/probe`
+/// instead, so the policy never selects it and its three attempts time out as under the
+/// default-deny policy alone. The probe's observation then stands for no Pod an exec runs in, and
+/// `confinement.no-egress` must not be published while the bound set lets exec Pods egress.
+#[tokio::test]
+async fn a_policy_selecting_exec_pods_but_not_the_probe_pod_withholds_no_egress() {
+    let exec_labels = names::labels(
+        DEPLOYMENT,
+        BackendKind::Exec,
+        &names::resource_hash(DEPLOYMENT, "ex_0001"),
+        BackendRole::Pod,
+    );
+    assert!(
+        exec_labels.contains_key("b10x-substrate/exec"),
+        "every exec Pod carries the key the policy selects on"
+    );
+    let (snapshot, probe_pod) = probe_beside(json!({
+        "metadata": {"name": "exec-pods-reach-the-mirror"},
+        "spec": {
+            "podSelector": {"matchExpressions": [
+                {"key": "b10x-substrate/exec", "operator": "Exists"},
+            ]},
+            "policyTypes": ["Egress"],
+            "egress": [{}],
+        },
+    }))
+    .await;
+    assert!(
+        probe_pod["metadata"]["labels"]
+            .get("b10x-substrate/exec")
+            .is_none(),
+        "the probe Pod is not selected by the policy: {}",
+        probe_pod["metadata"]["labels"]
+    );
+    assert_eq!(
+        snapshot.facts.confinement_no_egress, None,
+        "confinement.no-egress was published from a Pod the egress-allowing policy does not \
+         select, while every exec Pod it admits is selected by it"
+    );
+}
+
+/// Security review, wave 2026-10-31 (invariant 3, design 34 § 6.2 row 5 and § 14 Q1 B): a bound
+/// policy selecting every Pod allows egress to one range. The probe dials three fixed addresses
+/// outside it, so all three time out, while every exec Pod may reach the range. The driver holds
+/// the policy that states egress is allowed; `confinement.no-egress` must not be published from
+/// three sampled attempts against it.
+#[tokio::test]
+async fn a_bound_policy_allowing_egress_to_a_range_the_probe_does_not_dial_withholds_no_egress() {
+    let (snapshot, _) = probe_beside(json!({
+        "metadata": {"name": "allow-one-range"},
+        "spec": {
+            "podSelector": {},
+            "policyTypes": ["Egress"],
+            "egress": [{"to": [{"ipBlock": {"cidr": "203.0.113.0/24"}}]}],
+        },
+    }))
+    .await;
+    assert_eq!(
+        snapshot.facts.confinement_no_egress, None,
+        "confinement.no-egress was published while the bound policy set allows every Pod egress \
+         to 203.0.113.0/24"
+    );
+}
+
+/// Adversary, wave 2026-10-31 (claim 5; design 34 § 6.2, amendment of 2026-10-31): "the heartbeat
+/// and the egress observation count only from a run whose argv read back byte for byte". The
+/// suite holds an expanded argv only with no observation line, so dropping the argv gate in
+/// `read_run` stays green. Here the child's argv was expanded on its way to `execve` and its
+/// observation and heartbeat would each prove their property on their own: both stay absent,
+/// while the seven families, which rest on the end and not on the argv, are published.
+#[tokio::test]
+async fn adversary_w1031_an_expanded_argv_voids_the_heartbeat_and_the_egress_observation() {
+    let observation = Observation {
+        heartbeat: true,
+        egress: blocked(),
+    };
+    let control = facts_after(
+        Play::observing(&observation, Heartbeat::Stopped),
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    assert_eq!(
+        (
+            control.confinement_whole_tree_kill,
+            control.confinement_no_egress
+        ),
+        (Some(true), Some(true)),
+        "the control: the same observation from an exact argv proves both"
+    );
+    let expanded = Play {
+        child: Child::Expanded,
+        ..Play::observing(&observation, Heartbeat::Stopped)
+    };
+    let facts = facts_after(expanded, Some(check_with_host(SERVICE_HOST))).await;
+    assert_eq!(facts.exec_argv_only, None);
+    assert_eq!(families(&facts), [Some(true); 7]);
+    assert_eq!(
+        (
+            facts.confinement_whole_tree_kill,
+            facts.confinement_no_egress
+        ),
+        (None, None),
+        "an observation from a run whose argv did not read back proves nothing"
+    );
 }

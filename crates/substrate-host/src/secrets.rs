@@ -524,6 +524,7 @@ mod tests {
                 set: BTreeMap::new(),
             },
             sandbox: ConfinementRequest {
+                requires: None,
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                 network: NetworkMode::None,
                 aperture: None,
@@ -732,10 +733,11 @@ mod tests {
         assert!(!hash.contains(SENTINEL));
 
         let applied = AppliedConfinement {
+            requires: None,
             writable_roots: Vec::new(),
             workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             capability_snapshot: format!("sha256:{}", "7".repeat(64)),
-            cgroup: "substrate-ex_test".to_owned(),
+            cgroup: Some("substrate-ex_test".to_owned()),
             filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
             network: AppliedNetwork::None,
             profile: SandboxProfile::Workspace,

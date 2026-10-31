@@ -1,0 +1,62 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "argv": [
+        "/fixture/sleep-forever"
+      ],
+      "operation": "exec.start",
+      "timeout_ms": 100
+    },
+    "kind": "driver",
+    "port": "exec"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "security.timeout"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "exit": {
+        "code": null,
+        "signal": "KILL"
+      },
+      "state": "cancelled"
+    }
+  },
+  "id": "timeout-kills-whole-cgroup",
+  "layer": "driver",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/cgroup_process_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/elapsed_ms_max",
+      "expected": 31100,
+      "operator": "lte"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "process-tree",
+      "name": "forking-sleeper",
+      "state": {
+        "descendants": 2
+      }
+    }
+  ]
+}

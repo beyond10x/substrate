@@ -152,6 +152,8 @@ struct VectorDriver {
     exec_start_outcome: Option<DriverErrorClass>,
     workspace_create_observed: AtomicBool,
     after_observed_hook: StdMutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// The facts a vector's `machine` setup declares, served in place of the default set.
+    machine_facts: StdMutex<Option<substrate_wire::CapabilityFacts>>,
 }
 
 impl VectorDriver {
@@ -165,6 +167,7 @@ impl VectorDriver {
                 state: ExecState::Cancelled,
                 observed_at: FIXED_TIME.parse().expect("fixed time"),
                 requested: ConfinementRequest {
+                    requires: None,
                     capability_snapshot: SNAPSHOT.to_owned(),
                     network: NetworkMode::None,
                     aperture: None,
@@ -173,6 +176,7 @@ impl VectorDriver {
                     required: true,
                 },
                 applied: Some(AppliedConfinement {
+                    requires: None,
                     writable_roots: Vec::new(),
                     workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
                     read_only_roots: Vec::new(),
@@ -183,7 +187,7 @@ impl VectorDriver {
                     profile: SandboxProfile::Workspace,
                     filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
                     network: AppliedNetwork::None,
-                    cgroup: "substrate/vector".to_owned(),
+                    cgroup: Some("substrate/vector".to_owned()),
                     capsule: None,
                 }),
                 exit: Some(substrate_wire::ExecExit {
@@ -214,7 +218,8 @@ impl Driver for VectorDriver {
     }
 
     fn machine(&self) -> CapabilitySnapshot {
-        let facts = substrate_wire::CapabilityFacts {
+        let declared = self.machine_facts.lock().expect("machine facts").clone();
+        let facts = declared.unwrap_or_else(|| substrate_wire::CapabilityFacts {
             exec_namespaces: Some(substrate_wire::NamespaceFacts {
                 user: true,
                 mount: true,
@@ -233,7 +238,7 @@ impl Driver for VectorDriver {
             exec_output_limit_bytes: Some(1_048_576),
             leases_explicit: Some(true),
             ..substrate_wire::CapabilityFacts::default()
-        };
+        });
         CapabilitySnapshot {
             snapshot: SNAPSHOT.to_owned(),
             driver: HostDriverKind::Host,
@@ -599,6 +604,7 @@ impl Harness {
             exec_start_outcome,
             workspace_create_observed: AtomicBool::new(false),
             after_observed_hook: StdMutex::new(None),
+            machine_facts: StdMutex::new(None),
         });
         let erased: Arc<dyn Driver> = driver.clone();
         let clock_available = Arc::new(AtomicBool::new(true));
@@ -860,6 +866,43 @@ async fn current_session_positive_and_adversarial_vectors_execute_exactly() {
     seed_workspace(&harness.store);
     assert_exact_http(&harness.execute(&refusal).await, &refusal);
     assert_eq!(harness.driver.start_count.load(Ordering::SeqCst), 0);
+}
+
+/// Bundle `0.26.0`'s two `sandbox.requires` vectors (design 30 § 4.4), against the machine each
+/// one's setup declares: the first family that machine does not serve, then the first property it
+/// does not prove, each answered exactly, recorded refused and never dispatched.
+#[tokio::test(flavor = "multi_thread")]
+async fn confinement_requires_vectors_refuse_exactly_before_dispatch() {
+    for name in [
+        "confinement-family-unserved-by-the-snapshot",
+        "confinement-fact-unserved-by-the-snapshot",
+    ] {
+        let vector = bundle_vector("0.26.0", "http", name);
+        let machine = &vector["setup"][0];
+        assert_eq!(machine["kind"], "machine", "{name}");
+        assert_eq!(machine["state"]["snapshot"], SNAPSHOT, "{name}");
+        let harness = Harness::open(false);
+        *harness.driver.machine_facts.lock().expect("machine facts") = Some(
+            serde_json::from_value(machine["state"]["facts"].clone()).expect("declared facts"),
+        );
+        seed_workspace(&harness.store);
+        assert_exact_http(&harness.execute(&vector).await, &vector);
+        let operation = vector["action"]["request"]["body"]["op"]
+            .as_str()
+            .expect("operation id");
+        assert_eq!(
+            harness
+                .store
+                .operation(&vector_scope(), operation)
+                .expect("operation lookup")
+                .expect("refused operation")
+                .state,
+            substrate_wire::OperationState::Refused,
+            "{name}"
+        );
+        assert_eq!(harness.driver.dispatch_count.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.driver.start_count.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

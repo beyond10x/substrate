@@ -17,6 +17,7 @@ use substrate_wire::{
 };
 
 use crate::HostConfig;
+use crate::confinement::AdapterName;
 
 const MAX_BACKEND_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -34,6 +35,10 @@ pub(crate) struct BackendBinding {
 
 #[derive(Serialize)]
 struct SnapshotMaterial<'a> {
+    /// The confinement adapter this driver opens. Design 30 § 4.6: the snapshot digest binds the
+    /// adapter and its proof, so two adapters never share a snapshot even where their published
+    /// facts agree, though the wire itself never names the adapter.
+    adapter: AdapterName,
     driver: HostDriverKind,
     driver_version: &'a str,
     config_generation: u64,
@@ -130,6 +135,25 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         exec_no_egress: exec.then_some(true),
         // Design 34 N5: the neutral fact is the namespace driver's; the host publishes the Linux one.
         confinement_no_egress: None,
+        // Design 30 section 4.3: the family and property facts, published by
+        // `publish_confinement` below from the proofs this literal already holds.
+        confinement_family_process_run: None,
+        confinement_family_process_watch: None,
+        confinement_family_output_read: None,
+        confinement_family_wait: None,
+        confinement_family_workspace: None,
+        confinement_family_filesystem_view: None,
+        confinement_family_network_egress: None,
+        confinement_family_network_ingress: None,
+        confinement_family_limits: None,
+        confinement_family_audit: None,
+        confinement_paths_are_host_paths: None,
+        confinement_whole_tree_kill: None,
+        confinement_ipc_socket_allowlist: None,
+        confinement_ipc_signals_contained: None,
+        confinement_sealed_paths: None,
+        confinement_exec_subpaths: None,
+        confinement_private_tmpdir: None,
         exec_workspace_scoped_write: workspace_scoped_write.then_some(true),
         exec_cgroup_limits: exec.then_some(CgroupLimitFacts {
             processes: true,
@@ -210,18 +234,20 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         // supervisor's cgroups usable and serves the personal Unix socket alone.
         process_host: config.host_processes.then_some(true),
     };
+    let mut facts = facts;
+    publish_confinement(&mut facts);
     let driver_version = env!("CARGO_PKG_VERSION");
-    let serialized = serde_json::to_vec(&SnapshotMaterial {
+    let snapshot = snapshot_identity(&SnapshotMaterial {
+        adapter: AdapterName::Linux,
         driver: HostDriverKind::Host,
         driver_version,
         config_generation: config.config_generation,
         probed_at,
         facts: &facts,
         backend: &backend,
-    })
-    .expect("capability snapshot material serializes");
+    });
     CapabilitySnapshot {
-        snapshot: format!("sha256:{}", hex::encode(Sha256::digest(serialized))),
+        snapshot,
         driver: HostDriverKind::Host,
         driver_version: driver_version.to_owned(),
         config_generation: config.config_generation,
@@ -229,6 +255,65 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         valid_until: None,
         facts,
     }
+}
+
+fn snapshot_identity(material: &SnapshotMaterial<'_>) -> String {
+    let serialized = serde_json::to_vec(material).expect("capability snapshot material serializes");
+    format!("sha256:{}", hex::encode(Sha256::digest(serialized)))
+}
+
+/// Publishes the `linux` adapter's family and property facts (design 30 § 4.3) from the proofs
+/// already probed above, and from nothing else: each one is exactly a clause of
+/// `confinement::linux::proof`, which the probe tests hold this function to. A fact is `true` or
+/// absent, never `false`, so an unproved clause leaves its fact unpublished.
+fn publish_confinement(facts: &mut CapabilityFacts) {
+    let held = |proved: bool| proved.then_some(true);
+    // The confinement floor every exec rides: argv-only spawning inside the bubblewrap namespaces
+    // (`exec.argv-only`, `exec.namespaces`), proved by `probe_bubblewrap`, cgroup delegation and
+    // `close_range` together.
+    let floor = facts.exec_argv_only == Some(true) && facts.exec_namespaces.is_some();
+    // `exec.cgroup-limits` with all three controllers: the per-exec cgroup `probe_cgroup` proved.
+    let limits = facts
+        .exec_cgroup_limits
+        .as_ref()
+        .is_some_and(|limits| limits.processes && limits.memory && limits.cpu);
+    // process-run, process-watch and wait: the floor starts, observes and reaps a run.
+    facts.confinement_family_process_run = held(floor);
+    facts.confinement_family_process_watch = held(floor);
+    facts.confinement_family_wait = held(floor);
+    // output-read: the floor plus the bounded output store `exec.output-limit-bytes` publishes.
+    facts.confinement_family_output_read = held(floor && facts.exec_output_limit_bytes.is_some());
+    // workspace: `openat2(RESOLVE_BENEATH)` guarded I/O (`workspace.guarded-io`).
+    facts.confinement_family_workspace = held(facts.workspace_guarded_io == Some(true));
+    // filesystem-view: read-only roots and read-only files, each proved in a throwaway sandbox
+    // (ADR 0010, ADR 0033).
+    facts.confinement_family_filesystem_view =
+        held(facts.exec_read_only_roots.is_some() && facts.exec_read_only_files.is_some());
+    // network-egress: declared destination-bound apertures whose mechanism was proved (design 10).
+    facts.confinement_family_network_egress = held(facts.exec_egress_apertures.is_some());
+    // network-ingress: no adapter serves it yet (ADR 0044 decision 5), so it is never published.
+    facts.confinement_family_network_ingress = None;
+    facts.confinement_family_limits = held(limits);
+    // audit: `spec/confinement` declares it served by every adapter (its OpenAdapter notes).
+    facts.confinement_family_audit = Some(true);
+    // paths-are-host-paths and sealed-paths are not proved under `linux` (the S0 story), and no
+    // story declares exec-subpaths or private-tmpdir for it (`spec/confinement` UNMAPPED).
+    facts.confinement_paths_are_host_paths = None;
+    // whole-tree-kill: `cgroup.kill` on the run's own cgroup (`exec.cgroup-kill`).
+    facts.confinement_whole_tree_kill = held(facts.exec_cgroup_kill == Some(true));
+    // ipc-socket-allowlist: ADR 0039's seccomp socket filter, installed with the floor.
+    facts.confinement_ipc_socket_allowlist = held(floor);
+    // ipc-signals-contained: the floor's private PID namespace (`exec.namespaces.pid`).
+    facts.confinement_ipc_signals_contained = held(
+        floor
+            && facts
+                .exec_namespaces
+                .as_ref()
+                .is_some_and(|namespaces| namespaces.pid),
+    );
+    facts.confinement_sealed_paths = None;
+    facts.confinement_exec_subpaths = None;
+    facts.confinement_private_tmpdir = None;
 }
 
 /// Proves ADR 0023's mount ordering in a disposable tree rather than publishing it from a
@@ -942,6 +1027,8 @@ fn probe_close_range() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use substrate_wire::{ConfinementFamily, ConfinementProperty};
+
     use super::*;
 
     #[test]
@@ -954,6 +1041,204 @@ mod tests {
             probe(&first, false).snapshot,
             probe(&second, false).snapshot
         );
+    }
+
+    /// Design 30 § 4.6: the identity binds the opened adapter's name, which the wire never shows,
+    /// and the families and properties it proved. Two adapters, or two proofs, are two snapshots,
+    /// so a start naming the first is `exec.capability-stale` on a daemon holding the second.
+    #[test]
+    fn snapshot_identity_binds_the_opened_adapter_and_its_proof() {
+        let probed_at = Utc::now();
+        let facts = probe(&HostConfig::minimum("/does/not/exist"), true).facts;
+        let mut served = facts.clone();
+        served.confinement_family_limits = Some(true);
+        let identity = |adapter: AdapterName, facts: &CapabilityFacts| {
+            snapshot_identity(&SnapshotMaterial {
+                adapter,
+                driver: HostDriverKind::Host,
+                driver_version: "fixture",
+                config_generation: 7,
+                probed_at,
+                facts,
+                backend: &None,
+            })
+        };
+        let linux = identity(AdapterName::Linux, &facts);
+        assert_eq!(linux, identity(AdapterName::Linux, &facts));
+        assert_ne!(linux, identity(AdapterName::Macos, &facts));
+        assert_ne!(linux, identity(AdapterName::Linux, &served));
+    }
+
+    /// Design 30 § 4.3: `linux` publishes its families and properties from the same facts
+    /// `confinement::linux::proof` reads them from. A host without a delegated cgroup proves no
+    /// exec floor, so only the workspace family and the audit family every adapter serves are
+    /// published, and no property: never a fact written `false`.
+    #[test]
+    fn a_host_without_the_exec_floor_publishes_only_the_families_it_proved() {
+        let facts = probe(&HostConfig::minimum("/does/not/exist"), true).facts;
+        assert!(
+            facts.exec_argv_only.is_none(),
+            "this case needs no exec floor"
+        );
+        let served = ConfinementFamily::ALL
+            .into_iter()
+            .filter(|family| facts.serves_family(*family))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            served,
+            [ConfinementFamily::Workspace, ConfinementFamily::Audit]
+        );
+        assert!(
+            ConfinementProperty::ALL
+                .into_iter()
+                .all(|property| !facts.proves(property))
+        );
+        let published = serde_json::to_value(&facts).expect("facts serialize");
+        for (name, value) in published.as_object().expect("facts object") {
+            if name.starts_with("confinement.") {
+                assert_eq!(value, &serde_json::Value::Bool(true), "{name}");
+            }
+        }
+    }
+
+    /// The facts a host proves with the floor, cgroup limits and kill, both read-only binds and
+    /// a declared aperture: `linux`'s whole expected set (design 30 § 4.3).
+    fn delegated_facts() -> CapabilityFacts {
+        CapabilityFacts {
+            workspace_guarded_io: Some(true),
+            exec_argv_only: Some(true),
+            exec_namespaces: Some(NamespaceFacts {
+                user: true,
+                mount: true,
+                pid: true,
+                ipc: true,
+                uts: true,
+                network: true,
+            }),
+            exec_no_egress: Some(true),
+            exec_cgroup_limits: Some(CgroupLimitFacts {
+                processes: true,
+                memory: true,
+                cpu: true,
+            }),
+            exec_cgroup_kill: Some(true),
+            exec_output_limit_bytes: Some(substrate_wire::MAX_IO_BYTES),
+            exec_read_only_roots: Some(ReadOnlyRootFacts {
+                max_roots: substrate_wire::MAX_READ_ONLY_ROOTS,
+            }),
+            exec_read_only_files: crate::read_only_files::fact(true),
+            exec_egress_apertures: Some(Vec::new()),
+            ..CapabilityFacts::default()
+        }
+    }
+
+    fn proof_of(facts: &CapabilityFacts) -> crate::confinement::AdapterFacts {
+        crate::confinement::linux::proof(&CapabilitySnapshot {
+            snapshot: format!("sha256:{}", "0".repeat(64)),
+            driver: HostDriverKind::Host,
+            driver_version: "fixture".to_owned(),
+            config_generation: 1,
+            probed_at: Utc::now(),
+            valid_until: None,
+            facts: facts.clone(),
+        })
+    }
+
+    /// The published set and the adapter's own proof agree member by member, on the full set
+    /// and on each set that loses one underlying fact, so neither can drift from the other.
+    #[test]
+    fn the_published_set_is_the_linux_adapters_proof() {
+        let full = delegated_facts();
+        let mut variants = vec![full.clone(), CapabilityFacts::default()];
+        for remove in 0..6 {
+            let mut facts = full.clone();
+            match remove {
+                0 => facts.exec_cgroup_kill = None,
+                1 => facts.exec_egress_apertures = None,
+                2 => facts.exec_read_only_files = None,
+                3 => {
+                    facts.exec_cgroup_limits = Some(CgroupLimitFacts {
+                        processes: true,
+                        memory: false,
+                        cpu: true,
+                    });
+                }
+                4 => facts.exec_namespaces.as_mut().expect("namespaces").pid = false,
+                _ => facts.workspace_guarded_io = None,
+            }
+            variants.push(facts);
+        }
+        for mut facts in variants {
+            publish_confinement(&mut facts);
+            let proof = proof_of(&facts);
+            for family in ConfinementFamily::ALL {
+                let generated: crate::confinement::ContractFamily =
+                    serde_json::from_value(serde_json::json!(family.name().replace('-', "_")))
+                        .expect("a wire family is a contract family");
+                assert_eq!(
+                    facts.serves_family(family),
+                    proof.serves(&generated),
+                    "{}",
+                    family.name()
+                );
+            }
+            for property in ConfinementProperty::ALL {
+                let generated: crate::confinement::Fact =
+                    serde_json::from_value(serde_json::json!(property.name().replace('-', "_")))
+                        .expect("a wire property is a contract fact");
+                assert_eq!(
+                    facts.proves(property),
+                    proof.proves(&generated),
+                    "{}",
+                    property.name()
+                );
+            }
+        }
+        let mut facts = full;
+        publish_confinement(&mut facts);
+        assert_eq!(
+            ConfinementFamily::ALL
+                .into_iter()
+                .filter(|family| facts.serves_family(*family))
+                .collect::<Vec<_>>(),
+            ConfinementFamily::ALL
+                .into_iter()
+                .filter(|family| *family != ConfinementFamily::NetworkIngress)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ConfinementProperty::ALL
+                .into_iter()
+                .filter(|property| facts.proves(*property))
+                .collect::<Vec<_>>(),
+            [
+                ConfinementProperty::WholeTreeKill,
+                ConfinementProperty::IpcSocketAllowlist,
+                ConfinementProperty::IpcSignalsContained,
+            ]
+        );
+    }
+
+    /// Design 30 § 4.1: `driver_version` is a version string and never names the adapter or the
+    /// mechanism behind it.
+    #[test]
+    fn the_driver_version_names_no_adapter_or_mechanism() {
+        let version = probe(&HostConfig::minimum("/does/not/exist"), true).driver_version;
+        for name in [
+            "linux",
+            "macos",
+            "local",
+            "systemd",
+            "oci",
+            "pod",
+            "bubblewrap",
+            "seatbelt",
+        ] {
+            assert!(
+                !version.to_ascii_lowercase().contains(name),
+                "{version} names {name}"
+            );
+        }
     }
 
     #[test]

@@ -161,6 +161,7 @@ pub(crate) fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
             state,
             observed_at: "2026-08-13T12:00:01Z".parse().expect("time"),
             requested: ConfinementRequest {
+                requires: None,
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                 network: NetworkMode::None,
                 aperture: None,
@@ -4590,6 +4591,7 @@ fn an_exec_binding_a_workspace_as_a_writable_git_root_holds_it_until_terminal() 
     }
     let applied =
         |roots: Vec<substrate_wire::AppliedWritableRoot>| substrate_wire::AppliedConfinement {
+            requires: None,
             writable_roots: roots,
             workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             read_only_roots: Vec::new(),
@@ -4597,7 +4599,7 @@ fn an_exec_binding_a_workspace_as_a_writable_git_root_holds_it_until_terminal() 
             secret_slots: Vec::new(),
             workdir: None,
             capability_snapshot: format!("sha256:{}", "7".repeat(64)),
-            cgroup: "fixture".to_owned(),
+            cgroup: Some("fixture".to_owned()),
             filesystem: substrate_wire::AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
             network: substrate_wire::AppliedNetwork::None,
             profile: SandboxProfile::Workspace,
@@ -4710,6 +4712,7 @@ fn git_root_workspaces_migrate_from_the_applied_record() {
     }
     let mut bound = exec("ex_legacy", "ws_own", ExecState::Running);
     bound.resource.applied = Some(substrate_wire::AppliedConfinement {
+        requires: None,
         writable_roots: vec![
             substrate_wire::AppliedWritableRoot::Host {
                 name: "cache".to_owned(),
@@ -4728,7 +4731,7 @@ fn git_root_workspaces_migrate_from_the_applied_record() {
         secret_slots: Vec::new(),
         workdir: None,
         capability_snapshot: format!("sha256:{}", "7".repeat(64)),
-        cgroup: "fixture".to_owned(),
+        cgroup: Some("fixture".to_owned()),
         filesystem: substrate_wire::AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
         network: substrate_wire::AppliedNetwork::None,
         profile: SandboxProfile::Workspace,

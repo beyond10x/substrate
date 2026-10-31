@@ -91,6 +91,7 @@ confinement/mod.rs: pub const RENDER_UNSERVED: &str = "confinement.render-unserv
 confinement/mod.rs: pub const WRITABLE_SUBTREE_GIT: &str = "confinement.writable-subtree-git";
 confinement/mod.rs: pub const OUTPUT_RETENTION_UNSERVED: &str = "confinement.output-retention-unserved";
 confinement/mod.rs: pub const ADAPTERS: [AdapterName; 6] = [AdapterName::Local, AdapterName::Linux, AdapterName::Macos, AdapterName::Systemd, AdapterName::Oci, AdapterName::Pod];
+confinement/mod.rs: impl AdapterName > pub const fn name(&self) -> &'static str
 confinement/mod.rs: #[derive(Debug, Clone)] pub enum AdapterRequest
 confinement/mod.rs: enum AdapterRequest > Local(local::LocalRequest),
 confinement/mod.rs: enum AdapterRequest > Linux(Box<linux::LinuxRequest>),
@@ -455,6 +456,31 @@ substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize
 substrate-wire/src/lib.rs: enum HostDriverKind > #[serde(rename = "host")] Host,
 substrate-wire/src/lib.rs: enum HostDriverKind > #[serde(rename = "kubernetes")] Kubernetes,
 substrate-wire/src/lib.rs: impl HostDriverKind > pub const ALL: [Self; 2] = [Self::Host, Self::Kubernetes];
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)] #[serde(rename_all = "kebab-case")] pub enum ConfinementFamily
+substrate-wire/src/lib.rs: enum ConfinementFamily > ProcessRun,
+substrate-wire/src/lib.rs: enum ConfinementFamily > ProcessWatch,
+substrate-wire/src/lib.rs: enum ConfinementFamily > OutputRead,
+substrate-wire/src/lib.rs: enum ConfinementFamily > Wait,
+substrate-wire/src/lib.rs: enum ConfinementFamily > Workspace,
+substrate-wire/src/lib.rs: enum ConfinementFamily > FilesystemView,
+substrate-wire/src/lib.rs: enum ConfinementFamily > NetworkEgress,
+substrate-wire/src/lib.rs: enum ConfinementFamily > NetworkIngress,
+substrate-wire/src/lib.rs: enum ConfinementFamily > Limits,
+substrate-wire/src/lib.rs: enum ConfinementFamily > Audit,
+substrate-wire/src/lib.rs: impl ConfinementFamily > pub const ALL: [Self; 10] = [Self::ProcessRun, Self::ProcessWatch, Self::OutputRead, Self::Wait, Self::Workspace, Self::FilesystemView, Self::NetworkEgress, Self::NetworkIngress, Self::Limits, Self::Audit];
+substrate-wire/src/lib.rs: impl ConfinementFamily > pub const fn name(self) -> &'static str
+substrate-wire/src/lib.rs: impl ConfinementFamily > pub const fn fact(self) -> &'static str
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)] #[serde(rename_all = "kebab-case")] pub enum ConfinementProperty
+substrate-wire/src/lib.rs: enum ConfinementProperty > PathsAreHostPaths,
+substrate-wire/src/lib.rs: enum ConfinementProperty > WholeTreeKill,
+substrate-wire/src/lib.rs: enum ConfinementProperty > IpcSocketAllowlist,
+substrate-wire/src/lib.rs: enum ConfinementProperty > IpcSignalsContained,
+substrate-wire/src/lib.rs: enum ConfinementProperty > SealedPaths,
+substrate-wire/src/lib.rs: enum ConfinementProperty > ExecSubpaths,
+substrate-wire/src/lib.rs: enum ConfinementProperty > PrivateTmpdir,
+substrate-wire/src/lib.rs: impl ConfinementProperty > pub const ALL: [Self; 7] = [Self::PathsAreHostPaths, Self::WholeTreeKill, Self::IpcSocketAllowlist, Self::IpcSignalsContained, Self::SealedPaths, Self::ExecSubpaths, Self::PrivateTmpdir];
+substrate-wire/src/lib.rs: impl ConfinementProperty > pub const fn name(self) -> &'static str
+substrate-wire/src/lib.rs: impl ConfinementProperty > pub const fn fact(self) -> &'static str
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct CapabilityFacts
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.pull", skip_serializing_if = "Option::is_none")] pub events_pull: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.stream", skip_serializing_if = "Option::is_none")] pub events_stream: Option<bool>,
@@ -478,6 +504,23 @@ substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.argv-
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.namespaces", skip_serializing_if = "Option::is_none")] pub exec_namespaces: Option<NamespaceFacts>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.no-egress", skip_serializing_if = "Option::is_none")] pub exec_no_egress: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.no-egress", default, skip_serializing_if = "Option::is_none")] pub confinement_no_egress: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.family.process-run", default, skip_serializing_if = "Option::is_none")] pub confinement_family_process_run: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.family.process-watch", default, skip_serializing_if = "Option::is_none")] pub confinement_family_process_watch: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.family.output-read", default, skip_serializing_if = "Option::is_none")] pub confinement_family_output_read: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.family.wait", default, skip_serializing_if = "Option::is_none")] pub confinement_family_wait: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.family.workspace", default, skip_serializing_if = "Option::is_none")] pub confinement_family_workspace: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.family.filesystem-view", default, skip_serializing_if = "Option::is_none")] pub confinement_family_filesystem_view: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.family.network-egress", default, skip_serializing_if = "Option::is_none")] pub confinement_family_network_egress: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.family.network-ingress", default, skip_serializing_if = "Option::is_none")] pub confinement_family_network_ingress: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.family.limits", default, skip_serializing_if = "Option::is_none")] pub confinement_family_limits: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.family.audit", default, skip_serializing_if = "Option::is_none")] pub confinement_family_audit: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.paths-are-host-paths", default, skip_serializing_if = "Option::is_none")] pub confinement_paths_are_host_paths: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.whole-tree-kill", default, skip_serializing_if = "Option::is_none")] pub confinement_whole_tree_kill: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.ipc-socket-allowlist", default, skip_serializing_if = "Option::is_none")] pub confinement_ipc_socket_allowlist: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.ipc-signals-contained", default, skip_serializing_if = "Option::is_none")] pub confinement_ipc_signals_contained: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.sealed-paths", default, skip_serializing_if = "Option::is_none")] pub confinement_sealed_paths: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.exec-subpaths", default, skip_serializing_if = "Option::is_none")] pub confinement_exec_subpaths: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.private-tmpdir", default, skip_serializing_if = "Option::is_none")] pub confinement_private_tmpdir: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.workspace-scoped-write", skip_serializing_if = "Option::is_none")] pub exec_workspace_scoped_write: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.cgroup-limits", skip_serializing_if = "Option::is_none")] pub exec_cgroup_limits: Option<CgroupLimitFacts>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.cgroup-kill", skip_serializing_if = "Option::is_none")] pub exec_cgroup_kill: Option<bool>,
@@ -503,6 +546,8 @@ substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "sessions.u
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "snapshot.provenance-events", skip_serializing_if = "Option::is_none")] pub snapshot_provenance_events: Option<u64>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "process.host", default, skip_serializing_if = "Option::is_none")] pub process_host: Option<bool>,
 substrate-wire/src/lib.rs: impl Default for CapabilityFacts
+substrate-wire/src/lib.rs: impl CapabilityFacts > pub const fn serves_family(&self, family: ConfinementFamily) -> bool
+substrate-wire/src/lib.rs: impl CapabilityFacts > pub const fn proves(&self, property: ConfinementProperty) -> bool
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct StorageQuotaFacts
 substrate-wire/src/lib.rs: struct StorageQuotaFacts > pub allocation_unit_bytes: u64,
 substrate-wire/src/lib.rs: struct StorageQuotaFacts > pub max_bytes: u64,

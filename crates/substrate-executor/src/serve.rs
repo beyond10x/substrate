@@ -4,7 +4,9 @@
 //! root, with no symlink, magic link or mount crossing: the host driver's own code. No shell and no
 //! path string that follows a link performs file I/O.
 
+use std::ffi::OsStr;
 use std::io::{self, Read, Write};
+use std::net::IpAddr;
 use std::path::Path;
 
 use serde::Serialize;
@@ -31,23 +33,35 @@ pub fn open_workspace(root: &Path) -> Result<GuardedFilesystem, DriverError> {
     GuardedFilesystem::open_single(root, MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS)
 }
 
+/// The variable kubelet sets in every container to the Kubernetes Service's cluster address.
+pub const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
+
 /// The answer to `check`: each proof of design 34 § 6.2 on its own, made in a scratch directory in
 /// the workspace that is gone before the answer is written. The driver states
 /// `workspace.openat2-beneath` from the first, `workspace.guarded-io` only from the first two, and
 /// `workspace.atomic-replace` from the third.
+///
+/// It also states the keeper's [`KUBERNETES_SERVICE_HOST`] when that is an IP address: the probe
+/// child dials it, and its own environment is exactly what the driver computed (§ 7.3), so the
+/// driver hands it the keeper's.
 #[derive(Serialize)]
 struct Check {
     openat2_beneath: bool,
     symlink_escape_refused: bool,
     atomic_replace: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kubernetes_service_host: Option<IpAddr>,
 }
 
-impl From<GuardedIoProofs> for Check {
-    fn from(proofs: GuardedIoProofs) -> Self {
+impl Check {
+    fn new(proofs: GuardedIoProofs, kubernetes_service_host: Option<&OsStr>) -> Self {
         Self {
             openat2_beneath: proofs.openat2_beneath,
             symlink_escape_refused: proofs.symlink_escape_refused,
             atomic_replace: proofs.atomic_replace,
+            kubernetes_service_host: kubernetes_service_host
+                .and_then(OsStr::to_str)
+                .and_then(|host| host.parse().ok()),
         }
     }
 }
@@ -155,7 +169,10 @@ pub fn handle(filesystem: &GuardedFilesystem, request: Request, content: &[u8]) 
             .patch_cas(&workspace, ROOT_NAME, &path, &input)
             .and_then(complete),
         Request::Stat { workspace, path } => stat(filesystem, &workspace, path),
-        Request::Check {} => complete(Check::from(filesystem.prove_guarded_io())),
+        Request::Check {} => complete(Check::new(
+            filesystem.prove_guarded_io(),
+            std::env::var_os(KUBERNETES_SERVICE_HOST).as_deref(),
+        )),
     };
     match result {
         Ok(response) => response,
@@ -208,4 +225,47 @@ fn observation(value: impl Serialize, omitted_entries: u64) -> Result<Response, 
         value,
         omitted_entries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use substrate_guarded::fs::GuardedIoProofs;
+
+    use super::Check;
+
+    fn answer(host: Option<&str>) -> serde_json::Value {
+        let proofs = GuardedIoProofs {
+            openat2_beneath: true,
+            symlink_escape_refused: true,
+            atomic_replace: true,
+        };
+        serde_json::to_value(Check::new(proofs, host.map(OsStr::new))).expect("serializes")
+    }
+
+    #[test]
+    fn the_check_states_the_keepers_kubernetes_service_host_only_when_it_is_an_address() {
+        assert_eq!(
+            answer(Some("10.96.0.1"))["kubernetes_service_host"],
+            "10.96.0.1"
+        );
+        assert_eq!(
+            answer(Some("fd00::1"))["kubernetes_service_host"],
+            "fd00::1"
+        );
+        for unread in [
+            None,
+            Some(""),
+            Some("kubernetes.default.svc"),
+            Some("10.96.0.1:443"),
+        ] {
+            let value = answer(unread);
+            assert!(
+                value.get("kubernetes_service_host").is_none(),
+                "{unread:?} states no host: {value}"
+            );
+            assert_eq!(value["openat2_beneath"], true);
+        }
+    }
 }

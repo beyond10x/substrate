@@ -69,7 +69,7 @@ and the [wire event validator](https://github.com/beyond10x/substrate/blob/0.16.
 
 Workloads, images, volumes and endpoints are future resource families, not implemented route
 families. A Docker driver is absent, and the Kubernetes namespace driver, a development profile,
-refuses every exec start. A general architecture
+admits an exec only on the confinement its probe observed. A general architecture
 goal therefore does not imply complete served domain coverage.
 
 ## What is derived, and what is authored?

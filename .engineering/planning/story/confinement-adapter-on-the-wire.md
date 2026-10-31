@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:confinement-adapter-on-the-wire
 kind: story
-status: draft
+status: active
 title: The wire states what the confinement adapter proves, never its name
 summary: 'Design 30: a successor bundle publishes confinement families and properties as facts, lets a start require them, and keeps driver as host.'
 owner: substrate
@@ -12,7 +12,10 @@ tags:
 - wire
 relations:
 - informed_by: epic:confinement-contract-family
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-31T11:27:59Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-31T11:28:48Z", actor: "human:timo", revision: 4}
 ---
 # Story: the wire states what the confinement adapter proves, never its name
 
@@ -25,9 +28,10 @@ or deployment-profile name appears on the client wire, and `driver` stays `host`
 
 ## Design
 
-[Design 30](../../../docs/design/30-confinement-adapter-on-the-wire.md), status `proposed`. Under
-invariant 8 no code starts before the operator decides D1 to D10 of its § 9 and, under D8, the
-ADR that records it is accepted.
+[Design 30](../../../docs/design/30-confinement-adapter-on-the-wire.md), status `accepted`
+2026-10-31 with every recommended answer of its § 9, recorded in
+[ADR 0048](../../../adr/0048-the-wire-states-what-a-confinement-adapter-proves-never-its-name.md)
+(`approval-record:design-30-accepted`). The bundle is `0.26.0` (D10).
 
 This is the first story of the epic after `epic:confinement-contract-family`, which declares
 naming adapters on the wire out of its own scope ("the next epic's first story"). It is therefore

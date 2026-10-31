@@ -534,6 +534,7 @@ fn seed_ready_pipe_session(state_path: &Path, origin: &str) {
             state: ExecState::Accepted,
             observed_at: now,
             requested: ConfinementRequest {
+                requires: None,
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                 network: NetworkMode::None,
                 aperture: None,
@@ -878,7 +879,7 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert!(
         response
             .to_ascii_lowercase()
-            .contains("x-b10x-contract: substrate-wire/0.25.0"),
+            .contains("x-b10x-contract: substrate-wire/0.26.0"),
         "{response}"
     );
 
@@ -1461,9 +1462,10 @@ async fn development_static_bearer_refuses_non_loopback_binding() {
 }
 
 /// The largest number of samples `/metrics` may carry (ADR 0045 decision 7): 471 without
-/// `substrate_refusals_total`, plus one series per refusal code the wire crate names and `other`.
+/// `substrate_refusals_total`, plus one series per refusal code the wire crate names and `other`,
+/// plus the host daemon's one `substrate_adapter_info` series (ADR 0048 D7).
 /// `app::health::tests` pins the same number against the catalogue itself.
-const OPS_SERIES_MAXIMUM: usize = 582;
+const OPS_SERIES_MAXIMUM: usize = 585;
 
 struct OpsAnswer {
     status: u16,

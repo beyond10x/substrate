@@ -127,6 +127,7 @@ fn input() -> ExecStartInput {
             set: BTreeMap::new(),
         },
         sandbox: substrate_wire::ConfinementRequest {
+            requires: None,
             capability_snapshot: format!("sha256:{}", SNAPSHOT_DIGIT.repeat(64)),
             network: NetworkMode::None,
             aperture: None,

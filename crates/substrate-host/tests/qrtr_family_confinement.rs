@@ -105,6 +105,7 @@ fn exec_input(snapshot: &str, argv: &[&str]) -> ExecStartInput {
             set: BTreeMap::new(),
         },
         sandbox: ConfinementRequest {
+            requires: None,
             capability_snapshot: snapshot.to_owned(),
             network: NetworkMode::None,
             aperture: None,
