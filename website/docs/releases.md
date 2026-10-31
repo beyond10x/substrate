@@ -15,84 +15,73 @@ What 0.16.1 first publishes is listed under 0.16.0 in the full changelog and sum
 
 <!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->
 
-## 0.17.0 (2026-10-31)
+## 0.18.0 (2026-10-31)
 
-Shared clean-room conformance arrives: design 31's remote runner certifies a deployed endpoint from
-outside it, and the Kubernetes namespace lane runs it as step 4. The namespace driver still refuses
-every exec start `exec.sandbox-unavailable`; admitting one needs design 30's neutral confinement
-families, which wait on an operator decision.
+The wire states what a confinement adapter proves, never its name (design 30, ADR 0048), and the
+Kubernetes namespace driver admits an exec start on the confinement its probe observed. On a
+cluster whose network plugin does not enforce NetworkPolicy, `confinement.no-egress` stays absent
+and exec is still refused `exec.sandbox-unavailable`.
 
-### Added in 0.17.0
+### Added in 0.18.0
 
-- `b10x-substrate-conformance`, design 31's clean-room runner: it certifies one deployed endpoint
-  over HTTPS and WSS from outside it, pinned to `substrate-wire/0.25.0`, and writes `report.json`
-  with `report.json.sha256` under a closed schema (exit 0 passed, 1 failed, 2 invalid input, 3
-  harness failure, 4 incomplete). Build it with
-  `cargo build --release --locked -p b10x-substrate-conformance`; `cargo xtask check-packages`
-  holds that this build links no daemon, host driver or store. Guide: *Remote conformance*. No
-  release artifact (design 31 Q3).
-- The runner checks its input before the first request: `out-uncreatable` (the `--out` directory
-  is created at the start and removed again when the run stops without a report),
-  `token-command-unusable` and `restart-hook-unusable` (the program is not an absolute path to an
-  executable file) are exit 2 with no report. Its token command and restart hook start with only
-  the standard streams open.
-- Exit 3 (harness failure, no report) names `deadline-exceeded` (the handshake, the connect and the
-  final machine read run under `--deadline`), `token-fd-poisoned` (an exchange on `--token-fd`
-  timed out or answered an over-long line; every later fetch fails) and `report-outside-schema`
-  (the report is checked against its own schema before it is written). A chunk size or
-  `content-length` beyond the response bound is a malformed answer.
-- Cases fail by name instead of reading without bound: `events-page-shrank`,
-  `status-unrepresentable`, `session-output-exceeded` (64 KiB of session output). An endpoint whose
-  first `/v1/machine` body does not decode is exit 1 with a report: the failed case
-  `machine.envelope-decodes` (`envelope-undecodable`) and `capability_snapshot: null`.
-- The runner settles a destroy the endpoint leaves to reconciliation, as the namespace driver does
-  while the keeper Pod terminates: a retriable `operation.outcome-unknown` is read through
-  `GET /v1/ops/{op}` until terminal (design 01 § 6), and the closing cleanup waits out a
-  `destroying` workspace instead of destroying it again. After the restart hook it selects the
-  restart and cleanup cases on a machine snapshot read once `/readyz` answers.
-- The namespace lane's step 4 runs the runner against the `--driver kubernetes` daemon with a
-  crash restart hook, and the chart lane's hosted scenarios gain "clean-room runner" against
-  ordinal 0, with the report uploaded as the `clean-room-report` artifact. Step 4 counts a daemon
-  restart only when the exit was the SIGKILL its restart hook sent; any other daemon exit stops the
-  runner and fails the step (`daemon-exit-not-caused-by-hook`), and no exit at all is
-  `hook-caused-no-exit`. Both lanes refuse a report or runner output that holds the credential,
-  its body or the token prefix, and delete the report, its digest and the runner's log before
-  failing, so the `clean-room-report` artifact never carries them. Step 4 waits for the TLS
-  daemon by its `/readyz`, and, whatever the runner's verdict, destroys every workspace the
-  runner's subject still holds and waits until the lane deployment owns no Pod or claim, so steps
-  5 and 6 start under the namespace quota.
-- The operational listener of a daemon running `--driver kubernetes` serves
-  `substrate_kubernetes_collisions_total`, a counter with no labels: the objects the driver met
-  under a name it would use and did not create, each left untouched (design 34 § 4, the one
-  addition it makes to ADR 0045's catalogue). Each object is counted once, keyed on its kind, name
-  and uid, however often a provisional loop or a read meets it again; the driver remembers 4096
-  such objects, and past that a new one is counted every time it is met, so the series can
-  overcount but never misses an object. A foreign Pod met under an exec Pod's name at start is
-  counted too. Its scrape carries at most 583 samples. A host daemon publishes no such series and
-  its scrape is unchanged at 582. The driver port gains `Driver::backend_collisions`, `None` by
-  default.
+- Development contract bundle `substrate-wire/0.26.0` (design 30, ADR 0048), now advertised by the
+  daemon, the Rust SDK and the conformance runner. It adds no route. A capability snapshot may
+  state one optional fact per confinement family (`confinement.family.process-run` to
+  `confinement.family.audit`) and per mechanism-neutral property (`confinement.whole-tree-kill`
+  and six more), each `true` or absent. Both starts accept an optional closed `sandbox.requires`
+  that names families and properties, and two refusals are published at 501 with a vector each:
+  `confinement.family-unserved` and `confinement.fact-unserved`. `substrate-wire` exports
+  `ConfinementFamily`, `ConfinementProperty`, `ConfinementRequires`,
+  `validate_confinement_requires` and `confinement_requires_refusal`.
+- The host daemon publishes the `linux` adapter's family and property facts, each derived from a
+  proof it already makes: `audit` always, `workspace` with guarded workspace I/O, and with the exec
+  floor `process-run`, `process-watch`, `output-read`, `wait`, `limits`, `filesystem-view` (with
+  read-only roots and files), `network-egress` (with a declared aperture), `whole-tree-kill`,
+  `ipc-socket-allowlist` and `ipc-signals-contained`. It never publishes `network-ingress`. The
+  capability snapshot digest now binds the adapter, so the host's snapshot id changes once.
+- Exec and session starts check `sandbox.requires`. A requirement outside the schema (an empty
+  object or list, a repeated or unknown name, a `null` list) is `request.schema-invalid` (422)
+  with the other request-shape checks, before `exec.capability-stale`. After the stale check, the
+  first unserved family is `confinement.family-unserved` (501) and the first unproved property
+  `confinement.fact-unserved` (501), each recorded as refused before dispatch and before any
+  field-specific check. The host driver checks `requires` at the same two points, so it names
+  the same refusal the daemon does; for that its stale check now also precedes read-only roots,
+  read-only files, workspace access and secret slots, as the daemon's does. An admitted run's
+  applied record echoes `requires` on both drivers. A start without `requires` is unchanged.
+- `Machine::served_families` and `Machine::proved_properties` in the Rust SDK, which also
+  re-exports `ConfinementFamily`, `ConfinementProperty` and `ConfinementRequires`.
+- `/metrics` on the operational listener names the two new refusal codes and, on a host daemon
+  only, `substrate_adapter_info{adapter="linux"} 1` (ADR 0048 D7): the operator sees the adapter
+  name, the API never does. A `--driver kubernetes` daemon opens no adapter and has no such series.
+  Each scrape holds at most 585 samples.
+- The runtime vectors check the published facts and the `requires` refusals: the portable lane
+  counts 124 cases and the delegated lane 189.
+- The namespace driver's probe observes confinement (design 34 § 6.2). Its probe Pod now mounts
+  the probe's volume writable and carries one environment variable, `SUBSTRATE_PROBE_TARGETS`.
+  `probe-child` forks a grandchild that rewrites `substrate-probe-heartbeat` in the volume every
+  100 ms, and makes three egress attempts of at most 3 s each: TCP to the Kubernetes Service host
+  the keeper's environment states, port 443; a DNS query to `/etc/resolv.conf`'s first
+  nameserver; TCP to `egress_probe_address`. Each probe run takes about 5 s longer. The snapshot
+  then states the seven families `confinement.family.process-run`, `.process-watch`,
+  `.output-read`, `.wait`, `.workspace`, `.limits` and `.audit` when the Pod ended with its
+  frames, its applied bounds and an exit record that agrees with the API;
+  `confinement.whole-tree-kill` when the keeper sees the heartbeat unchanged for 2 s after the
+  container shows `terminated`; and `confinement.no-egress` when all three attempts failed with
+  nothing answering and no NetworkPolicy in the bound set other than the default-deny one has an
+  egress rule. Any such policy withholds the fact, whichever Pods it selects. Each lapses with the
+  proof. It never states the four Linux `exec.*` facts.
 
-### Changed in 0.17.0
+### Changed in 0.18.0
 
-- Changed contract: the report schema `remote-conformance-report.v1` differs from the one design 31
-  published before this release. `capability_snapshot` and each snapshot read may be `null`; a
-  snapshot read records only a `sha256:` digest and an RFC 3339 time; `not_covered` also lists
-  every pinned registry operation no case names (`{"operation": …}`); a word (driver, driver
-  version) is at most 32 characters of `[0-9A-Za-z.+-]` starting alphanumeric, so it no longer
-  admits `_`. A driver version outside that fails `machine.envelope-decodes` with
-  `driver-version-unrepresentable`. A consumer that parsed reports against design 31's table must
-  accept `null` there.
-- Pinned ESS 0.77.0 across every specification and the CI gate (`ESS_VERSION` and `ESS_SHA256` in
-  `.github/workflows/gate.yml`); `cargo xtask check-ess` passes with unchanged scenario counts.
-
-### Fixed in 0.17.0
-
-- A Pod removal no longer treats a 409 on its uid-preconditioned delete as the Pod gone: it reads
-  the name, and retries while the Pod it read is still there. The Status of the 409 does not
-  decide, because an admission webhook sets its own.
-- Kubernetes driver: an exec Pod still holding its bound uid 60 s or more after the driver's
-  deletion was accepted ends the exec `unknown`, not `running`, even when that read already shows
-  the container terminated, so the end no longer depends on when the exec is first observed; the
-  garbage round keeps deleting it (design 28). A `kill` or `term` whose delete answer was lost
-  starts the same bound at the first read that shows the Pod's `deletionTimestamp`; before, such
-  an exec stayed `running` when no garbage round ran.
+- A namespace-driver daemon admits an exec start when its snapshot states
+  `confinement.family.process-run`, `.wait`, `.output-read` and `.limits`,
+  `confinement.whole-tree-kill` and `confinement.no-egress` (design 34 § 6.4). On a cluster whose
+  network plugin does not enforce the NetworkPolicy, an attempt is reached or refused,
+  `confinement.no-egress` stays absent and every exec start is still `exec.sandbox-unavailable`
+  (501). The host driver never states `confinement.no-egress` and admits as before.
+- `AppliedConfinement.cgroup` is `Option<String>` and is optional in the bundle, present whenever
+  the adapter applied a cgroup; the host driver applies one to every run, so its records keep their
+  bytes. The applied record gains an optional `requires` echo. A crate that constructs or
+  exhaustively destructures the Rust type `AppliedConfinement` (loom does, in
+  `loom-intake-slice/src/confinement.rs`) must adapt when its substrate pin moves, even though it
+  uses the host API in process.
