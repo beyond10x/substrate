@@ -58,6 +58,7 @@ pub struct Reply {
 pub struct ErrorView {
     pub class: substrate_wire::ErrorClass,
     pub code: String,
+    pub retriable: bool,
 }
 
 impl Reply {
@@ -76,6 +77,7 @@ impl Reply {
         Some(ErrorView {
             class: failure.error.class,
             code: failure.error.code,
+            retriable: failure.error.retriable,
         })
     }
 

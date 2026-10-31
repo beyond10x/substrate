@@ -327,6 +327,74 @@ fn is_not_found(error: &SdkError) -> bool {
     refusal_code(error) == Some("resource.not-found")
 }
 
+/// What an endpoint answers a mutation it accepted and has not finished: a destroy whose absence
+/// is not yet proved is left to reconciliation (design 03 decision 8; design 34 § 5,
+/// `WorkspaceDestroyProgress::Pending`), and its outcome is read from the ledger.
+pub const OUTCOME_UNKNOWN: &str = "operation.outcome-unknown";
+/// The pause between two ledger reads while an accepted operation settles.
+const SETTLE_POLL: Duration = Duration::from_millis(500);
+
+/// Whether `error` is the retriable `failed` answer of an accepted operation whose outcome the
+/// endpoint has not yet proved.
+pub fn is_outcome_unknown(error: &SdkError) -> bool {
+    matches!(error, SdkError::Refusal(refusal) if refusal.code == OUTCOME_UNKNOWN && refusal.retriable)
+}
+
+/// Reads `GET /v1/ops/{operation}` until the operation is terminal, within `--restart-timeout`,
+/// and answers its successful result. Design 01 § 6: an accepted operation whose outcome is
+/// unknown is reconciled through the ledger, never resent under a new id and never counted as a
+/// refusal; a terminal error is the refusal it records.
+///
+/// # Errors
+///
+/// `operation-not-settled` past the bound; `refused` with the recorded code for a terminal error
+/// or a refused operation.
+pub async fn settled(ctx: &Ctx, operation: &str) -> Result<Value, Fail> {
+    let until = tokio::time::Instant::now() + ctx.settings.restart_timeout;
+    loop {
+        let record = ctx.io(ctx.client.operation(operation)).await?;
+        match record.state {
+            OperationState::Terminal | OperationState::Refused => {
+                if let Some(refusal) = record.refusal {
+                    return Err(Fail::new("refused").with(Some(&refusal.code)));
+                }
+                return record
+                    .result
+                    .ok_or_else(|| Fail::new("operation-not-successful"));
+            }
+            OperationState::Accepted | OperationState::Unknown => {}
+            _ => return Err(Fail::new("operation-state-unexpected")),
+        }
+        ensure(tokio::time::Instant::now() < until, "operation-not-settled")?;
+        tokio::time::sleep(SETTLE_POLL).await;
+    }
+}
+
+/// Destroys `workspace` under `operation` and answers once the destroy is proved: by its own
+/// answer, or, when the endpoint left it to reconciliation, by its operation's terminal result.
+/// Either must say the workspace is absent.
+///
+/// # Errors
+///
+/// The destroy's refusal, `destroy-not-applied`, or those of [`settled`].
+pub async fn destroy_settled(
+    ctx: &Ctx,
+    workspace: b10x_substrate_sdk::Workspace,
+    operation: String,
+) -> Result<(), Fail> {
+    let absent = match ctx
+        .io_raw(workspace.destroy_with_operation_id(Some(operation.clone())))
+        .await?
+    {
+        Ok(absent) => absent,
+        Err(error) if is_outcome_unknown(&error) => {
+            settled(ctx, &operation).await?["absent"] == Value::Bool(true)
+        }
+        Err(error) => return Err(crate::run::sdk(&error)),
+    };
+    ensure(absent, "destroy-not-applied")
+}
+
 /// The first and last machine read as the closed report carries it: the wire `snapshot` in its
 /// `sha256:<64 hex>` form and `probed_at` within four-digit years, or `None`. No other server
 /// string is ever copied.
@@ -687,7 +755,8 @@ pub async fn workspace(ctx: &mut Ctx) {
             .await?;
         let id = created.id().to_owned();
         ctx.state.workspaces.push(id.clone());
-        ensure(ctx.io(created.destroy()).await?, "destroy-not-applied")?;
+        let destroy = ctx.operation_id();
+        destroy_settled(ctx, created, destroy).await?;
         match ctx.io_raw(ctx.client.get_workspace(&id)).await? {
             Err(error) if is_not_found(&error) => Ok(Note::default()),
             Err(error) => Err(Fail::new("unexpected-refusal").with(refusal_code(&error))),
@@ -1026,8 +1095,7 @@ async fn commit_order(ctx: &mut Ctx) -> CaseResult {
     ))
     .await?;
     let destroy = ctx.operation_id();
-    ctx.io(created.destroy_with_operation_id(Some(destroy.clone())))
-        .await?;
+    destroy_settled(ctx, created, destroy.clone()).await?;
     let events = ctx.events_after(&cursor).await?;
     let sequences: Vec<u64> = events
         .iter()
