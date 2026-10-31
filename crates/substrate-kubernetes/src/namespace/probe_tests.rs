@@ -1323,3 +1323,42 @@ async fn no_egress_is_absent_unless_all_three_attempts_failed_at_the_named_addre
         assert_eq!(families(&facts), [Some(true); 7], "{why}");
     }
 }
+
+/// Adversary, wave 2026-10-31 (claim 5; design 34 § 6.2, amendment of 2026-10-31): "the heartbeat
+/// and the egress observation count only from a run whose argv read back byte for byte". The
+/// suite holds an expanded argv only with no observation line, so dropping the argv gate in
+/// `read_run` stays green. Here the child's argv was expanded on its way to `execve` and its
+/// observation and heartbeat would each prove their property on their own: both stay absent,
+/// while the seven families, which rest on the end and not on the argv, are published.
+#[tokio::test]
+async fn adversary_w1031_an_expanded_argv_voids_the_heartbeat_and_the_egress_observation() {
+    let observation = Observation {
+        heartbeat: true,
+        egress: blocked(),
+    };
+    let control = facts_after(
+        Play::observing(&observation, Heartbeat::Stopped),
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    assert_eq!(
+        (
+            control.confinement_whole_tree_kill,
+            control.confinement_no_egress
+        ),
+        (Some(true), Some(true)),
+        "the control: the same observation from an exact argv proves both"
+    );
+    let expanded = Play {
+        child: Child::Expanded,
+        ..Play::observing(&observation, Heartbeat::Stopped)
+    };
+    let facts = facts_after(expanded, Some(check_with_host(SERVICE_HOST))).await;
+    assert_eq!(facts.exec_argv_only, None);
+    assert_eq!(families(&facts), [Some(true); 7]);
+    assert_eq!(
+        (facts.confinement_whole_tree_kill, facts.confinement_no_egress),
+        (None, None),
+        "an observation from a run whose argv did not read back proves nothing"
+    );
+}
