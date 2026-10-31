@@ -233,6 +233,7 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
         state: ExecState::Exited,
         observed_at: Utc::now(),
         requested: ConfinementRequest {
+            requires: None,
             capability_snapshot: snapshot.clone(),
             network: NetworkMode::None,
             aperture: None,

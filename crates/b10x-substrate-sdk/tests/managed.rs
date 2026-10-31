@@ -384,7 +384,10 @@ async fn delegated_external_daemon_serves_pty_metrics_and_cleans_the_process_tre
             .await
             .expect("exec observation");
         if let Some(applied) = &exec.observation().applied {
-            break applied.cgroup.clone();
+            break applied
+                .cgroup
+                .clone()
+                .expect("the host driver names the exec cgroup");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     };

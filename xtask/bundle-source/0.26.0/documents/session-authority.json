@@ -1,0 +1,30 @@
+{
+  "$schema": "schemas/session-authority.json",
+  "authority": {
+    "bearer_format": "session_authority_v1_<43-base64url-characters>",
+    "id_format": "sa_<26-crockford-base32-characters>",
+    "maximum_lifetime_seconds": 60,
+    "maximum_live_per_session": 4,
+    "stored_form": "sha256-verifier-only"
+  },
+  "binding": {
+    "exporter_bytes": 32,
+    "exporter_context": "none",
+    "exporter_label": "EXPORTER-Substrate-Session-Authority-v1",
+    "key": "ed25519",
+    "proof_timestamp_skew_seconds": 10,
+    "transcript_domain": "substrate.session-authority.v1"
+  },
+  "headers": {
+    "authority": "x-substrate-session-authority",
+    "authority_id": "x-substrate-session-authority-id",
+    "proof": "x-substrate-session-proof",
+    "timestamp": "x-substrate-session-timestamp"
+  },
+  "mint": {
+    "method": "POST",
+    "path": "/v1/sessions/{session_id}/attachment-authorities",
+    "transport": "hosted-tls-only"
+  },
+  "redemption": "same-transaction-as-attachment-claim"
+}

@@ -151,6 +151,21 @@ Earlier bundle directories remain immutable. A source contract promotion is not 
 daemon release; consumers must pin and test the matching SDK/daemon revision. The SDK refuses an
 older daemon's contract before issuing mutations.
 
+### `0.26.0`
+
+Development source now advertises `substrate-wire/0.26.0`; no release advertises it yet. It adds
+no route. A capability snapshot may state what the serving confinement adapter proved, never its
+name: one optional fact per family, `confinement.family.process-run` through
+`confinement.family.audit` in ADR 0044's order, and one per mechanism-neutral property, such as
+`confinement.whole-tree-kill` or `confinement.paths-are-host-paths`. Each is `true` or absent,
+never `false`. An exec or session start may carry `sandbox.requires`, a closed object with a
+`families` list and a `facts` list of those names without their prefixes; an unknown name, a
+duplicate or an empty object is `request.schema-invalid`. The first required family the start's
+snapshot does not serve is `confinement.family-unserved` and the first required property it does
+not prove is `confinement.fact-unserved`, each `501` with class `unserved`, recorded as refused
+and never dispatched. The applied record echoes `requires`, and its `cgroup` is optional: present
+whenever a cgroup was applied, as on every host run.
+
 ### `0.25.0`
 
 Release `0.16.1` advertises `substrate-wire/0.25.0`. It adds no route. A capability

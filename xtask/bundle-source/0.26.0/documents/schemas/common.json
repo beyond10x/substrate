@@ -1,0 +1,697 @@
+{
+  "$defs": {
+    "api-version": {
+      "enum": [
+        "v1",
+        "v2"
+      ]
+    },
+    "canonical-base64-capsule-file": {
+      "maxLength": 349528,
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+      "type": "string",
+      "x-b10x-max-decoded-bytes": {
+        "$wire": "MAX_EXECUTION_CAPSULE_FILE_BYTES"
+      }
+    },
+    "canonical-base64-file": {
+      "oneOf": [
+        {
+          "maxLength": 1398100,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+          "type": "string"
+        },
+        {
+          "maxLength": 1398104,
+          "minLength": 1398104,
+          "pattern": "^[A-Za-z0-9+/]{1398102}==$",
+          "type": "string"
+        }
+      ],
+      "x-b10x-max-decoded-bytes": {
+        "$wire": "MAX_FILE_BYTES"
+      }
+    },
+    "empty-input": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "event-cursor": {
+      "maxLength": 512,
+      "pattern": "^ev2\\.scope_[A-Za-z0-9_-]+\\.[1-9][0-9]*\\.(?:0|[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "exec-id": {
+      "pattern": "^ex_[A-Za-z0-9]+$",
+      "type": "string"
+    },
+    "labels": {
+      "additionalProperties": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "maxProperties": 64,
+      "propertyNames": {
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "type": "object"
+    },
+    "operation-id": {
+      "maxLength": 128,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "positive-u64": {
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "relative-path": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\u0000).+$",
+      "type": "string",
+      "x-b10x-max-depth": 64
+    },
+    "request-id": {
+      "maxLength": 128,
+      "minLength": 8,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "rfc6901-pointer": {
+      "maxLength": 4096,
+      "pattern": "^(?:/(?:[^~/]|~[01])*)*$",
+      "type": "string"
+    },
+    "session-id": {
+      "pattern": "^ses_[A-Za-z0-9]+$",
+      "type": "string"
+    },
+    "snapshot-cursor": {
+      "maxLength": 512,
+      "pattern": "^sp2\\.snap_[A-Za-z0-9]+\\.[1-9][0-9]*$",
+      "type": "string"
+    },
+    "snapshot-id": {
+      "pattern": "^snap_[A-Za-z0-9]+$",
+      "type": "string"
+    },
+    "source-scope": {
+      "maxLength": 256,
+      "pattern": "^scope_[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "storage-limit": {
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {
+          "maximum": 1099511627776,
+          "minimum": 1048576,
+          "multipleOf": 1024,
+          "type": "integer"
+        },
+        "max_inodes": {
+          "maximum": 1048576,
+          "minimum": 16,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_bytes",
+        "max_inodes"
+      ],
+      "type": "object"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "maxLength": 35,
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+      "type": "string"
+    },
+    "u64": {
+      "maximum": 18446744073709551615,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "workspace-id": {
+      "pattern": "^ws_[A-Za-z0-9]+$",
+      "type": "string"
+    },
+    "workspace-access": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "read-write"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "read-only"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "scoped"
+            },
+            "writable_subtrees": {
+              "items": {
+                "$ref": "#/$defs/relative-path"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true,
+              "x-b10x-order": "strict-utf8-bytewise-path",
+              "x-b10x-non-overlapping": true
+            }
+          },
+          "required": [
+            "mode",
+            "writable_subtrees"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "host-absolute-path": {
+      "description": "Absolute and canonical: every component non-empty, never `.` or `..`, no NUL, no trailing slash. At most 64 components, each at most 255 UTF-8 bytes, and at most 4000 UTF-8 bytes in all; `maxLength` and the pattern count characters, so the byte bounds are the stricter for a non-ASCII path.",
+      "maxLength": 4000,
+      "pattern": "^(?:/(?!\\.\\.?(?:/|$))[^/\\u0000]{1,255}){1,64}$",
+      "type": "string"
+    },
+    "read-only-file": {
+      "additionalProperties": false,
+      "description": "A single host file bound read-only at one mount (ADR 0033).",
+      "properties": {
+        "host_path": {
+          "$ref": "#/$defs/host-absolute-path",
+          "x-b10x-host-object": "an-existing-regular-file-reached-without-any-symlink-component-pinned-at-admission"
+        },
+        "mount": {
+          "$ref": "#/$defs/host-absolute-path",
+          "x-b10x-not-equal-beneath-or-above": [
+            "/",
+            "/usr",
+            "/bin",
+            "/lib",
+            "/lib64",
+            "/proc",
+            "/dev",
+            "/tmp",
+            "/workspace",
+            "/runtime",
+            "/scratch",
+            "/etc/hosts",
+            "/etc/ssl/certs/ca-certificates.crt",
+            "every-declared-read-only-root-mount",
+            "every-other-declared-read-only-file-mount"
+          ]
+        }
+      },
+      "required": [
+        "host_path",
+        "mount"
+      ],
+      "type": "object"
+    },
+    "read-only-files": {
+      "description": "Declared read-only host files (ADR 0033). Every rule is checked before dispatch; a refused file refuses the start.",
+      "items": {
+        "$ref": "#/$defs/read-only-file"
+      },
+      "maxItems": 16,
+      "type": "array",
+      "x-b10x-requires-capability": "exec.read-only-files",
+      "x-b10x-refusals": [
+        {
+          "class": "refused",
+          "code": "exec.read-only-files-exceeded",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-path-invalid",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-mount-reserved",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-mount-overlap",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-mount-duplicate",
+          "status": 422
+        },
+        {
+          "class": "unserved",
+          "code": "exec.read-only-files-unserved",
+          "status": 501
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-absent",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-symlink",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-not-a-file",
+          "status": 422
+        }
+      ],
+      "x-b10x-failures": [
+        {
+          "class": "failed",
+          "code": "exec.read-only-file-pin-failed",
+          "status": 500
+        }
+      ],
+      "x-b10x-unique": "mount"
+    },
+    "process-id": {
+      "description": "A host-process record id (ADR 0036): proc_ and the minted identifier.",
+      "pattern": "^proc_[A-Za-z0-9]+$",
+      "type": "string"
+    },
+    "workdir": {
+      "description": "The directory the program starts in (design 26 section 1); absent is /workspace. Absolute and lexically normal: no empty, . or .. component, no trailing slash, no NUL, at most 4096 UTF-8 bytes. It lies at or beneath a mount this start places, and must be a directory reached without a symlink once every mount is in place. maxLength and the pattern count characters, so the byte bound is the stricter for a non-ASCII path.",
+      "maxLength": 4096,
+      "pattern": "^(?:/|(?:/(?!\\.\\.?(?:/|$))[^/\\u0000]+)+)$",
+      "type": "string",
+      "x-b10x-at-or-beneath-one-of": [
+        "/workspace",
+        "every-declared-read-only-root-mount",
+        "every-declared-writable-root-mount",
+        "/scratch-when-scratch-is-set",
+        "/runtime-when-a-capsule-is-set"
+      ],
+      "x-b10x-host-object": "an-existing-directory-reached-without-any-symlink-component-once-every-mount-is-placed",
+      "x-b10x-requires-capability": "exec.workdir",
+      "x-b10x-refusals": [
+        {
+          "class": "refused",
+          "code": "exec.workdir-invalid",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.workdir-outside-mounts",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.workdir-missing",
+          "status": 422
+        },
+        {
+          "class": "unserved",
+          "code": "exec.workdir-unserved",
+          "status": 501
+        }
+      ]
+    },
+    "writable-root-mount": {
+      "$ref": "#/$defs/host-absolute-path",
+      "x-b10x-not-equal-beneath-or-above": [
+        "/usr",
+        "/bin",
+        "/lib",
+        "/lib64",
+        "/proc",
+        "/dev",
+        "/tmp",
+        "/etc",
+        "/workspace",
+        "/runtime",
+        "/scratch",
+        "every-declared-read-only-root-mount",
+        "every-declared-read-only-file-mount",
+        "every-other-declared-writable-root-mount"
+      ]
+    },
+    "writable-root": {
+      "description": "A writable mount outside /workspace (ADR 0038): exactly one of a host root the operator declared by name, or a Git checkout workspace of the caller. A request never carries a host path.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "maxLength": 255,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$",
+              "type": "string",
+              "x-b10x-host-object": "a-directory-the-operator-declared-under-this-name-owned-by-the-daemon-uid-bound-by-descriptor"
+            },
+            "mount": {
+              "$ref": "#/$defs/writable-root-mount"
+            }
+          },
+          "required": [
+            "host",
+            "mount"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mount": {
+              "$ref": "#/$defs/writable-root-mount"
+            },
+            "workspace": {
+              "$ref": "#/$defs/workspace-id",
+              "x-b10x-host-object": "a-ready-git-checkout-workspace-of-the-caller-other-than-the-start-workspace-bound-by-descriptor"
+            }
+          },
+          "required": [
+            "workspace",
+            "mount"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "writable-roots": {
+      "description": "Declared writable roots (ADR 0038). Every lexical rule is checked before any capability, and both before dispatch; a refused root refuses the start. Nothing is widened, dropped or skipped.",
+      "items": {
+        "$ref": "#/$defs/writable-root"
+      },
+      "maxItems": 8,
+      "type": "array",
+      "x-b10x-requires-capability": [
+        "exec.writable-roots.host",
+        "exec.writable-roots.git"
+      ],
+      "x-b10x-refusals": [
+        {
+          "class": "refused",
+          "code": "exec.writable-roots-exceeded",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-name-invalid",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-mount-invalid",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-mount-reserved",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-mount-duplicate",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-mount-overlap",
+          "status": 422
+        },
+        {
+          "class": "unserved",
+          "code": "exec.writable-roots-host-unserved",
+          "status": 501
+        },
+        {
+          "class": "unserved",
+          "code": "exec.writable-roots-git-unserved",
+          "status": 501
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-absent",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-not-a-directory",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-not-owned",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-not-git",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-own-workspace",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-workspace-duplicate",
+          "status": 422
+        }
+      ],
+      "x-b10x-unique": "mount"
+    },
+    "applied-writable-root": {
+      "description": "A writable root as bound (ADR 0038 decision 6): its kind, its name or workspace id, the host path the daemon resolved and bound by descriptor, and its mount.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "host_path": {
+              "$ref": "#/$defs/host-absolute-path"
+            },
+            "kind": {
+              "const": "host"
+            },
+            "mount": {
+              "$ref": "#/$defs/host-absolute-path"
+            },
+            "name": {
+              "maxLength": 255,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "host_path",
+            "mount"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "host_path": {
+              "$ref": "#/$defs/host-absolute-path"
+            },
+            "kind": {
+              "const": "git"
+            },
+            "mount": {
+              "$ref": "#/$defs/host-absolute-path"
+            },
+            "workspace": {
+              "$ref": "#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "workspace",
+            "host_path",
+            "mount"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "applied-writable-roots": {
+      "items": {
+        "$ref": "#/$defs/applied-writable-root"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "type": "array",
+      "x-b10x-unique": "mount"
+    },
+    "read-only-root-path": {
+      "description": "A declared read-only root's host path or mount (ADR 0010): absolute and canonical, every component non-empty, never `.` or `..`, no NUL, no trailing slash, at most 64 components. Unlike host-absolute-path no byte bound is published, because the wire crate states none for a root; a host path the kernel will not resolve is refused exec.read-only-root-absent.",
+      "pattern": "^(?:/(?!\\.\\.?(?:/|$))[^/\\u0000]+){1,64}$",
+      "type": "string"
+    },
+    "read-only-root": {
+      "additionalProperties": false,
+      "description": "A host directory bound read-only at one mount (ADR 0010).",
+      "properties": {
+        "host_path": {
+          "$ref": "#/$defs/read-only-root-path",
+          "x-b10x-host-object": "an-existing-directory-reached-without-any-symlink-component-pinned-at-admission"
+        },
+        "mount": {
+          "$ref": "#/$defs/read-only-root-path",
+          "x-b10x-not-equal-beneath-or-above": [
+            "/",
+            "/usr",
+            "/bin",
+            "/lib",
+            "/lib64",
+            "/proc",
+            "/dev",
+            "/tmp",
+            "/workspace",
+            "/runtime",
+            "/scratch",
+            "/etc/hosts",
+            "/etc/ssl/certs/ca-certificates.crt",
+            "every-other-declared-read-only-root-mount"
+          ]
+        }
+      },
+      "required": [
+        "host_path",
+        "mount"
+      ],
+      "type": "object"
+    },
+    "read-only-roots": {
+      "description": "Declared read-only host roots (ADR 0010). The lexical rules are checked before the program starts and each host path is pinned without following a symlink; a refused root refuses the start, and nothing is adjusted.",
+      "items": {
+        "$ref": "#/$defs/read-only-root"
+      },
+      "maxItems": {
+        "$wire": "MAX_READ_ONLY_ROOTS"
+      },
+      "type": "array",
+      "x-b10x-requires-capability": "exec.read-only-roots",
+      "x-b10x-refusals": [
+        {
+          "class": "refused",
+          "code": "exec.read-only-root-invalid",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-root-absent",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-root-not-a-directory",
+          "status": 422
+        }
+      ],
+      "x-b10x-failures": [
+        {
+          "class": "failed",
+          "code": "exec.spawn-failed",
+          "status": 500
+        }
+      ],
+      "x-b10x-unique": "mount"
+    },
+    "process-event-cursor": {
+      "description": "The opaque position of one record's event stream (ADR 0036 S12): the record whose stream carried it, the event-log source, generation and the seq through which the record's events were delivered, and the log byte offset after the last delivered line. A cursor is honoured only on the stream of the record it names.",
+      "maxLength": 512,
+      "pattern": "^pe1\\.proc_[A-Za-z0-9]+\\.scope_[A-Za-z0-9_-]+\\.[1-9][0-9]*\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "confinement-requires": {
+      "additionalProperties": false,
+      "description": "The confinement families and mechanism-neutral properties a start requires (ADR 0048 D4, design 30 section 4.4). A family name is the capability fact confinement.family.<name> and a property name the fact confinement.<name>, each without its prefix. Checked after exec.capability-stale and before every field-specific check, against the snapshot the start names: the first family it does not serve, in this order, is confinement.family-unserved, and the first property it does not prove, in this order, is confinement.fact-unserved, each recorded as refused before dispatch. An unknown name, a duplicate, an empty list or an empty object is request.schema-invalid.",
+      "minProperties": 1,
+      "properties": {
+        "families": {
+          "items": {
+            "enum": [
+              "process-run",
+              "process-watch",
+              "output-read",
+              "wait",
+              "workspace",
+              "filesystem-view",
+              "network-egress",
+              "network-ingress",
+              "limits",
+              "audit"
+            ]
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "facts": {
+          "items": {
+            "enum": [
+              "paths-are-host-paths",
+              "whole-tree-kill",
+              "ipc-socket-allowlist",
+              "ipc-signals-contained",
+              "sealed-paths",
+              "exec-subpaths",
+              "private-tmpdir"
+            ]
+          },
+          "maxItems": 7,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "type": "object",
+      "x-b10x-refusals": [
+        {
+          "class": "unserved",
+          "code": "confinement.family-unserved",
+          "status": 501
+        },
+        {
+          "class": "unserved",
+          "code": "confinement.fact-unserved",
+          "status": 501
+        }
+      ]
+    }
+  },
+  "$id": "urn:b10x:substrate-wire:0.26.0:common",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Substrate phase-3 scalar and envelope definitions"
+}

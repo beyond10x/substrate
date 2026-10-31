@@ -1289,6 +1289,7 @@ fn writable_input(profile: &ConfinementProfile) -> ExecStartInput {
             set: BTreeMap::new(),
         },
         sandbox: ConfinementRequest {
+            requires: None,
             capability_snapshot: String::new(),
             network: NetworkMode::None,
             aperture: None,

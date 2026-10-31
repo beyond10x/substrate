@@ -42,7 +42,7 @@ const SERVER_NAME: &str = "substrate.test";
 const FORBIDDEN_NAME: &str = "substrate-headless.test";
 const RUNNER: &str = env!("CARGO_BIN_EXE_b10x-substrate-conformance");
 const SCHEMA: &str = include_str!("../schema/remote-conformance-report.v1.schema.json");
-const OPERATIONS: &str = include_str!("../../../contracts/substrate-wire/0.25.0/operations.json");
+const OPERATIONS: &str = include_str!("../../../contracts/substrate-wire/0.26.0/operations.json");
 /// A variable only the token command may receive.
 const TOKEN_MARK: &str = "B10X_CONFORMANCE_TEST_TOKEN_MARK";
 /// A variable only the restart hook may receive.

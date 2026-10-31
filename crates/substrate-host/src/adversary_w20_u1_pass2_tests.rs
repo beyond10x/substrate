@@ -114,6 +114,7 @@ fn input(workspace: &str, access: WorkspaceAccess) -> ExecStartInput {
             set: BTreeMap::new(),
         },
         sandbox: substrate_wire::ConfinementRequest {
+            requires: None,
             capability_snapshot: SNAPSHOT.to_owned(),
             network: NetworkMode::None,
             aperture: None,

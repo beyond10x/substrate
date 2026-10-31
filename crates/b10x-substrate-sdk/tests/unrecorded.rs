@@ -365,7 +365,14 @@ async fn delegated_sdk_streaming_never_records_terminal_canaries() {
             }
             if let Some(applied) = observed.observation().applied.as_ref() {
                 assert!(
-                    !cgroup.join(&applied.cgroup).exists(),
+                    !cgroup
+                        .join(
+                            applied
+                                .cgroup
+                                .as_deref()
+                                .expect("the host driver names the exec cgroup")
+                        )
+                        .exists(),
                     "whole process tree must be reconciled before terminal evidence"
                 );
             }
@@ -451,7 +458,15 @@ async fn delegated_sdk_streaming_never_records_terminal_canaries() {
                                 assert_eq!(exec.observation().exit.as_ref().unwrap().code, Some(0));
                                 assert!(
                                     !cgroup
-                                        .join(&exec.observation().applied.as_ref().unwrap().cgroup)
+                                        .join(
+                                            exec.observation()
+                                                .applied
+                                                .as_ref()
+                                                .unwrap()
+                                                .cgroup
+                                                .as_deref()
+                                                .unwrap()
+                                        )
                                         .exists()
                                 );
                                 break;

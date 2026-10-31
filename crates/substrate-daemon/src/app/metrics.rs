@@ -754,6 +754,7 @@ mod tests {
             state: ExecState::Exited,
             observed_at: Utc::now(),
             requested: ConfinementRequest {
+                requires: None,
                 capability_snapshot: "cap_metrics_stream".to_owned(),
                 network: NetworkMode::None,
                 aperture: None,

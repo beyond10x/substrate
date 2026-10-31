@@ -2088,6 +2088,7 @@ mod tests {
                 set: std::collections::BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: snapshot.to_owned(),
                 network: substrate_wire::NetworkMode::None,
                 aperture: None,
