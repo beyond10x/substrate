@@ -60,9 +60,9 @@ async fn follow(cluster: &Arc<Cluster>, api: Arc<Api>, kill: bool) -> Phase {
         Instant::now() + Duration::from_mins(10),
         PodTrace::default(),
     ));
-    let read = format!("GET {}/{RUN}", api.pods());
+    // A read answered running, not one recorded: the fake records a request before it answers.
     let began = Instant::now();
-    while !cluster.requests.lock().contains(&read) {
+    while cluster.run_reads_running.load(Ordering::SeqCst) == 0 {
         assert!(
             began.elapsed() < Duration::from_secs(10),
             "the task never read the Pod"
@@ -116,7 +116,11 @@ fn kept(run: &str) -> Deferred {
 
 /// Every path at once against one fake, so a silent watch costs its bound once.
 async fn released(watch: Watch, kill: bool) -> (Arc<Cluster>, Released) {
-    let cluster = cluster(watch);
+    released_by(cluster(watch), kill).await
+}
+
+/// [`released`], against a fake the case prepared.
+async fn released_by(cluster: Arc<Cluster>, kill: bool) -> (Arc<Cluster>, Released) {
     let api = Arc::new(start(&cluster));
     let ((open_sweep, deferred_sweep), phase) = tokio::join!(
         sweeps(&api, &cluster),
@@ -177,6 +181,17 @@ async fn a_kill_overtaken_by_a_forced_deletion_keeps_the_policy() {
         &released,
         "killed, then force-deleted while running",
     );
+}
+
+/// `story:force-deleted-pod-cases-wait-for-the-answer`: on a loaded machine the fake records the
+/// task's first read of the Pod well before it answers it. The Pod is marked gone only once a read
+/// was answered running, so the task still reads it running first and watches it from there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_read_answered_late_still_reads_the_pod_running() {
+    let cluster = cluster(Watch::ForceDeleted);
+    *cluster.first_run_read_held.lock() = Some(Duration::from_millis(300));
+    let (cluster, released) = released_by(cluster, false).await;
+    assert_kept(&cluster, &released, "first read answered late");
 }
 
 /// The history after the last `resourceVersion` the adapter read is gone, answered as a 410 and

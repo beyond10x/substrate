@@ -2,24 +2,26 @@
 //! with `--driver kubernetes` on the workstation, the vectors' namespace lane, the driver-specific
 //! cases of ADR 0047 decision 13 and the cleanup assertions.
 //!
-//! The daemon listens on its Unix socket, not over TLS: the chart lane's Identity stub runs inside
-//! its cluster's daemon Pods (`xtask/src/chart_cluster.rs`) and offers nothing a workstation
-//! process can reuse. Every daemon the lane starts is the shipped binary, built from this checkout;
-//! the lane talks to it over its socket and to the cluster with the admin credential only to set a
-//! case up, to look at what the driver left and to release the namespace's Lease once the daemon
-//! that held it is stopped: the Role grants the driver no `delete` on Leases (decision 3), so a
-//! stopped daemon's claim would hold the namespace for 30 s, or for ever for another deployment.
+//! Every daemon the lane starts is the shipped binary, built from this checkout; the lane talks to
+//! it over its Unix socket and to the cluster with the admin credential only to set a case up, to
+//! look at what the driver left and to release the namespace's Lease once the daemon that held it
+//! is stopped: the Role grants the driver no `delete` on Leases (decision 3), so a stopped
+//! daemon's claim would hold the namespace for 30 s, or for ever for another deployment.
 //!
-//! Step 4, design 31's clean-room runner, does not exist in this wave (D186): it is named in
-//! [`ABSENT`] and never counted. A case the driver cannot reach on this wave is named there too,
-//! with its reason; every other case in [`cases`] must pass once.
+//! Step 4 runs design 31's clean-room runner, built with `-p` beside the daemon, against the
+//! lane's daemon served over TLS as well, with the chart lane's Identity stub on loopback
+//! (`xtask/src/chart_cluster.rs`); its restart hook kills the daemon, and the step starts it again
+//! on the same state, certificate and port. A case the driver cannot reach on this wave is named
+//! in [`ABSENT`] with its reason; every other case in [`cases`] must pass once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
+use std::io::Write as _;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -29,7 +31,7 @@ use substrate_kubernetes_client::{Api, ListForm};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 
-use crate::chart_cluster::output;
+use crate::chart_cluster::{Listener, Material, clean_room, output};
 use crate::namespace_lane_render as render;
 
 /// The driver's kubeconfig context extension (`crates/substrate-kubernetes/src/lib.rs`).
@@ -81,17 +83,30 @@ const REFUSAL_BOUND: Duration = Duration::from_secs(90);
 /// claims.
 const INVENTORY_BOUND: Duration = Duration::from_mins(3);
 
-/// The step 4 reason (D186).
-pub const STEP_FOUR_ABSENT: &str = "postponed to story:remote-clean-room-conformance (D186): \
-                                    design 31's clean-room runner does not exist in this wave";
+/// The name step 4's daemon certificate carries; the runner verifies it apart from the loopback
+/// address it dials.
+const RUNNER_SERVER_NAME: &str = "namespace-lane.substrate.test";
+/// A name step 4's daemon certificate does not carry, under which the runner must fail to verify.
+const RUNNER_FORBIDDEN_NAME: &str = "headless.namespace-lane.substrate.test";
+/// Step 4's restart hook, run argv-only by the runner as `kill -KILL <daemon pid>`: a crash, not
+/// the graceful path (design 31 § 7).
+const KILL_PROGRAM: &str = "/usr/bin/kill";
+/// The runner's own deadline in step 4: each workspace is a claim and a keeper Pod on kind.
+const RUNNER_DEADLINE: Duration = Duration::from_mins(30);
+/// The runner's bound on one call, its ceiling.
+const RUNNER_IO: Duration = Duration::from_mins(1);
+/// The runner's bound on the hook and the new probe: the kill, the Lease, [`SERVING_BOUND`].
+const RUNNER_RESTART: Duration = Duration::from_mins(10);
+/// The input step 4 leaves undeclared: the Identity stub resolves one credential and narrows
+/// none, so the provider answers `unsupported` for the narrowed purpose.
+const RUNNER_UNDECLARED: [&str; 1] = ["narrowed-credential"];
 /// Why every exec-dependent case is absent on this wave.
 pub const NO_EXEC: &str = "no exec is admitted on this wave: the driver never publishes \
                            confinement.no-egress (O3 did not hold on kind), so every exec start \
                            is refused exec.sandbox-unavailable before a Pod exists";
 
 /// The cases named absent, with their reasons; none is ever counted as passed.
-pub const ABSENT: [(&str, &str); 7] = [
-    ("S4 clean-room runner", STEP_FOUR_ABSENT),
+pub const ABSENT: [(&str, &str); 6] = [
     ("S6 quota exec.capacity", NO_EXEC),
     (
         "S6 restart: running exec reads unknown and its Pod is gone",
@@ -469,6 +484,17 @@ fn labelled_collections(namespace: &str) -> Vec<(String, &'static str, &'static 
     ]
 }
 
+/// What shows a started daemon is ready for the lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ready {
+    /// Its Unix socket exists, within 30 s.
+    Socket,
+    /// `GET /readyz` on this operational listener answers 200, within [`SERVING_BOUND`]. A daemon
+    /// given `--tls-listen` serves TLS instead of its Unix socket and never creates one; its
+    /// `/readyz` answers 200 only once the listener accepts and the driver's opening settled.
+    Ops(SocketAddr),
+}
+
 /// One daemon the lane started: the shipped binary on a Unix socket, its stderr in a file.
 pub struct Daemon {
     child: Option<Child>,
@@ -485,6 +511,23 @@ impl Daemon {
     ///
     /// The process does not start, or exits or creates no socket within 30 s.
     pub fn start(binary: &Path, directory: &Path, config: &Path, deployment: &str) -> Result<Self> {
+        Self::start_with(binary, directory, config, deployment, &[], Ready::Socket)
+    }
+
+    /// [`Daemon::start`] with `extra` arguments after the lane's own (step 4's TLS listener),
+    /// waiting for what `ready` names.
+    ///
+    /// # Errors
+    ///
+    /// The process does not start, or exits or is not ready within the bound `ready` names.
+    pub fn start_with(
+        binary: &Path,
+        directory: &Path,
+        config: &Path,
+        deployment: &str,
+        extra: &[String],
+        ready: Ready,
+    ) -> Result<Self> {
         fs::create_dir_all(directory)?;
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
         let socket = directory.join("d.sock");
@@ -502,6 +545,7 @@ impl Daemon {
             .arg(directory.join("state.db"))
             .args(["--deployment", deployment, "--allow-uid"])
             .arg(nix_uid().to_string())
+            .args(extra)
             .env("NO_COLOR", "1")
             .env_remove("RUST_LOG")
             .env_remove("KUBECONFIG")
@@ -516,29 +560,74 @@ impl Daemon {
             log,
             sequence: 0,
         };
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !daemon.socket.exists() {
+        let (bound, awaited) = match ready {
+            Ready::Socket => (Duration::from_secs(30), "created no socket"),
+            Ready::Ops(_) => (SERVING_BOUND, "answered no 200 on /readyz"),
+        };
+        let deadline = Instant::now() + bound;
+        loop {
+            let done = match ready {
+                Ready::Socket => daemon.socket.exists(),
+                Ready::Ops(ops) => readyz_answers_ok(ops),
+            };
+            if done {
+                return Ok(daemon);
+            }
             if let Some(child) = daemon.child.as_mut()
                 && let Some(status) = child.try_wait()?
             {
                 bail!(
-                    "the daemon exited before its socket existed ({status}): {}",
+                    "the daemon exited before it was ready ({status}): {}",
                     daemon.log()
                 );
             }
             ensure!(
                 Instant::now() < deadline,
-                "the daemon created no socket within 30 s: {}",
+                "the daemon {awaited} within {} s: {}",
+                bound.as_secs(),
                 daemon.log()
             );
-            std::thread::sleep(Duration::from_millis(50));
+            let pause = match ready {
+                Ready::Socket => Duration::from_millis(50),
+                Ready::Ops(_) => Duration::from_millis(500),
+            };
+            std::thread::sleep(pause);
         }
-        Ok(daemon)
     }
 
     /// Everything the daemon wrote to stderr so far.
     pub fn log(&self) -> String {
         fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// The running daemon's process id.
+    ///
+    /// # Errors
+    ///
+    /// It was stopped or has exited.
+    pub fn pid(&self) -> Result<u32> {
+        self.child
+            .as_ref()
+            .map(Child::id)
+            .ok_or_else(|| anyhow!("the daemon is not running"))
+    }
+
+    /// The status of an exit this call observed; `None` while the daemon runs, and for an exit an
+    /// earlier call already returned. An exited daemon is reaped here, so [`Daemon::stop`] never
+    /// signals its reused pid.
+    ///
+    /// # Errors
+    ///
+    /// The process could not be waited on.
+    pub fn exit_status(&mut self) -> Result<Option<ExitStatus>> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(None);
+        };
+        let status = child.try_wait()?;
+        if status.is_some() {
+            self.child = None;
+        }
+        Ok(status)
     }
 
     /// Stops the daemon with SIGINT, then SIGKILL after 15 s.
@@ -760,6 +849,133 @@ fn tail(log: &str) -> String {
     lines[lines.len().saturating_sub(8)..].join(" | ")
 }
 
+/// The clean-room runner `build_daemon` builds into the daemon's own directory.
+fn runner_beside(daemon: &Path) -> PathBuf {
+    daemon.with_file_name(clean_room::PACKAGE)
+}
+
+/// A loopback address no listener holds now.
+fn unused_loopback() -> Result<SocketAddr> {
+    Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()?)
+}
+
+/// Whether `GET /readyz` on the plaintext operational listener at `ops` answers 200 within 2 s.
+/// Any failure to connect, write or read is "not yet".
+fn readyz_answers_ok(ops: SocketAddr) -> bool {
+    use std::io::Read as _;
+    let bound = Duration::from_secs(2);
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&ops, bound) else {
+        return false;
+    };
+    if stream.set_read_timeout(Some(bound)).is_err()
+        || stream.set_write_timeout(Some(bound)).is_err()
+        || stream
+            .write_all(
+                format!("GET /readyz HTTP/1.1\r\nHost: {ops}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .is_err()
+    {
+        return false;
+    }
+    let mut head = [0_u8; 12];
+    stream.read_exact(&mut head).is_ok() && status_is_ok(&head)
+}
+
+/// Whether an HTTP/1.x status line starts with status 200.
+fn status_is_ok(head: &[u8]) -> bool {
+    head.starts_with(b"HTTP/1.") && head.get(8..12) == Some(b" 200".as_slice())
+}
+
+/// Step 4's daemon arguments beside the lane's own: the production TLS listener with the
+/// generated chain and key, the loopback Identity stub and its CA, and the operational listener.
+fn tls_arguments(
+    address: SocketAddr,
+    ops: SocketAddr,
+    chain: &Path,
+    key: &Path,
+    identity: &str,
+    identity_ca: &Path,
+) -> Vec<String> {
+    [
+        ("--tls-listen", address.to_string()),
+        ("--tls-certificate-chain", chain.display().to_string()),
+        ("--tls-private-key", key.display().to_string()),
+        ("--hosted-identity-origin", identity.to_owned()),
+        (
+            "--hosted-identity-ca-bundle",
+            identity_ca.display().to_string(),
+        ),
+        ("--ops-listen", ops.to_string()),
+    ]
+    .into_iter()
+    .flat_map(|(flag, value)| [flag.to_owned(), value])
+    .collect()
+}
+
+/// Step 4's runner call: the loopback TLS address verified as [`RUNNER_SERVER_NAME`], the
+/// daemon's self-signed certificate as the one trust root, the kill of `pid` as the restart hook
+/// and the operational listener.
+fn runner_call<'a>(
+    address: SocketAddr,
+    ops: SocketAddr,
+    roots: &'a Path,
+    out: &'a Path,
+    pid: u32,
+) -> clean_room::Call<'a> {
+    clean_room::Call {
+        endpoint: format!("https://{address}/"),
+        trust_roots: roots,
+        server_name: RUNNER_SERVER_NAME,
+        forbidden_name: RUNNER_FORBIDDEN_NAME,
+        restart_hook: Some((KILL_PROGRAM, vec!["-KILL".to_owned(), pid.to_string()])),
+        ops_origin: Some(format!("http://{ops}")),
+        out,
+        deadline: RUNNER_DEADLINE,
+        io_timeout: RUNNER_IO,
+        restart_timeout: RUNNER_RESTART,
+    }
+}
+
+/// Why step 4's daemon exits are not exactly the one its restart hook caused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartFault {
+    /// No daemon exit was observed, so the hook restarted nothing.
+    HookCausedNoExit,
+    /// An exit other than the hook's one `SIGKILL` of the first daemon.
+    ExitNotCausedByHook,
+}
+
+impl std::fmt::Display for RestartFault {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::HookCausedNoExit => {
+                "hook-caused-no-exit: the restart hook ran but no daemon exit was observed"
+            }
+            Self::ExitNotCausedByHook => {
+                "daemon-exit-not-caused-by-hook: the daemon exited other than by the restart \
+                 hook's one SIGKILL of the first daemon"
+            }
+        })
+    }
+}
+
+/// The daemon restarts step 4 admits, from every daemon exit observed in order. The hook
+/// (`runner_call`) sends `SIGKILL` once, to the first daemon's pid, so exactly one exit, by
+/// `SIGKILL`, is the hook's; any further exit, or one by another cause, is not.
+///
+/// # Errors
+///
+/// The exits are not exactly that one.
+pub fn hook_restarts(exits: &[ExitStatus]) -> Result<usize, RestartFault> {
+    use std::os::unix::process::ExitStatusExt as _;
+    match exits {
+        [] => Err(RestartFault::HookCausedNoExit),
+        [only] if only.signal() == Some(libc::SIGKILL) => Ok(1),
+        _ => Err(RestartFault::ExitNotCausedByHook),
+    }
+}
+
 /// What steps 3 to 7 need.
 pub struct Steps<'a> {
     pub root: &'a Path,
@@ -811,6 +1027,17 @@ pub fn build_daemon(root: &Path, stop: &AtomicBool) -> Result<PathBuf> {
         ]),
         stop,
     )?;
+    // Its own invocation with `-p` alone, so no other package unifies the SDK's linked-daemon
+    // feature back in (design 31 § 2).
+    output(
+        Command::new(&cargo).current_dir(root).args([
+            "build",
+            "--locked",
+            "-p",
+            clean_room::PACKAGE,
+        ]),
+        stop,
+    )?;
     let metadata: Value = serde_json::from_str(&output(
         Command::new(&cargo).current_dir(root).args([
             "metadata",
@@ -826,6 +1053,8 @@ pub fn build_daemon(root: &Path, stop: &AtomicBool) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("cargo metadata names no target directory"))?;
     let binary = Path::new(target).join("debug/substrate-daemon");
     ensure!(binary.is_file(), "{} was not built", binary.display());
+    let runner = runner_beside(&binary);
+    ensure!(runner.is_file(), "{} was not built", runner.display());
     Ok(binary)
 }
 
@@ -874,6 +1103,10 @@ impl Steps<'_> {
                 return outcomes;
             }
         };
+        record(
+            "S4 clean-room runner",
+            to_case(self.step_four(binary, &lane_directory).await),
+        );
         record(
             "S5 runtime vectors, namespace lane",
             to_case(self.step_five().await),
@@ -963,6 +1196,169 @@ impl Steps<'_> {
                 started.elapsed().as_secs()
             ),
         ))
+    }
+
+    /// Step 4: design 31's runner against the lane's daemon over TLS. Core groups must pass and
+    /// no case may fail; an absence is accepted only when the endpoint's facts or the runner's
+    /// bounds decided it, or for the narrowed credential the stub does not issue.
+    async fn step_four(&self, binary: &Path, directory: &Path) -> Result<String> {
+        let runner = runner_beside(binary);
+        ensure!(runner.is_file(), "{} was not built", runner.display());
+        ensure!(
+            Path::new(KILL_PROGRAM).is_file(),
+            "the restart hook {KILL_PROGRAM} does not exist"
+        );
+        let material = Material::generate(
+            vec![RUNNER_SERVER_NAME.to_owned()],
+            RUNNER_FORBIDDEN_NAME.to_owned(),
+            Ipv4Addr::LOCALHOST,
+        )?;
+        let identity = Listener::identity(Ipv4Addr::LOCALHOST, &material)?;
+        let tally = self
+            .certify(binary, &runner, directory, &material, &identity.origin())
+            .await;
+        identity.stop();
+        let released = self.release(self.namespace).await;
+        let evidence = tally?;
+        released?;
+        Ok(evidence)
+    }
+
+    async fn certify(
+        &self,
+        binary: &Path,
+        runner: &Path,
+        directory: &Path,
+        material: &Material,
+        identity: &str,
+    ) -> Result<String> {
+        let tls = self.work.join("clean-room");
+        fs::create_dir_all(&tls)?;
+        fs::set_permissions(&tls, fs::Permissions::from_mode(0o700))?;
+        let chain = tls.join("daemon.pem");
+        let key = tls.join("daemon-key.pem");
+        let identity_ca = tls.join("identity.pem");
+        fs::write(&chain, &material.daemon_pem)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key)?
+            .write_all(material.daemon_key_pem.as_bytes())?;
+        fs::write(&identity_ca, &material.identity_pem)?;
+        let address = unused_loopback()?;
+        let ops = unused_loopback()?;
+        let arguments = tls_arguments(address, ops, &chain, &key, identity, &identity_ca);
+        let start = || {
+            Daemon::start_with(
+                binary,
+                directory,
+                self.driver_config,
+                LANE_DEPLOYMENT,
+                &arguments,
+                Ready::Ops(ops),
+            )
+        };
+        let mut daemon = start()?;
+        let out = self.work.join("conformance-report");
+        let call = runner_call(address, ops, &chain, &out, daemon.pid()?);
+        let token = clean_room::TokenSocket::serve(material.credential.clone())?;
+        let mut running =
+            clean_room::spawn(runner, &call, &token, &self.work.join("conformance.log"))?;
+        let deadline = Instant::now() + call.bound();
+        let mut exits = Vec::new();
+        let exit = loop {
+            if let Some(status) = running.exited()? {
+                break status.code();
+            }
+            if self.stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                running.kill();
+                break None;
+            }
+            if let Some(status) = daemon.exit_status()? {
+                exits.push(status);
+                if hook_restarts(&exits) == Err(RestartFault::ExitNotCausedByHook) {
+                    running.kill();
+                    break None;
+                }
+                self.release(self.namespace).await?;
+                daemon = start()?;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        // Whatever the verdict, step 4's workspaces go before step 5 starts.
+        let swept = self.sweep(&mut daemon, start, address, material).await;
+        daemon.stop();
+        let answered = token.finish();
+        let swept = match swept {
+            Ok(swept) => self.left_by_step_four().await.map(|()| swept),
+            Err(error) => Err(error),
+        };
+        // An exit the hook did not cause stopped the runner: that, not the stopped run, is the
+        // failure. Otherwise the runner's verdict comes first, and only then the count.
+        let restarts = hook_restarts(&exits);
+        if let Err(fault @ RestartFault::ExitNotCausedByHook) = restarts {
+            bail!("step 4: {fault}");
+        }
+        let tally = clean_room::judge(
+            exit,
+            &out,
+            &self.work.join("conformance.log"),
+            &material.credential,
+            Some(&RUNNER_UNDECLARED),
+        )?;
+        let restarts = restarts.map_err(|fault| anyhow!("step 4: {fault}"))?;
+        let swept = swept.context("step 4 left workspaces behind")?;
+        Ok(format!(
+            "{}; the daemon was started again {restarts} time(s); {answered} credential \
+             request(s) answered; {} workspace(s) swept after the run",
+            clean_room::evidence(&tally),
+            swept.len()
+        ))
+    }
+
+    /// Step 4's sweep through its own daemon, started again when the run left it stopped.
+    async fn sweep(
+        &self,
+        daemon: &mut Daemon,
+        start: impl Fn() -> Result<Daemon>,
+        address: SocketAddr,
+        material: &Material,
+    ) -> Result<Vec<String>> {
+        if daemon.exit_status()?.is_some() || daemon.pid().is_err() {
+            self.release(self.namespace).await?;
+            *daemon = start()?;
+        }
+        let client = material.client()?;
+        let credential = material.credential.clone();
+        tokio::task::spawn_blocking(move || {
+            sweep_workspaces(
+                &mut |method, path, body| {
+                    tls_call(address, &client, &credential, (method, path, body))
+                },
+                ABSENCE_BOUND,
+                Duration::from_secs(2),
+            )
+        })
+        .await?
+    }
+
+    /// The lane deployment owns no Pod or claim once step 4's sweep is done, within
+    /// [`ABSENCE_BOUND`].
+    async fn left_by_step_four(&self) -> Result<()> {
+        let deadline = Instant::now() + ABSENCE_BOUND;
+        loop {
+            let left = self.owned_by(LANE_DEPLOYMENT).await?;
+            if left.is_empty() {
+                return Ok(());
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "{LANE_DEPLOYMENT} still owns {left:?} {} s after step 4's sweep",
+                ABSENCE_BOUND.as_secs()
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     /// Step 5: the vectors' namespace lane, selected by the driver's kubeconfig; its count must
@@ -1594,6 +1990,146 @@ fn to_case(result: Result<String>) -> Case {
     }
 }
 
+/// One request to a daemon: the status and the JSON body.
+pub type Call<'a> = dyn FnMut(&str, &str, Option<&Value>) -> Result<(u16, Value)> + 'a;
+
+/// Step 4's sweep: every workspace the runner's subject holds is destroyed through the daemon
+/// and reads absent within `bound`, whatever the run's verdict, so steps 5 and 6 never meet the
+/// namespace quota because of step 4. The workspaces come from a reconciliation snapshot, the
+/// public listing of the subject's current resources. A destroy the driver leaves to
+/// reconciliation answers `operation.outcome-unknown` and is waited out (design 34 § 5); a
+/// `destroying` workspace is only waited out, never destroyed again under a fresh id (design 01
+/// § 6.2). The swept ids.
+///
+/// # Errors
+///
+/// A request failed, a destroy was refused, or a workspace still read present after `bound`.
+pub fn sweep_workspaces(
+    call: &mut Call<'_>,
+    bound: Duration,
+    pause: Duration,
+) -> Result<Vec<String>> {
+    let (status, created) = call("POST", "/v1/reconciliation-snapshots", Some(&json!({})))?;
+    ensure!(
+        status == 201,
+        "the reconciliation snapshot answered {status}: {}",
+        code_of(&created)
+    );
+    let snapshot = created["result"]["id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("the reconciliation snapshot names no id: {created}"))?
+        .to_owned();
+    let mut held = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut path = format!("/v1/reconciliation-snapshots/{snapshot}?limit=1000");
+        if let Some(cursor) = &cursor {
+            let _ = write!(path, "&cursor={}", url_encoded(cursor));
+        }
+        let (status, page) = call("GET", &path, None)?;
+        ensure!(
+            status == 200,
+            "the snapshot page answered {status}: {}",
+            code_of(&page)
+        );
+        for item in page["result"]["items"].as_array().into_iter().flatten() {
+            if item["kind"] == "workspace"
+                && let Some(id) = item["id"].as_str()
+            {
+                let state = item["value"]["state"].as_str().unwrap_or_default();
+                held.push((id.to_owned(), state.to_owned()));
+            }
+        }
+        match page["result"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    for (id, state) in &held {
+        if state == "destroying" || state == "destroyed" {
+            continue;
+        }
+        let body = json!({"op": ulid::Ulid::generate().to_string(), "input": {}});
+        let (status, answer) = call("DELETE", &format!("/v1/workspaces/{id}"), Some(&body))?;
+        let code = code_of(&answer);
+        let settled = matches!(
+            (status, code.as_str()),
+            (200 | 404, _) | (500, OUTCOME_UNKNOWN) | (409, "workspace.not-ready")
+        );
+        ensure!(settled, "destroying {id} answered {status} {code}");
+    }
+    let deadline = Instant::now() + bound;
+    for (id, _) in &held {
+        loop {
+            let (status, answer) = call("GET", &format!("/v1/workspaces/{id}"), None)?;
+            if status == 404 || answer["result"]["state"] == "destroyed" {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "{id} still read {status} {} {} s after step 4's sweep began",
+                answer["result"]["state"],
+                bound.as_secs()
+            );
+            std::thread::sleep(pause);
+        }
+    }
+    Ok(held.into_iter().map(|(id, _)| id).collect())
+}
+
+/// One request to the TLS daemon step 4 started, as the runner's subject: `credential` is the
+/// bearer the lane's Identity stub resolves to it.
+///
+/// # Errors
+///
+/// No connection, a TLS failure, or an answer without a status line or a JSON body.
+pub fn tls_call(
+    address: SocketAddr,
+    client: &std::sync::Arc<rustls::ClientConfig>,
+    credential: &str,
+    request: (&str, &str, Option<&Value>),
+) -> Result<(u16, Value)> {
+    let (method, path, body) = request;
+    let stream = std::net::TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(RUNNER_IO))?;
+    let server = rustls::pki_types::ServerName::try_from(RUNNER_SERVER_NAME.to_owned())?;
+    let connection = rustls::ClientConnection::new(std::sync::Arc::clone(client), server)?;
+    let mut tls = rustls::StreamOwned::new(connection, stream);
+    let payload = body.map(Value::to_string).unwrap_or_default();
+    let content = if payload.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "content-type: application/json\r\ncontent-length: {}\r\n",
+            payload.len()
+        )
+    };
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nhost: {RUNNER_SERVER_NAME}\r\nauthorization: Bearer \
+         {credential}\r\n{content}connection: close\r\n\r\n{payload}"
+    );
+    std::io::Write::write_all(&mut tls, request.as_bytes())?;
+    let mut answer = Vec::new();
+    if let Err(error) = std::io::Read::read_to_end(&mut tls, &mut answer)
+        && (error.kind() != std::io::ErrorKind::UnexpectedEof || answer.is_empty())
+    {
+        return Err(anyhow!("{method} {path}: {error}"));
+    }
+    let boundary = answer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("{method} {path}: no response head"))?;
+    let head = String::from_utf8_lossy(&answer[..boundary]);
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .ok_or_else(|| anyhow!("{method} {path}: no status line"))?;
+    let body: Value = serde_json::from_slice(&answer[boundary + 4..])
+        .with_context(|| format!("{method} {path}: the body is not JSON"))?;
+    Ok((status, body))
+}
+
 fn url_encoded(text: &str) -> String {
     text.bytes()
         .map(|byte| match byte {
@@ -1625,8 +2161,86 @@ mod tests {
             .collect()
     }
 
+    /// A stand-in daemon that ignores the lane's arguments and creates no socket, as the shipped
+    /// daemon does with `--tls-listen`: `/bin/true`, or `/bin/false` when it must fail. A system
+    /// program, not a script the test writes: an executable written while another test forks
+    /// can be held open for writing by that child, and its `exec` then fails `ETXTBSY`.
+    fn stand_in(fails: bool) -> PathBuf {
+        PathBuf::from(if fails { "/bin/false" } else { "/bin/true" })
+    }
+
+    /// An operational listener that answers every request with `status`.
+    fn ops_answering(status: &'static str) -> SocketAddr {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let address = listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut request = [0_u8; 256];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                let _ = stream.write_all(
+                    format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\n\r\n").as_bytes(),
+                );
+            }
+        });
+        address
+    }
+
     #[test]
-    fn every_role_verb_of_decision_three_is_a_case_and_step_four_is_absent_by_name() {
+    fn a_tls_daemon_is_ready_by_its_readyz_though_it_creates_no_socket() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = stand_in(false);
+        let ops = ops_answering("200 OK");
+        let started = Instant::now();
+        let daemon = Daemon::start_with(
+            &binary,
+            &directory.path().join("d"),
+            &directory.path().join("config.json"),
+            LANE_DEPLOYMENT,
+            &[],
+            Ready::Ops(ops),
+        )
+        .expect("ready by /readyz");
+        assert!(
+            !daemon.socket.exists(),
+            "the stand-in creates no socket, as a TLS daemon does not"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_readyz_503_is_not_ready_and_a_200_is() {
+        assert!(!readyz_answers_ok(ops_answering("503 Service Unavailable")));
+        assert!(readyz_answers_ok(ops_answering("200 OK")));
+        assert!(!readyz_answers_ok(unused_loopback().expect("a free port")));
+        assert!(status_is_ok(b"HTTP/1.1 200"));
+        assert!(!status_is_ok(b"XTTP/1.1 200"));
+    }
+
+    #[test]
+    fn a_daemon_that_exits_before_its_readyz_answers_is_named() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = stand_in(true);
+        let ops = unused_loopback().expect("a free port");
+        let error = Daemon::start_with(
+            &binary,
+            &directory.path().join("d"),
+            &directory.path().join("config.json"),
+            LANE_DEPLOYMENT,
+            &[],
+            Ready::Ops(ops),
+        )
+        .err()
+        .expect("an exited daemon is refused");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("exited before it was ready"),
+            "unexpected: {error}"
+        );
+    }
+
+    #[test]
+    fn every_role_verb_of_decision_three_is_a_case_and_step_four_must_pass() {
         let names = cases();
         assert_eq!(role_verbs().len(), 17, "decision 3 grants 17 verbs");
         for (resource, verb) in role_verbs() {
@@ -1635,8 +2249,11 @@ mod tests {
                 "{resource} {verb}"
             );
         }
-        assert!(ABSENT.contains(&("S4 clean-room runner", STEP_FOUR_ABSENT)));
-        assert!(STEP_FOUR_ABSENT.contains("postponed to story:remote-clean-room-conformance"));
+        assert!(names.contains(&"S4 clean-room runner".to_owned()));
+        assert!(
+            !ABSENT.iter().any(|(absent, _)| absent.starts_with("S4")),
+            "step 4 is run, never declared absent, once the runner exists"
+        );
         for unused in ["persistentvolumeclaims list", "networkpolicies get"] {
             let name = format!("S6 Role without {unused}");
             assert!(
@@ -1654,15 +2271,64 @@ mod tests {
         assert_eq!(verdict(&passing()), None);
     }
 
+    /// Finding `namespace-lane-restarts-unpinned`: the hook sends `SIGKILL` to the first daemon
+    /// once, so step 4 admits exactly that one exit; any other exit, or none, fails by name.
+    #[test]
+    fn step_four_admits_exactly_the_daemon_exit_its_restart_hook_caused() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let killed = ExitStatus::from_raw(libc::SIGKILL);
+        let terminated = ExitStatus::from_raw(libc::SIGTERM);
+        let exited = ExitStatus::from_raw(1 << 8);
+        assert_eq!(hook_restarts(&[killed]), Ok(1));
+        assert_eq!(
+            hook_restarts(&[]),
+            Err(RestartFault::HookCausedNoExit),
+            "a run whose hook killed nothing was not restarted by it"
+        );
+        assert_eq!(
+            hook_restarts(&[killed, killed]),
+            Err(RestartFault::ExitNotCausedByHook),
+            "the hook names the first daemon's pid; a second exit is not its doing"
+        );
+        for status in [terminated, exited] {
+            assert_eq!(
+                hook_restarts(&[status]),
+                Err(RestartFault::ExitNotCausedByHook),
+                "{status}: the hook sends SIGKILL only"
+            );
+        }
+        assert!(
+            RestartFault::ExitNotCausedByHook
+                .to_string()
+                .contains("daemon-exit-not-caused-by-hook")
+        );
+        assert!(
+            RestartFault::HookCausedNoExit
+                .to_string()
+                .contains("hook-caused-no-exit")
+        );
+    }
+
     #[test]
     fn an_absent_case_reported_passed_a_failure_or_a_missing_case_is_no_record() {
         let mut passed_absent = passing();
-        let step_four = passed_absent
+        let quota = passed_absent
+            .iter_mut()
+            .find(|(name, _)| name == "S6 quota exec.capacity")
+            .expect("an absent case");
+        quota.1 = Case::Passed("ran".to_owned());
+        assert!(verdict(&passed_absent).is_some_and(|fault| fault.contains("exec.capacity")));
+
+        let mut step_four_absent = passing();
+        let step_four = step_four_absent
             .iter_mut()
             .find(|(name, _)| name == "S4 clean-room runner")
             .expect("step 4");
-        step_four.1 = Case::Passed("ran".to_owned());
-        assert!(verdict(&passed_absent).is_some_and(|fault| fault.contains("S4")));
+        step_four.1 = Case::Absent("postponed".to_owned());
+        assert!(
+            verdict(&step_four_absent)
+                .is_some_and(|fault| fault.contains("S4 clean-room runner is not declared absent"))
+        );
 
         let mut failed = passing();
         failed[0].1 = Case::Failed("no snapshot".to_owned());
@@ -1679,6 +2345,75 @@ mod tests {
         let mut twice = passing();
         twice.push(twice[0].clone());
         assert!(verdict(&twice).is_some_and(|fault| fault.contains("more than once")));
+    }
+
+    /// Step 4's runner: dialled on loopback, verified under the certificate's own name and
+    /// refused under one it does not carry, restarted by `kill -KILL` of the daemon's pid, argv
+    /// only, and bounded within the runner's own ceilings (3600 s, 60 s, 600 s).
+    #[test]
+    fn step_four_runs_the_runner_built_beside_the_daemon_with_a_kill_hook_within_its_ceilings() {
+        assert_eq!(
+            runner_beside(Path::new("/w/target/debug/substrate-daemon")),
+            Path::new("/w/target/debug/b10x-substrate-conformance")
+        );
+        let address: SocketAddr = "127.0.0.1:4443".parse().expect("address");
+        let ops: SocketAddr = "127.0.0.1:9090".parse().expect("address");
+        let call = runner_call(
+            address,
+            ops,
+            Path::new("/w/clean-room/daemon.pem"),
+            Path::new("/w/conformance-report"),
+            4242,
+        );
+        let argv = clean_room::argv(&call, 9);
+        let after = |flag: &str| {
+            argv.iter()
+                .position(|argument| argument == flag)
+                .map(|index| argv[index + 1].as_str())
+        };
+        assert_eq!(after("--endpoint"), Some("https://127.0.0.1:4443/"));
+        assert_eq!(after("--server-name"), Some(RUNNER_SERVER_NAME));
+        assert_eq!(after("--forbidden-name"), Some(RUNNER_FORBIDDEN_NAME));
+        assert_eq!(after("--trust-roots"), Some("/w/clean-room/daemon.pem"));
+        assert_eq!(after("--restart-hook"), Some("/usr/bin/kill"));
+        assert_eq!(after("--ops-origin"), Some("http://127.0.0.1:9090"));
+        assert_eq!(after("--token-fd"), Some("9"));
+        let hook: Vec<&str> = argv
+            .windows(2)
+            .filter(|pair| pair[0] == "--restart-hook-arg")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(hook, ["-KILL", "4242"]);
+        assert!(RUNNER_DEADLINE.as_secs() <= 3_600);
+        assert!(RUNNER_IO.as_secs() <= 60);
+        assert!(RUNNER_RESTART.as_secs() <= 600 && RUNNER_RESTART > SERVING_BOUND);
+        assert_ne!(RUNNER_SERVER_NAME, RUNNER_FORBIDDEN_NAME);
+
+        let daemon = tls_arguments(
+            address,
+            ops,
+            Path::new("/w/chain.pem"),
+            Path::new("/w/key.pem"),
+            "https://127.0.0.1:7000",
+            Path::new("/w/identity.pem"),
+        );
+        assert_eq!(
+            daemon,
+            [
+                "--tls-listen",
+                "127.0.0.1:4443",
+                "--tls-certificate-chain",
+                "/w/chain.pem",
+                "--tls-private-key",
+                "/w/key.pem",
+                "--hosted-identity-origin",
+                "https://127.0.0.1:7000",
+                "--hosted-identity-ca-bundle",
+                "/w/identity.pem",
+                "--ops-listen",
+                "127.0.0.1:9090",
+            ]
+        );
     }
 
     #[test]
@@ -1851,5 +2586,154 @@ mod tests {
             inventory_difference(&before, &after),
             ["PersistentVolumeList gained pvc-1"]
         );
+    }
+
+    /// The runner's subject as the namespace daemon serves it: a destroy the driver leaves to
+    /// reconciliation answers `operation.outcome-unknown` and reads absent a few reads later; a
+    /// second destroy of a `destroying` workspace is refused `workspace.not-ready`.
+    #[derive(Default)]
+    struct Subject {
+        /// Each workspace's state and the reads left until it reads absent once destroying.
+        workspaces: BTreeMap<String, (String, u32)>,
+        deletes: Vec<String>,
+        /// A destroy of this workspace is refused with this status and code.
+        refuse: Option<(String, u16, &'static str)>,
+        /// This workspace never reads absent.
+        stuck: Option<String>,
+    }
+
+    impl Subject {
+        fn holding(states: &[(&str, &str)]) -> Self {
+            Self {
+                workspaces: states
+                    .iter()
+                    .map(|(id, state)| ((*id).to_owned(), ((*state).to_owned(), 2)))
+                    .collect(),
+                ..Self::default()
+            }
+        }
+
+        fn answer(&mut self, method: &str, path: &str) -> (u16, Value) {
+            let (route, query) = path.split_once('?').unwrap_or((path, ""));
+            let failure = |status, code: &str| (status, json!({"error": {"code": code}}));
+            let segments: Vec<&str> = route.trim_start_matches("/v1/").split('/').collect();
+            match (method, segments.as_slice()) {
+                ("POST", ["reconciliation-snapshots"]) => {
+                    (201, json!({"result": {"id": "snap_1"}}))
+                }
+                ("GET", ["reconciliation-snapshots", "snap_1"]) => {
+                    // One workspace per page, so the sweep must follow the cursor.
+                    let after: usize = query
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix("cursor=c"))
+                        .and_then(|seq| seq.parse().ok())
+                        .unwrap_or(0);
+                    let items: Vec<Value> = self
+                        .workspaces
+                        .iter()
+                        .skip(after)
+                        .take(1)
+                        .map(|(id, (state, _))| {
+                            json!({"kind": "workspace", "id": id, "value": {"state": state}})
+                        })
+                        .collect();
+                    let next =
+                        (after + 1 < self.workspaces.len()).then(|| format!("c{}", after + 1));
+                    (
+                        200,
+                        json!({"result": {"items": items, "next_cursor": next}}),
+                    )
+                }
+                ("DELETE", ["workspaces", id]) => {
+                    let id = *id;
+                    self.deletes.push(id.to_owned());
+                    if let Some((refused, status, code)) = &self.refuse
+                        && refused == id
+                    {
+                        return failure(*status, code);
+                    }
+                    match self.workspaces.get_mut(id) {
+                        None => failure(404, "resource.not-found"),
+                        Some((state, _)) if state == "destroying" => {
+                            failure(409, "workspace.not-ready")
+                        }
+                        Some((state, _)) => {
+                            "destroying".clone_into(state);
+                            failure(500, OUTCOME_UNKNOWN)
+                        }
+                    }
+                }
+                ("GET", ["workspaces", id]) => {
+                    let id = *id;
+                    let stuck = self.stuck.as_deref() == Some(id);
+                    match self.workspaces.get_mut(id) {
+                        None => failure(404, "resource.not-found"),
+                        Some((state, reads)) if state == "destroying" && !stuck => {
+                            if *reads == 0 {
+                                self.workspaces.remove(id);
+                                return failure(404, "resource.not-found");
+                            }
+                            *reads -= 1;
+                            (200, json!({"result": {"id": id, "state": "destroying"}}))
+                        }
+                        Some((state, _)) => (200, json!({"result": {"id": id, "state": state}})),
+                    }
+                }
+                _ => failure(404, "resource.not-found"),
+            }
+        }
+    }
+
+    fn sweep(subject: &mut Subject, bound: Duration) -> Result<Vec<String>> {
+        sweep_workspaces(
+            &mut |method, path, _| Ok(subject.answer(method, path)),
+            bound,
+            Duration::ZERO,
+        )
+    }
+
+    /// story:clean-room-destroy-settles-on-the-namespace-driver: step 4 leaves no workspace of
+    /// its own behind. Each one the subject holds is destroyed once and waited out until it reads
+    /// absent; one already `destroying` is only waited out (design 01 § 6.2: never a second
+    /// destroy under a fresh id).
+    #[test]
+    fn step_four_destroys_every_workspace_its_subject_holds_and_waits_until_each_is_absent() {
+        let mut subject =
+            Subject::holding(&[("ws_a", "ready"), ("ws_b", "ready"), ("ws_c", "destroying")]);
+        let swept = sweep(&mut subject, Duration::from_secs(5)).expect("the sweep settles");
+        assert!(
+            subject.workspaces.is_empty(),
+            "step 4 left {:?} for steps 5 and 6",
+            subject.workspaces.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(swept, ["ws_a", "ws_b", "ws_c"]);
+        assert_eq!(
+            subject.deletes,
+            ["ws_a", "ws_b"],
+            "each ready workspace is destroyed once, and the destroying one not at all"
+        );
+    }
+
+    /// A destroy refused for another reason, and a workspace that never reads absent, fail the
+    /// sweep by name instead of passing a step that left a workspace behind.
+    #[test]
+    fn a_refused_destroy_or_a_workspace_that_stays_fails_the_sweep_by_name() {
+        let mut refused = Subject::holding(&[("ws_a", "ready")]);
+        refused.refuse = Some(("ws_a".to_owned(), 403, "auth.forbidden"));
+        let error = format!(
+            "{:#}",
+            sweep(&mut refused, Duration::from_secs(5)).expect_err("a refusal fails")
+        );
+        assert!(
+            error.contains("ws_a") && error.contains("auth.forbidden"),
+            "{error}"
+        );
+        let mut stuck = Subject::holding(&[("ws_a", "ready")]);
+        stuck.stuck = Some("ws_a".to_owned());
+        let error = format!(
+            "{:#}",
+            sweep(&mut stuck, Duration::from_millis(50)).expect_err("a stuck one fails")
+        );
+        assert!(error.contains("ws_a"), "{error}");
     }
 }

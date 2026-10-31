@@ -53,6 +53,12 @@ struct Cluster {
     list_body: Mutex<Option<String>>,
     /// While set, a read of `RUN` answers it running on a node, as its kubelet last reported it.
     running: AtomicBool,
+    /// How many reads of `RUN` were answered with it running on its node. The fake records a
+    /// request before it answers it, so a recorded read is not yet a read answered running.
+    run_reads_running: AtomicU32,
+    /// While set, the first read of `RUN` is held this long between its record and its answer, as
+    /// a loaded machine may (`story:force-deleted-pod-cases-wait-for-the-answer`).
+    first_run_read_held: Mutex<Option<Duration>>,
     /// How a watch of one Pod answers (`story:pod-force-deleted-keeps-its-policy`).
     watch: Mutex<Watch>,
 }
@@ -347,21 +353,24 @@ fn answer_run(cluster: &Cluster, method: &str, path: &str) -> (u16, String) {
     match method {
         "GET" if pod_path == format!("{pod}/log") => (200, "hello\n".to_owned()),
         "GET" if path == pod && cluster.pod_gone.load(Ordering::SeqCst) => gone,
-        "GET" if path == pod && cluster.running.load(Ordering::SeqCst) => (
-            200,
-            json!({
-                "metadata": {"name": RUN, "uid": format!("uid-{RUN}"), "resourceVersion": "10"},
-                "spec": {"nodeName": "node-a", "restartPolicy": "Never"},
-                "status": {
-                    "phase": "Running",
-                    "containerStatuses": [{
-                        "name": CONTAINER,
-                        "state": {"running": {"startedAt": "2026-10-28T00:00:00Z"}},
-                    }],
-                },
-            })
-            .to_string(),
-        ),
+        "GET" if path == pod && cluster.running.load(Ordering::SeqCst) => {
+            cluster.run_reads_running.fetch_add(1, Ordering::SeqCst);
+            (
+                200,
+                json!({
+                    "metadata": {"name": RUN, "uid": format!("uid-{RUN}"), "resourceVersion": "10"},
+                    "spec": {"nodeName": "node-a", "restartPolicy": "Never"},
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [{
+                            "name": CONTAINER,
+                            "state": {"running": {"startedAt": "2026-10-28T00:00:00Z"}},
+                        }],
+                    },
+                })
+                .to_string(),
+            )
+        }
         "GET" if path == pod => (
             200,
             json!({
@@ -431,6 +440,12 @@ fn serve(stream: TcpStream, config: Arc<ServerConfig>, cluster: &Cluster) -> std
     let mut parts = line.split(' ');
     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     cluster.requests.lock().push(format!("{method} {path}"));
+    if method == "GET" && path == format!("/api/v1/namespaces/{NAMESPACE}/pods/{RUN}") {
+        let held = cluster.first_run_read_held.lock().take();
+        if let Some(held) = held {
+            std::thread::sleep(held);
+        }
+    }
     let (status, payload) = answer(cluster, method, path, &accept);
     let writer = stream.get_mut();
     if status == 0 {

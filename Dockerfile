@@ -24,6 +24,16 @@ RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,s
     install -D /usr/lib/x86_64-linux-gnu/libz.so.1 /out/lib/libz.so.1 && \
     install -d -m 0700 /out/state
 
+FROM builder AS conformance-runner-build
+RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=b10x-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=b10x-substrate-target,target=/src/target,sharing=locked \
+    cargo build --locked --release -p b10x-substrate-conformance && \
+    install -D /src/target/release/b10x-substrate-conformance /conformance/b10x-substrate-conformance
+
+FROM scratch AS conformance-runner
+COPY --from=conformance-runner-build /conformance/b10x-substrate-conformance /b10x-substrate-conformance
+
 FROM builder AS quota-executable
 # Finish ownership and mode before setting the xattr; the runtime COPY must preserve it.
 RUN apt-get update && \

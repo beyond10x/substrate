@@ -694,6 +694,36 @@ async fn a_held_name_is_a_retriable_failure_and_its_holder_is_untouched() {
     assert_eq!(rig.ledger.row(&name).uid, None);
 }
 
+/// Adversary, `story:kubernetes-collisions-metric`: an exec start that meets a foreign Pod under
+/// the exec Pod's name is exactly the object the series' help text describes ("met under a name
+/// it would use and did not create, each left untouched"), and § 4 says such an object is counted.
+/// The scrape must show it.
+#[tokio::test]
+async fn a_held_exec_pod_name_at_start_is_one_collision_on_the_port() {
+    let rig = rig().await;
+    assert_eq!(
+        substrate_host::Driver::backend_collisions(&rig.driver),
+        Some(0)
+    );
+    let name = names::exec_pod(DEPLOYMENT, "exec_held_counted");
+    let holder = rig
+        .fake
+        .seed("pods", json!({"metadata": {"name": name}, "spec": {}}))
+        .expect("a foreign Pod holds the name");
+    let DispatchOutcome::NotDispatched(_) =
+        rig.start("exec_held_counted", &input(&["/bin/true"])).await
+    else {
+        panic!("a held name was dispatched");
+    };
+    assert_eq!(rig.pod(&name), Some(holder), "the holder is untouched");
+    assert_eq!(
+        substrate_host::Driver::backend_collisions(&rig.driver),
+        Some(1),
+        "story:kubernetes-collisions-metric: a foreign Pod under the exec Pod's name at start is a \
+         collision (design 34 § 4) and the port's count must move by one"
+    );
+}
+
 /// § 4: a create whose answer was lost after the API stored the Pod is adopted by its operation
 /// annotation, and the start is observed.
 #[tokio::test]
@@ -1236,6 +1266,173 @@ async fn a_replacement_past_the_wall_bound_is_never_deleted() {
     );
 }
 
+/// The next `count` deletions of the Pod `name` are accepted and do nothing: a kubelet that does
+/// not confirm them, so the Pod keeps its uid and its running container.
+fn ignore_deletes(rig: &Rig, name: &str, count: usize) {
+    let mut accepted = rig.pod(name).expect("the Pod is present");
+    accepted["metadata"]["deletionTimestamp"] = json!(Utc::now().to_rfc3339());
+    for _ in 0..count {
+        rig.fake.fault(Fault::Answer {
+            method: Method::DELETE,
+            path: format!("/api/v1/namespaces/substrate/pods/{name}"),
+            status: 200,
+            body: accepted.clone(),
+        });
+    }
+}
+
+fn deletes(rig: &Rig, name: &str) -> usize {
+    let target = format!("DELETE /api/v1/namespaces/substrate/pods/{name}");
+    rig.fake
+        .requests()
+        .iter()
+        .filter(|request| **request == target)
+        .count()
+}
+
+fn kill() -> ExecSignalInput {
+    ExecSignalInput {
+        signal: Signal::Kill,
+        grace_ms: 0,
+    }
+}
+
+/// Design 28: a kubelet that has not confirmed a deletion within 60 s leaves the run `Unknown`,
+/// because its container may still run. The bound is the driver's own wall clock from the
+/// accepted delete, and the garbage round observes it with no timer of its own; once the exec is
+/// `Unknown` the same round keeps deleting the Pod under its uid.
+#[tokio::test]
+async fn a_kill_the_kubelet_does_not_confirm_within_sixty_seconds_ends_unknown() {
+    let rig = rig().await;
+    let id = "exec_unconfirmed";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    ignore_deletes(&rig, &name, 5);
+    rig.driver
+        .exec_signal(id, &kill())
+        .await
+        .expect("signalled");
+
+    rig.clock.set(Duration::from_secs(59));
+    rig.driver.exec_garbage_round().await.expect("a round");
+    let waiting = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        waiting.resource.state,
+        ExecState::Running,
+        "story:unconfirmed-pod-deletion-ends-unknown: 59 s after the accepted delete it is not yet \
+         unconfirmed"
+    );
+
+    rig.clock.set(Duration::from_mins(1));
+    rig.driver.exec_garbage_round().await.expect("a round");
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        ended.resource.state,
+        ExecState::Unknown,
+        "story:unconfirmed-pod-deletion-ends-unknown: a deletion unconfirmed 60 s after it was \
+         accepted leaves the run unknown, never cancelled"
+    );
+    assert_eq!(ended.resource.exit, None, "no exit is fabricated");
+    assert!(!ended.output_complete, "what the run wrote is not known");
+    assert!(rig.pod(&name).is_some(), "the Pod still holds its uid");
+
+    let before = deletes(&rig, &name);
+    rig.driver.exec_garbage_round().await.expect("a round");
+    assert!(
+        deletes(&rig, &name) > before,
+        "story:unconfirmed-pod-deletion-ends-unknown: the garbage round deletes the Pod again"
+    );
+    assert!(
+        rig.ledger.row(&name).settled_at.is_none(),
+        "its row stays open while the Pod is present"
+    );
+}
+
+/// The wall-bound deletion is the same deletion as `kill` and shares its bound: a Pod still
+/// holding its uid 60 s after the driver's own deletion was accepted leaves the exec `Unknown`.
+#[tokio::test]
+async fn a_wall_bound_deletion_unconfirmed_within_sixty_seconds_ends_unknown() {
+    let rig = rig().await;
+    let id = "exec_wall_unconfirmed";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    ignore_deletes(&rig, &name, 1);
+    let deleted_at = 10 + 60 + 1;
+    rig.clock.set(Duration::from_secs(deleted_at));
+    let deleting = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(deleting.resource.state, ExecState::Running);
+    assert_eq!(deletes(&rig, &name), 1, "deleted past the wall bound");
+
+    rig.clock.set(Duration::from_secs(deleted_at + 59));
+    let waiting = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(waiting.resource.state, ExecState::Running);
+
+    rig.clock.set(Duration::from_secs(deleted_at + 60));
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        ended.resource.state,
+        ExecState::Unknown,
+        "story:unconfirmed-pod-deletion-ends-unknown: the wall-bound deletion unconfirmed for 60 s \
+         leaves the run unknown"
+    );
+    assert_eq!(ended.resource.exit, None, "no exit is fabricated");
+}
+
+/// A Pod gone after the accepted delete, or a name now holding another uid, ends as before the
+/// 60 s bound existed, however late it is observed: the bound only reads a Pod that still holds
+/// the bound uid.
+#[tokio::test]
+async fn a_pod_gone_or_replaced_after_its_delete_ends_as_before() {
+    let rig = rig().await;
+    let gone = "exec_gone";
+    let swapped = "exec_swapped";
+    rig.started(gone, &input(&["/bin/sleep", "600"])).await;
+    rig.started(swapped, &input(&["/bin/sleep", "600"])).await;
+    let gone_pod = names::exec_pod(DEPLOYMENT, gone);
+    let swapped_pod = names::exec_pod(DEPLOYMENT, swapped);
+    for (id, name) in [(gone, &gone_pod), (swapped, &swapped_pod)] {
+        ignore_deletes(&rig, name, 1);
+        rig.driver
+            .exec_signal(id, &kill())
+            .await
+            .expect("signalled");
+    }
+    rig.clock.set(Duration::from_secs(30));
+    rig.admin
+        .delete(&format!("{}/{gone_pod}", rig.admin.pods()), 1)
+        .await
+        .expect("the deletion completes");
+    let mut replacement = rig.pod(&swapped_pod).expect("present");
+    rig.admin
+        .delete(&format!("{}/{swapped_pod}", rig.admin.pods()), 1)
+        .await
+        .expect("the deletion completes");
+    for member in ["uid", "resourceVersion", "creationTimestamp"] {
+        replacement["metadata"]
+            .as_object_mut()
+            .expect("metadata")
+            .remove(member);
+    }
+    let replaced = rig.fake.seed("pods", replacement).expect("replaced");
+
+    rig.clock.set(Duration::from_secs(61));
+    for id in [gone, swapped] {
+        let ended = rig.driver.exec_observe(id).await.expect("observed");
+        assert_eq!(
+            ended.resource.state,
+            ExecState::Cancelled,
+            "{id}: a Pod shown stopped ends as the signal"
+        );
+    }
+    assert_eq!(
+        rig.pod(&swapped_pod),
+        Some(replaced),
+        "the replacement is untouched"
+    );
+}
+
 /// Design 34 § 7.3: an exec Pod is owned by the workspace PVC by uid and mounts it by name. A PVC
 /// deleted and created again under the same name has another uid, so a start over the workspace's
 /// bound rows is refused before any Pod create.
@@ -1267,6 +1464,384 @@ async fn a_replaced_workspace_pvc_refuses_the_start_before_any_pod() {
     let DispatchOutcome::NotDispatched(_) = outcome else {
         panic!("the start over a replaced PVC was dispatched");
     };
+}
+
+/// Adversary, story:unconfirmed-pod-deletion-ends-unknown: the garbage round itself reads the
+/// 60 s bound. `exec_completed` makes no API call, so only the round can have ended the exec; the
+/// unit's own case calls `exec_observe` after the round and would stay green with the round's
+/// observation removed.
+#[tokio::test]
+async fn adversary_the_garbage_round_itself_ends_an_unconfirmed_deletion_unknown() {
+    let rig = rig().await;
+    let id = "exec_round_reads";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    ignore_deletes(&rig, &name, 3);
+    rig.driver
+        .exec_signal(id, &kill())
+        .await
+        .expect("signalled");
+    rig.clock.set(Duration::from_mins(1));
+    rig.driver.exec_garbage_round().await.expect("a round");
+    let completed = rig.driver.exec_completed();
+    assert_eq!(
+        completed
+            .iter()
+            .map(|observation| (observation.resource.id.as_str(), observation.resource.state))
+            .collect::<Vec<_>>(),
+        vec![(id, ExecState::Unknown)],
+        "story:unconfirmed-pod-deletion-ends-unknown: the round alone ends the exec unknown"
+    );
+}
+
+/// Adversary, story:unconfirmed-pod-deletion-ends-unknown: once `Unknown`, a kubelet that confirms
+/// late does not turn the end into another one, through an observe or a garbage round.
+#[tokio::test]
+async fn adversary_a_late_confirmation_never_overwrites_unknown() {
+    let rig = rig().await;
+    let id = "exec_stays_unknown";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    ignore_deletes(&rig, &name, 1);
+    rig.driver
+        .exec_signal(id, &kill())
+        .await
+        .expect("signalled");
+    rig.clock.set(Duration::from_secs(61));
+    let unknown = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(unknown.resource.state, ExecState::Unknown);
+    let log = [applied_line(67_108_864, 500), exit_line(0)].concat();
+    rig.terminated(&name, 0, log.as_bytes()).await;
+    rig.clock.set(Duration::from_secs(70));
+    let again = rig.driver.exec_observe(id).await.expect("observed");
+    rig.driver.exec_garbage_round().await.expect("a round");
+    assert_eq!(
+        (again.resource.state, again.resource.exit),
+        (ExecState::Unknown, None),
+        "story:unconfirmed-pod-deletion-ends-unknown: an Unknown end is final"
+    );
+    assert_eq!(
+        rig.driver
+            .exec_completed()
+            .iter()
+            .map(|observation| observation.resource.state)
+            .collect::<Vec<_>>(),
+        vec![ExecState::Unknown],
+        "story:unconfirmed-pod-deletion-ends-unknown: the round keeps it Unknown"
+    );
+}
+
+/// Adversary, story:unconfirmed-pod-deletion-ends-unknown, acceptance "a delete accepted for a Pod
+/// whose uid is still present 60 s later ends the exec Unknown" and design 28 "a kubelet that has
+/// not confirmed it within 60 seconds leaves the run Unknown". Two execs share one history: the
+/// kill is accepted at 0 s, the Pod still holds its uid at 61 s, and the kubelet shows the
+/// container terminated only at 65 s. The first is observed at 61 s, the second first at 70 s.
+/// The end is a fact of that history, so both must end alike; the driver reads the bound only
+/// when somebody observes, and no daemon task runs the garbage round (design 34 § 15).
+#[tokio::test]
+async fn adversary_the_end_of_a_late_confirmed_deletion_does_not_depend_on_when_it_is_observed() {
+    let rig = rig().await;
+    let early = "exec_seen_early";
+    let late = "exec_seen_late";
+    let mut pods = Vec::new();
+    for id in [early, late] {
+        rig.started(id, &input(&["/bin/sleep", "600"])).await;
+        let name = names::exec_pod(DEPLOYMENT, id);
+        rig.running(&name).await;
+        ignore_deletes(&rig, &name, 1);
+        rig.driver
+            .exec_signal(id, &kill())
+            .await
+            .expect("signalled");
+        pods.push(name);
+    }
+    rig.clock.set(Duration::from_secs(61));
+    let seen_early = rig.driver.exec_observe(early).await.expect("observed");
+    assert_eq!(seen_early.resource.state, ExecState::Unknown);
+
+    rig.clock.set(Duration::from_secs(65));
+    let log = [applied_line(67_108_864, 500), exit_line(0)].concat();
+    for name in &pods {
+        rig.terminated(name, 0, log.as_bytes()).await;
+    }
+    rig.clock.set(Duration::from_secs(70));
+    let seen_late = rig.driver.exec_observe(late).await.expect("observed");
+    assert_eq!(
+        seen_late.resource.state, seen_early.resource.state,
+        "story:unconfirmed-pod-deletion-ends-unknown: the same history (uid still present 60 s \
+         after the accepted kill, the container shown ended at 65 s) ended {:?} when observed at \
+         61 s and {:?} when first observed at 70 s",
+        seen_early.resource.state, seen_late.resource.state
+    );
+}
+
+/// Adversary, story:unconfirmed-pod-deletion-ends-unknown: the API acts on the kill (the Pod
+/// carries `deletionTimestamp` under its bound uid) but its answer is lost (504), and the kubelet
+/// never confirms. The driver reads that Pod on every observe and never starts the 60 s bound,
+/// and `kill` suppresses the wall-bound deletion, so without a garbage round (design 34 § 15: no
+/// daemon task calls it) the exec stays `Running` for good: the defect the story fixes.
+#[tokio::test]
+async fn adversary_a_kill_whose_accepted_answer_was_lost_still_ends_unknown() {
+    let rig = rig().await;
+    let id = "exec_answer_lost";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    let mut deleting = rig.pod(&name).expect("the Pod is present");
+    deleting["metadata"]["deletionTimestamp"] = json!(Utc::now().to_rfc3339());
+    deleting["metadata"]["deletionGracePeriodSeconds"] = json!(1);
+    rig.admin
+        .update(&format!("{}/{name}", rig.admin.pods()), &deleting)
+        .await
+        .expect("the API marks the Pod deleted");
+    rig.fake.fault(Fault::Answer {
+        method: Method::DELETE,
+        path: format!("/api/v1/namespaces/substrate/pods/{name}"),
+        status: 504,
+        body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "Timeout", "code": 504,
+            "message": "Timeout: request did not complete within requested timeout"}),
+    });
+    rig.driver
+        .exec_signal(id, &kill())
+        .await
+        .expect_err("the kill's answer is lost");
+
+    rig.clock.set(Duration::from_hours(1));
+    let observed = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        rig.pod(&name).map(|pod| uid(&pod)),
+        Some(rig.ledger.row(&name).uid.expect("bound")),
+        "the Pod still holds its bound uid"
+    );
+    assert_eq!(
+        observed.resource.state,
+        ExecState::Unknown,
+        "story:unconfirmed-pod-deletion-ends-unknown: an hour after the API marked the Pod deleted \
+         under its bound uid, with the kubelet silent, the exec still reads Running"
+    );
+}
+
+/// story:unconfirmed-pod-deletion-ends-unknown, the watch path of the same rule: the kill is
+/// accepted at 0 s, the Pod still holds its uid, and the kubelet shows the container terminated
+/// only at 65 s. A watch round that first sees that event at 70 s ends the exec as an observe at
+/// 61 s would, `Unknown`, and not from the event's terminated container.
+#[tokio::test]
+async fn a_watch_event_after_the_bound_ends_an_unconfirmed_deletion_unknown() {
+    let rig = rig().await;
+    let id = "exec_watched_late";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    ignore_deletes(&rig, &name, 1);
+    rig.driver
+        .exec_signal(id, &kill())
+        .await
+        .expect("signalled");
+    let round = Duration::from_secs(1);
+    rig.driver
+        .exec_watch_round(round)
+        .await
+        .expect("the first round lists");
+
+    rig.clock.set(Duration::from_secs(65));
+    let log = [applied_line(67_108_864, 500), exit_line(0)].concat();
+    rig.terminated(&name, 0, log.as_bytes()).await;
+    rig.clock.set(Duration::from_secs(70));
+    rig.driver
+        .exec_watch_round(round)
+        .await
+        .expect("a watch round");
+    assert_eq!(
+        rig.driver
+            .exec_completed()
+            .iter()
+            .map(|observation| (
+                observation.resource.state,
+                observation.resource.exit.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(ExecState::Unknown, None)],
+        "story:unconfirmed-pod-deletion-ends-unknown: the bound uid present 70 s after the \
+         accepted kill ends the exec unknown, through the watch as through an observe"
+    );
+}
+
+/// story:unconfirmed-pod-deletion-ends-unknown: a `term` whose accepted answer was lost starts
+/// the bound as a lost `kill` does. The read right after the lost answer shows the Pod under its
+/// bound uid with `deletionTimestamp`, so the bound runs from the signal, and 61 s later (before
+/// the wall bound's own deletion at 70 s) the exec is `Unknown`.
+#[tokio::test]
+async fn a_term_whose_accepted_answer_was_lost_starts_the_bound_too() {
+    let rig = rig().await;
+    let id = "exec_term_lost";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    let mut deleting = rig.pod(&name).expect("the Pod is present");
+    deleting["metadata"]["deletionTimestamp"] = json!(Utc::now().to_rfc3339());
+    deleting["metadata"]["deletionGracePeriodSeconds"] = json!(5);
+    rig.admin
+        .update(&format!("{}/{name}", rig.admin.pods()), &deleting)
+        .await
+        .expect("the API marks the Pod deleted");
+    rig.fake.fault(Fault::Answer {
+        method: Method::DELETE,
+        path: format!("/api/v1/namespaces/substrate/pods/{name}"),
+        status: 504,
+        body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "Timeout", "code": 504, "message": "Timeout"}),
+    });
+    rig.driver
+        .exec_signal(
+            id,
+            &ExecSignalInput {
+                signal: Signal::Term,
+                grace_ms: 0,
+            },
+        )
+        .await
+        .expect_err("the term's answer is lost");
+
+    rig.clock.set(Duration::from_secs(61));
+    let observed = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        (observed.resource.state, observed.resource.exit),
+        (ExecState::Unknown, None),
+        "story:unconfirmed-pod-deletion-ends-unknown: 61 s after a term the API acted on, with \
+         its answer lost and the kubelet silent, the exec is unknown"
+    );
+}
+
+/// Adversary pass 2, `story:kubernetes-collisions-metric`: the same exec Pod name held first by
+/// one foreign Pod and, once that one is removed, by another (a new uid) is two objects. A start
+/// retried over the first holder meets the same object and does not move the count.
+#[tokio::test]
+async fn adversary_one_name_held_by_two_foreign_pods_in_turn_counts_two() {
+    let rig = rig().await;
+    let id = "exec_held_in_turn";
+    let name = names::exec_pod(DEPLOYMENT, id);
+    let count = || substrate_host::Driver::backend_collisions(&rig.driver);
+    rig.fake
+        .seed("pods", json!({"metadata": {"name": name}, "spec": {}}))
+        .expect("a foreign Pod holds the name");
+    for attempt in 0..2 {
+        let DispatchOutcome::NotDispatched(_) = rig.start(id, &input(&["/bin/true"])).await else {
+            panic!("attempt {attempt}: a held name was dispatched");
+        };
+    }
+    assert_eq!(count(), Some(1), "one holder met twice is one object");
+    rig.admin
+        .delete(&format!("{}/{name}", rig.admin.pods()), 0)
+        .await
+        .expect("its owner removes the first holder");
+    rig.fake
+        .seed("pods", json!({"metadata": {"name": name}, "spec": {}}))
+        .expect("another foreign Pod takes the name");
+    let DispatchOutcome::NotDispatched(_) = rig.start(id, &input(&["/bin/true"])).await else {
+        panic!("a held name was dispatched");
+    };
+    assert_eq!(
+        count(),
+        Some(2),
+        "story:kubernetes-collisions-metric: a second object under the same name is counted"
+    );
+}
+
+/// Marks the exec Pod `name` deleted under its uid, as the API does when it acts on a deletion.
+async fn mark_deleting(rig: &Rig, name: &str) {
+    let mut deleting = rig.pod(name).expect("the Pod is present");
+    deleting["metadata"]["deletionTimestamp"] = json!(Utc::now().to_rfc3339());
+    deleting["metadata"]["deletionGracePeriodSeconds"] = json!(1);
+    rig.admin
+        .update(&format!("{}/{name}", rig.admin.pods()), &deleting)
+        .await
+        .expect("the API marks the Pod deleted");
+}
+
+fn lost_answer(method: Method, name: &str, status: u16) -> Fault {
+    Fault::Answer {
+        method,
+        path: format!("/api/v1/namespaces/substrate/pods/{name}"),
+        status,
+        body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "Timeout", "code": status, "message": "Timeout"}),
+    }
+}
+
+/// Adversary pass 2, `story:unconfirmed-pod-deletion-ends-unknown`, acceptance "a kill the API
+/// acted on whose answer was lost starts the bound at the first observation that sees it". The
+/// kill's answer is lost and `deliver_tracked`'s own read fails too: the signal returns the lost
+/// answer, records nothing, and the bound starts at the first observe that reads the Pod under
+/// its bound uid with `deletionTimestamp` (30 s), not at the signal (0 s). So 89 s is still
+/// running and 90 s is `Unknown`. With `read_deleting` only in the lost-answer read, or the
+/// acceptance taken at the signal, one of the two assertions fails.
+#[tokio::test]
+async fn adversary_a_lost_kill_whose_own_read_fails_starts_the_bound_at_the_first_observe() {
+    let rig = rig().await;
+    let id = "exec_read_lost_too";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    mark_deleting(&rig, &name).await;
+    rig.fake.fault(lost_answer(Method::DELETE, &name, 504));
+    rig.fake.fault(lost_answer(Method::GET, &name, 503));
+    let lost = rig
+        .driver
+        .exec_signal(id, &kill())
+        .await
+        .expect_err("the kill's answer is lost");
+    assert_eq!(lost.code, API_FAILED, "{}", lost.message);
+    assert!(
+        lost.message.contains("504"),
+        "the DELETE's answer: {}",
+        lost.message
+    );
+
+    rig.clock.set(Duration::from_secs(30));
+    let first = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(first.resource.state, ExecState::Running);
+    rig.clock.set(Duration::from_secs(89));
+    let waiting = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        waiting.resource.state,
+        ExecState::Running,
+        "story:unconfirmed-pod-deletion-ends-unknown: the bound runs from the first observation \
+         that saw the deletion (30 s), not from the signal whose read failed"
+    );
+    rig.clock.set(Duration::from_secs(90));
+    let ended = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        (ended.resource.state, ended.resource.exit),
+        (ExecState::Unknown, None),
+        "story:unconfirmed-pod-deletion-ends-unknown: 60 s after the first observation saw the \
+         deletion, the bound uid still present ends the exec unknown"
+    );
+}
+
+/// Adversary pass 2, `story:unconfirmed-pod-deletion-ends-unknown`: a `deletionTimestamp` the
+/// driver did not cause (an eviction, an operator) while the driver holds no signal intent is no
+/// accepted deletion of the driver's: 65 s later, before the wall bound's own deletion at 70 s,
+/// the exec is still running. Without `read_deleting`'s intent guard it would read `Unknown`.
+#[tokio::test]
+async fn adversary_a_deletion_the_driver_did_not_ask_for_starts_no_bound() {
+    let rig = rig().await;
+    let id = "exec_evicted";
+    rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    mark_deleting(&rig, &name).await;
+    let seen = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(seen.resource.state, ExecState::Running);
+    rig.clock.set(Duration::from_secs(65));
+    let later = rig.driver.exec_observe(id).await.expect("observed");
+    assert_eq!(
+        later.resource.state,
+        ExecState::Running,
+        "story:unconfirmed-pod-deletion-ends-unknown: only the driver's own deletion starts the bound"
+    );
 }
 
 #[path = "restart_tests.rs"]

@@ -42,8 +42,8 @@ or unbounded.”
 
 ## One contract, capability-gated behavior
 
-The released driver is the Linux host driver; a Kubernetes namespace driver is in development
-source.
+The released drivers are the Linux host driver and, from 0.16.1, a Kubernetes namespace driver, a
+development profile that refuses every exec start.
 
 The contract separates each driver's resource model from
 backend-specific enforcement. A caller should ask which capabilities this daemon

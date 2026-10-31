@@ -2,12 +2,23 @@
 format: aep.planning-md/3
 id: story:unconfirmed-pod-deletion-ends-unknown
 kind: story
-status: draft
+status: implemented
 title: A deletion the kubelet does not confirm within 60 s ends as Unknown
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
 - depends_on: story:exec-pod-past-wall-bound-is-deleted
-revision: 1
+scope:
+- confidence: cited
+  path: crates/substrate-kubernetes/src/exec.rs
+- confidence: inferred
+  path: crates/substrate-kubernetes/src/exec_tests.rs
+- confidence: inferred
+  path: docs/design/34-kubernetes-namespace-driver.md
+revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 5}
+- {from: "proposed", to: "active", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 6}
+- {from: "active", to: "implemented", at: "2026-10-30T20:34:27Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: A deletion the kubelet does not confirm within 60 s ends as Unknown
 
@@ -32,10 +43,17 @@ coordinating session filed it on 2026-10-29:
 ## Acceptance
 
 - A delete accepted for a Pod whose uid is still present 60 s later (on the driver's injected clock)
-  ends the exec `Unknown`, and the kill intent stays recorded for the garbage round.
+  ends the exec `Unknown`, whenever the exec is first observed after the bound, and the Pod stays in
+  the garbage set, which deletes it again.
+- A kill the API acted on whose answer was lost (the bound-uid Pod carries `deletionTimestamp`)
+  starts the bound at the first observation that sees it.
 - A Pod gone within 60 s, or a name now holding another uid, ends the exec as today.
 - A red case first, on the fake API: a Pod that ignores its delete, then a clock moved 60 s.
 - Every new case runs once, in seconds; no real wait.
+
+Amended during wave 2026-10-30-remote-conformance after adversary pass 1: the first bullet said the
+kill intent stays recorded (the code clears it and the garbage set repeats the delete), and the
+observation-time and lost-answer bullets were added.
 
 ## Design
 

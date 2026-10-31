@@ -10,6 +10,7 @@ members = [
     "crates/substrate-daemon",
     "crates/substrate-contract-check",
     "crates/b10x-substrate-sdk",
+    "crates/b10x-substrate-conformance",
     "crates/substrate-mcp",
     "crates/b10x-substrate-cli",
     "xtask",
@@ -21,7 +22,7 @@ edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/beyond10x/substrate"
 rust-version = "1.97"
-version = "0.16.0"
+version = "0.17.0"
 
 [workspace.dependencies]
 anyhow = "1.0"

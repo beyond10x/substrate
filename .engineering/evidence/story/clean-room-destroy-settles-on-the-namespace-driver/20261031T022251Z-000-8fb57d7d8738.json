@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-31T02:22:51Z",
+  "actor": "human:timo",
+  "artifact": "story:clean-room-destroy-settles-on-the-namespace-driver",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local wave gate on wave/2026-10-31-lane-fixes at 9822bd4b: fmt, check-ess, check-docs, tests of conformance, kubernetes-client, kubernetes, host, daemon (lib and 5 targets) and xtask (1654 passed, 0 failed), clippy -D warnings, 8 xtask checks; all exit 0; namespace-lane observe at 1e29a077: S4 passed 39/14 absent, S5 56 cases, S6 and S7 passed, exit 0",
+    "reference": "9822bd4b"
+  }
+}

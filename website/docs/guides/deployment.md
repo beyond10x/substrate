@@ -135,7 +135,9 @@ The four readiness checks:
 
 - `store`: one read-only statement returns within 1 second.
 - `schema`: that statement reads the schema version this binary expects. The daemon refuses to
-  start on a database a newer binary stamped, and leaves its stamp unchanged.
+  start on a database a newer binary stamped, and leaves its stamp unchanged. From 0.16.1 a store
+  is stamped schema version 2 when it opens, which 0.15.x and earlier refuse: back up the state
+  directory before upgrading if you may roll back.
 - `maintenance`: each maintenance task completed a round in the last 5 seconds.
 - `driver`: the startup capability snapshot publishes every `--ops-require-fact <fact>`. The flag is
   repeatable (or `SUBSTRATE_OPS_REQUIRE_FACT`, comma-separated). Startup refuses a name that is not
@@ -146,7 +148,8 @@ listener closes.
 
 The metric set is fixed. Labels are closed sets: listener, route family, outcome class, refusal
 code, check, maintenance task and admission result. No subject, resource id, path, address or
-credential appears in a label or a value. A scrape carries at most 582 samples.
+credential appears in a label or a value. A scrape carries at most 582 samples on a host daemon
+and at most 583 samples on a daemon running `--driver kubernetes`.
 
 - **Build and readiness:** `substrate_build_info`, `substrate_ready`.
 - **Requests:** `substrate_http_requests_total`, `substrate_http_request_duration_seconds`,
@@ -160,6 +163,9 @@ credential appears in a label or a value. A scrape carries at most 582 samples.
   `substrate_maintenance_last_round_timestamp_seconds`.
 - **Hosted Identity:** `substrate_hosted_admissions_total`,
   `substrate_hosted_resolution_duration_seconds`.
+- **Kubernetes driver only:** `substrate_kubernetes_collisions_total`, the objects the driver met
+  under a name it would use and did not create. It leaves each one untouched. A host daemon does
+  not publish it.
 - **Process:** the standard `process_*` metrics.
 
 Every histogram uses the same 11 buckets, from 5 ms to 10 s.
@@ -252,7 +258,7 @@ stays with its ordinal. Delete the claims yourself to destroy the ledgers.
 ## Kubernetes namespace driver
 
 `--driver kubernetes` serves workspaces as objects in one namespace. It is a development profile,
-unreleased until 0.16.0.
+first released in 0.16.1.
 
 What it does not do yet:
 
@@ -262,7 +268,7 @@ What it does not do yet:
   the API server, so no enforced egress denial was observed and `confinement.no-egress` stays
   absent.
 - **Shared clean-room conformance follows in the next release.** The namespace lane reports that
-  step absent.
+  step absent until `story:remote-clean-room-conformance` lands.
 
 ```bash
 substrate-daemon --driver kubernetes --kubernetes-config driver.json \

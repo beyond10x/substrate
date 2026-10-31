@@ -1158,3 +1158,155 @@ async fn the_default_grants_a_v1_37_cluster_shows_open_without_excess() {
         .expect("the grants the lane observed on v1.37 are the cluster's own defaults");
     assert!(driver.opened());
 }
+
+/// Adversary pass 2, `story:kubernetes-collisions-metric`: `remove_owned`'s 409 arm. The read
+/// shows the row's own object (uid bound), the precondition then meets a foreign replacement
+/// (another deployment, another uid), and `planned_get_failure` says whether the arm's one read
+/// of the replacement answers. Returns the count moved over three removals, and checks that every
+/// removal ends `Collision`, the replacement is untouched and the row is neither rebound nor
+/// settled.
+async fn removals_through_the_409_arm(planned_get_failure: bool) -> u64 {
+    let fake = passing_fake();
+    let clock = ManualClock::new();
+    let (driver, ledger) = driver(&fake, &clock);
+    driver.open().await.expect("opens");
+    let digest = "a".repeat(64);
+    let name = names::exec_pod(DEPLOYMENT, "ex_swapped");
+    ledger.reserve(
+        BackendKind::Exec,
+        "ex_swapped",
+        BackendRole::Pod,
+        &name,
+        &digest,
+    );
+    let bound = "00000000-0000-4000-8000-0000000000aa";
+    ledger.bind_uid(&name, bound).expect("bound");
+    let replacement = fake
+        .seed(
+            "pods",
+            owned_object(&name, &names::deployment_label("deploy-b"), &digest),
+        )
+        .expect("a foreign replacement holds the name");
+    let mut ours = owned_object(&name, &names::deployment_label(DEPLOYMENT), &digest);
+    ours["metadata"]["uid"] = json!(bound);
+    let path = format!("/api/v1/namespaces/substrate/pods/{name}");
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: path.clone(),
+        status: 200,
+        body: ours,
+    });
+    if planned_get_failure {
+        fake.fault(Fault::Answer {
+            method: Method::GET,
+            path,
+            status: 500,
+            body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                "reason": "InternalError", "code": 500, "message": "etcd unavailable"}),
+        });
+    }
+    let before = driver.collisions_total();
+    for round in 0..3 {
+        let removal = driver
+            .remove_owned(&ledger.row(&name), 1)
+            .await
+            .expect("answered");
+        assert_eq!(removal, Removal::Collision, "round {round}");
+    }
+    assert_eq!(
+        fake.object("pods", &name),
+        Some(replacement),
+        "the replacement is never modified"
+    );
+    assert_eq!(ledger.row(&name).uid.as_deref(), Some(bound));
+    assert_eq!(ledger.row(&name).settled_at, None);
+    driver.collisions_total() - before
+}
+
+/// Adversary pass 2, `story:kubernetes-collisions-metric`: the 409 arm reads the replacement so
+/// the next removal, which meets it under the uid rule, does not count it again. One foreign
+/// object, three removals: one. With the arm's read dropped (`replacement = None`) the same
+/// removals count two, which `the_409_arm_whose_read_fails_counts_its_replacement_twice` shows.
+#[tokio::test]
+async fn adversary_a_replacement_met_in_the_409_arm_is_one_object_across_removals() {
+    assert_eq!(
+        removals_through_the_409_arm(false).await,
+        1,
+        "story:kubernetes-collisions-metric: a replacement read in the 409 arm and met again by \
+         the next removals is one object"
+    );
+}
+
+/// Adversary pass 2, `story:kubernetes-collisions-metric`: the 409 arm's read of the replacement
+/// fails. The removal still ends `Collision` and touches nothing; the replacement is counted
+/// unread and then again under its uid by the next removal: two for one object, the overcount
+/// `NamespaceDriver::collision`'s doc accepts for an object the driver could not read. This is
+/// also what the 409 arm would count with its read removed.
+#[tokio::test]
+async fn adversary_the_409_arm_whose_read_fails_counts_its_replacement_twice() {
+    assert_eq!(
+        removals_through_the_409_arm(true).await,
+        2,
+        "story:kubernetes-collisions-metric: the documented overcount of an unread object"
+    );
+}
+
+/// Adversary pass 2, `story:kubernetes-collisions-metric`: the remembered set at the driver's own
+/// bound. The first `COLLISIONS_REMEMBERED` objects are counted once each and stay remembered;
+/// object 4097 is counted every time it is met.
+#[test]
+fn adversary_the_remembered_set_holds_exactly_collisions_remembered_objects() {
+    use crate::ownership::{COLLISIONS_REMEMBERED, Collisions, Foreign};
+    let object = |index: usize| {
+        Foreign::of(
+            BackendRole::Pod,
+            &json!({"metadata": {"name": format!("sbx-ex-{index}"), "uid": format!("u{index}")}}),
+        )
+    };
+    let collisions = Collisions::default();
+    for index in 0..COLLISIONS_REMEMBERED {
+        assert!(collisions.meet(Some(object(index)), COLLISIONS_REMEMBERED));
+    }
+    for index in [0, COLLISIONS_REMEMBERED - 1] {
+        assert!(
+            !collisions.meet(Some(object(index)), COLLISIONS_REMEMBERED),
+            "object {index} is remembered"
+        );
+    }
+    let past = object(COLLISIONS_REMEMBERED);
+    assert!(collisions.meet(Some(past.clone()), COLLISIONS_REMEMBERED));
+    assert!(collisions.meet(Some(past), COLLISIONS_REMEMBERED));
+    assert_eq!(
+        collisions.total(),
+        u64::try_from(COLLISIONS_REMEMBERED).expect("small") + 2
+    );
+}
+
+/// Adversary pass 2, `story:kubernetes-collisions-metric`: one foreign object met by many tasks at
+/// once is counted once, and distinct objects met at once are each counted.
+#[test]
+fn adversary_one_object_met_concurrently_is_counted_once() {
+    use crate::ownership::{COLLISIONS_REMEMBERED, Collisions, Foreign};
+    let collisions = Collisions::default();
+    let same = Foreign::of(
+        BackendRole::Pvc,
+        &json!({"metadata": {"name": "sbx-ws-a", "uid": "u-same"}}),
+    );
+    std::thread::scope(|scope| {
+        for thread in 0..16 {
+            let collisions = &collisions;
+            let same = same.clone();
+            scope.spawn(move || {
+                for _ in 0..200 {
+                    collisions.meet(Some(same.clone()), COLLISIONS_REMEMBERED);
+                }
+                let own = Foreign::of(
+                    BackendRole::Pvc,
+                    &json!({"metadata": {"name": format!("sbx-ws-{thread}"), "uid": format!("u{thread}")}}),
+                );
+                collisions.meet(Some(own), COLLISIONS_REMEMBERED);
+            });
+        }
+    });
+    assert_eq!(collisions.total(), 1 + 16);
+}

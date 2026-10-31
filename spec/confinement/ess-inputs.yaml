@@ -1,5 +1,5 @@
 format: ess-inputs/2
-requires: ess 0.76.0
+requires: ess 0.77.0
 specification: [system.yaml, components.yaml, confinement.yaml]
 scenarios:
   - scenarios/local-admitted-with-reason-on-portable.yaml

@@ -8,14 +8,17 @@
 //!
 //! 1. every daemon pod is ready, each on a different worker of the pool;
 //! 2. each pod's certificate verifies under its own host name and fails under the Service's;
-//! 3. a workspace, a file in it and an operation replay survive a rolling restart by
+//! 3. design 31's clean-room runner, exported from the `Dockerfile`'s `conformance-runner` stage,
+//!    certifies ordinal 0 over a port-forward with verdict `passed`; its absent cases go to the
+//!    job summary unpinned and its report is the workflow's artifact (design 31 § 7);
+//! 4. a workspace, a file in it and an operation replay survive a rolling restart by
 //!    `helm upgrade`, and the replayed operation answers the original workspace;
-//! 4. the daemon dials a declared Git source and its connection to an undeclared port on the same
+//! 5. the daemon dials a declared Git source and its connection to an undeclared port on the same
 //!    host never arrives (the `NetworkPolicy`); if it did not dial the declared one either, the
 //!    scenario is reported absent, never passed;
-//! 5. the execution-enabled pod is admitted by server dry run in a `privileged` namespace and
+//! 6. the execution-enabled pod is admitted by server dry run in a `privileged` namespace and
 //!    refused in a `baseline` one, and the execution-off install itself runs under `restricted`;
-//! 6. `helm uninstall` leaves exactly the ledger claims.
+//! 7. `helm uninstall` leaves exactly the ledger claims.
 //!
 //! The hosted lane reports the four execution-enabled scenarios absent, by name. With
 //! `--node-profiles` the verb is ADR 0046's K9 C: a workstation lane on one kind worker, because
@@ -128,6 +131,14 @@ pub struct Args {
     /// and a `Chart-lane:` record printed.
     #[arg(long)]
     node_profiles: bool,
+    /// Design 31's clean-room runner, as the workflow exports it from the `Dockerfile`'s
+    /// `conformance-runner` stage; the hosted lane runs it once against ordinal 0.
+    #[arg(long)]
+    conformance_runner: Option<PathBuf>,
+    /// The directory the runner writes its report into; it must not exist. By default it is in
+    /// the lane's own work directory.
+    #[arg(long)]
+    conformance_out: Option<PathBuf>,
 }
 
 /// What one scenario came to.
@@ -160,9 +171,10 @@ pub const EXECUTION_ABSENT: [(&str, &str); 4] = [
 ];
 
 /// The scenarios the hosted mode runs, in order, on two workers.
-const HOSTED: [&str; 6] = [
+const HOSTED: [&str; 7] = [
     "placement",
     "certificate names",
+    "clean-room runner",
     "restart survival",
     "egress",
     "pod security",
@@ -1001,6 +1013,7 @@ fn run_until(args: &Args, stop: &AtomicBool) -> Result<ExitCode> {
         "certificate names",
         certificate_names(&lane, &client, &material),
     );
+    record("clean-room runner", clean_room_run(&lane, &material));
     record(
         "restart survival",
         restart_survival(&lane, &client, &material, &values),
@@ -1969,17 +1982,18 @@ fn kind_gateway(args: &Args, stop: &AtomicBool) -> Result<Ipv4Addr> {
         .ok_or_else(|| anyhow!("the kind network has no IPv4 gateway: {config}"))
 }
 
-/// The lane's certificates and the one bearer credential its Identity stub resolves.
-struct Material {
-    daemon_pem: String,
-    daemon_key_pem: String,
+/// The lane's certificates and the one bearer credential its Identity stub resolves. The
+/// namespace lane's step 4 makes its own with [`Material::generate`].
+pub(crate) struct Material {
+    pub(crate) daemon_pem: String,
+    pub(crate) daemon_key_pem: String,
     daemon_der: CertificateDer<'static>,
-    identity_pem: String,
+    pub(crate) identity_pem: String,
     identity_der: CertificateDer<'static>,
     identity_key: Vec<u8>,
     pod_names: Vec<String>,
     service_name: String,
-    credential: String,
+    pub(crate) credential: String,
 }
 
 impl Material {
@@ -2034,11 +2048,25 @@ impl Material {
 
     fn new(gateway: Ipv4Addr, chart_dir: &Path, helm: &Path) -> Result<Self> {
         let pod_names = Self::pod_names(chart_dir, helm, NAMESPACE, REPLICAS)?;
+        Self::generate(
+            pod_names,
+            format!("{RELEASE}.{NAMESPACE}.svc.cluster.local"),
+            gateway,
+        )
+    }
+
+    /// A daemon certificate naming exactly `pod_names`, one `service_name` it must not carry, an
+    /// Identity stub certificate for `identity_host` and a fresh credential the stub resolves.
+    pub(crate) fn generate(
+        pod_names: Vec<String>,
+        service_name: String,
+        identity_host: Ipv4Addr,
+    ) -> Result<Self> {
         let daemon_key = KeyPair::generate()?;
         let daemon = CertificateParams::new(pod_names.clone())?.self_signed(&daemon_key)?;
         let identity_key = KeyPair::generate()?;
         let identity =
-            CertificateParams::new(vec![gateway.to_string()])?.self_signed(&identity_key)?;
+            CertificateParams::new(vec![identity_host.to_string()])?.self_signed(&identity_key)?;
         let secret = ulid::Ulid::generate()
             .to_string()
             .repeat(2)
@@ -2052,12 +2080,12 @@ impl Material {
             identity_der: identity.der().clone(),
             identity_key: identity_key.serialize_der(),
             pod_names,
-            service_name: format!("{RELEASE}.{NAMESPACE}.svc.cluster.local"),
+            service_name,
             credential,
         })
     }
 
-    fn client(&self) -> Result<Arc<ClientConfig>> {
+    pub(crate) fn client(&self) -> Result<Arc<ClientConfig>> {
         let mut roots = RootCertStore::empty();
         roots.add(self.daemon_der.clone())?;
         Ok(Arc::new(
@@ -2071,8 +2099,9 @@ impl Material {
     }
 }
 
-/// A listener on the kind gateway, served from a thread until stopped.
-struct Listener {
+/// A listener on the kind gateway (or loopback, for the namespace lane), served from a thread
+/// until stopped.
+pub(crate) struct Listener {
     address: SocketAddr,
     accepted: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
@@ -2124,7 +2153,7 @@ impl Listener {
         Self::serve(gateway, drop)
     }
 
-    fn identity(gateway: Ipv4Addr, material: &Material) -> Result<Self> {
+    pub(crate) fn identity(gateway: Ipv4Addr, material: &Material) -> Result<Self> {
         let builder = ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::aws_lc_rs::default_provider(),
         ))
@@ -2152,11 +2181,11 @@ impl Listener {
         Ok(listener)
     }
 
-    fn origin(&self) -> String {
+    pub(crate) fn origin(&self) -> String {
         format!("https://{}", self.address)
     }
 
-    fn stop(mut self) {
+    pub(crate) fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -2783,6 +2812,806 @@ fn uninstall(lane: &Lane<'_>) -> Result<Outcome> {
     Ok(Outcome::Passed(format!("only {wanted:?} remain")))
 }
 
+/// Design 31 § 7's step: the clean-room runner once against ordinal 0 over a port-forward,
+/// verified under the pod's own name and refused under the headless Service's, with the stub's
+/// credential over an inherited socket. No restart hook, so the restart group is absent
+/// (`input-not-declared`); the absent set goes to the job summary, unpinned, because cluster
+/// facts vary.
+fn clean_room_run(lane: &Lane<'_>, material: &Material) -> Result<Outcome> {
+    let runner = lane.args.conformance_runner.as_deref().ok_or_else(|| {
+        anyhow!(
+            "--conformance-runner was not given: the workflow exports it from the Dockerfile's \
+             conformance-runner stage"
+        )
+    })?;
+    let out = lane
+        .args
+        .conformance_out
+        .clone()
+        .unwrap_or_else(|| lane.work.join("conformance-report"));
+    let roots = lane.work.join("conformance-roots.pem");
+    fs::write(&roots, &material.daemon_pem)?;
+    let log = lane.work.join("conformance.log");
+    let forward = Forward::open(lane, 0)?;
+    let call = clean_room::Call {
+        endpoint: format!("https://127.0.0.1:{}/", forward.1),
+        trust_roots: &roots,
+        server_name: &material.pod_names[0],
+        forbidden_name: &material.service_name,
+        restart_hook: None,
+        ops_origin: None,
+        out: &out,
+        deadline: Duration::from_mins(5),
+        io_timeout: Duration::from_secs(30),
+        restart_timeout: Duration::from_mins(1),
+    };
+    let token = clean_room::TokenSocket::serve(material.credential.clone())?;
+    let mut running = clean_room::spawn(runner, &call, &token, &log)?;
+    let exit = running.wait(call.bound(), lane.stop)?;
+    drop(forward);
+    let answered = token.finish();
+    let tally = clean_room::judge(exit, &out, &log, &material.credential, None)?;
+    println!("{}", clean_room::summary(&tally));
+    if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)?;
+        file.write_all(clean_room::summary(&tally).as_bytes())?;
+    }
+    Ok(Outcome::Passed(format!(
+        "{}; {answered} credential request(s) answered",
+        clean_room::evidence(&tally)
+    )))
+}
+
+/// Design 31's clean-room runner as both cluster lanes run it: built with `-p` and nothing else,
+/// handed the runner's end of a token socket no other child inherits, bounded, and judged by its
+/// exit code and its report, neither of which may carry the credential.
+pub(crate) mod clean_room {
+    use std::fmt::Write as _;
+    use std::fs;
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt as _;
+    use std::path::Path;
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use anyhow::{Context as _, Result, anyhow, bail};
+    use serde_json::Value;
+
+    /// The runner's package; a lane builds it with `-p` and nothing else (design 31 § 2).
+    pub const PACKAGE: &str = "b10x-substrate-conformance";
+    /// What a provider answers for a purpose it does not serve (design 31 § 5).
+    const UNSUPPORTED: &str = "unsupported";
+    /// The absences the endpoint's own facts or the runner's bounds decide, which a lane accepts
+    /// whatever inputs it declares.
+    const DECIDED_BY_THE_ENDPOINT: [&str; 3] =
+        ["fact-absent", "fact-unsatisfied", "bound-exceeded"];
+    /// The credential format's fixed prefix (ADR 0026); its 43-character body follows it.
+    const CREDENTIAL_PREFIX: &str = "identity_access_v1_";
+
+    /// One run's arguments, apart from the token descriptor.
+    pub struct Call<'a> {
+        pub endpoint: String,
+        pub trust_roots: &'a Path,
+        pub server_name: &'a str,
+        pub forbidden_name: &'a str,
+        /// The hook's absolute path and its arguments, run argv-only by the runner.
+        pub restart_hook: Option<(&'a str, Vec<String>)>,
+        pub ops_origin: Option<String>,
+        pub out: &'a Path,
+        pub deadline: Duration,
+        pub io_timeout: Duration,
+        pub restart_timeout: Duration,
+    }
+
+    impl Call<'_> {
+        /// How long a lane waits for the runner before it kills it: the runner's own deadline,
+        /// its restart bound and a minute to write the report.
+        pub fn bound(&self) -> Duration {
+            self.deadline + self.restart_timeout + Duration::from_mins(1)
+        }
+    }
+
+    /// The runner's arguments, one element each, with `--token-fd <descriptor>`.
+    pub fn argv(call: &Call<'_>, descriptor: i32) -> Vec<String> {
+        let mut argv: Vec<String> = [
+            ("--endpoint", call.endpoint.clone()),
+            ("--trust-roots", call.trust_roots.display().to_string()),
+            ("--server-name", call.server_name.to_owned()),
+            ("--forbidden-name", call.forbidden_name.to_owned()),
+            ("--token-fd", descriptor.to_string()),
+            ("--out", call.out.display().to_string()),
+            ("--deadline", call.deadline.as_secs().to_string()),
+            ("--io-timeout", call.io_timeout.as_secs().to_string()),
+            (
+                "--restart-timeout",
+                call.restart_timeout.as_secs().to_string(),
+            ),
+        ]
+        .into_iter()
+        .flat_map(|(flag, value)| [flag.to_owned(), value])
+        .collect();
+        if let Some((hook, arguments)) = &call.restart_hook {
+            argv.extend(["--restart-hook".to_owned(), (*hook).to_owned()]);
+            for argument in arguments {
+                argv.extend(["--restart-hook-arg".to_owned(), argument.clone()]);
+            }
+        }
+        if let Some(origin) = &call.ops_origin {
+            argv.extend(["--ops-origin".to_owned(), origin.clone()]);
+        }
+        argv
+    }
+
+    /// The answer to one credential request line: `credential` for the primary purpose and
+    /// `unsupported` for anything else, the narrowed purpose and an unreadable line included.
+    pub fn answer<'c>(request: &str, credential: &'c str) -> &'c str {
+        let purpose = serde_json::from_str::<Value>(request)
+            .ok()
+            .and_then(|request| request["purpose"].as_str().map(str::to_owned));
+        if purpose.as_deref() == Some("primary") {
+            credential
+        } else {
+            UNSUPPORTED
+        }
+    }
+
+    /// The lane's token provider: a Unix stream pair whose far end only the runner inherits,
+    /// served from a thread until every copy of that end is closed.
+    pub struct TokenSocket {
+        theirs: UnixStream,
+        server: thread::JoinHandle<usize>,
+    }
+
+    impl TokenSocket {
+        /// Serves `credential` for the primary purpose and `unsupported` for any other.
+        ///
+        /// # Errors
+        ///
+        /// The pair could not be made.
+        pub fn serve(credential: String) -> Result<Self> {
+            let (ours, theirs) = UnixStream::pair().context("the token socket pair")?;
+            let reading = ours.try_clone().context("the token socket")?;
+            let server = thread::spawn(move || {
+                let mut reader = BufReader::new(reading);
+                let mut writer = ours;
+                let mut line = String::new();
+                let mut answered = 0;
+                while reader.read_line(&mut line).is_ok_and(|count| count > 0) {
+                    if writeln!(writer, "{}", answer(&line, &credential)).is_err() {
+                        break;
+                    }
+                    answered += 1;
+                    line.clear();
+                }
+                answered
+            });
+            Ok(Self { theirs, server })
+        }
+
+        /// Makes `command`'s child, and only it, inherit the runner's end: the descriptor keeps
+        /// close-on-exec in this process and loses it in the child between fork and exec. The
+        /// descriptor number the runner is to read.
+        fn hand_to(&self, command: &mut Command) -> i32 {
+            let descriptor = self.theirs.as_raw_fd();
+            // SAFETY: the closure runs in the forked child before exec and calls only
+            // `fcntl(2)`, which is async-signal-safe, on a descriptor the child inherited.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::fcntl(descriptor, libc::F_SETFD, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            descriptor
+        }
+
+        /// Closes this process's copy of the runner's end and waits for the server: how many
+        /// requests it answered.
+        pub fn finish(self) -> usize {
+            drop(self.theirs);
+            self.server.join().unwrap_or(0)
+        }
+    }
+
+    /// The runner while it runs; killed and reaped if it is dropped before it ended.
+    pub struct Running {
+        child: Child,
+        ended: Option<ExitStatus>,
+    }
+
+    impl Running {
+        /// Its exit status once it ended, reaped.
+        ///
+        /// # Errors
+        ///
+        /// The process could not be waited on.
+        pub fn exited(&mut self) -> Result<Option<ExitStatus>> {
+            if self.ended.is_none() {
+                self.ended = self.child.try_wait()?;
+            }
+            Ok(self.ended)
+        }
+
+        /// Kills and reaps it, unless it already ended.
+        pub fn kill(&mut self) {
+            if self.ended.is_none() {
+                let _ = self.child.kill();
+                self.ended = self.child.wait().ok();
+            }
+        }
+
+        /// Waits for its exit within `bound`, killing it on overrun or once `stop` is set: its
+        /// exit code, or `None` when it was killed or a signal ended it.
+        ///
+        /// # Errors
+        ///
+        /// The process could not be waited on.
+        pub fn wait(&mut self, bound: Duration, stop: &AtomicBool) -> Result<Option<i32>> {
+            let deadline = Instant::now() + bound;
+            loop {
+                if let Some(status) = self.exited()? {
+                    return Ok(status.code());
+                }
+                if stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                    self.kill();
+                    return Ok(None);
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.kill();
+        }
+    }
+
+    /// Starts `runner` with an empty environment, no standard input, its output in `log`, and
+    /// the token socket's far end.
+    ///
+    /// # Errors
+    ///
+    /// The log could not be created or the runner did not start.
+    pub fn spawn(
+        runner: &Path,
+        call: &Call<'_>,
+        token: &TokenSocket,
+        log: &Path,
+    ) -> Result<Running> {
+        let log = fs::File::create(log)?;
+        let mut command = Command::new(runner);
+        let descriptor = token.hand_to(&mut command);
+        command
+            .args(argv(call, descriptor))
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log);
+        let child = command
+            .spawn()
+            .with_context(|| format!("starting {}", runner.display()))?;
+        Ok(Running { child, ended: None })
+    }
+
+    /// What a lane keeps from a passed run.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct Tally {
+        pub passed: u64,
+        /// Each absent case and its reason, in the report's order.
+        pub absent: Vec<(String, String)>,
+    }
+
+    fn id(case: &Value) -> String {
+        case["id"].as_str().unwrap_or("<no id>").to_owned()
+    }
+
+    fn reason(case: &Value) -> &str {
+        case["absent"]["reason"].as_str().unwrap_or("<no reason>")
+    }
+
+    fn accepted(case: &Value, undeclared: &[&str]) -> bool {
+        let reason = reason(case);
+        if DECIDED_BY_THE_ENDPOINT.contains(&reason) {
+            return true;
+        }
+        reason == "input-not-declared"
+            && case["absent"]["inputs"].as_array().is_some_and(|inputs| {
+                !inputs.is_empty()
+                    && inputs.iter().all(|input| {
+                        input
+                            .as_str()
+                            .is_some_and(|input| undeclared.contains(&input))
+                    })
+            })
+    }
+
+    /// Whether the runner's exit code and report certify the endpoint for a lane: exit 0, the
+    /// verdict `passed` and no failed case. Absence never satisfies a core group (design 31 § 3),
+    /// so an exit 4 is refused with its absent cases named.
+    ///
+    /// `undeclared` is `None` when the lane accepts every absence the runner reports. Otherwise
+    /// it names the inputs the lane does not declare, and an absence is accepted only when the
+    /// endpoint's facts or the runner's bounds decided it, or when it names only those inputs.
+    ///
+    /// # Errors
+    ///
+    /// Why not, naming the failed and the refused absent cases.
+    pub fn verdict(
+        exit: Option<i32>,
+        report: Option<&Value>,
+        undeclared: Option<&[&str]>,
+    ) -> Result<Tally, String> {
+        let code = exit.ok_or(
+            "the runner did not exit within its bound or a signal ended it, so it wrote no verdict",
+        )?;
+        let named = match code {
+            0 => "passed",
+            1 => "failed",
+            4 => "incomplete",
+            2 => {
+                return Err(
+                    "the runner refused its input or the endpoint's contract (exit 2)".into(),
+                );
+            }
+            3 => return Err("the runner's harness failed (exit 3)".into()),
+            other => return Err(format!("the runner exited {other}")),
+        };
+        let report =
+            report.ok_or_else(|| format!("the runner exited {code} and wrote no report"))?;
+        let stated = report["verdict"].as_str().unwrap_or("<none>");
+        if stated != named {
+            return Err(format!(
+                "the runner exited {code}, but its report's verdict is {stated}"
+            ));
+        }
+        let cases = report["cases"]
+            .as_array()
+            .ok_or("the report lists no cases")?;
+        let failed: Vec<String> = cases
+            .iter()
+            .filter(|case| case["status"] == "failed")
+            .map(|case| {
+                let diagnostics: Vec<&str> = case["diagnostics"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                format!("{} ({})", id(case), diagnostics.join(", "))
+            })
+            .collect();
+        let absent: Vec<&Value> = cases
+            .iter()
+            .filter(|case| case["status"] == "absent")
+            .collect();
+        let named_absent = |cases: &[&Value]| {
+            cases
+                .iter()
+                .map(|case| format!("{} ({})", id(case), reason(case)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if named != "passed" || !failed.is_empty() {
+            return Err(format!(
+                "verdict {named}; failed: {}; absent: {}",
+                failed.join(", "),
+                named_absent(&absent)
+            ));
+        }
+        if let Some(undeclared) = undeclared {
+            let refused: Vec<&Value> = absent
+                .iter()
+                .copied()
+                .filter(|case| !accepted(case, undeclared))
+                .collect();
+            if !refused.is_empty() {
+                return Err(format!(
+                    "absent for a reason this lane does not accept: {}",
+                    named_absent(&refused)
+                ));
+            }
+        }
+        let passed = report["totals"]["passed"]
+            .as_u64()
+            .ok_or("the report states no passed total")?;
+        Ok(Tally {
+            passed,
+            absent: absent
+                .iter()
+                .map(|case| (id(case), reason(case).to_owned()))
+                .collect(),
+        })
+    }
+
+    /// Whether `bytes` hold `credential`, its body after [`CREDENTIAL_PREFIX`], or the prefix
+    /// itself anywhere (design 31 § 5 point 4). An empty credential is found nowhere.
+    pub fn carries(bytes: &[u8], credential: &str) -> bool {
+        let holds = |needle: &str| {
+            !needle.is_empty()
+                && bytes
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+        };
+        !credential.is_empty()
+            && (holds(credential)
+                || holds(credential.strip_prefix(CREDENTIAL_PREFIX).unwrap_or(""))
+                || holds(CREDENTIAL_PREFIX))
+    }
+
+    /// Reads the run's report, digest and output, refuses any that holds `credential`, and
+    /// judges the run with [`verdict`]. A refused run's report, digest and output are deleted
+    /// first, so a later step that uploads the report directory (`chart-lane.yml` uploads it
+    /// whatever the outcome) finds nothing that holds the credential.
+    ///
+    /// # Errors
+    ///
+    /// A file holds the credential (nothing of it is shown; the files are deleted, and a file
+    /// that could not be deleted is named), the report is not JSON, or
+    /// [`verdict`] refused the run; the runner's last lines are appended, as it prints only case
+    /// ids, statuses and closed codes.
+    pub fn judge(
+        exit: Option<i32>,
+        out: &Path,
+        log: &Path,
+        credential: &str,
+        undeclared: Option<&[&str]>,
+    ) -> Result<Tally> {
+        let report = fs::read(out.join("report.json")).ok();
+        let digest = fs::read(out.join("report.json.sha256")).ok();
+        let printed = fs::read(log).unwrap_or_default();
+        if [
+            report.as_deref(),
+            digest.as_deref(),
+            Some(printed.as_slice()),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|bytes| carries(bytes, credential))
+        {
+            let kept: Vec<String> = [
+                out.join("report.json"),
+                out.join("report.json.sha256"),
+                log.to_path_buf(),
+            ]
+            .iter()
+            .filter(|path| match fs::remove_file(path) {
+                Ok(()) => false,
+                Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+            })
+            .map(|path| path.display().to_string())
+            .collect();
+            if kept.is_empty() {
+                bail!(
+                    "the runner's report or output holds the credential; neither is shown, and \
+                     both were deleted"
+                );
+            }
+            bail!(
+                "the runner's report or output holds the credential; neither is shown, and {} \
+                 could not be deleted",
+                kept.join(", ")
+            );
+        }
+        let report: Option<Value> = report
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .context("report.json is not JSON")?;
+        verdict(exit, report.as_ref(), undeclared).map_err(|why| {
+            let printed = String::from_utf8_lossy(&printed);
+            let lines: Vec<&str> = printed.lines().collect();
+            anyhow!(
+                "{why}; the runner's last lines: {}",
+                lines[lines.len().saturating_sub(6)..].join(" | ")
+            )
+        })
+    }
+
+    /// The step's evidence: the totals and every absent case with its reason.
+    pub fn evidence(tally: &Tally) -> String {
+        let absent: Vec<String> = tally
+            .absent
+            .iter()
+            .map(|(id, reason)| format!("{id} ({reason})"))
+            .collect();
+        format!(
+            "verdict passed, {} passed, {} absent: {}",
+            tally.passed,
+            tally.absent.len(),
+            absent.join(", ")
+        )
+    }
+
+    /// The job summary's block: the totals and the absent set, unpinned (design 31 § 7).
+    pub fn summary(tally: &Tally) -> String {
+        let mut text = format!(
+            "### Clean-room runner\n\nverdict passed: {} passed, {} absent\n\n",
+            tally.passed,
+            tally.absent.len()
+        );
+        for (id, reason) in &tally.absent {
+            let _ = writeln!(text, "- `{id}`: {reason}");
+        }
+        text
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::os::unix::net::UnixStream;
+        use std::path::Path;
+        use std::time::Duration;
+
+        use serde_json::{Value, json};
+
+        use super::{Call, Tally, TokenSocket, answer, argv, carries, verdict};
+
+        fn report(verdict: &str, cases: &Value) -> Value {
+            json!({"verdict": verdict, "totals": {"passed": 2, "failed": 0, "absent": 1}, "cases": cases})
+        }
+
+        fn case(id: &str, status: &str, absent: Option<Value>) -> Value {
+            let mut case = json!({"id": id, "group": "g", "status": status, "diagnostics": []});
+            if let Some(absent) = absent {
+                case["absent"] = absent;
+            }
+            case
+        }
+
+        #[test]
+        fn the_argv_carries_each_value_as_one_argument_and_the_hook_argv_only() {
+            let call = Call {
+                endpoint: "https://127.0.0.1:4443/".to_owned(),
+                trust_roots: Path::new("/w/roots.pem"),
+                server_name: "lane-0.lane.ns.svc.cluster.local",
+                forbidden_name: "lane.ns.svc.cluster.local",
+                restart_hook: Some(("/usr/bin/kill", vec!["-KILL".to_owned(), "41".to_owned()])),
+                ops_origin: Some("http://127.0.0.1:9090".to_owned()),
+                out: Path::new("/w/out"),
+                deadline: Duration::from_mins(30),
+                io_timeout: Duration::from_mins(1),
+                restart_timeout: Duration::from_mins(10),
+            };
+            assert_eq!(
+                argv(&call, 7),
+                [
+                    "--endpoint",
+                    "https://127.0.0.1:4443/",
+                    "--trust-roots",
+                    "/w/roots.pem",
+                    "--server-name",
+                    "lane-0.lane.ns.svc.cluster.local",
+                    "--forbidden-name",
+                    "lane.ns.svc.cluster.local",
+                    "--token-fd",
+                    "7",
+                    "--out",
+                    "/w/out",
+                    "--deadline",
+                    "1800",
+                    "--io-timeout",
+                    "60",
+                    "--restart-timeout",
+                    "600",
+                    "--restart-hook",
+                    "/usr/bin/kill",
+                    "--restart-hook-arg",
+                    "-KILL",
+                    "--restart-hook-arg",
+                    "41",
+                    "--ops-origin",
+                    "http://127.0.0.1:9090",
+                ]
+            );
+            assert_eq!(call.bound(), Duration::from_mins(41));
+            let bare = Call {
+                restart_hook: None,
+                ops_origin: None,
+                ..call
+            };
+            let bare = argv(&bare, 7);
+            assert!(
+                !bare
+                    .iter()
+                    .any(|argument| argument.starts_with("--restart-hook"))
+            );
+            assert!(!bare.iter().any(|argument| argument == "--ops-origin"));
+            assert!(
+                !bare
+                    .iter()
+                    .any(|argument| argument.contains("identity_access"))
+            );
+        }
+
+        #[test]
+        fn only_the_primary_purpose_is_answered_with_the_credential() {
+            let credential = "identity_access_v1_secret";
+            let primary = r#"{"reason":"request","purpose":"primary","scopes":["exec"]}"#;
+            assert_eq!(answer(primary, credential), credential);
+            for other in [
+                r#"{"reason":"request","purpose":"narrowed","scopes":["observe"]}"#,
+                r#"{"purpose":"Primary"}"#,
+                "primary",
+                "",
+            ] {
+                assert_eq!(answer(other, credential), "unsupported", "{other}");
+            }
+        }
+
+        #[test]
+        fn the_token_socket_answers_each_line_and_ends_when_the_far_end_closes() {
+            let token = TokenSocket::serve("identity_access_v1_secret".to_owned()).expect("pair");
+            let far: UnixStream = token.theirs.try_clone().expect("far end");
+            let mut writer = far.try_clone().expect("writer");
+            let mut reader = BufReader::new(far);
+            let mut line = String::new();
+            writeln!(
+                writer,
+                r#"{{"reason":"request","purpose":"primary","scopes":[]}}"#
+            )
+            .expect("request");
+            reader.read_line(&mut line).expect("answer");
+            assert_eq!(line, "identity_access_v1_secret\n");
+            line.clear();
+            writeln!(
+                writer,
+                r#"{{"reason":"request","purpose":"narrowed","scopes":[]}}"#
+            )
+            .expect("request");
+            reader.read_line(&mut line).expect("answer");
+            assert_eq!(line, "unsupported\n");
+            drop((writer, reader));
+            assert_eq!(token.finish(), 2);
+        }
+
+        #[test]
+        fn only_exit_zero_with_verdict_passed_and_no_failed_case_certifies() {
+            let cases = json!([
+                case("machine.envelope", "passed", None),
+                case("tls.v12-refused", "passed", None),
+                case(
+                    "exec.run-output",
+                    "absent",
+                    Some(
+                        json!({"reason": "fact-absent", "facts": ["exec.no-egress"], "inputs": [], "scopes": []})
+                    )
+                ),
+            ]);
+            assert_eq!(
+                verdict(Some(0), Some(&report("passed", &cases)), Some(&[])),
+                Ok(Tally {
+                    passed: 2,
+                    absent: vec![("exec.run-output".to_owned(), "fact-absent".to_owned())],
+                })
+            );
+            for (exit, stated, why) in [
+                (None, "passed", "did not exit"),
+                (Some(2), "passed", "exit 2"),
+                (Some(3), "passed", "exit 3"),
+                (Some(9), "passed", "exited 9"),
+                (Some(0), "failed", "verdict is failed"),
+                (Some(1), "passed", "verdict is passed"),
+            ] {
+                let refused = verdict(exit, Some(&report(stated, &cases)), None).expect_err(why);
+                assert!(refused.contains(why), "{refused}");
+            }
+            assert!(
+                verdict(Some(0), None, None)
+                    .expect_err("no report")
+                    .contains("wrote no report")
+            );
+            let incomplete = json!([case(
+                "recovery.dropped",
+                "absent",
+                Some(json!({"reason": "fact-absent", "facts": ["x"], "inputs": [], "scopes": []}))
+            ),]);
+            let refused = verdict(Some(4), Some(&report("incomplete", &incomplete)), None)
+                .expect_err("incomplete");
+            assert!(
+                refused.contains("recovery.dropped (fact-absent)"),
+                "{refused}"
+            );
+            let failed = json!([
+                {"id": "auth.absent", "group": "auth", "status": "failed", "diagnostics": ["status-unexpected"]},
+            ]);
+            let refused =
+                verdict(Some(1), Some(&report("failed", &failed)), None).expect_err("failed");
+            assert!(
+                refused.contains("auth.absent (status-unexpected)"),
+                "{refused}"
+            );
+        }
+
+        #[test]
+        fn a_lane_accepts_only_absences_its_endpoint_decided_or_it_left_undeclared() {
+            let absent = |reason: &str, inputs: Value| {
+                case(
+                    "c",
+                    "absent",
+                    Some(json!({"reason": reason, "facts": [], "inputs": inputs, "scopes": []})),
+                )
+            };
+            let narrowed = &["narrowed-credential"][..];
+            for (case, accepted) in [
+                (absent("fact-absent", json!([])), true),
+                (absent("fact-unsatisfied", json!([])), true),
+                (absent("bound-exceeded", json!([])), true),
+                (
+                    absent("input-not-declared", json!(["narrowed-credential"])),
+                    true,
+                ),
+                (absent("input-not-declared", json!(["restart-hook"])), false),
+                (
+                    absent(
+                        "input-not-declared",
+                        json!(["narrowed-credential", "ops-origin"]),
+                    ),
+                    false,
+                ),
+                (absent("input-not-declared", json!([])), false),
+                (absent("scope-not-declared", json!([])), false),
+            ] {
+                let report = report("passed", &json!([case]));
+                assert_eq!(
+                    verdict(Some(0), Some(&report), Some(narrowed)).is_ok(),
+                    accepted,
+                    "{case}"
+                );
+                assert!(verdict(Some(0), Some(&report), None).is_ok(), "{case}");
+            }
+        }
+
+        #[test]
+        fn a_credential_is_found_anywhere_in_the_bytes_and_an_empty_one_nowhere() {
+            // The security review on u1 widened the match to the body and the prefix (design 31
+            // § 5 point 4), so the former case "the bare prefix is not the credential" is
+            // replaced by the cases below with a credential in the bundle's format.
+            let body = "Ab3-_".repeat(8) + "xyz";
+            let credential = format!("identity_access_v1_{body}");
+            assert!(carries(format!("x {credential} y").as_bytes(), &credential));
+            assert!(carries(credential.as_bytes(), &credential));
+            assert!(carries(format!("v{body}").as_bytes(), &credential));
+            assert!(carries(b"driver identity_access_v1_", &credential));
+            assert!(!carries(&body.as_bytes()[1..], &credential));
+            assert!(!carries(b"identity_access_v2_", &credential));
+            assert!(!carries(b"anything", ""));
+            assert!(!carries(b"identity_access_v1_", ""));
+        }
+
+        /// Security review (u1): `chart-lane.yml` uploads the report directory whatever the step's
+        /// outcome, so a run refused for holding the credential leaves none of its files behind.
+        #[test]
+        fn a_refused_run_leaves_no_file_that_holds_the_credential() {
+            let directory = tempfile::tempdir().expect("scratch");
+            let out = directory.path().join("out");
+            std::fs::create_dir(&out).expect("out");
+            let log = directory.path().join("conformance.log");
+            let credential = format!("identity_access_v1_{}", "q".repeat(43));
+            std::fs::write(
+                out.join("report.json"),
+                format!("{{\"d\":\"{}\"}}", "q".repeat(43)),
+            )
+            .expect("report");
+            std::fs::write(out.join("report.json.sha256"), "0").expect("digest");
+            std::fs::write(&log, "case a passed\n").expect("log");
+            let refused = super::judge(Some(1), &out, &log, &credential, None)
+                .expect_err("the report holds the body");
+            assert!(!refused.to_string().contains(&"q".repeat(43)));
+            assert!(!out.join("report.json").exists());
+            assert!(!out.join("report.json.sha256").exists());
+            assert!(!log.exists());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2878,7 +3707,7 @@ mod tests {
         let names: BTreeSet<&str> = SCENARIOS.iter().copied().collect();
         assert_eq!(names.len(), SCENARIOS.len(), "a scenario is declared twice");
         // A local record covers exactly the execution scenarios the hosted lane reports absent;
-        // the six hosted ones are the hosted lane's, on two workers.
+        // the seven hosted ones are the hosted lane's, on two workers.
         let execution: Vec<&str> = EXECUTION_ABSENT.iter().map(|(name, _)| *name).collect();
         assert_eq!(SCENARIOS.as_slice(), execution.as_slice());
         for name in HOSTED {
@@ -3318,6 +4147,8 @@ mod tests {
             docker: PathBuf::from("docker-not-used"),
             cluster: "substrate-chart-lane".to_owned(),
             node_profiles: false,
+            conformance_runner: None,
+            conformance_out: None,
         };
         assert!(
             run(&args).is_err(),
@@ -3367,6 +4198,8 @@ mod tests {
             docker: PathBuf::from("docker-not-used"),
             cluster: "substrate-chart-lane".to_owned(),
             node_profiles: false,
+            conformance_runner: None,
+            conformance_out: None,
         }
     }
 

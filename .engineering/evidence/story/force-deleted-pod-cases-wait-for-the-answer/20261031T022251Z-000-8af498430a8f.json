@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-31T02:22:51Z",
+  "actor": "human:timo",
+  "artifact": "story:force-deleted-pod-cases-wait-for-the-answer",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local wave gate on wave/2026-10-31-lane-fixes at 9822bd4b: fmt, check-ess, check-docs, tests of conformance, kubernetes-client, kubernetes, host, daemon (lib and 5 targets) and xtask (1654 passed, 0 failed), clippy -D warnings, 8 xtask checks; all exit 0",
+    "reference": "9822bd4b"
+  }
+}

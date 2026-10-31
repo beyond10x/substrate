@@ -2,12 +2,23 @@
 format: aep.planning-md/3
 id: story:preconditioned-delete-409-is-not-a-uid-mismatch
 kind: story
-status: draft
+status: implemented
 title: A 409 on a preconditioned Pod delete is told apart from a uid mismatch
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
 - depends_on: story:pod-removal-never-deletes-a-replacement
-revision: 1
+scope:
+- confidence: cited
+  path: crates/substrate-kubernetes-client/src/api.rs
+- confidence: inferred
+  path: crates/substrate-kubernetes-client/src/client_tests.rs
+- confidence: inferred
+  path: crates/substrate-kubernetes-client/src/fake.rs
+revision: 10
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 7}
+- {from: "proposed", to: "active", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 8}
+- {from: "active", to: "implemented", at: "2026-10-30T20:34:26Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: A 409 on a preconditioned Pod delete is told apart from a uid mismatch
 
@@ -30,14 +41,25 @@ coordinating session filed it on 2026-10-29:
 
 ## Acceptance
 
-- On a 409, the removal parses the Status `reason` and `details`, then GETs the name:
+- On a 409, the removal GETs the name; the Status does not decide, because an admission webhook
+  sets its own Status on a denial and a 409's `reason` and `details` name no single cause:
   - another uid, or absent: gone, nothing deleted;
   - the same uid: the conflict was not a uid mismatch, and the removal tries again within its
     existing bound.
 - A red case first, on the fake API: a 409 whose follow-up GET still shows the read uid.
 - The unit S cases and the Pod adapter's tests stay green.
 - The story cites the Kubernetes API reference for the causes of a 409 on a delete with
-  preconditions.
+  preconditions:
+  - DeleteOptions `preconditions`: "Must be fulfilled before a deletion is carried out. If not
+    possible, a 409 Conflict status will be returned."
+    (https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/delete-options/#DeleteOptions)
+  - Admission webhook responses carry a webhook-chosen `status` (code, reason, message), so a
+    denial can arrive as a 409 that is not the precondition
+    (https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#response).
+
+Amended during wave 2026-10-30-remote-conformance: the first bullet originally required parsing the
+Status `reason` and `details`; the coordinator accepted the implementor's case that the GET alone
+decides.
 
 ## Design
 

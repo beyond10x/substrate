@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:remote-clean-room-conformance
 kind: story
-status: proposed
+status: implemented
 title: A clean-room client proves remote Substrate
 summary: A black-box Rust runner verifies HTTPS/WSS, auth, durable recovery and event semantics against any deployed instance.
 owner: substrate
@@ -15,9 +15,34 @@ relations:
 - depends_on: story:remote-sdk-transport
 - depends_on: story:node-bound-kubernetes-serving-profile
 - depends_on: story:operational-health-and-telemetry
-revision: 4
+scope:
+- confidence: cited
+  path: .github/workflows/chart-lane.yml
+- confidence: cited
+  path: Cargo.lock
+- confidence: cited
+  path: Cargo.toml
+- confidence: cited
+  path: Dockerfile
+- confidence: cited
+  path: crates/b10x-substrate-conformance
+- confidence: cited
+  path: scripts/delegated-lane.sh
+- confidence: inferred
+  path: website/docs/guides
+- confidence: cited
+  path: website/sidebars.ts
+- confidence: cited
+  path: xtask/src/chart_cluster.rs
+- confidence: cited
+  path: xtask/src/namespace_lane_run.rs
+- confidence: cited
+  path: xtask/src/packages.rs
+revision: 17
 transitions:
 - {from: "draft", to: "proposed", at: "2026-08-31T22:54:33Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-10-30T17:39:13Z", actor: "human:timo", revision: 16}
+- {from: "active", to: "implemented", at: "2026-10-30T20:34:26Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: A clean-room client proves remote Substrate
 
