@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-31T15:34:58Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-driver-admits-an-exec-on-observed-confinement",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:wave-2026-10-31-design-30-adversary-pass-1",
+    "reference": "commit:7f7d77ef",
+    "review": "review-result:wave-2026-10-31-design-30-adversary-pass-1",
+    "outcome": "fixed"
+  }
+}
