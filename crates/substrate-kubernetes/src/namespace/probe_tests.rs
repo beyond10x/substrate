@@ -1323,3 +1323,134 @@ async fn no_egress_is_absent_unless_all_three_attempts_failed_at_the_named_addre
         assert_eq!(families(&facts), [Some(true); 7], "{why}");
     }
 }
+
+/// Security review, wave 2026-10-31: one probe after the namespace's policy set gained `policy`
+/// beside the default-deny one, the driver reopened over it (§ 14 Q1 B binds the whole set), and
+/// the probe child reporting what a child the policy does not reach reports: all three attempts
+/// failed with nothing answering. Answers the snapshot and the probe Pod the kubelet ran.
+async fn probe_beside(policy: Value) -> (CapabilitySnapshot, Value) {
+    let observation = Observation {
+        heartbeat: false,
+        egress: blocked(),
+    };
+    let rig = rig_with(
+        Play::observing(&observation, Heartbeat::Absent),
+        None,
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    let before = rig.driver.binding().expect("bound at open").digest();
+    rig.fake
+        .seed("networkpolicies", policy)
+        .expect("the additional policy is stored");
+    rig.driver
+        .open()
+        .await
+        .expect("the driver reopens over a set whose default-deny policy still denies");
+    assert_ne!(
+        rig.driver.binding().expect("bound again").digest(),
+        before,
+        "the added policy is in the bound set"
+    );
+    rig.driver.probe().await.expect("the probe runs");
+    let snapshot = rig.machine();
+    assert_eq!(
+        families(&snapshot.facts),
+        [Some(true); 7],
+        "the control: the probe Pod ran and ended as its spec says"
+    );
+    let pod = lock(&rig.ran)[0].clone();
+    (snapshot, pod)
+}
+
+/// Security review, wave 2026-10-31 (invariant 3, design 34 § 6.2 row 5 and § 14 Q1 B): an
+/// operator lets the exec Pods reach the network with a policy that selects them by the label
+/// every exec Pod carries, `b10x-substrate/exec`. The probe Pod carries `b10x-substrate/probe`
+/// instead, so the policy never selects it and its three attempts time out as under the
+/// default-deny policy alone. The probe's observation then stands for no Pod an exec runs in, and
+/// `confinement.no-egress` must not be published while the bound set lets exec Pods egress.
+#[tokio::test]
+async fn a_policy_selecting_exec_pods_but_not_the_probe_pod_withholds_no_egress() {
+    let exec_labels = names::labels(
+        DEPLOYMENT,
+        BackendKind::Exec,
+        &names::resource_hash(DEPLOYMENT, "ex_0001"),
+        BackendRole::Pod,
+    );
+    assert!(
+        exec_labels.contains_key("b10x-substrate/exec"),
+        "every exec Pod carries the key the policy selects on"
+    );
+    let (snapshot, probe_pod) = probe_beside(json!({
+        "metadata": {"name": "exec-pods-reach-the-mirror"},
+        "spec": {
+            "podSelector": {"matchExpressions": [
+                {"key": "b10x-substrate/exec", "operator": "Exists"},
+            ]},
+            "policyTypes": ["Egress"],
+            "egress": [{}],
+        },
+    }))
+    .await;
+    assert!(
+        probe_pod["metadata"]["labels"]
+            .get("b10x-substrate/exec")
+            .is_none(),
+        "the probe Pod is not selected by the policy: {}",
+        probe_pod["metadata"]["labels"]
+    );
+    assert_eq!(
+        snapshot.facts.confinement_no_egress, None,
+        "confinement.no-egress was published from a Pod the egress-allowing policy does not \
+         select, while every exec Pod it admits is selected by it"
+    );
+}
+
+/// Security review, wave 2026-10-31 (invariant 3, design 34 § 6.2 row 5 and § 14 Q1 B): a bound
+/// policy selecting every Pod allows egress to one range. The probe dials three fixed addresses
+/// outside it, so all three time out, while every exec Pod may reach the range. The driver holds
+/// the policy that states egress is allowed; `confinement.no-egress` must not be published from
+/// three sampled attempts against it.
+#[tokio::test]
+async fn a_bound_policy_allowing_egress_to_a_range_the_probe_does_not_dial_withholds_no_egress() {
+    let (snapshot, _) = probe_beside(json!({
+        "metadata": {"name": "allow-one-range"},
+        "spec": {
+            "podSelector": {},
+            "policyTypes": ["Egress"],
+            "egress": [{"to": [{"ipBlock": {"cidr": "203.0.113.0/24"}}]}],
+        },
+    }))
+    .await;
+    assert_eq!(
+        snapshot.facts.confinement_no_egress, None,
+        "confinement.no-egress was published while the bound policy set allows every Pod egress \
+         to 203.0.113.0/24"
+    );
+}
+
+/// Security review, wave 2026-10-31 (claim 5, design 34 amendment of 2026-10-31): the heartbeat
+/// and the egress observation count only from a run whose argv read back byte for byte. A child
+/// whose argv something expanded, reporting a heartbeat that moved and three blocked attempts,
+/// with the heartbeat standing still after the end, proves neither property. No existing case
+/// pairs an expanded argv with an observation line, so removing that rule went unmeasured.
+#[tokio::test]
+async fn an_observation_after_an_argv_that_did_not_read_back_proves_neither_property() {
+    let observation = Observation {
+        heartbeat: true,
+        egress: blocked(),
+    };
+    let play = Play {
+        child: Child::Expanded,
+        ..Play::observing(&observation, Heartbeat::Stopped)
+    };
+    let facts = facts_after(play, Some(check_with_host(SERVICE_HOST))).await;
+    assert_eq!(facts.exec_argv_only, None);
+    assert_eq!(
+        families(&facts),
+        [Some(true); 7],
+        "the families are the end's"
+    );
+    assert_eq!(facts.confinement_whole_tree_kill, None);
+    assert_eq!(facts.confinement_no_egress, None);
+}
