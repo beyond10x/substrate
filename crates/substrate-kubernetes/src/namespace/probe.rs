@@ -130,8 +130,9 @@ const RUN_FACTS: [&str; 10] = [
     CONFINEMENT_NO_EGRESS_FACT,
 ];
 
-/// Why the probe Pod's run proved nothing: the API refused or lost a call the run needed, named by
-/// its reason `code`, or the run itself gave no proof (`code` absent).
+/// Why the probe Pod's run proved nothing: a call the run needed failed, named by its reason
+/// `code` (the API's refusal is `kubernetes.api-failed`, the Pod's create keeps the code it failed
+/// with), or the run itself gave no proof (`code` absent).
 struct RunFailed {
     code: Option<&'static str>,
     why: String,
@@ -649,10 +650,10 @@ impl NamespaceDriver {
         let uid = match self.create_recorded(row, &self.api.pods(), rendered).await {
             Created::Bound(uid) => uid,
             Created::Refused(error) | Created::Unknown(error) => {
-                return Err(RunFailed::api(format!(
-                    "the probe Pod: {}: {}",
-                    error.code, error.message
-                )));
+                return Err(RunFailed {
+                    code: Some(error.code),
+                    why: format!("the probe Pod: {}: {}", error.code, error.message),
+                });
             }
         };
         let bound = Duration::from_secs(bounds.deadline_seconds) + self.api.timeout + PROBE_SLACK;
