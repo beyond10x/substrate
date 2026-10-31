@@ -210,6 +210,8 @@ fn an_unknown_or_prefixed_name_or_an_unknown_member_is_not_read() {
         serde_json::json!({"facts": ["confinement.whole-tree-kill"]}),
         serde_json::json!({"adapter": "linux"}),
         serde_json::json!({"families": "limits"}),
+        serde_json::json!({"families": null, "facts": ["sealed-paths"]}),
+        serde_json::json!({"families": ["limits"], "facts": null}),
     ] {
         assert!(
             serde_json::from_value::<ConfinementRequest>(sandbox(&requires)).is_err(),

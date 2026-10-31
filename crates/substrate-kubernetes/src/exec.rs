@@ -1489,7 +1489,7 @@ fn running(id: &str, input: &ExecStartInput, pod: &str) -> ExecObservation {
             observed_at: Utc::now(),
             requested: input.sandbox.clone(),
             applied: Some(AppliedConfinement {
-                requires: None,
+                requires: input.sandbox.requires.clone(),
                 capability_snapshot: input.sandbox.capability_snapshot.clone(),
                 cgroup: Some(pod.to_owned()),
                 filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,

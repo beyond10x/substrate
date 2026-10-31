@@ -18,6 +18,10 @@ pub struct PolicySet {
     /// Lowercase hex SHA-256 of the canonical list of every policy's name, uid,
     /// `resourceVersion` and `spec`, sorted by name.
     pub set_digest: String,
+    /// The name of every other policy in the set that allows egress, sorted: its `egress` is
+    /// present and not an empty list. Which Pods it selects is not read; any one of them withholds
+    /// `confinement.no-egress` (design 34 § 6.2 row 5).
+    pub egress_allowing: Vec<String>,
 }
 
 /// Why the set does not hold a default-deny policy named `name`.
@@ -57,12 +61,25 @@ pub fn read(policies: &[Value], name: &str) -> Result<PolicySet, NotDefaultDeny>
         .collect();
     entries.sort_by(|left, right| left.0.cmp(right.0));
     let set: Vec<Value> = entries.into_iter().map(|(_, entry)| entry).collect();
+    let mut egress_allowing: Vec<String> = policies
+        .iter()
+        .filter(|other| other["metadata"]["name"] != name && has_rules(&other["spec"]["egress"]))
+        .map(|other| text(&other["metadata"]["name"]))
+        .collect();
+    egress_allowing.sort();
     Ok(PolicySet {
         default_deny_uid: text(&policy["metadata"]["uid"]),
         default_deny_resource_version: text(&policy["metadata"]["resourceVersion"]),
         default_deny_spec: digest(&policy["spec"], name)?,
         set_digest: digest(&Value::Array(set), "the namespace's policy set")?,
+        egress_allowing,
     })
+}
+
+/// Whether a policy's `ingress` or `egress` member states any rule: present and not an empty
+/// list. A member that is no list is read as allowing, never as denying.
+fn has_rules(rules: &Value) -> bool {
+    !rules.is_null() && rules.as_array().is_none_or(|rules| !rules.is_empty())
 }
 
 fn check_default_deny(name: &str, spec: &Value) -> Result<(), NotDefaultDeny> {
@@ -92,8 +109,7 @@ fn check_default_deny(name: &str, spec: &Value) -> Result<(), NotDefaultDeny> {
         return refuse("does not name Ingress and Egress once each in policyTypes");
     }
     for direction in ["ingress", "egress"] {
-        let rules = &spec[direction];
-        if !rules.is_null() && rules.as_array().is_none_or(|rules| !rules.is_empty()) {
+        if has_rules(&spec[direction]) {
             return refuse(&format!("allows {direction} traffic"));
         }
     }

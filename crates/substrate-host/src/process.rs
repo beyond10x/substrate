@@ -2391,6 +2391,19 @@ impl ProcessRuntime {
                 "exec",
             ));
         }
+        // The applied record echoes `sandbox.requires`, so the driver checks it too: a caller that
+        // reaches the driver without the daemon is never told a requirement held unchecked. In
+        // the daemon's order: its shape, then the stale snapshot, then what the snapshot serves,
+        // before every field-specific check, so both name the same refusal for one start.
+        admit_requires_shape(&input.sandbox)?;
+        if input.sandbox.capability_snapshot != self.capability.snapshot {
+            return Err(DriverError::refused(
+                "exec.capability-stale",
+                "The admitted capability snapshot is stale.",
+                "capability_snapshot",
+            ));
+        }
+        admit_confinement_requires(&input.sandbox, &self.capability.facts)?;
         let read_only_roots = Self::admit_read_only_roots(
             &input.read_only_roots,
             self.capability.facts.exec_read_only_roots.as_ref(),
@@ -2409,16 +2422,6 @@ impl ProcessRuntime {
             self.capability.facts.secrets_slots.as_ref(),
             &input.secret_slots,
         )?;
-        if input.sandbox.capability_snapshot != self.capability.snapshot {
-            return Err(DriverError::refused(
-                "exec.capability-stale",
-                "The admitted capability snapshot is stale.",
-                "capability_snapshot",
-            ));
-        }
-        // The applied record echoes `sandbox.requires`, so the driver checks it too: a caller that
-        // reaches the driver without the daemon is never told a requirement held unchecked.
-        admit_confinement_requires(&input.sandbox, &self.capability.facts)?;
         // Where `workspace.is_dir()` stood, which followed a link. The pinned directory is the one
         // bubblewrap binds, so an entry replaced after adopt is refused by name before any mount,
         // and the writable subtrees are checked beneath it, never by walking the path.
@@ -3916,8 +3919,23 @@ fn sandbox_unavailable() -> DriverError {
     )
 }
 
-/// The driver's half of design 30 § 4.4: the wire crate's rule and refusal, as the daemon answers
-/// it, read against the facts this driver published.
+/// The lexical half of design 30 § 4.4, the wire crate's rule: request shape, so the driver
+/// answers it before the stale snapshot, as the daemon does.
+fn admit_requires_shape(sandbox: &substrate_wire::ConfinementRequest) -> Result<(), DriverError> {
+    match sandbox.requires.as_ref() {
+        Some(requires) if substrate_wire::validate_confinement_requires(requires).is_err() => {
+            Err(DriverError::refused(
+                "request.schema-invalid",
+                "The confinement requirement is empty or names a family or fact twice.",
+                "sandbox.requires",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The serving half of design 30 § 4.4: the wire crate's refusal, as the daemon answers it, read
+/// against the facts this driver published.
 fn admit_confinement_requires(
     sandbox: &substrate_wire::ConfinementRequest,
     facts: &substrate_wire::CapabilityFacts,
@@ -3925,13 +3943,6 @@ fn admit_confinement_requires(
     let Some(requires) = sandbox.requires.as_ref() else {
         return Ok(());
     };
-    if substrate_wire::validate_confinement_requires(requires).is_err() {
-        return Err(DriverError::refused(
-            "request.schema-invalid",
-            "The confinement requirement is empty or names a family or fact twice.",
-            "sandbox.requires",
-        ));
-    }
     match substrate_wire::confinement_requires_refusal(requires, facts) {
         Some((refusal, message)) => Err(DriverError::unserved(
             refusal.code,

@@ -24,11 +24,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   read-only roots and files), `network-egress` (with a declared aperture), `whole-tree-kill`,
   `ipc-socket-allowlist` and `ipc-signals-contained`. It never publishes `network-ingress`. The
   capability snapshot digest now binds the adapter, so the host's snapshot id changes once.
-- Exec and session starts check `sandbox.requires` right after `exec.capability-stale`: an empty
-  list or a repeated name is `request.schema-invalid` (422), the first unserved family
-  `confinement.family-unserved` (501), the first unproved property `confinement.fact-unserved`
-  (501), each recorded as refused before dispatch. The host driver applies the same check, and an
-  admitted run's applied record echoes `requires`. A start without `requires` is unchanged.
+- Exec and session starts check `sandbox.requires`. A requirement outside the schema (an empty
+  object or list, a repeated or unknown name, a `null` list) is `request.schema-invalid` (422)
+  with the other request-shape checks, before `exec.capability-stale`. After the stale check, the
+  first unserved family is `confinement.family-unserved` (501) and the first unproved property
+  `confinement.fact-unserved` (501), each recorded as refused before dispatch and before any
+  field-specific check. The host driver checks `requires` at the same two points, so it names
+  the same refusal the daemon does; for that its stale check now also precedes read-only roots,
+  read-only files, workspace access and secret slots, as the daemon's does. An admitted run's
+  applied record echoes `requires` on both drivers. A start without `requires` is unchanged.
 - `Machine::served_families` and `Machine::proved_properties` in the Rust SDK, which also
   re-exports `ConfinementFamily`, `ConfinementProperty` and `ConfinementRequires`.
 - `/metrics` on the operational listener names the two new refusal codes and, on a host daemon
@@ -48,7 +52,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames, its applied bounds and an exit record that agrees with the API;
   `confinement.whole-tree-kill` when the keeper sees the heartbeat unchanged for 2 s after the
   container shows `terminated`; and `confinement.no-egress` when all three attempts failed with
-  nothing answering. Each lapses with the proof. It never states the four Linux `exec.*` facts.
+  nothing answering and no NetworkPolicy in the bound set other than the default-deny one has an
+  egress rule. Any such policy withholds the fact, whichever Pods it selects. Each lapses with the
+  proof. It never states the four Linux `exec.*` facts.
 
 ### Changed
 
@@ -60,7 +66,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (501). The host driver never states `confinement.no-egress` and admits as before.
 - `AppliedConfinement.cgroup` is `Option<String>` and is optional in the bundle, present whenever
   the adapter applied a cgroup; the host driver applies one to every run, so its records keep their
-  bytes. The applied record gains an optional `requires` echo.
+  bytes. The applied record gains an optional `requires` echo. A crate that constructs or
+  exhaustively destructures the Rust type `AppliedConfinement` (loom does, in
+  `loom-intake-slice/src/confinement.rs`) must adapt when its substrate pin moves, even though it
+  uses the host API in process.
 
 ## [0.17.0] — 2026-10-31
 

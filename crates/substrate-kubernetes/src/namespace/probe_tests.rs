@@ -1462,7 +1462,10 @@ async fn adversary_w1031_an_expanded_argv_voids_the_heartbeat_and_the_egress_obs
     assert_eq!(facts.exec_argv_only, None);
     assert_eq!(families(&facts), [Some(true); 7]);
     assert_eq!(
-        (facts.confinement_whole_tree_kill, facts.confinement_no_egress),
+        (
+            facts.confinement_whole_tree_kill,
+            facts.confinement_no_egress
+        ),
         (None, None),
         "an observation from a run whose argv did not read back proves nothing"
     );

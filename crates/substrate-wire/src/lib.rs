@@ -3746,10 +3746,26 @@ impl ConfinementProperty {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfinementRequires {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present_list",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub families: Option<Vec<ConfinementFamily>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present_list",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub facts: Option<Vec<ConfinementProperty>>,
+}
+
+/// Decodes a `requires` list that is present: the schema states `type: array`, so `null` is
+/// refused rather than read as an absent list; an absent member stays `None`.
+fn present_list<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<T>>, D::Error> {
+    Vec::<T>::deserialize(deserializer).map(Some)
 }
 
 /// Checks the lexical rules of `sandbox.requires` the closed enums cannot state: it names at
