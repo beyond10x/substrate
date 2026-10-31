@@ -14,7 +14,8 @@
 //! - `confinement.whole-tree-kill` from the heartbeat: the child saw its grandchild's heartbeat
 //!   move, and the keeper's `fs stat` sees it unchanged for [`HEARTBEAT_STILL`] after the end.
 //! - `confinement.no-egress` from the child's three egress attempts: each one, at the address the
-//!   driver named, failed with nothing answering ([`EgressOutcome::blocked`]).
+//!   driver named, failed with nothing answering ([`EgressOutcome::blocked`]), and only while the
+//!   bound policy set holds no policy beside the default-deny one that allows egress.
 //!
 //! The child is told what to observe through [`TARGETS_ENV`]; the Kubernetes Service host it
 //! dials is the one the keeper's own environment states, because the child's environment is only
@@ -150,6 +151,23 @@ struct Observation {
     run: RunProofs,
 }
 
+impl Observation {
+    /// The observation under the bound policy set: a policy beside the default-deny one that
+    /// allows egress, `egress_allowing` naming each, withholds `confinement.no-egress` whatever
+    /// the three attempts found, because it may let an exec Pod out where the probe Pod was not
+    /// let out (design 34 § 6.2 row 5). Every other proof stands.
+    fn under(mut self, egress_allowing: &[String]) -> Self {
+        if !egress_allowing.is_empty() && self.run.observed.no_egress {
+            tracing::warn!(
+                policies = ?egress_allowing,
+                "a bound NetworkPolicy allows egress; confinement.no-egress is withheld"
+            );
+            self.run.observed.no_egress = false;
+        }
+        self
+    }
+}
+
 impl NamespaceDriver {
     /// One probe, now: leftovers of earlier probes are removed first, then the PVC, the keeper
     /// and the probe Pod are created under fresh rows, observed and removed. A proof the run
@@ -191,7 +209,10 @@ impl NamespaceDriver {
         self.remove_probe_leftovers().await;
         let nonce = names::probe_nonce();
         let mut sent = Vec::new();
-        let observed = self.probe_with(&nonce, &mut sent).await;
+        let observed = self
+            .probe_with(&nonce, &mut sent)
+            .await
+            .map(|observation| observation.under(&binding.policies.egress_allowing));
         self.remove_probe_objects(&nonce, &sent).await;
         let now = self.clock.wall();
         let interval = Duration::from_secs(self.config.probe_interval_seconds);

@@ -111,9 +111,18 @@ async fn adversary_w1031_a_requires_outside_the_schema_is_schema_invalid_even_wi
  {
     let harness = Harness::open();
     let cases = [
-        ("01JADVW1031REQSHAPE00001", json!({"families": ["no-such-family"]})),
-        ("01JADVW1031REQSHAPE00002", json!({"families": ["wait", "wait"]})),
-        ("01JADVW1031REQSHAPE00003", json!({"facts": ["whole-tree-kill", "whole-tree-kill"]})),
+        (
+            "01JADVW1031REQSHAPE00001",
+            json!({"families": ["no-such-family"]}),
+        ),
+        (
+            "01JADVW1031REQSHAPE00002",
+            json!({"families": ["wait", "wait"]}),
+        ),
+        (
+            "01JADVW1031REQSHAPE00003",
+            json!({"facts": ["whole-tree-kill", "whole-tree-kill"]}),
+        ),
         ("01JADVW1031REQSHAPE00004", json!({"families": []})),
         ("01JADVW1031REQSHAPE00005", json!({})),
     ];

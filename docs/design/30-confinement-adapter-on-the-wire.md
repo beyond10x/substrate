@@ -258,8 +258,10 @@ AGENTS.md invariant 6 records it. Every released bundle stays byte for byte.
   `confines_execution` keeps working on Linux and correctly withholds `run` on macOS, because
   `exec.cgroup-limits` is absent there. Moving it to `confinement.family.limits` is harness's own
   change after its pin moves. Not done here.
-- **loom and takt** use the host API in process. They are unaffected and may keep naming adapters
-  there.
+- **loom and takt** use the host API in process and may keep naming adapters there. The Rust type
+  `AppliedConfinement` gains `requires` and its `cgroup` becomes `Option<String>`, so a crate
+  that constructs or exhaustively destructures it (loom does, in
+  `loom-intake-slice/src/confinement.rs`) must adapt when its substrate pin moves.
 - **mantle** is unaffected until its SDK pin moves. Its fixtures' `"driver": "host"` stays valid.
 
 ## 9. Decisions left open, each with a recommendation

@@ -440,7 +440,8 @@ pub(super) fn validate_exec_input(
         && input.sandbox.capability_snapshot.len() == 71
         && input.sandbox.capability_snapshot[7..]
             .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && requires_shape_valid(&input.sandbox);
     if !shape_valid {
         return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
     }
@@ -536,11 +537,24 @@ pub(super) fn validate_exec_input(
     Ok(())
 }
 
-/// `sandbox.requires` (design 30 § 4.4, ADR 0048 D4), read against the snapshot the start just
-/// proved current: an empty list or a repeated name is `request.schema-invalid` (422), then the
-/// first family the snapshot does not serve is `confinement.family-unserved` (501), then the first
-/// property it does not prove is `confinement.fact-unserved` (501). The caller records each as
-/// refused before any dispatch. A start that names no requirement is admitted as before.
+/// The lexical half of `sandbox.requires` (design 30 § 4.4, ADR 0048 D4): it names at least one
+/// family or property, carries no empty list and repeats no name. The closed schema states each
+/// rule, so a start that breaks one is request shape, `request.schema-invalid` (422), answered
+/// with the other shape checks and before the stale check, on the exec and the session routes.
+fn requires_shape_valid(sandbox: &substrate_wire::ConfinementRequest) -> bool {
+    sandbox
+        .requires
+        .as_ref()
+        .is_none_or(|requires| substrate_wire::validate_confinement_requires(requires).is_ok())
+}
+
+/// The serving half of `sandbox.requires` (design 30 § 4.4, ADR 0048 D4), read against the
+/// snapshot the start just proved current: the first family the snapshot does not serve is
+/// `confinement.family-unserved` (501), then the first property it does not prove is
+/// `confinement.fact-unserved` (501). Its lexical half (an empty object or list, a repeated
+/// name) is request shape, answered `request.schema-invalid` (422) before the stale check. The
+/// caller records each as refused before any dispatch. A start that names no requirement is
+/// admitted as before.
 fn check_confinement_requires(
     facts: &substrate_wire::CapabilityFacts,
     sandbox: &substrate_wire::ConfinementRequest,
@@ -550,9 +564,6 @@ fn check_confinement_requires(
     let Some(requires) = sandbox.requires.as_ref() else {
         return Ok(());
     };
-    if substrate_wire::validate_confinement_requires(requires).is_err() {
-        return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
-    }
     if let Some((refusal, message)) = substrate_wire::confinement_requires_refusal(requires, facts)
     {
         return Err(failure(
