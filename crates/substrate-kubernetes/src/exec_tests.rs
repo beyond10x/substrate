@@ -1845,5 +1845,31 @@ async fn adversary_a_deletion_the_driver_did_not_ask_for_starts_no_bound() {
     );
 }
 
+/// Security review, wave 2026-10-31 (design 30 § 4.4, ADR 0048 D4): the daemon now admits a
+/// namespace-driver start on the neutral set (design 34 § 6.4), so this driver's applied record
+/// reaches the client wire. A start carrying `sandbox.requires` that the daemon checked and
+/// admitted is echoed in the applied record, as the host driver echoes it.
+#[tokio::test]
+async fn security_the_applied_record_echoes_the_requires_the_start_carried() {
+    let rig = rig().await;
+    let mut start = input(&["/bin/true"]);
+    start.sandbox.requires = Some(substrate_wire::ConfinementRequires {
+        families: Some(vec![
+            substrate_wire::ConfinementFamily::ProcessRun,
+            substrate_wire::ConfinementFamily::Limits,
+        ]),
+        facts: Some(vec![substrate_wire::ConfinementProperty::WholeTreeKill]),
+    });
+    let observation = rig.started("exec_requires", &start).await;
+    let applied = observation
+        .resource
+        .applied
+        .expect("a running exec states what was applied");
+    assert_eq!(
+        applied.requires, start.sandbox.requires,
+        "ADR 0048 D4: the applied record echoes `requires` when the start carried it"
+    );
+}
+
 #[path = "restart_tests.rs"]
 mod restart;
