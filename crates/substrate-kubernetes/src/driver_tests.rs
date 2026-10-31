@@ -1311,12 +1311,11 @@ fn adversary_one_object_met_concurrently_is_counted_once() {
     assert_eq!(collisions.total(), 1 + 16);
 }
 
-/// Adversary, D333: after the fix an attempt counts as stopped inside the Pod only when it is
-/// `Denied` or `Unreachable`. The kernel answers a TCP connect to a broadcast or multicast address
+/// Adversary, D333: the kernel answers a TCP connect to a broadcast or multicast address
 /// `ENETUNREACH` before any packet is sent (`tcp_v4_connect`, `tcp_v6_connect`), whatever network
-/// plugin or `NetworkPolicy` is in force. The extension admits such an `egress_probe_address`, so
-/// the third attempt would read `Unreachable`, stopped by nothing a policy did, on every cluster.
-/// The configuration must refuse it as it refuses loopback and unspecified addresses.
+/// plugin or `NetworkPolicy` is in force, so such an `egress_probe_address` can never test egress.
+/// Since D334 `Unreachable` no longer counts as stopped, but an address that cannot test anything
+/// is still a configuration error, refused as loopback and unspecified addresses are.
 #[test]
 fn adversary_d333_a_broadcast_or_multicast_egress_probe_address_is_refused() {
     use substrate_executor::probe::{ATTEMPT_BOUND, EgressOutcome, EgressTarget, attempt_tcp};
@@ -1338,7 +1337,10 @@ fn adversary_d333_a_broadcast_or_multicast_egress_probe_address_is_refused() {
             EgressOutcome::Unreachable,
             "the precondition: {address} is unreachable with no policy at all: {attempt:?}"
         );
-        assert!(attempt.outcome.blocked(), "and counts as stopped");
+        assert!(
+            !attempt.outcome.blocked(),
+            "and it does not count as stopped (D334)"
+        );
 
         let mut extension = extension();
         extension["egress_probe_address"] = json!(address);
@@ -1347,7 +1349,7 @@ fn adversary_d333_a_broadcast_or_multicast_egress_probe_address_is_refused() {
             .unwrap_or_else(|| {
                 panic!(
                     "{address}: admitted as egress_probe_address, so the probe's third attempt is \
-                     Unreachable on any cluster and counts toward confinement.no-egress"
+                     Unreachable on any cluster and tests nothing"
                 )
             });
         assert_eq!(

@@ -1068,8 +1068,8 @@ fn attempt(target: EgressTarget, address: &str, outcome: EgressOutcome) -> Egres
 }
 
 /// What a child under a default-deny policy its plugin enforces inside the Pod reports: each
-/// attempt was stopped before it left (denied or without a route), at the addresses the driver
-/// named and the nameserver its resolver names. A timed-out attempt proves nothing (D333).
+/// attempt was denied before it left (`EPERM`, `EACCES`), at the addresses the driver
+/// named and the nameserver its resolver names. A timed-out or no-route attempt proves nothing (D333, D334).
 fn blocked() -> Vec<EgressAttempt> {
     vec![
         attempt(
@@ -1085,7 +1085,7 @@ fn blocked() -> Vec<EgressAttempt> {
         attempt(
             EgressTarget::EgressProbe,
             "192.0.2.10:443",
-            EgressOutcome::Unreachable,
+            EgressOutcome::Denied,
         ),
     ]
 }
@@ -1567,7 +1567,7 @@ async fn one_timeout_among_local_denials_withholds_no_egress() {
         let mut outcomes = [
             (EgressOutcome::Denied, Some(EPERM), 0),
             (EgressOutcome::Denied, Some(EACCES), 0),
-            (EgressOutcome::Unreachable, Some(EHOSTUNREACH), 0),
+            (EgressOutcome::Denied, Some(EPERM), 0),
         ];
         outcomes[position] = (EgressOutcome::TimedOut, None, 3_000);
         let observation = Observation {
@@ -1583,8 +1583,38 @@ async fn one_timeout_among_local_denials_withholds_no_egress() {
     }
 }
 
-/// D333: three attempts each denied before they left the Pod (`EPERM`, `EACCES`, `ENETUNREACH`)
-/// publish the fact.
+/// D334: one attempt without a route among two local denials withholds the fact. `ENETUNREACH`
+/// and `EHOSTUNREACH` can come from a remote router's ICMP or an address of the wrong family, so
+/// they do not prove the attempt was stopped inside the Pod.
+#[tokio::test]
+async fn one_no_route_attempt_among_local_denials_withholds_no_egress() {
+    for errno in [ENETUNREACH, EHOSTUNREACH] {
+        for (position, elapsed_ms) in [(0, 0), (1, 0), (2, 0), (2, 3_000)] {
+            let mut outcomes = [
+                (EgressOutcome::Denied, Some(EPERM), 0),
+                (EgressOutcome::Denied, Some(EACCES), 0),
+                (EgressOutcome::Denied, Some(EPERM), 0),
+            ];
+            outcomes[position] = (EgressOutcome::Unreachable, Some(errno), elapsed_ms);
+            let observation = Observation {
+                heartbeat: true,
+                egress: traced(outcomes),
+            };
+            let facts = facts_after(
+                Play::observing(&observation, Heartbeat::Stopped),
+                Some(check_with_host(SERVICE_HOST)),
+            )
+            .await;
+            assert_eq!(
+                facts.confinement_no_egress, None,
+                "errno {errno} at {position} after {elapsed_ms} ms"
+            );
+        }
+    }
+}
+
+/// D334: three attempts each denied before they left the Pod (`EPERM`, `EACCES`) publish the
+/// fact.
 #[tokio::test]
 async fn three_local_denials_publish_no_egress() {
     let observation = Observation {
@@ -1592,7 +1622,7 @@ async fn three_local_denials_publish_no_egress() {
         egress: traced([
             (EgressOutcome::Denied, Some(EPERM), 0),
             (EgressOutcome::Denied, Some(EACCES), 0),
-            (EgressOutcome::Unreachable, Some(ENETUNREACH), 0),
+            (EgressOutcome::Denied, Some(EPERM), 0),
         ]),
     };
     let facts = facts_after(

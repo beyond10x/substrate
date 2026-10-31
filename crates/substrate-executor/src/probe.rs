@@ -567,8 +567,8 @@ mod tests {
     }
 
     #[test]
-    fn only_a_local_denial_or_no_route_is_blocked_never_a_timeout() {
-        let blocked = [EgressOutcome::Unreachable, EgressOutcome::Denied];
+    fn only_a_local_denial_is_blocked_never_a_timeout_or_a_missing_route() {
+        let blocked = [EgressOutcome::Denied];
         for outcome in [
             EgressOutcome::Reached,
             EgressOutcome::Refused,
@@ -585,7 +585,7 @@ mod tests {
     /// Each raw errno lands in its outcome, so a timeout (`ETIMEDOUT`, `EAGAIN`) can never be
     /// moved into a counted arm unnoticed (D333 adversary finding).
     #[test]
-    fn each_raw_errno_is_classified_and_only_a_denial_or_no_route_is_blocked() {
+    fn each_raw_errno_is_classified_and_only_a_local_denial_is_blocked() {
         for (errno, expected) in [
             (libc::ECONNREFUSED, EgressOutcome::Refused),
             (libc::ETIMEDOUT, EgressOutcome::TimedOut),
@@ -598,6 +598,11 @@ mod tests {
         ] {
             let outcome = classify(&std::io::Error::from_raw_os_error(errno));
             assert_eq!(outcome, expected, "errno {errno}");
+            assert_eq!(
+                outcome.blocked(),
+                matches!(errno, libc::EPERM | libc::EACCES),
+                "errno {errno}: only a local denial is blocked (D334)"
+            );
         }
         for kind in [std::io::ErrorKind::TimedOut, std::io::ErrorKind::WouldBlock] {
             let outcome = classify(&std::io::Error::from(kind));
