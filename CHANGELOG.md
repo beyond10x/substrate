@@ -7,7 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-## [0.17.0] — 2026-10-30
+## [0.17.0] — 2026-10-31
 
 Shared clean-room conformance arrives: design 31's remote runner certifies a deployed endpoint from
 outside it, and the Kubernetes namespace lane runs it as step 4. The namespace driver still refuses
@@ -37,6 +37,11 @@ families, which wait on an operator decision.
   `status-unrepresentable`, `session-output-exceeded` (64 KiB of session output). An endpoint whose
   first `/v1/machine` body does not decode is exit 1 with a report: the failed case
   `machine.envelope-decodes` (`envelope-undecodable`) and `capability_snapshot: null`.
+- The runner settles a destroy the endpoint leaves to reconciliation, as the namespace driver does
+  while the keeper Pod terminates: a retriable `operation.outcome-unknown` is read through
+  `GET /v1/ops/{op}` until terminal (design 01 § 6), and the closing cleanup waits out a
+  `destroying` workspace instead of destroying it again. After the restart hook it selects the
+  restart and cleanup cases on a machine snapshot read once `/readyz` answers.
 - The namespace lane's step 4 runs the runner against the `--driver kubernetes` daemon with a
   crash restart hook, and the chart lane's hosted scenarios gain "clean-room runner" against
   ordinal 0, with the report uploaded as the `clean-room-report` artifact. Step 4 counts a daemon
@@ -44,7 +49,10 @@ families, which wait on an operator decision.
   runner and fails the step (`daemon-exit-not-caused-by-hook`), and no exit at all is
   `hook-caused-no-exit`. Both lanes refuse a report or runner output that holds the credential,
   its body or the token prefix, and delete the report, its digest and the runner's log before
-  failing, so the `clean-room-report` artifact never carries them.
+  failing, so the `clean-room-report` artifact never carries them. Step 4 waits for the TLS
+  daemon by its `/readyz`, and, whatever the runner's verdict, destroys every workspace the
+  runner's subject still holds and waits until the lane deployment owns no Pod or claim, so steps
+  5 and 6 start under the namespace quota.
 - The operational listener of a daemon running `--driver kubernetes` serves
   `substrate_kubernetes_collisions_total`, a counter with no labels: the objects the driver met
   under a name it would use and did not create, each left untouched (design 34 § 4, the one

@@ -12,7 +12,9 @@ use b10x_substrate_sdk::{
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
-use crate::cases::{decode_machine, exec_input, spec, success, write_input};
+use crate::cases::{
+    OUTCOME_UNKNOWN, decode_machine, exec_input, settled, spec, success, write_input,
+};
 use crate::probe::plain_get;
 use crate::run::{CaseResult, Ctx, Fail, Head, LABEL_KEY, Note, Spec, ensure, refusal_code};
 use crate::token::{Purpose, Reason};
@@ -745,7 +747,7 @@ async fn sequence(ctx: &mut Ctx) -> CaseResult {
         Ok(Ok(status)) if status.success() => {}
         _ => return Err(Fail::new("hook-failed")),
     }
-    let snapshot = loop {
+    let mut snapshot = loop {
         if let Some((after, snapshot)) = probed_at(ctx).await
             && after > before
         {
@@ -765,6 +767,18 @@ async fn sequence(ctx: &mut Ctx) -> CaseResult {
             ensure(Instant::now() < until, "restart-not-ready")?;
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+        // Design 34 § 6.1: before `/readyz` answers, a restarted daemon may serve a snapshot
+        // without the driver's facts; the cases after the restart are selected on one read once
+        // it is ready.
+        snapshot = loop {
+            if let Some((after, ready)) = probed_at(ctx).await
+                && after > before
+            {
+                break ready;
+            }
+            ensure(Instant::now() < until, "restart-not-observed")?;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
     }
     ctx.state.restart_ran = true;
     ctx.snapshot.clone_from(&snapshot.snapshot);
@@ -919,13 +933,26 @@ async fn retire(ctx: &mut Ctx, path: &str) -> Result<(), Fail> {
         if read.status == 404 && read.error_code().as_deref() == Some("resource.not-found") {
             return Ok(());
         }
+        if read
+            .result()
+            .is_some_and(|resource| resource["state"] == "destroying")
+        {
+            // A destroy already accepted and left to reconciliation: it is not sent again.
+            ensure(Instant::now() < until, "resource-still-readable")?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
         let operation = ctx.operation_id();
         let reply = ctx
             .raw("DELETE", path, Some(&Ctx::mutation(&operation, &json!({}))))
             .await?;
         let code = reply.error_code();
+        let retriable = reply.error().is_some_and(|error| error.retriable);
         match (reply.status, code.as_deref()) {
             (200..=299, _) | (404, Some("resource.not-found")) => {}
+            (500, Some(OUTCOME_UNKNOWN)) if retriable => {
+                settled(ctx, &operation).await?;
+            }
             (409, Some("exec.not-terminal" | "session.not-terminal")) => {
                 ensure(Instant::now() < until, "resource-not-retirable")
                     .map_err(|fail| fail.with(code.as_deref()))?;
