@@ -406,6 +406,7 @@ mod imp {
                     set: command.env.clone(),
                 },
                 sandbox: ConfinementRequest {
+                    requires: None,
                     capability_snapshot: self.snapshot.clone(),
                     network,
                     aperture,

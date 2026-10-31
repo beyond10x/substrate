@@ -1,0 +1,26 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.26.0",
+  "client_visible_changes": [
+    "0.26.0 adds no route and preserves the 45 routes of 0.25.0 (ADR 0048, design 30 section 8). driver keeps its two words; a confinement adapter is never a driver value and no adapter name reaches the client wire.",
+    "Ten optional family facts are new, one per confinement family in ADR 0044 decision 1 order (ADR 0048 D2): confinement.family.process-run, confinement.family.process-watch, confinement.family.output-read, confinement.family.wait, confinement.family.workspace, confinement.family.filesystem-view, confinement.family.network-egress, confinement.family.network-ingress, confinement.family.limits and confinement.family.audit. Each is const true when the serving adapter proved the family and absent otherwise, never false. A snapshot that states none of them keeps its bytes and digest.",
+    "Seven optional property facts are new, one per mechanism-neutral property in the Fact order of spec/confinement (ADR 0048 D3): confinement.paths-are-host-paths, confinement.whole-tree-kill, confinement.ipc-socket-allowlist, confinement.ipc-signals-contained, confinement.sealed-paths, confinement.exec-subpaths and confinement.private-tmpdir, each const true when proved and absent otherwise. The Linux facts exec.namespaces, exec.cgroup-limits, exec.cgroup-kill and exec.no-egress and the neutral confinement.no-egress keep their bytes and meanings.",
+    "The sandbox of an exec start, and so of a session start, gains the optional closed object sandbox.requires (ADR 0048 D4): families, a unique list of family names, and facts, a unique list of property names, each without its fact prefix. An unknown name, a duplicate, an empty list, an empty object or another member is request.schema-invalid (422). A start without requires is answered exactly as under 0.25.0, and the exec record's requested sandbox carries requires when the start did.",
+    "Two refusals are new, each unserved, 501 and not retriable, each recorded as refused before dispatch and published with a vector: confinement.family-unserved (address sandbox.requires.families) names the first required family the start's snapshot does not serve, in ADR 0044 decision 1 order, and confinement.fact-unserved (address sandbox.requires.facts) the first required property it does not prove, in the Fact order. Both are checked after exec.capability-stale and before every field-specific check.",
+    "The applied record echoes requires when the start carried it: every family and property it names was checked and held. Its cgroup becomes optional (ADR 0048 D5): present whenever the adapter applied a cgroup, as on every host run, and absent when it applied none. A client that reads cgroup as required must accept its absence before it moves to 0.26.0.",
+    "The vector schema's three machine setup shapes admit each new fact as const true. The two new refusal vectors set up a host machine that serves every family but network-ingress and network-egress and proves whole-tree-kill, ipc-socket-allowlist and ipc-signals-contained, the linux adapter's set without an aperture."
+  ]
+}

@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.25.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.26.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "853d7365a56f0d8dc97fe5feb87ce57285a34bbf7a0f6eb05616d6010fc4fc00";
+    "f6216ea867d743b8efbfddb86b7097ddcddd261a10dbca3f7a775ba1a6687403";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -1628,13 +1628,22 @@ pub struct ConfinementRequest {
     pub profile: SandboxProfile,
     #[serde(rename = "require")]
     pub required: bool,
+    /// The confinement families and properties this start requires (design 30 § 4.4, ADR 0048
+    /// D4). Checked after `exec.capability-stale` and before every field-specific check; absent
+    /// behaves exactly as before the member existed, and is skipped, so an unchanged start hashes
+    /// as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires: Option<ConfinementRequires>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppliedConfinement {
     pub capability_snapshot: String,
-    pub cgroup: String,
+    /// The cgroup the adapter applied, present exactly when it applied one (design 30 § 4.5,
+    /// ADR 0048 D5). No value is invented for an adapter that applies none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
     pub filesystem: AppliedFilesystem,
     pub network: AppliedNetwork,
     pub profile: SandboxProfile,
@@ -1669,6 +1678,10 @@ pub struct AppliedConfinement {
     /// Every writable root that was bound, with what it resolved to (ADR 0038 decision 6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writable_roots: Vec<AppliedWritableRoot>,
+    /// The start's `sandbox.requires`, echoed when it carried one: these were checked and held
+    /// (design 30 § 4.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires: Option<ConfinementRequires>,
 }
 
 /// A writable mount outside `/workspace` a start asks for (ADR 0038), a closed union of two kinds.
@@ -3564,6 +3577,268 @@ pub const DRIVER_UNSERVED_REFUSALS: [UnservedRefusal; 3] = [
     },
 ];
 
+/// `confinement.family.process-run`: the adapter serves running a program (design 30 § 4.3).
+pub const CONFINEMENT_FAMILY_PROCESS_RUN_FACT: &str = "confinement.family.process-run";
+/// `confinement.family.process-watch`: the adapter serves watching a running program.
+pub const CONFINEMENT_FAMILY_PROCESS_WATCH_FACT: &str = "confinement.family.process-watch";
+/// `confinement.family.output-read`: the adapter serves reading a run's output.
+pub const CONFINEMENT_FAMILY_OUTPUT_READ_FACT: &str = "confinement.family.output-read";
+/// `confinement.family.wait`: the adapter serves waiting for a run to end.
+pub const CONFINEMENT_FAMILY_WAIT_FACT: &str = "confinement.family.wait";
+/// `confinement.family.workspace`: the adapter serves a writable workspace.
+pub const CONFINEMENT_FAMILY_WORKSPACE_FACT: &str = "confinement.family.workspace";
+/// `confinement.family.filesystem-view`: the adapter serves a declared filesystem view.
+pub const CONFINEMENT_FAMILY_FILESYSTEM_VIEW_FACT: &str = "confinement.family.filesystem-view";
+/// `confinement.family.network-egress`: published only where the operator declared an aperture.
+pub const CONFINEMENT_FAMILY_NETWORK_EGRESS_FACT: &str = "confinement.family.network-egress";
+/// `confinement.family.network-ingress`: never published until ADR 0044 decision 5's reserved
+/// fields are filled.
+pub const CONFINEMENT_FAMILY_NETWORK_INGRESS_FACT: &str = "confinement.family.network-ingress";
+/// `confinement.family.limits`: the adapter serves resource limits.
+pub const CONFINEMENT_FAMILY_LIMITS_FACT: &str = "confinement.family.limits";
+/// `confinement.family.audit`: the adapter serves the audit record.
+pub const CONFINEMENT_FAMILY_AUDIT_FACT: &str = "confinement.family.audit";
+/// `confinement.paths-are-host-paths`: a path the program sees is the host path.
+pub const CONFINEMENT_PATHS_ARE_HOST_PATHS_FACT: &str = "confinement.paths-are-host-paths";
+/// `confinement.whole-tree-kill`: a kill reaches every process of the tree.
+pub const CONFINEMENT_WHOLE_TREE_KILL_FACT: &str = "confinement.whole-tree-kill";
+/// `confinement.ipc-socket-allowlist`: socket families are an allowlist (ADR 0039).
+pub const CONFINEMENT_IPC_SOCKET_ALLOWLIST_FACT: &str = "confinement.ipc-socket-allowlist";
+/// `confinement.ipc-signals-contained`: no signal reaches a process outside the tree.
+pub const CONFINEMENT_IPC_SIGNALS_CONTAINED_FACT: &str = "confinement.ipc-signals-contained";
+/// `confinement.sealed-paths`: paths inside a writable workspace that stay unwritable.
+pub const CONFINEMENT_SEALED_PATHS_FACT: &str = "confinement.sealed-paths";
+/// `confinement.exec-subpaths`: exec admitted by declared subpath, not only by literal program.
+pub const CONFINEMENT_EXEC_SUBPATHS_FACT: &str = "confinement.exec-subpaths";
+/// `confinement.private-tmpdir`: a per-run temporary directory no other run sees.
+pub const CONFINEMENT_PRIVATE_TMPDIR_FACT: &str = "confinement.private-tmpdir";
+
+/// A confinement contract family (ADR 0044 decision 1), as the wire names it: kebab-case, without
+/// the `confinement.family.` prefix its fact carries (design 30 § 4.3 and § 4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfinementFamily {
+    ProcessRun,
+    ProcessWatch,
+    OutputRead,
+    Wait,
+    Workspace,
+    FilesystemView,
+    NetworkEgress,
+    NetworkIngress,
+    Limits,
+    Audit,
+}
+
+impl ConfinementFamily {
+    /// Every family in ADR 0044 decision 1's order: the order the daemon refuses in, and exactly
+    /// the enum bundle `0.26.0` publishes for `sandbox.requires.families`.
+    pub const ALL: [Self; 10] = [
+        Self::ProcessRun,
+        Self::ProcessWatch,
+        Self::OutputRead,
+        Self::Wait,
+        Self::Workspace,
+        Self::FilesystemView,
+        Self::NetworkEgress,
+        Self::NetworkIngress,
+        Self::Limits,
+        Self::Audit,
+    ];
+
+    /// The wire word, as a start names it in `sandbox.requires.families`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ProcessRun => "process-run",
+            Self::ProcessWatch => "process-watch",
+            Self::OutputRead => "output-read",
+            Self::Wait => "wait",
+            Self::Workspace => "workspace",
+            Self::FilesystemView => "filesystem-view",
+            Self::NetworkEgress => "network-egress",
+            Self::NetworkIngress => "network-ingress",
+            Self::Limits => "limits",
+            Self::Audit => "audit",
+        }
+    }
+
+    /// The capability fact that states the family is served.
+    #[must_use]
+    pub const fn fact(self) -> &'static str {
+        match self {
+            Self::ProcessRun => CONFINEMENT_FAMILY_PROCESS_RUN_FACT,
+            Self::ProcessWatch => CONFINEMENT_FAMILY_PROCESS_WATCH_FACT,
+            Self::OutputRead => CONFINEMENT_FAMILY_OUTPUT_READ_FACT,
+            Self::Wait => CONFINEMENT_FAMILY_WAIT_FACT,
+            Self::Workspace => CONFINEMENT_FAMILY_WORKSPACE_FACT,
+            Self::FilesystemView => CONFINEMENT_FAMILY_FILESYSTEM_VIEW_FACT,
+            Self::NetworkEgress => CONFINEMENT_FAMILY_NETWORK_EGRESS_FACT,
+            Self::NetworkIngress => CONFINEMENT_FAMILY_NETWORK_INGRESS_FACT,
+            Self::Limits => CONFINEMENT_FAMILY_LIMITS_FACT,
+            Self::Audit => CONFINEMENT_FAMILY_AUDIT_FACT,
+        }
+    }
+}
+
+/// A mechanism-neutral confinement property (design 30 § 4.3): the members of the `Fact` type of
+/// `spec/confinement/` that reach the exec route, as the wire names them, without the
+/// `confinement.` prefix their facts carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfinementProperty {
+    PathsAreHostPaths,
+    WholeTreeKill,
+    IpcSocketAllowlist,
+    IpcSignalsContained,
+    SealedPaths,
+    ExecSubpaths,
+    PrivateTmpdir,
+}
+
+impl ConfinementProperty {
+    /// Every property in the `Fact` order of `spec/confinement/confinement.yaml`: the order the
+    /// daemon refuses in, and exactly the enum bundle `0.26.0` publishes for
+    /// `sandbox.requires.facts`.
+    pub const ALL: [Self; 7] = [
+        Self::PathsAreHostPaths,
+        Self::WholeTreeKill,
+        Self::IpcSocketAllowlist,
+        Self::IpcSignalsContained,
+        Self::SealedPaths,
+        Self::ExecSubpaths,
+        Self::PrivateTmpdir,
+    ];
+
+    /// The wire word, as a start names it in `sandbox.requires.facts`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PathsAreHostPaths => "paths-are-host-paths",
+            Self::WholeTreeKill => "whole-tree-kill",
+            Self::IpcSocketAllowlist => "ipc-socket-allowlist",
+            Self::IpcSignalsContained => "ipc-signals-contained",
+            Self::SealedPaths => "sealed-paths",
+            Self::ExecSubpaths => "exec-subpaths",
+            Self::PrivateTmpdir => "private-tmpdir",
+        }
+    }
+
+    /// The capability fact that states the property is proved.
+    #[must_use]
+    pub const fn fact(self) -> &'static str {
+        match self {
+            Self::PathsAreHostPaths => CONFINEMENT_PATHS_ARE_HOST_PATHS_FACT,
+            Self::WholeTreeKill => CONFINEMENT_WHOLE_TREE_KILL_FACT,
+            Self::IpcSocketAllowlist => CONFINEMENT_IPC_SOCKET_ALLOWLIST_FACT,
+            Self::IpcSignalsContained => CONFINEMENT_IPC_SIGNALS_CONTAINED_FACT,
+            Self::SealedPaths => CONFINEMENT_SEALED_PATHS_FACT,
+            Self::ExecSubpaths => CONFINEMENT_EXEC_SUBPATHS_FACT,
+            Self::PrivateTmpdir => CONFINEMENT_PRIVATE_TMPDIR_FACT,
+        }
+    }
+}
+
+/// `sandbox.requires` on an exec or session start (design 30 § 4.4): a closed object naming the
+/// families and properties the start needs. An unknown name or member is not read at all; an
+/// empty requirement or a duplicate is refused by [`validate_confinement_requires`]. Both answer
+/// `request.schema-invalid` (422).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfinementRequires {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub families: Option<Vec<ConfinementFamily>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<Vec<ConfinementProperty>>,
+}
+
+/// Checks the lexical rules of `sandbox.requires` the closed enums cannot state: it names at
+/// least one family or property, no list it carries is empty, and no name appears twice. Each list
+/// is therefore bounded by its enum's size.
+///
+/// # Errors
+///
+/// [`WireValidationError::ConfinementRequiresEmpty`] for `{}` or an empty list, and
+/// [`WireValidationError::ConfinementRequiresDuplicate`] for a name listed twice. The daemon
+/// answers both `request.schema-invalid` (422).
+pub fn validate_confinement_requires(
+    requires: &ConfinementRequires,
+) -> Result<(), WireValidationError> {
+    let lists = [
+        requires.families.as_ref().map(Vec::len),
+        requires.facts.as_ref().map(Vec::len),
+    ];
+    if lists.iter().all(Option::is_none) || lists.contains(&Some(0)) {
+        return Err(WireValidationError::ConfinementRequiresEmpty);
+    }
+    let families = requires.families.as_deref().unwrap_or_default();
+    let facts = requires.facts.as_deref().unwrap_or_default();
+    if families.iter().collect::<BTreeSet<_>>().len() != families.len()
+        || facts.iter().collect::<BTreeSet<_>>().len() != facts.len()
+    {
+        return Err(WireValidationError::ConfinementRequiresDuplicate);
+    }
+    Ok(())
+}
+
+/// A start's `requires.families` names a family the admitted snapshot does not serve (design 30
+/// § 7, ADR 0044's code).
+pub const CONFINEMENT_FAMILY_UNSERVED: &str = "confinement.family-unserved";
+/// A start's `requires.facts` names a property the admitted snapshot does not prove (design 30
+/// § 7, ADR 0044's code).
+pub const CONFINEMENT_FACT_UNSERVED: &str = "confinement.fact-unserved";
+
+/// Design 30 § 7's two refusals, as bundle `0.26.0` publishes them. `{name}` in the message is the
+/// wire word of the first unmet requirement. A session start embeds the exec start's `sandbox`, so
+/// it answers the same rows. The one place the set is written down: the bundle check holds each
+/// vector to its row and to [`confinement_requires_refusal`].
+pub const CONFINEMENT_UNSERVED_REFUSALS: [UnservedRefusal; 2] = [
+    UnservedRefusal {
+        operation: "exec.start",
+        code: CONFINEMENT_FAMILY_UNSERVED,
+        address: Some("sandbox.requires.families"),
+        message: "Confinement family {name} is not served by this driver.",
+    },
+    UnservedRefusal {
+        operation: "exec.start",
+        code: CONFINEMENT_FACT_UNSERVED,
+        address: Some("sandbox.requires.facts"),
+        message: "Confinement fact {name} is not proved by this driver.",
+    },
+];
+
+/// The refusal a start's `requires` earns against the facts of the snapshot it names, with its
+/// rendered message, or `None` when every requirement holds (design 30 § 4.4). Families come
+/// first, the first unserved one in [`ConfinementFamily::ALL`]'s order whatever order the start
+/// wrote them in; then the first unproved property in [`ConfinementProperty::ALL`]'s order.
+#[must_use]
+pub fn confinement_requires_refusal(
+    requires: &ConfinementRequires,
+    facts: &CapabilityFacts,
+) -> Option<(UnservedRefusal, String)> {
+    let [family_row, fact_row] = CONFINEMENT_UNSERVED_REFUSALS;
+    let families = requires.families.as_deref().unwrap_or_default();
+    if let Some(family) = ConfinementFamily::ALL
+        .into_iter()
+        .find(|family| families.contains(family) && !facts.serves_family(*family))
+    {
+        return Some((
+            family_row,
+            family_row.message.replace("{name}", family.name()),
+        ));
+    }
+    let properties = requires.facts.as_deref().unwrap_or_default();
+    ConfinementProperty::ALL
+        .into_iter()
+        .find(|property| properties.contains(property) && !facts.proves(*property))
+        .map(|property| {
+            (
+                fact_row,
+                fact_row.message.replace("{name}", property.name()),
+            )
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityFacts {
@@ -3648,6 +3923,112 @@ pub struct CapabilityFacts {
         skip_serializing_if = "Option::is_none"
     )]
     pub confinement_no_egress: Option<bool>,
+    /// The confinement families and mechanism-neutral properties the opened adapter proved
+    /// (design 30 § 4.3, ADR 0048 D2 and D3): `true` when proved, absent otherwise, never `false`.
+    /// One field per [`ConfinementFamily`] and [`ConfinementProperty`], in their `ALL` orders;
+    /// [`CapabilityFacts::serves_family`] and [`CapabilityFacts::proves`] read them.
+    #[serde(
+        rename = "confinement.family.process-run",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_family_process_run: Option<bool>,
+    #[serde(
+        rename = "confinement.family.process-watch",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_family_process_watch: Option<bool>,
+    #[serde(
+        rename = "confinement.family.output-read",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_family_output_read: Option<bool>,
+    #[serde(
+        rename = "confinement.family.wait",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_family_wait: Option<bool>,
+    #[serde(
+        rename = "confinement.family.workspace",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_family_workspace: Option<bool>,
+    #[serde(
+        rename = "confinement.family.filesystem-view",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_family_filesystem_view: Option<bool>,
+    #[serde(
+        rename = "confinement.family.network-egress",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_family_network_egress: Option<bool>,
+    #[serde(
+        rename = "confinement.family.network-ingress",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_family_network_ingress: Option<bool>,
+    #[serde(
+        rename = "confinement.family.limits",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_family_limits: Option<bool>,
+    #[serde(
+        rename = "confinement.family.audit",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_family_audit: Option<bool>,
+    #[serde(
+        rename = "confinement.paths-are-host-paths",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_paths_are_host_paths: Option<bool>,
+    #[serde(
+        rename = "confinement.whole-tree-kill",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_whole_tree_kill: Option<bool>,
+    #[serde(
+        rename = "confinement.ipc-socket-allowlist",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_ipc_socket_allowlist: Option<bool>,
+    #[serde(
+        rename = "confinement.ipc-signals-contained",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_ipc_signals_contained: Option<bool>,
+    #[serde(
+        rename = "confinement.sealed-paths",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_sealed_paths: Option<bool>,
+    #[serde(
+        rename = "confinement.exec-subpaths",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_exec_subpaths: Option<bool>,
+    #[serde(
+        rename = "confinement.private-tmpdir",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_private_tmpdir: Option<bool>,
     #[serde(
         rename = "exec.workspace-scoped-write",
         skip_serializing_if = "Option::is_none"
@@ -3830,6 +4211,23 @@ impl Default for CapabilityFacts {
             exec_namespaces: None,
             exec_no_egress: None,
             confinement_no_egress: None,
+            confinement_family_process_run: None,
+            confinement_family_process_watch: None,
+            confinement_family_output_read: None,
+            confinement_family_wait: None,
+            confinement_family_workspace: None,
+            confinement_family_filesystem_view: None,
+            confinement_family_network_egress: None,
+            confinement_family_network_ingress: None,
+            confinement_family_limits: None,
+            confinement_family_audit: None,
+            confinement_paths_are_host_paths: None,
+            confinement_whole_tree_kill: None,
+            confinement_ipc_socket_allowlist: None,
+            confinement_ipc_signals_contained: None,
+            confinement_sealed_paths: None,
+            confinement_exec_subpaths: None,
+            confinement_private_tmpdir: None,
             exec_workspace_scoped_write: None,
             exec_cgroup_limits: None,
             exec_cgroup_kill: None,
@@ -3855,6 +4253,41 @@ impl Default for CapabilityFacts {
             snapshot_provenance_events: None,
             process_host: None,
         }
+    }
+}
+
+impl CapabilityFacts {
+    /// Whether the snapshot states the family served: its fact is present and `true`.
+    #[must_use]
+    pub const fn serves_family(&self, family: ConfinementFamily) -> bool {
+        let fact = match family {
+            ConfinementFamily::ProcessRun => self.confinement_family_process_run,
+            ConfinementFamily::ProcessWatch => self.confinement_family_process_watch,
+            ConfinementFamily::OutputRead => self.confinement_family_output_read,
+            ConfinementFamily::Wait => self.confinement_family_wait,
+            ConfinementFamily::Workspace => self.confinement_family_workspace,
+            ConfinementFamily::FilesystemView => self.confinement_family_filesystem_view,
+            ConfinementFamily::NetworkEgress => self.confinement_family_network_egress,
+            ConfinementFamily::NetworkIngress => self.confinement_family_network_ingress,
+            ConfinementFamily::Limits => self.confinement_family_limits,
+            ConfinementFamily::Audit => self.confinement_family_audit,
+        };
+        matches!(fact, Some(true))
+    }
+
+    /// Whether the snapshot states the property proved: its fact is present and `true`.
+    #[must_use]
+    pub const fn proves(&self, property: ConfinementProperty) -> bool {
+        let fact = match property {
+            ConfinementProperty::PathsAreHostPaths => self.confinement_paths_are_host_paths,
+            ConfinementProperty::WholeTreeKill => self.confinement_whole_tree_kill,
+            ConfinementProperty::IpcSocketAllowlist => self.confinement_ipc_socket_allowlist,
+            ConfinementProperty::IpcSignalsContained => self.confinement_ipc_signals_contained,
+            ConfinementProperty::SealedPaths => self.confinement_sealed_paths,
+            ConfinementProperty::ExecSubpaths => self.confinement_exec_subpaths,
+            ConfinementProperty::PrivateTmpdir => self.confinement_private_tmpdir,
+        };
+        matches!(fact, Some(true))
     }
 }
 
@@ -4158,6 +4591,10 @@ pub enum WireValidationError {
     WritableRootHostUnserved { name: String },
     #[error("writable Git root {workspace} is not served by this host")]
     WritableRootGitUnserved { workspace: String },
+    #[error("a confinement requirement names no family or property, or carries an empty list")]
+    ConfinementRequiresEmpty,
+    #[error("a confinement requirement names one family or property twice")]
+    ConfinementRequiresDuplicate,
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -5991,8 +6428,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.25.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.25.0/bundle.json");
+        assert_eq!(version, "0.26.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.26.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
@@ -6413,6 +6850,7 @@ mod egress_aperture_tests {
     #[test]
     fn egress_defaults_to_none() {
         let request = super::ConfinementRequest {
+            requires: None,
             capability_snapshot: format!("sha256:{}", "0".repeat(64)),
             network: NetworkMode::None,
             aperture: None,
@@ -6516,6 +6954,7 @@ mod egress_aperture_tests {
             state: super::ExecState::Cancelled,
             observed_at: chrono::Utc::now(),
             requested: super::ConfinementRequest {
+                requires: None,
                 capability_snapshot: format!("sha256:{}", "0".repeat(64)),
                 network: NetworkMode::Aperture,
                 aperture: Some("model".to_owned()),
@@ -6574,6 +7013,9 @@ mod stream_bounds_tests;
 
 #[cfg(test)]
 mod namespace_driver_tests;
+
+#[cfg(test)]
+mod confinement_facts_tests;
 
 #[cfg(test)]
 mod adoption_tests {

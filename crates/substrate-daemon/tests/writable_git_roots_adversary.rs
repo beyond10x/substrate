@@ -88,6 +88,7 @@ impl Fixture {
             observed_at: Utc::now(),
             requested: input.sandbox.clone(),
             applied: Some(AppliedConfinement {
+                requires: None,
                 writable_roots,
                 workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
                 read_only_roots: Vec::new(),
@@ -95,7 +96,7 @@ impl Fixture {
                 secret_slots: Vec::new(),
                 workdir: None,
                 capability_snapshot: SNAPSHOT.to_owned(),
-                cgroup: format!("fixture-{id}"),
+                cgroup: Some(format!("fixture-{id}")),
                 filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
                 network: AppliedNetwork::None,
                 profile: SandboxProfile::Workspace,

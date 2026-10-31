@@ -10,13 +10,13 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// The contract pair this runner pins, independently of the wire crate's advertised constant.
-pub const PINNED_CONTRACT: &str = "substrate-wire/0.25.0";
+pub const PINNED_CONTRACT: &str = "substrate-wire/0.26.0";
 /// The bundle digest of [`PINNED_CONTRACT`].
-pub const PINNED_SHA256: &str = "853d7365a56f0d8dc97fe5feb87ce57285a34bbf7a0f6eb05616d6010fc4fc00";
+pub const PINNED_SHA256: &str = "f6216ea867d743b8efbfddb86b7097ddcddd261a10dbca3f7a775ba1a6687403";
 
-const OPERATIONS: &str = include_str!("../../../contracts/substrate-wire/0.25.0/operations.json");
+const OPERATIONS: &str = include_str!("../../../contracts/substrate-wire/0.26.0/operations.json");
 const HOSTED_ADMISSION: &str =
-    include_str!("../../../contracts/substrate-wire/0.25.0/hosted-admission.json");
+    include_str!("../../../contracts/substrate-wire/0.26.0/hosted-admission.json");
 
 #[derive(Debug, Deserialize)]
 struct OperationsDocument {
@@ -220,7 +220,7 @@ mod tests {
             .filter(|operation| operation.id.starts_with("process."))
             .collect();
         assert_eq!(process.len(), 8, "design 31 § 3 step 5 names eight");
-        assert!(PINNED_CONTRACT.ends_with("/0.25.0"));
+        assert!(PINNED_CONTRACT.ends_with("/0.26.0"));
     }
 
     #[test]

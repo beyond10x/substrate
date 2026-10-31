@@ -165,6 +165,7 @@ impl VectorDriver {
                 state: ExecState::Cancelled,
                 observed_at: FIXED_TIME.parse().expect("fixed time"),
                 requested: ConfinementRequest {
+                    requires: None,
                     capability_snapshot: SNAPSHOT.to_owned(),
                     network: NetworkMode::None,
                     aperture: None,
@@ -173,6 +174,7 @@ impl VectorDriver {
                     required: true,
                 },
                 applied: Some(AppliedConfinement {
+                    requires: None,
                     writable_roots: Vec::new(),
                     workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
                     read_only_roots: Vec::new(),
@@ -183,7 +185,7 @@ impl VectorDriver {
                     profile: SandboxProfile::Workspace,
                     filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
                     network: AppliedNetwork::None,
-                    cgroup: "substrate/vector".to_owned(),
+                    cgroup: Some("substrate/vector".to_owned()),
                     capsule: None,
                 }),
                 exit: Some(substrate_wire::ExecExit {

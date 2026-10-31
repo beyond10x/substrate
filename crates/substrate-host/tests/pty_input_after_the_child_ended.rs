@@ -78,6 +78,7 @@ fn pty_start(snapshot: &str, argv: &[&str]) -> PipeSessionStartInput {
                 set: BTreeMap::new(),
             },
             sandbox: ConfinementRequest {
+                requires: None,
                 capability_snapshot: snapshot.to_owned(),
                 network: NetworkMode::None,
                 aperture: None,

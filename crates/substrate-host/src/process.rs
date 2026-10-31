@@ -1316,9 +1316,10 @@ impl ProcessRuntime {
 
         let applied_capsule = capsule.as_ref().map(|value| value.applied.clone());
         let applied = AppliedConfinement {
+            requires: None,
             writable_roots: applied_writable_roots,
             capability_snapshot: self.capability.snapshot.clone(),
-            cgroup: cgroup.name().to_owned(),
+            cgroup: Some(cgroup.name().to_owned()),
             filesystem: if applied_capsule.is_some() {
                 AppliedFilesystem::WorkspaceReadWriteCapsuleReadOnlySystemReadOnly
             } else {
@@ -4632,6 +4633,7 @@ mod tests {
                 state: substrate_wire::ExecState::Running,
                 observed_at: chrono::Utc::now(),
                 requested: substrate_wire::ConfinementRequest {
+                    requires: None,
                     capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                     network: NetworkMode::None,
                     aperture: None,
@@ -4671,9 +4673,10 @@ mod tests {
                 signal: None,
             });
             observation.resource.applied = Some(substrate_wire::AppliedConfinement {
+                requires: None,
                 writable_roots: Vec::new(),
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
-                cgroup: "ex_workdir".to_owned(),
+                cgroup: Some("ex_workdir".to_owned()),
                 filesystem: substrate_wire::AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
                 network: substrate_wire::AppliedNetwork::None,
                 profile: SandboxProfile::Workspace,
@@ -4755,6 +4758,7 @@ mod tests {
         apertures: &[&str],
     ) -> substrate_wire::ConfinementRequest {
         substrate_wire::ConfinementRequest {
+            requires: None,
             capability_snapshot: format!("sha256:{}", "0".repeat(64)),
             network: NetworkMode::Aperture,
             aperture: aperture.map(str::to_owned),
@@ -4887,6 +4891,7 @@ mod tests {
         let published = crate::egress::egress_apertures_fact(&config.egress_apertures, true)
             .expect("a verified mechanism publishes");
         let sandbox = substrate_wire::ConfinementRequest {
+            requires: None,
             capability_snapshot: format!("sha256:{}", "7".repeat(64)),
             network: NetworkMode::Aperture,
             aperture: Some("model".to_owned()),
@@ -5164,6 +5169,7 @@ mod tests {
                 set: BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: format!("sha256:{}", "8".repeat(64)),
                 network: NetworkMode::None,
                 aperture: None,
@@ -5377,6 +5383,7 @@ mod tests {
                 set: BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: snapshot,
                 network: NetworkMode::None,
                 aperture: None,
@@ -5658,6 +5665,7 @@ mod tests {
                 set: BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: snapshot.to_owned(),
                 network: NetworkMode::None,
                 aperture: None,
@@ -8453,6 +8461,7 @@ mod adversary_unknown_exec_retry {
                 set: std::collections::BTreeMap::new(),
             },
             sandbox: substrate_wire::ConfinementRequest {
+                requires: None,
                 capability_snapshot: snapshot.to_owned(),
                 network: NetworkMode::None,
                 aperture: None,

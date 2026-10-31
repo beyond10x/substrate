@@ -177,6 +177,7 @@ fn exec_input(snapshot: &str, trigger: &str) -> ExecStartInput {
             set: BTreeMap::from([(PROBE_VARIABLE.to_owned(), trigger.to_owned())]),
         },
         sandbox: ConfinementRequest {
+            requires: None,
             capability_snapshot: snapshot.to_owned(),
             network: NetworkMode::None,
             aperture: None,

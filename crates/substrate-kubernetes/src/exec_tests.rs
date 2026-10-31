@@ -274,6 +274,7 @@ fn input(argv: &[&str]) -> ExecStartInput {
             set: BTreeMap::from([("GREETING".to_owned(), "$(HOME) $$".to_owned())]),
         },
         sandbox: ConfinementRequest {
+            requires: None,
             capability_snapshot: SNAPSHOT.to_owned(),
             network: NetworkMode::None,
             aperture: None,

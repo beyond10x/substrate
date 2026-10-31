@@ -44,6 +44,7 @@ use crate::render_v2;
 use crate::repo;
 use crate::report::Report;
 
+mod confinement_facts;
 mod host_process;
 mod namespace_driver;
 mod omitted_entries;
@@ -898,21 +899,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
-    // Design 27 binds every bundle from `0.23.0` on, not only the one that introduced it.
-    if session_exec_fields::applies_to(version) {
-        session_exec_fields::check(released, failures);
-        // ADR 0042's stream-bound facts bind every bundle from `0.23.0` on, like design 27.
-        stream_bounds::check(released, failures);
-        // ADR 0043's omitted-entries header binds every bundle from `0.23.0` on as well.
-        omitted_entries::check(released, failures);
-    }
-    // ADR 0036 S12 binds every bundle from `0.24.0` on.
-    if process_events::applies_to(version) {
-        process_events::check(released, failures);
-    }
-    // Design 34 § 11 binds every bundle from `0.25.0` on.
-    if namespace_driver::applies_to(version) {
-        namespace_driver::check(released, failures);
+    check_standing_additions(version, released, failures);
+    if version == "0.26.0" {
+        confinement_facts::check_introduction(released, failures);
+        return;
     }
     if version == "0.25.0" {
         namespace_driver::check_introduction(released, failures);
@@ -929,6 +919,35 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
         omitted_entries::check_introduction(released, failures);
         return;
     }
+    check_earlier_additions(version, released, failures);
+}
+
+/// The additions that bind every bundle from the one that introduced them on.
+fn check_standing_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    // Design 27 binds every bundle from `0.23.0` on, not only the one that introduced it.
+    if session_exec_fields::applies_to(version) {
+        session_exec_fields::check(released, failures);
+        // ADR 0042's stream-bound facts bind every bundle from `0.23.0` on, like design 27.
+        stream_bounds::check(released, failures);
+        // ADR 0043's omitted-entries header binds every bundle from `0.23.0` on as well.
+        omitted_entries::check(released, failures);
+    }
+    // ADR 0036 S12 binds every bundle from `0.24.0` on.
+    if process_events::applies_to(version) {
+        process_events::check(released, failures);
+    }
+    // Design 34 § 11 binds every bundle from `0.25.0` on.
+    if namespace_driver::applies_to(version) {
+        namespace_driver::check(released, failures);
+    }
+    // Design 30 (ADR 0048) binds every bundle from `0.26.0` on.
+    if confinement_facts::applies_to(version) {
+        confinement_facts::check(version, released, failures);
+    }
+}
+
+/// The additions of the bundles before `0.23.0`, each bound only to the version that added it.
+fn check_earlier_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     if version == "0.22.0" {
         writable_roots::check(version, released, failures);
         return;
@@ -5919,7 +5938,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 25, "every released bundle must be checked");
+        assert_eq!(checked, 26, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

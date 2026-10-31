@@ -7,6 +7,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Development contract bundle `substrate-wire/0.26.0` (design 30, ADR 0048), now advertised by the
+  daemon, the Rust SDK and the conformance runner. It adds no route. A capability snapshot may
+  state one optional fact per confinement family (`confinement.family.process-run` to
+  `confinement.family.audit`) and per mechanism-neutral property (`confinement.whole-tree-kill`
+  and six more), each `true` or absent. Both starts accept an optional closed `sandbox.requires`
+  that names families and properties, and two refusals are published at 501 with a vector each:
+  `confinement.family-unserved` and `confinement.fact-unserved`. `substrate-wire` exports
+  `ConfinementFamily`, `ConfinementProperty`, `ConfinementRequires`,
+  `validate_confinement_requires` and `confinement_requires_refusal`. The host daemon publishes
+  none of the new facts yet and does not check `requires` yet, so its answers do not change.
+- `/metrics` on the operational listener names the two new refusal codes: a host daemon's scrape
+  holds at most 584 samples and a `--driver kubernetes` daemon's at most 585.
+
+### Changed
+
+- `AppliedConfinement.cgroup` is `Option<String>` and is optional in the bundle, present whenever
+  the adapter applied a cgroup; the host driver applies one to every run, so its records keep their
+  bytes. The applied record gains an optional `requires` echo.
+
 ## [0.17.0] — 2026-10-31
 
 Shared clean-room conformance arrives: design 31's remote runner certifies a deployed endpoint from

@@ -1,0 +1,53 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.26.0:input:process-events",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Opens one record's event stream (ADR 0036 S12). Without a cursor the stream starts with what the event log and the log still hold, the record's oldest retained event and log byte, and is never refused for what retention removed; with one it starts after the item that carried it. Every refusal is answered before the WebSocket upgrade.",
+  "properties": {
+    "cursor": {
+      "description": "A cursor an item of this record's stream carried. A malformed one, or one another record's stream carried, is event.cursor-invalid, as on the event stream.",
+      "maxLength": 512,
+      "type": "string"
+    }
+  },
+  "required": [],
+  "title": "process-events operation input",
+  "type": "object",
+  "x-b10x-refusals": [
+    {
+      "class": "refused",
+      "code": "process.host-posture-refused",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.host-subject-mismatch",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.not-found",
+      "status": 404
+    },
+    {
+      "class": "exhausted",
+      "code": "process.events-readers-exceeded",
+      "status": 429
+    },
+    {
+      "class": "conflict",
+      "code": "event.source-mismatch",
+      "status": 409
+    },
+    {
+      "class": "conflict",
+      "code": "event.retention-gap",
+      "status": 409
+    },
+    {
+      "class": "conflict",
+      "code": "event.cursor-invalid",
+      "status": 409
+    }
+  ]
+}
