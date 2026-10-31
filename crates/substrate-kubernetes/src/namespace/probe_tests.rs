@@ -1429,28 +1429,41 @@ async fn a_bound_policy_allowing_egress_to_a_range_the_probe_does_not_dial_withh
     );
 }
 
-/// Security review, wave 2026-10-31 (claim 5, design 34 amendment of 2026-10-31): the heartbeat
-/// and the egress observation count only from a run whose argv read back byte for byte. A child
-/// whose argv something expanded, reporting a heartbeat that moved and three blocked attempts,
-/// with the heartbeat standing still after the end, proves neither property. No existing case
-/// pairs an expanded argv with an observation line, so removing that rule went unmeasured.
+/// Adversary, wave 2026-10-31 (claim 5; design 34 § 6.2, amendment of 2026-10-31): "the heartbeat
+/// and the egress observation count only from a run whose argv read back byte for byte". The
+/// suite holds an expanded argv only with no observation line, so dropping the argv gate in
+/// `read_run` stays green. Here the child's argv was expanded on its way to `execve` and its
+/// observation and heartbeat would each prove their property on their own: both stay absent,
+/// while the seven families, which rest on the end and not on the argv, are published.
 #[tokio::test]
-async fn an_observation_after_an_argv_that_did_not_read_back_proves_neither_property() {
+async fn adversary_w1031_an_expanded_argv_voids_the_heartbeat_and_the_egress_observation() {
     let observation = Observation {
         heartbeat: true,
         egress: blocked(),
     };
-    let play = Play {
+    let control = facts_after(
+        Play::observing(&observation, Heartbeat::Stopped),
+        Some(check_with_host(SERVICE_HOST)),
+    )
+    .await;
+    assert_eq!(
+        (
+            control.confinement_whole_tree_kill,
+            control.confinement_no_egress
+        ),
+        (Some(true), Some(true)),
+        "the control: the same observation from an exact argv proves both"
+    );
+    let expanded = Play {
         child: Child::Expanded,
         ..Play::observing(&observation, Heartbeat::Stopped)
     };
-    let facts = facts_after(play, Some(check_with_host(SERVICE_HOST))).await;
+    let facts = facts_after(expanded, Some(check_with_host(SERVICE_HOST))).await;
     assert_eq!(facts.exec_argv_only, None);
+    assert_eq!(families(&facts), [Some(true); 7]);
     assert_eq!(
-        families(&facts),
-        [Some(true); 7],
-        "the families are the end's"
+        (facts.confinement_whole_tree_kill, facts.confinement_no_egress),
+        (None, None),
+        "an observation from a run whose argv did not read back proves nothing"
     );
-    assert_eq!(facts.confinement_whole_tree_kill, None);
-    assert_eq!(facts.confinement_no_egress, None);
 }
