@@ -254,7 +254,7 @@ Pod, created like a workspace and an exec but with probe rows, then deleted unde
 | the probe Pod runs the executor's `probe-child`, which writes its argv as JSON; the argv holds `$(HOME)`, `$$`, a space and a non-ASCII byte; byte-exact | `exec.argv-only` |
 | the Pod ends, its log frames decode, and its `applied` record matches the rendered memory and CPU | `confinement.family.process-run`, `.process-watch`, `.output-read`, `.wait`, `.limits`, `.audit`, `.workspace` (design 30 § 4.3) |
 | `probe-child` forks a grandchild that writes a heartbeat to the PVC every 100 ms and exits; after the container is shown `terminated`, the keeper's `fs stat` sees the heartbeat unchanged for 2 s | `confinement.whole-tree-kill` |
-| from inside: TCP to `KUBERNETES_SERVICE_HOST:443`, a DNS query to `/etc/resolv.conf`'s nameserver, TCP to `egress_probe_address`; each must fail within 3 s | `confinement.no-egress` (N5) |
+| from inside: TCP to `KUBERNETES_SERVICE_HOST:443`, a DNS query to `/etc/resolv.conf`'s nameserver, TCP to `egress_probe_address`; each must be denied or find no route within 3 s, and a timeout never counts (amendment of 2026-10-31, D333) | `confinement.no-egress` (N5) |
 | — | never: `exec.namespaces`, `exec.cgroup-limits`, `exec.cgroup-kill`, `exec.no-egress` |
 
 Declared bounds are published as configuration, as the host publishes them: `workspace.max-current`,

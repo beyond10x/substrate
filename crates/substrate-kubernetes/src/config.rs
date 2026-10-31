@@ -185,16 +185,25 @@ impl Members<'_> {
     }
 
     /// An `ip:port` that a Pod could dial outside the cluster: not loopback, not unspecified, not
-    /// port 0.
+    /// broadcast or multicast, not port 0. The kernel refuses a TCP connect to a broadcast or
+    /// multicast address `ENETUNREACH` with no policy at all, so such an address would count as
+    /// stopped and prove nothing about egress.
     fn address(&self, member: &str) -> Result<SocketAddr, String> {
         let address: SocketAddr = self
             .text(member)?
             .parse()
             .map_err(|_| format!("{member} is not an ip:port"))?;
-        if address.ip().is_loopback() || address.ip().is_unspecified() || address.port() == 0 {
+        let ip = address.ip();
+        let broadcast = matches!(ip, std::net::IpAddr::V4(v4) if v4.is_broadcast());
+        if ip.is_loopback()
+            || ip.is_unspecified()
+            || ip.is_multicast()
+            || broadcast
+            || address.port() == 0
+        {
             return Err(format!(
-                "{member} must be an address outside the cluster, not loopback, unspecified or \
-                 port 0"
+                "{member} must be an address outside the cluster, not loopback, unspecified, \
+                 broadcast, multicast or port 0"
             ));
         }
         Ok(address)

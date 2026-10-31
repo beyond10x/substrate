@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-31T18:42:14Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-driver-admits-an-exec-on-observed-confinement",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "J2 (TimedOut counts as blocked) was wrongly marked INFEASIBLE: the D332 traced namespace lane reached it (three attempts timed out on a kind cluster whose egress was observed open; lane log d332-attempts.txt); closed by commit 46d56a38 (D333)",
+    "reference": "commit:46d56a38",
+    "review": "review-result:wave-2026-10-31-design-30-security-pass-1",
+    "outcome": "fixed"
+  }
+}

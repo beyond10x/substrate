@@ -827,7 +827,8 @@ fn first_line(bytes: &[u8]) -> (&[u8], &[u8]) {
 }
 
 /// § 6.2 row 5: exactly the three attempts, in order, each at the address the driver named (the
-/// nameserver's at port 53, its host the child's resolver's), each failed with nothing answering.
+/// nameserver's at port 53, its host the child's resolver's), each stopped: denied or without a
+/// route ([`EgressOutcome::blocked`]). A timed-out attempt never counts (D333).
 /// Without a Kubernetes Service host there is no first attempt to hold, so nothing is proved.
 fn no_egress(observed: &Observed, targets: &ProbeTargets) -> bool {
     let Some(host) = targets.kubernetes_service_host else {

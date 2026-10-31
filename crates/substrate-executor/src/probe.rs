@@ -459,7 +459,7 @@ mod tests {
 
     use super::{
         ArgvReport, EgressAttempt, EgressOutcome, EgressTarget, Observation, PROBE_ARGUMENTS,
-        ProbeTargets, attempt_dns, attempt_tcp, nameserver, report,
+        ProbeTargets, attempt_dns, attempt_tcp, classify, nameserver, report,
     };
 
     const SHORT: Duration = Duration::from_millis(300);
@@ -579,6 +579,30 @@ mod tests {
             EgressOutcome::Unread,
         ] {
             assert_eq!(outcome.blocked(), blocked.contains(&outcome), "{outcome:?}");
+        }
+    }
+
+    /// Each raw errno lands in its outcome, so a timeout (`ETIMEDOUT`, `EAGAIN`) can never be
+    /// moved into a counted arm unnoticed (D333 adversary finding).
+    #[test]
+    fn each_raw_errno_is_classified_and_only_a_denial_or_no_route_is_blocked() {
+        for (errno, expected) in [
+            (libc::ECONNREFUSED, EgressOutcome::Refused),
+            (libc::ETIMEDOUT, EgressOutcome::TimedOut),
+            (libc::EAGAIN, EgressOutcome::TimedOut),
+            (libc::ENETUNREACH, EgressOutcome::Unreachable),
+            (libc::EHOSTUNREACH, EgressOutcome::Unreachable),
+            (libc::EPERM, EgressOutcome::Denied),
+            (libc::EACCES, EgressOutcome::Denied),
+            (libc::ECONNRESET, EgressOutcome::Failed),
+        ] {
+            let outcome = classify(&std::io::Error::from_raw_os_error(errno));
+            assert_eq!(outcome, expected, "errno {errno}");
+        }
+        for kind in [std::io::ErrorKind::TimedOut, std::io::ErrorKind::WouldBlock] {
+            let outcome = classify(&std::io::Error::from(kind));
+            assert_eq!(outcome, EgressOutcome::TimedOut, "{kind:?}");
+            assert!(!outcome.blocked(), "{kind:?}");
         }
     }
 
