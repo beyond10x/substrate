@@ -95,3 +95,11 @@ kind's among them, leaves `confinement.no-egress` absent, and exec stays refused
   exhaustively destructures the Rust type `AppliedConfinement` (loom does, in
   `loom-intake-slice/src/confinement.rs`) must adapt when its substrate pin moves, even though it
   uses the host API in process.
+
+### Fixed in 0.18.0
+
+- When the namespace driver's probe Pod run proves nothing, its `warn` says why: the reason code
+  `kubernetes.api-failed` when the API refused or lost a call the run needed (a Role without
+  `pods/log` `get` among them), the code the probe Pod's create failed with (such as
+  `state.store-failed`), and one line per run fact, "`<fact>` was not proved". Before, the
+  one warning named neither, and the run's facts went absent without a stated reason.
