@@ -446,7 +446,8 @@ impl NamespaceDriver {
                 return match self.resolve(row).await {
                     Ok(Resolved::Ours(uid)) => Created::Bound(uid),
                     Ok(Resolved::Collision(reason)) => Created::Unknown(collided(&reason)),
-                    Ok(_) | Err(_) => Created::Unknown(api_failed(&error)),
+                    Ok(_) => Created::Unknown(api_failed(&error)),
+                    Err(resolved) => Created::Unknown(resolved),
                 };
             }
         };

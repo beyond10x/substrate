@@ -2299,3 +2299,73 @@ mod d339 {
         );
     }
 }
+
+/// D339 adversary pass: `story:probe-withheld-facts-name-the-failed-calls-code`, Acceptance 1.
+mod adversary_d339 {
+    use super::adversary_d337::{StoreCall, StoreFails, answer_keeper};
+    use super::*;
+    use crate::driver_tests::driver_over_any;
+
+    /// Acceptance 1: "A ledger that fails `bind_uid` for the probe's PVC or keeper yields a
+    /// startup refusal naming `state.store-failed`, not `kubernetes.api-failed`." Here the
+    /// create's answer is lost after the API stored the object, so the driver reads it back by
+    /// name and adopts it (`create_recorded` -> `resolve`); the adopting `bind_uid` is the one
+    /// the ledger fails. The API's loss was recovered by the read; the call that failed is the
+    /// store's.
+    #[tokio::test]
+    async fn a_store_failure_adopting_a_probe_object_whose_create_answer_was_lost_is_state_store_failed()
+     {
+        for (role, collection) in [
+            (BackendRole::Pvc, "persistentvolumeclaims"),
+            (BackendRole::Keeper, "pods"),
+        ] {
+            // The control: the same lost answer over a healthy ledger is adopted, so the read
+            // back finds the object stored and ours, and only the adopting bind is left to fail.
+            // Its keeper answers the handshake with no release line, so the probe stops at the
+            // handshake, past both creates.
+            let control = passing_fake();
+            let (healthy, _ledger) = driver(&control, &ManualClock::new());
+            healthy.open().await.expect("the driver opens");
+            control.set_exec(|_: ExecRequest| ExecAnswer {
+                stdout: b"not a release line\n".to_vec(),
+                ..ExecAnswer::default()
+            });
+            control.fault(Fault::DropAnswer {
+                method: Method::POST,
+                path: format!("/api/v1/namespaces/substrate/{collection}"),
+            });
+            let past = healthy
+                .probe()
+                .await
+                .expect_err("the control stops at the handshake");
+            assert_eq!(
+                past.code, EXECUTOR_HANDSHAKE_FAILED,
+                "the control: a lost create answer is adopted: {}",
+                past.message
+            );
+
+            let fake = passing_fake();
+            let clock = ManualClock::new();
+            let driver = driver_over_any(
+                &fake,
+                &clock,
+                Arc::new(StoreFails {
+                    inner: Arc::new(MemoryLedger::default()),
+                    at: StoreCall::Bind(role),
+                }),
+            );
+            driver.open().await.expect("the driver opens");
+            answer_keeper(&fake, || {});
+            fake.fault(Fault::DropAnswer {
+                method: Method::POST,
+                path: format!("/api/v1/namespaces/substrate/{collection}"),
+            });
+            let refused = driver.probe().await.expect_err("the store write fails");
+            assert_eq!(
+                refused.code, "state.store-failed",
+                "{role:?}: {}",
+                refused.message
+            );
+        }
+    }
+}
