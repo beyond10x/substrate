@@ -25,7 +25,7 @@ ess verify conform run --path spec/host-processes --scenarios spec/host-processe
   --target interpreted --report-format 2 --strict-requires
 ```
 
-The pin is ESS 0.77.0 (`ess-inputs.yaml`). The authored scenarios under `scenarios/` are the
+The pin is ESS 0.80.0 (`ess-inputs.yaml`). The authored scenarios under `scenarios/` are the
 acceptance set, one or more per command. A run against the interpreted reference checks the model
 only. It is not evidence that any implementation conforms.
 
