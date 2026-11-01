@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:namespace-no-egress-observed-on-every-node
 kind: story
-status: active
+status: implemented
 title: The namespace driver observes no-egress on every node an exec Pod can land on
 owner: substrate
 tags:
@@ -25,10 +25,11 @@ scope:
   path: crates/substrate-kubernetes/src/namespace/probe_tests.rs
 - confidence: cited
   path: crates/substrate-kubernetes/src/restart_tests.rs
-revision: 16
+revision: 17
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-31T15:22:59Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-01T15:13:33Z", actor: "human:timo", revision: 16}
+- {from: "active", to: "implemented", at: "2026-11-01T20:46:30Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"test_result":3,"review_outcome":2,"verification":1}}}
 ---
 # Story: the namespace driver observes no-egress on every node an exec Pod can land on
 

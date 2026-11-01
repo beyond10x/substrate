@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:pod-sweep-replays-from-the-policys-create
 kind: story
-status: active
+status: implemented
 title: The sweep's replay starts from the policy's create
 relations:
 - decomposes: epic:confinement-contract-family
@@ -16,10 +16,11 @@ scope:
   path: crates/substrate-host/src/confinement/pod_cleanup_tests.rs
 - confidence: cited
   path: docs/design/28-pod-confinement-adapter.md
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T02:22:37Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-01T15:13:33Z", actor: "human:timo", revision: 7}
+- {from: "active", to: "implemented", at: "2026-11-01T20:46:30Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":3,"review_outcome":2}}}
 ---
 # Story: the sweep's replay starts from the policy's create
 

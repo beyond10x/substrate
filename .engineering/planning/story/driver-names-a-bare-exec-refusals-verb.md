@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:driver-names-a-bare-exec-refusals-verb
 kind: story
-status: active
+status: implemented
 title: The driver names a bare exec refusal's verb
 relations:
 - decomposes: epic:confinement-contract-family
@@ -22,10 +22,11 @@ scope:
   path: docs/design/34-kubernetes-namespace-driver.md
 - confidence: inferred
   path: xtask/src/namespace_lane_run.rs
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T10:16:18Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-01T15:13:33Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"health_observation":1}}}
+- {from: "active", to: "implemented", at: "2026-11-01T20:46:30Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":2,"health_observation":1,"review_outcome":2}}}
 ---
 # Story: the driver names a bare exec refusal's verb
 

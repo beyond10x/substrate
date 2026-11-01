@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:listener-held-during-install-is-never-inherited-by-a-fork
 kind: story
-status: active
+status: implemented
 title: A listener held during install is never inherited by a concurrent fork
 relations:
 - decomposes: epic:confinement-contract-family
 scope:
 - confidence: cited
   path: crates/substrate-host/src/egress.rs
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T07:46:15Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-01T15:13:33Z", actor: "human:timo", revision: 9}
+- {from: "active", to: "implemented", at: "2026-11-01T20:46:30Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":2,"review_outcome":2}}}
 ---
 # Story: a listener held during install is never inherited by a concurrent fork
 

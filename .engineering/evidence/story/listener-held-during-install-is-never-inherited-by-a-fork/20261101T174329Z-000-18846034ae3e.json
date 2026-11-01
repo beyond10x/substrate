@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-01T17:43:29Z",
+  "actor": "human:timo",
+  "artifact": "story:listener-held-during-install-is-never-inherited-by-a-fork",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:wave-2026-11-01-d354-u3-adversary-pass-1",
+    "reference": "d1a60105",
+    "review": "review-result:wave-2026-11-01-d354-u3-adversary-pass-1",
+    "outcome": "no-op"
+  }
+}
