@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:namespace-no-egress-observed-on-every-node
 kind: story
-status: proposed
+status: active
 title: The namespace driver observes no-egress on every node an exec Pod can land on
 owner: substrate
 tags:
@@ -25,11 +25,10 @@ scope:
   path: crates/substrate-kubernetes/src/namespace/probe_tests.rs
 - confidence: cited
   path: crates/substrate-kubernetes/src/restart_tests.rs
-- confidence: cited
-  path: docs/design/34-kubernetes-namespace-driver.md
-revision: 11
+revision: 16
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-31T15:22:59Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-01T15:13:33Z", actor: "human:timo", revision: 16}
 ---
 # Story: the namespace driver observes no-egress on every node an exec Pod can land on
 
@@ -65,3 +64,17 @@ on an unobserved node, not a withheld fact.
 Adopted 2026-11-01 under D338 (the 2026-10-31 findings triage sheet, row 1). Blocked until design
 34 is amended to choose between probing every schedulable node and pinning exec Pods to the nodes
 the probe observed; the amendment is the first unit of the wave that takes this story.
+
+## Scope
+
+Derived 2026-11-01 by `story-scoper` at `bf0e0443` (wave D354). Every line is **cited** (read from the story or the tree) or **inferred** (a reading that could be wrong). Design 34 is already amended (amendments of 2026-11-01, D339); this story's code does not edit it.
+
+- **Probe side:** `crates/substrate-kubernetes/src/namespace/probe.rs` — `Probed` (:89), `RunProofs` (:100, derives `Copy`, so the node goes beside it in `Probed`), `capability_snapshot` (:411; digest material :473-480), `probe_run` (:609), `run_probe_pod` (:670; `scheduled_node(keeper)` at :679) — cited
+- **Start side:** `crates/substrate-kubernetes/src/exec.rs` — `Execs::published` (:69), `publish_exec_snapshot` (:134), `prepare_start` (:217; `placement` :246, `check_binding` :248, `render_exec_pod` :256), `placement` (:295; keeper `spec.nodeName` read at :336-340) — cited. The comparison goes in `prepare_start` after `check_binding` and before the render, refused `DriverError::unserved("exec.sandbox-unavailable", …)` — inferred
+- **Node binding (wave D354 decision):** the node is kept with the published snapshot tuple in the driver and is not part of the snapshot digest; design 34's amendment says the node is not a wire field and the refusal is the guarantee, so the client hears `exec.sandbox-unavailable` (501), not `exec.capability-stale` — decided by the coordinator
+- **Also likely:** `crates/substrate-kubernetes/src/lib.rs` `machine()` (:94-98) only if the publish signature changes — inferred
+- **Tests:** `crates/substrate-kubernetes/src/exec_tests.rs` (`rig()` :196, `NODE` :41, `POD_CREATE` :43, model `a_foreign_snapshot_or_a_moved_binding_is_stale_before_any_pod` :603); `crates/substrate-kubernetes/src/namespace/probe_tests.rs` (`NODE` :39, played kubelet hard-codes `NODE` at :252-253 and :821-825; `Play` :56-62); `crates/substrate-kubernetes/src/restart_tests.rs` (`take_over` :43-54) — cited for the helpers, inferred for the changes
+- **Not touched:** `crates/substrate-kubernetes-client/src/fake.rs` (no node handling; tests set `spec.nodeName` through `admin.update`) — cited; `crates/substrate-wire` (`CapabilitySnapshot` unchanged) — cited; `crates/substrate-daemon/src/app/operations.rs` — cited
+- **Documents:** `CHANGELOG.md` `[Unreleased]` — inferred
+- **Confidence:** high for the files and symbols.
+- **Would collide with:** any unit on `probe.rs`, `probe_tests.rs`, `exec.rs`, `exec_tests.rs`, `restart_tests.rs`; in wave D354 `story:driver-names-a-bare-exec-refusals-verb` keeps its tests out of `probe_tests.rs`.
