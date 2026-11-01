@@ -34,7 +34,7 @@ pub use api::{
     list_items,
 };
 pub use exec::{EXEC_PROTOCOL, ExecOutput};
-pub use gone::{PodEnd, PodTrace, container_state, never_bound, pod_end, watch_event};
+pub use gone::{PodEnd, PodHistory, PodTrace, container_state, never_bound, pod_end, watch_event};
 pub use hyper::Method;
 
 /// What a request asks the API server for.

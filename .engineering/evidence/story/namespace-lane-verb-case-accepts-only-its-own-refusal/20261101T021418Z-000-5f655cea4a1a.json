@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T02:14:18Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-lane-verb-case-accepts-only-its-own-refusal",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p xtask: 456 passed, 9 ignored (adversary pass on 82ee7f92)",
+    "reference": "82ee7f92"
+  }
+}

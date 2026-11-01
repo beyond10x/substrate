@@ -156,6 +156,18 @@ struct Behaviour {
     refuse_policy_list: bool,
     /// What goes wrong with the run's `NetworkPolicy` between its create and `start`'s read-back.
     policy_fault: PolicyFault,
+    /// How a watch of one Pod ends once it has replayed what the fake deleted.
+    watch_end: WatchEnd,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum WatchEnd {
+    /// The stream ends.
+    #[default]
+    Ended,
+    /// A watch that asks for bookmarks ends in a `BOOKMARK`, as an API server sends one shortly
+    /// before the watch's `timeoutSeconds` ends (kind v1.37.0, 2026-11-01).
+    Bookmark,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -179,6 +191,7 @@ impl Default for Behaviour {
             log: (200, "hello\n".to_owned()),
             refuse_policy_list: false,
             policy_fault: PolicyFault::None,
+            watch_end: WatchEnd::Ended,
         }
     }
 }
@@ -341,6 +354,32 @@ fn pod_status() -> Value {
     })
 }
 
+/// What a watch of one Pod at `query` replays: its deletion, when the fake deleted it; then, with
+/// [`WatchEnd::Bookmark`] and a watch that allows bookmarks, a `BOOKMARK`. Otherwise it ends
+/// without an event.
+fn replay(shared: &Shared, query: &str) -> String {
+    let name = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("fieldSelector=metadata.name%3D"))
+        .unwrap_or_default();
+    let mut replay = shared
+        .deleted
+        .lock()
+        .get(name)
+        .map(|object| json!({"type": "DELETED", "object": object}).to_string() + "\n")
+        .unwrap_or_default();
+    let bookmarks = query
+        .split('&')
+        .any(|pair| pair == "allowWatchBookmarks=true");
+    if shared.behaviour.watch_end == WatchEnd::Bookmark && bookmarks {
+        // A `BOOKMARK`'s object carries its kind and `metadata.resourceVersion` alone.
+        let object =
+            json!({"kind": "Pod", "apiVersion": "v1", "metadata": {"resourceVersion": "9"}});
+        replay += &(json!({"type": "BOOKMARK", "object": object}).to_string() + "\n");
+    }
+    replay
+}
+
 #[allow(clippy::too_many_lines)] // One fake API server keeps every route it answers adjacent.
 fn serve(
     stream: &mut BufReader<StreamOwned<ServerConnection, TcpStream>>,
@@ -379,18 +418,7 @@ fn serve(
             r#"{"kind":"PodList","apiVersion":"v1","items":[]}"#.to_owned(),
         )
     } else if method == "GET" && path == pods && query.starts_with("watch=") {
-        // A watch of one Pod replays its deletion, when the fake deleted it; otherwise it ends
-        // without an event.
-        let name = query
-            .split('&')
-            .find_map(|pair| pair.strip_prefix("fieldSelector=metadata.name%3D"))
-            .unwrap_or_default();
-        let replay = shared
-            .deleted
-            .lock()
-            .get(name)
-            .map(|object| json!({"type": "DELETED", "object": object}).to_string() + "\n");
-        (200, replay.unwrap_or_default())
+        (200, replay(shared, query))
     } else if method == "GET" && path == policies {
         if shared.behaviour.refuse_policy_list {
             (
@@ -1066,6 +1094,50 @@ async fn adversary_open_removes_only_an_old_owned_policy_whose_pod_is_gone() {
         1,
         "open deleted more than the orphan: {deletions:?}"
     );
+}
+
+/// `story:pod-orphaned-policy-is-swept`: the adapter stopped between creating a run's policy and
+/// creating its Pod. Open removes that policy once the replay from the policy's `resourceVersion`
+/// ends in a `BOOKMARK` before any event of the run's name: the replay is complete and no Pod of it
+/// was ever added. Without the `BOOKMARK` the replay is incomplete and the policy stays. The policy
+/// of a Pod force-deleted with its container last seen running stays either way.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary_open_removes_an_old_owned_policy_whose_pod_was_never_created() {
+    for watch_end in [WatchEnd::Bookmark, WatchEnd::Ended] {
+        let fake = Fake::start(Behaviour {
+            watch_end,
+            ..Behaviour::default()
+        });
+        let old = Duration::from_hours(1);
+        {
+            let mut objects = fake.objects.lock();
+            for run in ["substrate-run-never", "substrate-run-forced"] {
+                let labels = [
+                    (pod::MANAGED_BY_LABEL, pod::MANAGED_BY),
+                    (pod::RUN_LABEL, run),
+                ];
+                objects.insert(format!("networkpolicies/{run}"), policy(run, &labels, old));
+            }
+            let running = json!([{"name": "run", "state": {"running": {}}}]);
+            fake.deleted.lock().insert(
+                "substrate-run-forced".to_owned(),
+                json!({"metadata": {"name": "substrate-run-forced", "resourceVersion": "2"},
+                       "spec": {"nodeName": "node-a", "restartPolicy": "Never"},
+                       "status": {"phase": "Failed", "containerStatuses": running}}),
+            );
+        }
+        let _adapter = fake.open();
+        let mut expected = vec!["networkpolicies/substrate-run-forced"];
+        if watch_end == WatchEnd::Ended {
+            expected.push("networkpolicies/substrate-run-never");
+        }
+        assert_eq!(
+            fake.objects(),
+            expected,
+            "{watch_end:?}: open swept the wrong policies; requests: {:#?}",
+            fake.requests()
+        );
+    }
 }
 
 /// A sweep that cannot list the namespace's policies does not open as if it had swept: the

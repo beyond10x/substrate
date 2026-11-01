@@ -46,7 +46,7 @@ use substrate_executor::probe::{
 };
 use substrate_executor::spec::RunSpec;
 use substrate_host::{BackendKind, BackendRecord, BackendRole};
-use substrate_kubernetes_client::{RUN_CONTAINER, container_state};
+use substrate_kubernetes_client::{ApiError, RUN_CONTAINER, container_state};
 use substrate_wire::{
     CONFINEMENT_NO_EGRESS_FACT, CONFINEMENT_WHOLE_TREE_KILL_FACT, CapabilityFacts,
     CapabilitySnapshot, ConfinementFamily, ExecLimits, HostDriverKind, MAX_FILE_BYTES,
@@ -154,6 +154,27 @@ impl From<String> for RunFailed {
     }
 }
 
+/// Logs that `fact` was not proved and why, in the one form every fact the probe withholds takes
+/// (D339).
+fn not_proved(fact: &str, why: &str) {
+    tracing::warn!("{fact} was not proved: {why}");
+}
+
+/// Whether the API refused a read for good: a 4xx answer, as [`super::workspace`]'s create counts
+/// a refusal, except a timeout or throttling answer, which a later read may clear.
+fn refused(error: &ApiError) -> bool {
+    matches!(error.status(), Some(400..=499)) && !matches!(error.status(), Some(408 | 429))
+}
+
+/// A poll that ran out of time: `kubernetes.api-failed` with the API's last answer when a read
+/// failed while it waited, and no code when every read answered.
+fn timed_out(what: &str, last: Option<ApiError>) -> RunFailed {
+    match last {
+        Some(error) => RunFailed::api(format!("{what}; the API's last answer: {error}")),
+        None => what.to_owned().into(),
+    }
+}
+
 /// The workspace facts the keeper's `fs check` proved (design 34 § 6.2), each from its own answer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct WorkspaceProofs {
@@ -173,6 +194,19 @@ impl WorkspaceProofs {
             openat2_beneath,
             guarded_io: openat2_beneath && proved("symlink_escape_refused"),
             atomic_replace: proved("atomic_replace"),
+        }
+    }
+
+    /// Says, for each fact these proofs leave out, that it was not proved and `why`.
+    fn warn_unproved(self, why: &str) {
+        for (fact, proved) in [
+            ("workspace.openat2-beneath", self.openat2_beneath),
+            ("workspace.guarded-io", self.guarded_io),
+            ("workspace.atomic-replace", self.atomic_replace),
+        ] {
+            if !proved {
+                not_proved(fact, why);
+            }
         }
     }
 }
@@ -201,7 +235,7 @@ impl Observation {
         if !egress_allowing.is_empty() && self.run.observed.no_egress {
             tracing::warn!(
                 policies = ?egress_allowing,
-                "a bound NetworkPolicy allows egress; confinement.no-egress is withheld"
+                "{CONFINEMENT_NO_EGRESS_FACT} was not proved: a bound NetworkPolicy allows egress"
             );
             self.run.observed.no_egress = false;
         }
@@ -218,8 +252,10 @@ impl NamespaceDriver {
     /// # Errors
     ///
     /// `kubernetes.executor-handshake-failed` when the probe keeper's executor is not this
-    /// release; `kubernetes.api-failed` when the driver is not open or an object could not be
-    /// created. Every fact the probe proves is then absent.
+    /// release; `kubernetes.api-failed` when the driver is not open; the failed call's own code
+    /// when the probe's ledger rows could not be reserved or read, or its PVC or keeper could not
+    /// be created and bound (`kubernetes.api-failed` for the API's refusal or loss,
+    /// `workspace.capacity`, `state.store-failed`). Every fact the probe proves is then absent.
     pub async fn probe(&self) -> Result<(), StartupRefusal> {
         let probed = self.probe_once().await;
         self.opening_settled.send_replace(true);
@@ -460,7 +496,7 @@ impl NamespaceDriver {
     ) -> Result<Observation, StartupRefusal> {
         let ledger = |error: substrate_host::DriverError| {
             refusal(
-                API_FAILED,
+                error.code,
                 format!("the probe's ledger rows: {}", error.message),
             )
         };
@@ -503,16 +539,24 @@ impl NamespaceDriver {
             .keeper_call(&keeper.name, &Request::Check {}, &[])
             .await
         {
-            Ok((answer, _)) => (
-                WorkspaceProofs::from_check(&answer),
-                kubernetes_service_host(&answer),
-            ),
+            Ok((answer, _)) => {
+                let proofs = WorkspaceProofs::from_check(&answer);
+                proofs.warn_unproved("the keeper's check did not prove it");
+                (proofs, kubernetes_service_host(&answer))
+            }
             Err(CallFailure::Unanswered(why)) => {
-                tracing::warn!(why, "the probe keeper's check went unanswered");
+                tracing::warn!(why = %why, "the probe keeper's check went unanswered");
+                WorkspaceProofs::default()
+                    .warn_unproved("the probe keeper's check went unanswered");
                 (WorkspaceProofs::default(), None)
             }
             Err(CallFailure::Failed(error)) => {
-                tracing::warn!(code = error.code, "the probe keeper's check failed");
+                tracing::warn!(
+                    code = error.code,
+                    why = %error.message,
+                    "the probe keeper's check failed"
+                );
+                WorkspaceProofs::default().warn_unproved("the probe keeper's check failed");
                 (WorkspaceProofs::default(), None)
             }
         };
@@ -525,12 +569,12 @@ impl NamespaceDriver {
             Ok(run) => run,
             Err(RunFailed { code, why }) => {
                 if let Some(code) = code {
-                    tracing::warn!(code, why, "the probe Pod's run proved nothing");
+                    tracing::warn!(code, why = %why, "the probe Pod's run proved nothing");
                 } else {
-                    tracing::warn!(why, "the probe Pod's run proved nothing");
+                    tracing::warn!(why = %why, "the probe Pod's run proved nothing");
                 }
                 for fact in RUN_FACTS {
-                    tracing::warn!("{fact} was not proved: the probe Pod's run proved nothing");
+                    not_proved(fact, "the probe Pod's run proved nothing");
                 }
                 RunProofs::default()
             }
@@ -547,7 +591,7 @@ impl NamespaceDriver {
         match self.create_recorded(row, collection, object).await {
             Created::Bound(uid) => Ok(uid),
             Created::Refused(error) | Created::Unknown(error) => Err(refusal(
-                API_FAILED,
+                error.code,
                 format!(
                     "the probe's {} was not created: {}: {}",
                     names::role_name(row.role),
@@ -586,12 +630,31 @@ impl NamespaceDriver {
             .await?;
         let (argv_only, observed) = read_run(end, code, &argv)?;
         let observed = if let Some(observed) = observed {
+            let no_egress = no_egress(&observed, &targets)
+                .inspect_err(|why| not_proved(CONFINEMENT_NO_EGRESS_FACT, why))
+                .is_ok();
+            let whole_tree_kill = if observed.heartbeat {
+                self.heartbeat_stood_still(keeper).await
+            } else {
+                not_proved(
+                    CONFINEMENT_WHOLE_TREE_KILL_FACT,
+                    "the probe child never saw its grandchild's heartbeat move",
+                );
+                false
+            };
             ObservedProofs {
-                no_egress: no_egress(&observed, &targets),
-                whole_tree_kill: observed.heartbeat && self.heartbeat_stood_still(keeper).await,
+                whole_tree_kill,
+                no_egress,
             }
         } else {
-            tracing::warn!("the probe child reported no observation; neither property holds");
+            let why = if argv_only {
+                "the probe child reported no observation"
+            } else {
+                "the argv did not read back byte for byte, so no observation counts"
+            };
+            for fact in [CONFINEMENT_WHOLE_TREE_KILL_FACT, CONFINEMENT_NO_EGRESS_FACT] {
+                not_proved(fact, why);
+            }
             ObservedProofs::default()
         };
         Ok(RunProofs {
@@ -686,13 +749,19 @@ impl NamespaceDriver {
     /// Whether the keeper sees the heartbeat present and unchanged across [`HEARTBEAT_STILL`].
     async fn heartbeat_stood_still(&self, keeper: &str) -> bool {
         let Some(before) = self.heartbeat(keeper).await else {
-            tracing::warn!("the keeper reads no heartbeat; whole-tree kill is not proved");
+            not_proved(
+                CONFINEMENT_WHOLE_TREE_KILL_FACT,
+                "the keeper reads no heartbeat",
+            );
             return false;
         };
         tokio::time::sleep(HEARTBEAT_STILL).await;
         let still = self.heartbeat(keeper).await.as_ref() == Some(&before);
         if !still {
-            tracing::warn!("the heartbeat moved after the end; whole-tree kill is not proved");
+            not_proved(
+                CONFINEMENT_WHOLE_TREE_KILL_FACT,
+                "the heartbeat moved after the end",
+            );
         }
         still
     }
@@ -711,10 +780,13 @@ impl NamespaceDriver {
         ))
     }
 
-    /// The keeper's node, once the scheduler has bound it, within [`CREATE_BOUND`].
-    async fn scheduled_node(&self, keeper: &str) -> Result<String, String> {
+    /// The keeper's node, once the scheduler has bound it, within [`CREATE_BOUND`]. A read the
+    /// API refuses ends the wait at once, `kubernetes.api-failed` with the API's answer; a read
+    /// it leaves unanswered is asked again, and named so if the wait runs out.
+    async fn scheduled_node(&self, keeper: &str) -> Result<String, RunFailed> {
         let path = format!("{}/{keeper}", self.api.pods());
-        tokio::time::timeout(CREATE_BOUND, async {
+        let mut last = None;
+        let waited = tokio::time::timeout(CREATE_BOUND, async {
             loop {
                 match self.api.get(&path).await {
                     Ok(Some(held)) => {
@@ -725,20 +797,36 @@ impl NamespaceDriver {
                             return Ok(node.to_owned());
                         }
                     }
-                    Ok(None) => return Err("the probe keeper is absent".to_owned()),
-                    Err(error) => tracing::info!(%error, "the probe asks for its keeper again"),
+                    Ok(None) => return Err("the probe keeper is absent".to_owned().into()),
+                    Err(error) if refused(&error) => {
+                        return Err(RunFailed::api(format!(
+                            "the probe keeper's read was refused: {error}"
+                        )));
+                    }
+                    Err(error) => {
+                        tracing::info!(%error, "the probe asks for its keeper again");
+                        last = Some(error);
+                    }
                 }
                 tokio::time::sleep(PROBE_POLL).await;
             }
         })
-        .await
-        .unwrap_or_else(|_| Err("the probe keeper was not scheduled in time".to_owned()))
+        .await;
+        waited.unwrap_or_else(|_| {
+            Err(timed_out(
+                "the probe keeper was not scheduled in time",
+                last,
+            ))
+        })
     }
 
-    /// The probe Pod once its container is shown terminated under `uid`, within `bound`.
-    async fn ended(&self, name: &str, uid: &str, bound: Duration) -> Result<Value, String> {
+    /// The probe Pod once its container is shown terminated under `uid`, within `bound`. A read
+    /// the API refuses ends the wait at once, `kubernetes.api-failed` with the API's answer; a
+    /// read it leaves unanswered is asked again, and named so if the wait runs out.
+    async fn ended(&self, name: &str, uid: &str, bound: Duration) -> Result<Value, RunFailed> {
         let path = format!("{}/{name}", self.api.pods());
-        tokio::time::timeout(bound, async {
+        let mut last = None;
+        let waited = tokio::time::timeout(bound, async {
             loop {
                 match self.api.get(&path).await {
                     Ok(Some(pod)) if uid_of(&pod) == Some(uid) => {
@@ -746,14 +834,22 @@ impl NamespaceDriver {
                             return Ok(pod);
                         }
                     }
-                    Ok(_) => return Err("the probe Pod is gone or replaced".to_owned()),
-                    Err(error) => tracing::info!(%error, "the probe asks for its Pod again"),
+                    Ok(_) => return Err("the probe Pod is gone or replaced".to_owned().into()),
+                    Err(error) if refused(&error) => {
+                        return Err(RunFailed::api(format!(
+                            "the probe Pod's read was refused: {error}"
+                        )));
+                    }
+                    Err(error) => {
+                        tracing::info!(%error, "the probe asks for its Pod again");
+                        last = Some(error);
+                    }
                 }
                 tokio::time::sleep(PROBE_POLL).await;
             }
         })
-        .await
-        .unwrap_or_else(|_| Err("the probe Pod did not end in time".to_owned()))
+        .await;
+        waited.unwrap_or_else(|_| Err(timed_out("the probe Pod did not end in time", last)))
     }
 
     /// Removes the objects of earlier probes that are still recorded unsettled: a crash, or a
@@ -762,7 +858,11 @@ impl NamespaceDriver {
         let rows = match self.unsettled_by_name() {
             Ok(rows) => rows,
             Err(error) => {
-                tracing::warn!(code = error.code, "the probe's leftovers could not be read");
+                tracing::warn!(
+                    code = error.code,
+                    why = %error.message,
+                    "the probe's leftovers could not be read"
+                );
                 return;
             }
         };
@@ -782,7 +882,11 @@ impl NamespaceDriver {
         let mut rows = match self.ledger.recorded(BackendKind::Probe, nonce) {
             Ok(rows) => rows,
             Err(error) => {
-                tracing::warn!(code = error.code, "the probe's rows could not be read");
+                tracing::warn!(
+                    code = error.code,
+                    why = %error.message,
+                    "the probe's rows could not be read"
+                );
                 return;
             }
         };
@@ -790,7 +894,11 @@ impl NamespaceDriver {
         for row in rows.iter().filter(|row| row.settled_at.is_none()) {
             if row.uid.is_none() && !sent.contains(&row.name) {
                 if let Err(error) = self.ledger.settle(&row.name) {
-                    tracing::warn!(code = error.code, "a probe row could not be settled");
+                    tracing::warn!(
+                        code = error.code,
+                        why = %error.message,
+                        "a probe row could not be settled"
+                    );
                 }
                 continue;
             }
@@ -816,6 +924,7 @@ impl NamespaceDriver {
             Err(error) => tracing::warn!(
                 code = error.code,
                 name = row.name,
+                why = %error.message,
                 "a probe object could not be removed"
             ),
         }
@@ -884,12 +993,13 @@ fn first_line(bytes: &[u8]) -> (&[u8], &[u8]) {
 /// nameserver's at port 53, its host the child's resolver's), each denied inside the Pod
 /// ([`EgressOutcome::blocked`]). A timed-out or no-route attempt never counts (D333, D334).
 /// Without a Kubernetes Service host there is no first attempt to hold, so nothing is proved.
-fn no_egress(observed: &Observed, targets: &ProbeTargets) -> bool {
+/// The error is why the fact was not proved.
+fn no_egress(observed: &Observed, targets: &ProbeTargets) -> Result<(), &'static str> {
     let Some(host) = targets.kubernetes_service_host else {
-        return false;
+        return Err("the keeper states no Kubernetes Service host");
     };
     let [kubernetes, nameserver, egress] = observed.egress.as_slice() else {
-        return false;
+        return Err("the probe child did not report exactly three egress attempts");
     };
     let named = kubernetes.target == EgressTarget::KubernetesService
         && kubernetes.address == Some(SocketAddr::new(host, KUBERNETES_SERVICE_PORT))
@@ -899,10 +1009,16 @@ fn no_egress(observed: &Observed, targets: &ProbeTargets) -> bool {
             .is_some_and(|address| address.port() == NAMESERVER_PORT)
         && egress.target == EgressTarget::EgressProbe
         && egress.address == Some(targets.egress_probe_address);
-    named
-        && [kubernetes, nameserver, egress]
-            .iter()
-            .all(|attempt| EgressOutcome::blocked(attempt.outcome))
+    if !named {
+        return Err("an egress attempt was not made at the address the driver named");
+    }
+    if ![kubernetes, nameserver, egress]
+        .iter()
+        .all(|attempt| EgressOutcome::blocked(attempt.outcome))
+    {
+        return Err("an egress attempt was not denied inside the Pod");
+    }
+    Ok(())
 }
 
 const fn removal_order(role: BackendRole) -> u8 {

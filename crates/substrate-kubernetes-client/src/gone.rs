@@ -18,6 +18,14 @@ use crate::api::{Api, WatchError, bounded, pod_name};
 /// watch that shows nothing within this decides nothing.
 pub const WATCH_LIMIT: Duration = Duration::from_secs(5);
 
+/// How long [`Api::pod_history`] reads a replay that asks for bookmarks: the watch's own
+/// `timeoutSeconds`, [`WATCH_LIMIT`], and 3 seconds more. An API server sends such a watch one
+/// `BOOKMARK` shortly before its `timeoutSeconds` ends (observed on kind v1.37.0, 2026-11-01), so a
+/// client bound equal to it could end the read just before the line that shows the replay complete;
+/// the server closes the stream at its timeout, and the margin covers only its lateness. The bound
+/// is fixed, so a sweep that waits on it stays bounded.
+pub const REPLAY_LIMIT: Duration = WATCH_LIMIT.saturating_add(Duration::from_secs(3));
+
 /// What has been read of one run's Pod, for [`pod_end`].
 #[derive(Debug, Clone, Default)]
 pub struct PodTrace {
@@ -116,6 +124,18 @@ pub enum PodEnd {
     Unproven(String),
     /// The API did not answer; asking again may tell.
     Unanswered(String),
+}
+
+/// What [`Api::pod_history`] shows of a Pod no read ever showed an object of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PodHistory {
+    /// The replay from the version read before the Pod ended in a `BOOKMARK` before any event of
+    /// the Pod's name: the API server replayed every change since, and no Pod of that name was
+    /// ever added.
+    NeverCreated,
+    /// What the replay's events of the name decided, as [`Api::quoted_watch_event`] decides them,
+    /// or why the replay decides nothing.
+    End(PodEnd),
 }
 
 /// One line of a watch of the Pod `name`: noted in `trace`, and the [`PodEnd`] it decides, if any:
@@ -235,18 +255,7 @@ impl Api {
         // The connection goes with the watch, however the read ends.
         let mut watch = match self.watch(path).await {
             Ok(watch) => watch,
-            Err(WatchError::Expired) => {
-                return PodEnd::Unproven(
-                    "the watch answered 410: the history after the last read is gone".to_owned(),
-                );
-            }
-            Err(WatchError::Refused(status)) => {
-                return PodEnd::Unproven(format!(
-                    "the watch answered {status}: the credential may not watch pods"
-                ));
-            }
-            Err(WatchError::Unanswered(error)) => return PodEnd::Unanswered(error),
-            Err(other) => return PodEnd::Unanswered(other.to_string()),
+            Err(error) => return unopened(error),
         };
         loop {
             match watch.next_line().await {
@@ -266,5 +275,147 @@ impl Api {
                 Err(_) => return PodEnd::Unanswered("the watch stream failed".to_owned()),
             }
         }
+    }
+
+    /// The replay of the Pod `name` from the `resourceVersion` `trace` last read, for a sweep of a
+    /// policy whose run's Pod no read ever showed (`trace` carries no `uid`) and a read just found
+    /// gone (`story:pod-orphaned-policy-is-swept`). The watch is [`pod_end`]'s, asking for
+    /// bookmarks too (`allowWatchBookmarks=true`, `timeoutSeconds` [`WATCH_LIMIT`]), and is read
+    /// for at most [`REPLAY_LIMIT`]. The API server replays every event of the name since that
+    /// version first and then sends a `BOOKMARK`, so a `BOOKMARK` before any event of the name ends
+    /// a complete replay that shows no Pod of it ever added: [`PodHistory::NeverCreated`]. Events of
+    /// the name decide as [`Api::quoted_watch_event`] decides them, and a `BOOKMARK` after events
+    /// of the name that decided nothing is unproven. So is a replay that does not end in a
+    /// `BOOKMARK`: a 410, a refusal, an `ERROR` event, a line that is not JSON, the byte bound, or
+    /// the stream ending or the bound passing first. One that goes unanswered is
+    /// [`PodEnd::Unanswered`]. A run whose Pod a read showed is [`pod_end`]'s alone.
+    pub async fn pod_history(&self, name: &str, trace: &PodTrace) -> PodHistory {
+        if trace.stopped {
+            return PodHistory::End(PodEnd::Stopped);
+        }
+        let Some(version) = &trace.resource_version else {
+            return PodHistory::End(PodEnd::Unproven(
+                "no resourceVersion of the run was read to watch from".to_owned(),
+            ));
+        };
+        if let Err(invalid) = pod_name(name) {
+            return PodHistory::End(PodEnd::Unproven(invalid.to_string()));
+        }
+        let since = version.clone();
+        let version: String = url::form_urlencoded::byte_serialize(version.as_bytes()).collect();
+        let path = format!(
+            "{}?watch=1&fieldSelector=metadata.name%3D{name}&resourceVersion={version}\
+             &allowWatchBookmarks=true&timeoutSeconds={}",
+            self.pods(),
+            WATCH_LIMIT.as_secs()
+        );
+        let mut trace = trace.clone();
+        let history =
+            tokio::time::timeout(REPLAY_LIMIT, self.history(&path, name, &since, &mut trace))
+                .await
+                .unwrap_or_else(|_| {
+                    PodHistory::End(PodEnd::Unproven(format!(
+                        "the watch sent no bookmark within {REPLAY_LIMIT:?}, so its replay may be \
+                     incomplete"
+                    )))
+                });
+        match history {
+            PodHistory::End(PodEnd::Unproven(why)) => {
+                PodHistory::End(PodEnd::Unproven(self.redact(&why)))
+            }
+            PodHistory::End(PodEnd::Unanswered(why)) => {
+                PodHistory::End(PodEnd::Unanswered(self.redact(&why)))
+            }
+            decided => decided,
+        }
+    }
+
+    /// Reads the watch at `path`, which asks for bookmarks, event by event until one of `name`
+    /// decides [`PodEnd`], a `BOOKMARK` ends the replay, the stream ends, or it passes
+    /// [`crate::MAX_API_BODY_BYTES`]. A `BOOKMARK` shows the replay complete only when it carries a
+    /// `resourceVersion` other than `since`, the one the watch started from: a server sends every
+    /// event up to a bookmark's version before it, so one at the start version, or without one,
+    /// says nothing of what followed. Versions are opaque, so an older one is not told apart.
+    async fn history(
+        &self,
+        path: &str,
+        name: &str,
+        since: &str,
+        trace: &mut PodTrace,
+    ) -> PodHistory {
+        // The connection goes with the watch, however the read ends.
+        let mut watch = match self.watch(path).await {
+            Ok(watch) => watch,
+            Err(error) => return PodHistory::End(unopened(error)),
+        };
+        let mut named = false;
+        loop {
+            let line = match watch.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => {
+                    return PodHistory::End(PodEnd::Unproven(
+                        "the watch ended without a bookmark, so its replay may be incomplete"
+                            .to_owned(),
+                    ));
+                }
+                Err(WatchError::Bound) => {
+                    return PodHistory::End(PodEnd::Unproven(
+                        "the watch passed its byte bound".to_owned(),
+                    ));
+                }
+                Err(_) => {
+                    return PodHistory::End(PodEnd::Unanswered(
+                        "the watch stream failed".to_owned(),
+                    ));
+                }
+            };
+            if let Some(decided) = self.quoted_watch_event(&line, name, trace) {
+                return PodHistory::End(decided);
+            }
+            // `quoted_watch_event` decided a line that is not JSON; what is left is blank or an
+            // event.
+            let Ok(event) = serde_json::from_slice::<Value>(&line) else {
+                continue;
+            };
+            match event["type"].as_str() {
+                Some("BOOKMARK") if named => {
+                    return PodHistory::End(PodEnd::Unproven(
+                        "the replay showed the Pod added and not its container stopped".to_owned(),
+                    ));
+                }
+                Some("BOOKMARK") => {
+                    let at = event["object"]["metadata"]["resourceVersion"].as_str();
+                    if at.is_some_and(|at| !at.is_empty() && at != since) {
+                        return PodHistory::NeverCreated;
+                    }
+                    return PodHistory::End(PodEnd::Unproven(
+                        "the watch's bookmark carried no resourceVersion past the one it started \
+                         from, so its replay may be incomplete"
+                            .to_owned(),
+                    ));
+                }
+                Some("ADDED" | "MODIFIED" | "DELETED")
+                    if event["object"]["metadata"]["name"].as_str() == Some(name) =>
+                {
+                    named = true;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// What a watch of a gone Pod that did not open shows: a 410 or a refusal will not tell, anything
+/// else may when asked again.
+fn unopened(error: WatchError) -> PodEnd {
+    match error {
+        WatchError::Expired => PodEnd::Unproven(
+            "the watch answered 410: the history after the last read is gone".to_owned(),
+        ),
+        WatchError::Refused(status) => PodEnd::Unproven(format!(
+            "the watch answered {status}: the credential may not watch pods"
+        )),
+        WatchError::Unanswered(error) => PodEnd::Unanswered(error),
+        other => PodEnd::Unanswered(other.to_string()),
     }
 }

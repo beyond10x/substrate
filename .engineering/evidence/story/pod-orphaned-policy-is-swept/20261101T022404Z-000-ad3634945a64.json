@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T02:24:04Z",
+  "actor": "human:timo",
+  "artifact": "story:pod-orphaned-policy-is-swept",
+  "kind": "story",
+  "revision": 10,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p b10x-substrate-kubernetes-client: 48 passed; -p b10x-substrate-host --lib: 403 passed; --test adversary_pod: 22 passed",
+    "reference": "6a82ca39"
+  }
+}

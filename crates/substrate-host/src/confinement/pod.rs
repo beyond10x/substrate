@@ -33,8 +33,8 @@ use serde_json::{Map, Value, json};
 #[cfg(test)]
 use substrate_kubernetes_client::JSON;
 use substrate_kubernetes_client::{
-    self as kubernetes, Method, Pacing, PodEnd, PodTrace, continuation, is_dns_label, kubeconfig,
-    list_items, pod_end,
+    self as kubernetes, Method, Pacing, PodEnd, PodHistory, PodTrace, continuation, is_dns_label,
+    kubeconfig, list_items, pod_end,
 };
 use substrate_wire::Signal;
 use tokio::sync::watch;
@@ -423,10 +423,11 @@ fn owner_selector() -> String {
 /// (`approval-record:pod-orphan-policy-sweep-d124`): each carrying the adapter's owner label, named
 /// for the run that label names, at least [`SWEEP_AGE_FLOOR`] old by the API server's clock, whose
 /// run's Pod the API no longer has, in any phase, and whose container the API shows stopped
-/// ([`pod_end`]). A policy without the label is never a candidate.
+/// ([`pod_end`]) or whose Pod a complete replay from the policy's `resourceVersion` shows never
+/// created ([`gone_pod`]). A policy without the label is never a candidate.
 /// The list is read whole first, in at most [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`],
 /// each policy's metadata alone ([`kubernetes::METADATA_LIST`]) and each page bounded in bytes;
-/// every request is bounded by [`API_TIMEOUT`], a watch by [`kubernetes::gone::WATCH_LIMIT`], and
+/// every request is bounded by [`API_TIMEOUT`], a watch by [`kubernetes::gone::REPLAY_LIMIT`], and
 /// there are at most three per owned policy, so open stays bounded. Any failure of a list, a read
 /// or a deletion, a list longer than that included, fails the sweep, and with it the open.
 ///
@@ -471,9 +472,10 @@ async fn sweep(api: &Api) -> Result<Vec<Deferred>, String> {
             });
             continue;
         }
-        match pod_end(api, &run, &trace).await {
-            PodEnd::Stopped => {}
-            PodEnd::Unproven(why) => {
+        let never_created = match gone_pod(api, &run, &trace, pod_seen).await {
+            PodHistory::NeverCreated => true,
+            PodHistory::End(PodEnd::Stopped) => false,
+            PodHistory::End(PodEnd::Unproven(why)) => {
                 tracing::warn!(
                     policy = run,
                     why,
@@ -482,7 +484,7 @@ async fn sweep(api: &Api) -> Result<Vec<Deferred>, String> {
                 );
                 continue;
             }
-            PodEnd::Unanswered(_) => {
+            PodHistory::End(PodEnd::Unanswered(_)) => {
                 deferred.push(Deferred {
                     run,
                     created,
@@ -491,14 +493,33 @@ async fn sweep(api: &Api) -> Result<Vec<Deferred>, String> {
                 });
                 continue;
             }
-        }
+        };
         api.delete(&format!("{}/{run}", api.policies()), 0).await?;
-        tracing::info!(
-            policy = run,
-            "pod: open removed a NetworkPolicy whose run's Pod is gone and its container stopped"
-        );
+        if never_created {
+            tracing::info!(
+                policy = run,
+                "pod: open removed a NetworkPolicy whose run's Pod was never created"
+            );
+        } else {
+            tracing::info!(
+                policy = run,
+                "pod: open removed a NetworkPolicy whose run's Pod is gone and its container \
+                 stopped"
+            );
+        }
     }
     Ok(deferred)
+}
+
+/// What the sweeps know of the run `run`, whose Pod a read just found gone: [`pod_end`] once a
+/// read showed a Pod object of the run (`pod_seen`, or a `uid` in `trace`), and while none did,
+/// the replay from the policy's `resourceVersion`, which may also show that the Pod was never
+/// created ([`kubernetes::Api::pod_history`], `story:pod-orphaned-policy-is-swept`).
+async fn gone_pod(api: &Api, run: &str, trace: &PodTrace, pod_seen: bool) -> PodHistory {
+    if pod_seen || trace.uid().is_some() {
+        return PodHistory::End(pod_end(api, run, trace).await);
+    }
+    api.pod_history(run, trace).await
 }
 
 /// An owned policy the open sweep listed: its run, its creation time, whether it is old enough to
@@ -638,8 +659,8 @@ fn defer_sweep(
 /// One round of the deferred sweep. Reads the namespace's owned Pods whole, then, for each kept
 /// policy whose Pod that list lacks and whose Pod the API showed before or which is at least
 /// [`SWEEP_AGE_FLOOR`] old by the list's `Date`, reads the Pod once more and deletes the policy
-/// when that read says the Pod is gone and the API shows its container stopped ([`pod_end`]), as
-/// the open sweep does. A Pod listed or read marks its policy seen and is noted in its trace. A
+/// when that read says the Pod is gone and the API shows its container stopped, or, for a Pod no
+/// read showed, a complete replay shows it never created ([`gone_pod`]), as the open sweep does. A Pod listed or read marks its policy seen and is noted in its trace. A
 /// list that fails fails the round before anything is deleted; a read, a watch or a deletion that
 /// fails keeps its policy for the next round. A policy whose container the API cannot show stopped
 /// stays, and is checked no more.
@@ -675,23 +696,24 @@ async fn resweep(api: &Api, deferred: &mut Vec<Deferred>) -> Result<(), String> 
                 continue;
             }
         }
-        match pod_end(api, &policy.run, &policy.trace).await {
-            PodEnd::Stopped => {}
-            PodEnd::Unproven(why) => {
+        let never_created = match gone_pod(api, &policy.run, &policy.trace, policy.pod_seen).await {
+            PodHistory::NeverCreated => true,
+            PodHistory::End(PodEnd::Stopped) => false,
+            PodHistory::End(PodEnd::Unproven(why)) => {
                 tracing::warn!(
                     policy = policy.run,
                     why,
-                    "pod: the adapter keeps a NetworkPolicy whose run's Pod is gone, because the \
-                     API does not show its container stopped"
+                    "pod: the adapter keeps a NetworkPolicy whose run's Pod is gone, because \
+                         the API does not show its container stopped"
                 );
                 deferred.swap_remove(index);
                 continue;
             }
-            PodEnd::Unanswered(_) => {
+            PodHistory::End(PodEnd::Unanswered(_)) => {
                 index += 1;
                 continue;
             }
-        }
+        };
         if api
             .delete(&format!("{}/{}", api.policies(), policy.run), 0)
             .await
@@ -700,10 +722,19 @@ async fn resweep(api: &Api, deferred: &mut Vec<Deferred>) -> Result<(), String> 
             index += 1;
             continue;
         }
-        tracing::info!(
-            policy = policy.run,
-            "pod: the adapter removed a NetworkPolicy its open kept, once its run's Pod was gone"
-        );
+        if never_created {
+            tracing::info!(
+                policy = policy.run,
+                "pod: the adapter removed a NetworkPolicy its open kept, whose run's Pod was \
+                 never created"
+            );
+        } else {
+            tracing::info!(
+                policy = policy.run,
+                "pod: the adapter removed a NetworkPolicy its open kept, once its run's Pod was \
+                 gone"
+            );
+        }
         deferred.swap_remove(index);
     }
     Ok(())

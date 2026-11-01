@@ -1759,27 +1759,38 @@ mod adversary_d337 {
     use super::*;
     use crate::driver_tests::driver_over_any;
 
-    /// The daemon's store failing the one write that binds the probe Pod's uid, as
-    /// `StoreBackendLedger::bind_uid` answers any store error (`state.store-failed`); every other
-    /// call is `inner`'s.
-    struct StoreFailsProbePodBind {
-        inner: Arc<MemoryLedger>,
+    /// The store write a [`StoreFails`] ledger fails.
+    #[derive(Debug, Clone, Copy)]
+    pub(super) enum StoreCall {
+        /// The write that binds the uid of the probe's object in `role`.
+        Bind(BackendRole),
+        /// The write that reserves the probe's three rows.
+        ReserveProbe,
     }
 
-    impl BackendLedger for StoreFailsProbePodBind {
+    /// The daemon's store failing the one write `at` names, as `StoreBackendLedger` answers any
+    /// store error (`state.store-failed`); every other call is `inner`'s.
+    pub(super) struct StoreFails {
+        pub(super) inner: Arc<MemoryLedger>,
+        pub(super) at: StoreCall,
+    }
+
+    fn store_failed() -> DriverError {
+        DriverError::failed("state.store-failed", "Durable state operation failed.")
+    }
+
+    impl BackendLedger for StoreFails {
         fn recorded(&self, kind: BackendKind, id: &str) -> Result<Vec<BackendRecord>, DriverError> {
             self.inner.recorded(kind, id)
         }
 
         fn bind_uid(&self, name: &str, uid: &str) -> Result<UidBinding, DriverError> {
-            let probe_pod = self.inner.unsettled(None)?.into_iter().any(|row| {
-                row.name == name && row.kind == BackendKind::Probe && row.role == BackendRole::Pod
-            });
-            if probe_pod {
-                return Err(DriverError::failed(
-                    "state.store-failed",
-                    "Durable state operation failed.",
-                ));
+            if let StoreCall::Bind(role) = self.at
+                && self.inner.unsettled(None)?.into_iter().any(|row| {
+                    row.name == name && row.kind == BackendKind::Probe && row.role == role
+                })
+            {
+                return Err(store_failed());
             }
             self.inner.bind_uid(name, uid)
         }
@@ -1789,6 +1800,9 @@ mod adversary_d337 {
         }
 
         fn reserve_probe(&self, nonce: &str, names: &[BackendName]) -> Result<(), DriverError> {
+            if let StoreCall::ReserveProbe = self.at {
+                return Err(store_failed());
+            }
             self.inner.reserve_probe(nonce, names)
         }
 
@@ -1799,7 +1813,7 @@ mod adversary_d337 {
 
     /// The keeper's handshake and its whole check, as [`rig_with`] answers them; `on_check` runs
     /// once the check is answered, before the probe Pod is created.
-    fn answer_keeper(fake: &FakeCluster, on_check: impl Fn() + Send + Sync + 'static) {
+    pub(super) fn answer_keeper(fake: &FakeCluster, on_check: impl Fn() + Send + Sync + 'static) {
         fake.set_exec(move |request: ExecRequest| {
             let command: Vec<&str> = request.command.iter().map(String::as_str).collect();
             match command.as_slice() {
@@ -1835,7 +1849,7 @@ mod adversary_d337 {
     }
 
     /// The line that says the probe Pod's run proved nothing, and why.
-    fn run_line(warnings: &[String]) -> String {
+    pub(super) fn run_line(warnings: &[String]) -> String {
         warnings
             .iter()
             .find(|line| {
@@ -1856,8 +1870,9 @@ mod adversary_d337 {
         let driver = driver_over_any(
             &fake,
             &clock,
-            Arc::new(StoreFailsProbePodBind {
+            Arc::new(StoreFails {
                 inner: Arc::clone(&inner),
+                at: StoreCall::Bind(BackendRole::Pod),
             }),
         );
         driver.open().await.expect("the driver opens");
@@ -1937,6 +1952,419 @@ mod adversary_d337 {
             assert!(
                 warnings.iter().any(|line| line.contains(&stated)),
                 "no warning says {fact} was not proved: {warnings:#?}"
+            );
+        }
+    }
+}
+
+/// D339 (`story:probe-withheld-facts-name-the-failed-calls-code`): every fact the probe withholds
+/// says why at `warn`, in one form, "<fact> was not proved: <reason>", and a failed call is named
+/// by its own reason code and, for an API refusal, the API's own answer.
+mod d339 {
+    use std::sync::Weak;
+
+    use super::adversary_d337::{StoreCall, StoreFails, answer_keeper, run_line};
+    use super::*;
+    use crate::driver_tests::driver_over_any;
+
+    /// The ten facts the probe Pod's run proves.
+    fn run_facts() -> impl Iterator<Item = &'static str> {
+        SEVEN_FAMILIES.iter().map(|family| family.fact()).chain([
+            "exec.argv-only",
+            substrate_wire::CONFINEMENT_WHOLE_TREE_KILL_FACT,
+            substrate_wire::CONFINEMENT_NO_EGRESS_FACT,
+        ])
+    }
+
+    /// The API's 403 for a Role without `verb` on `resource`, worded as the API server words it,
+    /// for the next `method` request whose path starts with `path`.
+    fn forbidden(method: Method, path: String, verb: &str, resource: &str) -> Fault {
+        Fault::Answer {
+            method,
+            path,
+            status: 403,
+            body: json!({
+                "kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "Forbidden",
+                "code": 403,
+                "message": format!(
+                    "{resource} \"sbx-pr\" is forbidden: User \
+                     \"system:serviceaccount:substrate:substrate-driver\" cannot {verb} resource \
+                     \"{resource}\" in API group \"\" in the namespace \"substrate\""
+                ),
+            }),
+        }
+    }
+
+    /// The name of this probe's object in `role`, from its unsettled row.
+    fn probe_object(ledger: &MemoryLedger, role: BackendRole) -> String {
+        ledger
+            .rows_of(BackendKind::Probe)
+            .into_iter()
+            .find(|row| row.role == role && row.settled_at.is_none())
+            .map(|row| row.name)
+            .expect("the probe's row is reserved")
+    }
+
+    /// One probe over an open driver whose keeper answers its handshake and its whole check, and
+    /// whose kubelet plays an exact run. Once the check is answered, before the probe Pod is
+    /// created, `faults` is planned with the names of the probe's three objects (PVC, keeper,
+    /// Pod). Answers the `WARN` lines the probe logged and the seven families it published.
+    async fn probe_with_faults(
+        faults: impl Fn(&str, &str, &str) -> Vec<Fault> + Send + Sync + 'static,
+    ) -> (Vec<String>, [Option<bool>; 7]) {
+        let fake = Arc::new(passing_fake());
+        let clock = ManualClock::new();
+        let (driver, ledger) = driver(&fake, &clock);
+        driver.open().await.expect("the driver opens");
+        let weak: Weak<FakeCluster> = Arc::downgrade(&fake);
+        let rows = Arc::clone(&ledger);
+        answer_keeper(&fake, move || {
+            if let Some(fake) = weak.upgrade() {
+                let [pvc, keeper, pod] = [BackendRole::Pvc, BackendRole::Keeper, BackendRole::Pod]
+                    .map(|role| probe_object(&rows, role));
+                for fault in faults(&pvc, &keeper, &pod) {
+                    fake.fault(fault);
+                }
+            }
+        });
+        let root = tempfile::tempdir().expect("a temporary PVC");
+        let kubelet = tokio::spawn(play_kubelet(
+            admin(&fake),
+            Arc::clone(&fake),
+            Play::of(Child::Exact),
+            Arc::new(Mutex::new(Vec::new())),
+            root.path().to_path_buf(),
+        ));
+        let log = CapturedLog::start();
+        driver.probe().await.expect("the probe runs");
+        kubelet.abort();
+        (log.warnings(), families(&Driver::machine(&driver).facts))
+    }
+
+    /// Acceptance 1: a store write the probe needs before its run that fails is the store's
+    /// failure, `state.store-failed`, and not the API's: the PVC's and the keeper's uid bindings,
+    /// and the reservation of the probe's rows.
+    #[tokio::test]
+    async fn a_store_failure_before_the_run_refuses_the_probe_with_state_store_failed() {
+        for at in [
+            StoreCall::Bind(BackendRole::Pvc),
+            StoreCall::Bind(BackendRole::Keeper),
+            StoreCall::ReserveProbe,
+        ] {
+            let fake = Arc::new(passing_fake());
+            let clock = ManualClock::new();
+            let driver = driver_over_any(
+                &fake,
+                &clock,
+                Arc::new(StoreFails {
+                    inner: Arc::new(MemoryLedger::default()),
+                    at,
+                }),
+            );
+            driver.open().await.expect("the driver opens");
+            answer_keeper(&fake, || {});
+            let refused = driver.probe().await.expect_err("the store write fails");
+            assert_eq!(
+                refused.code, "state.store-failed",
+                "{at:?}: {}",
+                refused.message
+            );
+            assert_no_driver_facts(&Driver::machine(&driver));
+        }
+    }
+
+    /// Acceptance 2 and D339: a refused `pods get` while the probe waits for its keeper's node
+    /// (`scheduled_node`) or for its Pod's end (`ended`) ends the run with
+    /// `code="kubernetes.api-failed"` and the API's own answer on the run's `WARN` line, and the
+    /// ten facts each as not proved.
+    #[tokio::test]
+    async fn a_refused_pods_get_while_the_probe_waits_names_its_code_the_api_answer_and_each_fact()
+    {
+        for waited_on in [BackendRole::Keeper, BackendRole::Pod] {
+            let (warnings, published) = probe_with_faults(move |_, keeper, pod| {
+                let name = if waited_on == BackendRole::Keeper {
+                    keeper
+                } else {
+                    pod
+                };
+                vec![forbidden(
+                    Method::GET,
+                    format!("/api/v1/namespaces/substrate/pods/{name}"),
+                    "get",
+                    "pods",
+                )]
+            })
+            .await;
+            assert_eq!(
+                published, [None; 7],
+                "{waited_on:?}: the run proved nothing"
+            );
+            let run = run_line(&warnings);
+            assert!(
+                run.contains("code=\"kubernetes.api-failed\""),
+                "{waited_on:?}: the run's warning names no code: {run}"
+            );
+            assert!(
+                run.contains("cannot get resource \"pods\""),
+                "{waited_on:?}: the run's warning does not carry the API's answer: {run}"
+            );
+            for fact in run_facts() {
+                let stated = format!(" {fact} was not proved: ");
+                assert!(
+                    warnings.iter().any(|line| line.contains(&stated)),
+                    "{waited_on:?}: no warning says {fact} was not proved: {warnings:#?}"
+                );
+            }
+        }
+    }
+
+    /// D339: the probe's removal warnings carry the API's answer, so a refused `pods delete` and a
+    /// refused `persistentvolumeclaims get` each name `cannot <verb> resource "<resource>"`.
+    #[tokio::test]
+    async fn a_refused_removal_names_the_api_answer_on_its_warning() {
+        let (warnings, published) = probe_with_faults(|pvc, _, pod| {
+            vec![
+                forbidden(
+                    Method::DELETE,
+                    format!("/api/v1/namespaces/substrate/pods/{pod}"),
+                    "delete",
+                    "pods",
+                ),
+                forbidden(
+                    Method::GET,
+                    format!("/api/v1/namespaces/substrate/persistentvolumeclaims/{pvc}"),
+                    "get",
+                    "persistentvolumeclaims",
+                ),
+            ]
+        })
+        .await;
+        assert_eq!(
+            published,
+            [Some(true); 7],
+            "the control: the run itself proved its end"
+        );
+        for refusal in [
+            "cannot delete resource \"pods\"",
+            "cannot get resource \"persistentvolumeclaims\"",
+        ] {
+            assert!(
+                warnings
+                    .iter()
+                    .any(|line| line.contains("a probe object could not be removed")
+                        && line.contains(refusal)),
+                "no removal warning names {refusal}: {warnings:#?}"
+            );
+        }
+    }
+
+    /// The `WARN` lines one probe logs when the kubelet plays `play` and the keeper's check
+    /// answers `check`.
+    async fn warnings_after(play: Play, check: Option<Value>) -> Vec<String> {
+        let log = CapturedLog::start();
+        facts_after(play, check).await;
+        log.warnings()
+    }
+
+    fn assert_not_proved(warnings: &[String], fact: &str, why: &str) {
+        let stated = format!(" {fact} was not proved: {why}");
+        assert!(
+            warnings.iter().any(|line| line.contains(&stated)),
+            "no warning says \"{stated}\": {warnings:#?}"
+        );
+    }
+
+    /// Acceptance 3: a bound `NetworkPolicy` that allows egress withholds
+    /// `confinement.no-egress`, and a heartbeat that moves after the end withholds
+    /// `confinement.whole-tree-kill`, each said as "<fact> was not proved: <reason>".
+    #[tokio::test]
+    async fn an_egress_allowing_policy_and_a_moving_heartbeat_say_which_fact_was_not_proved() {
+        let log = CapturedLog::start();
+        let (snapshot, _) = probe_beside(json!({
+            "metadata": {"name": "allow-one-range"},
+            "spec": {
+                "podSelector": {},
+                "policyTypes": ["Egress"],
+                "egress": [{"to": [{"ipBlock": {"cidr": "203.0.113.0/24"}}]}],
+            },
+        }))
+        .await;
+        assert_eq!(snapshot.facts.confinement_no_egress, None);
+        assert_not_proved(
+            &log.warnings(),
+            substrate_wire::CONFINEMENT_NO_EGRESS_FACT,
+            "a bound NetworkPolicy allows egress",
+        );
+        drop(log);
+
+        let moving = Observation {
+            heartbeat: true,
+            egress: blocked(),
+        };
+        let warnings = warnings_after(
+            Play::observing(&moving, Heartbeat::Moving),
+            Some(check_with_host(SERVICE_HOST)),
+        )
+        .await;
+        assert_not_proved(
+            &warnings,
+            substrate_wire::CONFINEMENT_WHOLE_TREE_KILL_FACT,
+            "the heartbeat moved after the end",
+        );
+    }
+
+    /// The rest of the class: every other path that withholds an observed property or a workspace
+    /// fact says so in the same form.
+    #[tokio::test]
+    async fn every_other_withheld_property_and_workspace_fact_says_it_was_not_proved() {
+        let no_egress = substrate_wire::CONFINEMENT_NO_EGRESS_FACT;
+        let whole_tree_kill = substrate_wire::CONFINEMENT_WHOLE_TREE_KILL_FACT;
+        let check = || Some(check_with_host(SERVICE_HOST));
+
+        let unreported = warnings_after(Play::of(Child::Exact), check()).await;
+        for fact in [no_egress, whole_tree_kill] {
+            assert_not_proved(&unreported, fact, "the probe child reported no observation");
+        }
+
+        let observation = Observation {
+            heartbeat: true,
+            egress: blocked(),
+        };
+        let expanded = Play {
+            child: Child::Expanded,
+            ..Play::observing(&observation, Heartbeat::Stopped)
+        };
+        let expanded = warnings_after(expanded, check()).await;
+        for fact in [no_egress, whole_tree_kill] {
+            assert_not_proved(&expanded, fact, "the argv did not read back byte for byte");
+        }
+
+        let unread =
+            warnings_after(Play::observing(&observation, Heartbeat::Absent), check()).await;
+        assert_not_proved(&unread, whole_tree_kill, "the keeper reads no heartbeat");
+
+        let never_moved = Observation {
+            heartbeat: false,
+            egress: blocked(),
+        };
+        let still =
+            warnings_after(Play::observing(&never_moved, Heartbeat::Stopped), check()).await;
+        assert_not_proved(
+            &still,
+            whole_tree_kill,
+            "the probe child never saw its grandchild's heartbeat move",
+        );
+
+        let no_host = warnings_after(
+            Play::observing(&observation, Heartbeat::Stopped),
+            Some(json!({
+                "openat2_beneath": true,
+                "symlink_escape_refused": true,
+                "atomic_replace": true,
+            })),
+        )
+        .await;
+        assert_not_proved(
+            &no_host,
+            no_egress,
+            "the keeper states no Kubernetes Service host",
+        );
+
+        let mut reached = blocked();
+        reached[2].outcome = EgressOutcome::Reached;
+        let reached = Observation {
+            heartbeat: true,
+            egress: reached,
+        };
+        let reached = warnings_after(Play::observing(&reached, Heartbeat::Stopped), check()).await;
+        assert_not_proved(
+            &reached,
+            no_egress,
+            "an egress attempt was not denied inside the Pod",
+        );
+
+        let openat2_only = warnings_after(
+            Play::of(Child::Exact),
+            Some(json!({ "openat2_beneath": true })),
+        )
+        .await;
+        for fact in ["workspace.guarded-io", "workspace.atomic-replace"] {
+            assert_not_proved(&openat2_only, fact, "the keeper's check did not prove it");
+        }
+        assert!(
+            !openat2_only
+                .iter()
+                .any(|line| line.contains("workspace.openat2-beneath was not proved")),
+            "a proved fact is not said to be unproved: {openat2_only:#?}"
+        );
+    }
+}
+
+/// D339 adversary pass: `story:probe-withheld-facts-name-the-failed-calls-code`, Acceptance 1.
+mod adversary_d339 {
+    use super::adversary_d337::{StoreCall, StoreFails, answer_keeper};
+    use super::*;
+    use crate::driver_tests::driver_over_any;
+
+    /// Acceptance 1: "A ledger that fails `bind_uid` for the probe's PVC or keeper yields a
+    /// startup refusal naming `state.store-failed`, not `kubernetes.api-failed`." Here the
+    /// create's answer is lost after the API stored the object, so the driver reads it back by
+    /// name and adopts it (`create_recorded` -> `resolve`); the adopting `bind_uid` is the one
+    /// the ledger fails. The API's loss was recovered by the read; the call that failed is the
+    /// store's.
+    #[tokio::test]
+    async fn a_store_failure_adopting_a_probe_object_whose_create_answer_was_lost_is_state_store_failed()
+     {
+        for (role, collection) in [
+            (BackendRole::Pvc, "persistentvolumeclaims"),
+            (BackendRole::Keeper, "pods"),
+        ] {
+            // The control: the same lost answer over a healthy ledger is adopted, so the read
+            // back finds the object stored and ours, and only the adopting bind is left to fail.
+            // Its keeper answers the handshake with no release line, so the probe stops at the
+            // handshake, past both creates.
+            let control = passing_fake();
+            let (healthy, _ledger) = driver(&control, &ManualClock::new());
+            healthy.open().await.expect("the driver opens");
+            control.set_exec(|_: ExecRequest| ExecAnswer {
+                stdout: b"not a release line\n".to_vec(),
+                ..ExecAnswer::default()
+            });
+            control.fault(Fault::DropAnswer {
+                method: Method::POST,
+                path: format!("/api/v1/namespaces/substrate/{collection}"),
+            });
+            let past = healthy
+                .probe()
+                .await
+                .expect_err("the control stops at the handshake");
+            assert_eq!(
+                past.code, EXECUTOR_HANDSHAKE_FAILED,
+                "the control: a lost create answer is adopted: {}",
+                past.message
+            );
+
+            let fake = passing_fake();
+            let clock = ManualClock::new();
+            let driver = driver_over_any(
+                &fake,
+                &clock,
+                Arc::new(StoreFails {
+                    inner: Arc::new(MemoryLedger::default()),
+                    at: StoreCall::Bind(role),
+                }),
+            );
+            driver.open().await.expect("the driver opens");
+            answer_keeper(&fake, || {});
+            fake.fault(Fault::DropAnswer {
+                method: Method::POST,
+                path: format!("/api/v1/namespaces/substrate/{collection}"),
+            });
+            let refused = driver.probe().await.expect_err("the store write fails");
+            assert_eq!(
+                refused.code, "state.store-failed",
+                "{role:?}: {}",
+                refused.message
             );
         }
     }

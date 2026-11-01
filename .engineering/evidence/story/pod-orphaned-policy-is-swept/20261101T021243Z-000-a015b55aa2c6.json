@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T02:12:43Z",
+  "actor": "human:timo",
+  "artifact": "story:pod-orphaned-policy-is-swept",
+  "kind": "story",
+  "revision": 10,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "manual kind case adversary_lane_open_sweeps_an_orphaned_policy on kindest/node v1.37.0: 1 passed in 96 s, no run objects left",
+    "reference": "7cbc0cc4"
+  }
+}

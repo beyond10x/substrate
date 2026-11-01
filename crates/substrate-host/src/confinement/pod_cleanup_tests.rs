@@ -81,6 +81,19 @@ enum Watch {
     Expired,
     /// The stream opens and carries no event.
     Silent,
+    /// No Pod of the name was ever created: the replay is one `BOOKMARK`, as an API server sends
+    /// shortly before a watch's `timeoutSeconds` ends when it allows bookmarks (kind v1.37.0,
+    /// 2026-11-01; `story:pod-orphaned-policy-is-swept`).
+    NeverCreated,
+    /// The stream opens and ends without an event or a `BOOKMARK`.
+    Ended,
+    /// A Pod bound to a node was added and deleted with its container last shown running, then
+    /// the `BOOKMARK`.
+    BoundDeleted,
+    /// A Pod bound to a node was added, its end not shown, then the `BOOKMARK`.
+    Added,
+    /// The watch answers 503.
+    Unavailable,
 }
 
 /// The objects a watch of `name` replays, one JSON event per line, or 410, or nothing.
@@ -108,6 +121,9 @@ fn watch_answer(cluster: &Cluster, query: &str) -> (u16, String) {
             .collect();
         (200, lines.join("\n") + "\n")
     };
+    // A `BOOKMARK`'s object carries its kind and `metadata.resourceVersion` alone.
+    let bookmark =
+        json!({"kind": "Pod", "apiVersion": "v1", "metadata": {"resourceVersion": "99"}});
     match *cluster.watch.lock() {
         Watch::Terminated => {
             let stopped = json!({"terminated": {"exitCode": 137, "reason": "Error"}});
@@ -138,6 +154,27 @@ fn watch_answer(cluster: &Cluster, query: &str) -> (u16, String) {
         )]),
         // `serve` holds the stream open without writing an event.
         Watch::Silent => (0, String::new()),
+        Watch::NeverCreated => events(vec![("BOOKMARK", bookmark)]),
+        Watch::Ended => (200, String::new()),
+        Watch::BoundDeleted => {
+            let running = json!({"running": {"startedAt": "2026-10-28T00:00:00Z"}});
+            events(vec![
+                ("ADDED", pod("2", "Running", running.clone(), json!([]))),
+                ("DELETED", pod("3", "Running", running, json!([]))),
+                ("BOOKMARK", bookmark),
+            ])
+        }
+        Watch::Added => events(vec![
+            (
+                "ADDED",
+                pod("2", "Running", json!({"running": {}}), json!([])),
+            ),
+            ("BOOKMARK", bookmark),
+        ]),
+        Watch::Unavailable => (
+            503,
+            r#"{"kind":"Status","code":503,"message":"unavailable"}"#.to_owned(),
+        ),
     }
 }
 
@@ -860,3 +897,6 @@ mod force_deleted;
 
 #[path = "pod_cleanup_adversary_watch.rs"]
 mod adversary_watch;
+
+#[path = "pod_cleanup_never_created.rs"]
+mod never_created;

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T02:14:18Z",
+  "actor": "human:timo",
+  "artifact": "story:probe-withheld-facts-name-the-failed-calls-code",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p b10x-substrate-kubernetes --lib: 136 passed",
+    "reference": "b0c433d4"
+  }
+}
