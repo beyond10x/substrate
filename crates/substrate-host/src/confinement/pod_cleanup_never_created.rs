@@ -194,3 +194,118 @@ async fn a_policy_whose_pod_was_seen_is_not_swept_on_a_bookmark() {
         "{requests:#?}"
     );
 }
+
+/// The listed policy's `creationTimestamp`, as the fake answers it.
+const CREATED: &str = "2020-01-01T00:00:00Z";
+
+/// Makes each listed policy created at `created`, with one `managedFields` entry per time in
+/// `writes`: the adapter's create first, then another writer's (an operator adding a label);
+/// `None` lists no `managedFields`.
+fn written(cluster: &Cluster, created: &str, writes: Option<&[&str]>) {
+    let mut metadata = json!({"creationTimestamp": created});
+    if let Some(writes) = writes {
+        let fields: Vec<Value> = writes
+            .iter()
+            .enumerate()
+            .map(|(index, time)| {
+                json!({
+                    "manager": if index == 0 { "b10x-substrate-pod" } else { "kubectl-label" },
+                    "operation": "Update",
+                    "apiVersion": "networking.k8s.io/v1",
+                    "time": time,
+                    "fieldsType": "FieldsV1",
+                    "fieldsV1": {"f:metadata": {"f:labels": {"f:team": {}}}},
+                })
+            })
+            .collect();
+        metadata["managedFields"] = json!(fields);
+    }
+    *cluster.policy_metadata.lock() = Some(metadata);
+}
+
+/// `story:pod-sweep-replays-from-the-policys-create`: a policy whose metadata shows a write after
+/// its create, another `managedFields` entry (even in the same second, as times have second
+/// precision) or its one entry's time after `creationTimestamp`, has a `resourceVersion` past its
+/// create, so a replay from it may start past the Pod's whole history. The never-created rule does
+/// not sweep it: open keeps it, logged, and does not check it again, as a policy whose container
+/// is not shown stopped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_written_after_its_create_is_not_swept_as_never_created() {
+    let began = Instant::now();
+    for writes in [
+        &[CREATED, CREATED][..],
+        &[CREATED, "2020-01-02T09:30:00Z"],
+        &["2020-01-01T00:00:01Z"],
+    ] {
+        let cluster = cluster(Watch::NeverCreated);
+        written(&cluster, CREATED, Some(writes));
+        let api = start(&cluster);
+        let deferred = sweep(&api).await.expect("the open sweep");
+        let requests = cluster.requests.lock().clone();
+        assert!(
+            !deleted(&cluster, ORPHAN),
+            "{writes:?}: open swept a policy written after its create as never created \
+             (story:pod-sweep-replays-from-the-policys-create): {requests:#?}"
+        );
+        assert!(deferred.is_empty(), "{writes:?}: {deferred:?}");
+    }
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+}
+
+/// A policy unchanged since its create, one `managedFields` entry at or before its
+/// `creationTimestamp`, or none listed, is swept as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_unchanged_since_its_create_is_swept_as_never_created() {
+    for writes in [
+        Some(&[CREATED][..]),
+        Some(&["2019-12-31T23:59:59Z"][..]),
+        None,
+    ] {
+        let cluster = cluster(Watch::NeverCreated);
+        written(&cluster, CREATED, writes);
+        let api = start(&cluster);
+        let deferred = sweep(&api).await.expect("the open sweep");
+        let requests = cluster.requests.lock().clone();
+        assert!(
+            deleted(&cluster, ORPHAN),
+            "{writes:?}: open kept the policy of a Pod a complete replay shows never created: \
+             {requests:#?}"
+        );
+        assert!(deferred.is_empty(), "{writes:?}: {deferred:?}");
+    }
+}
+
+/// A young policy written after its create, which open defers, is not swept as never created by
+/// the deferred sweep once it is old: it is kept and checked no more.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deferred_policy_written_after_its_create_is_not_swept_as_never_created() {
+    let cluster = cluster(Watch::NeverCreated);
+    let now = chrono::Utc::now();
+    let created =
+        (now - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let later = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    written(&cluster, &created, Some(&[&created, &later]));
+    let api = start(&cluster);
+    let mut deferred = sweep(&api).await.expect("the open sweep");
+    assert_eq!(
+        deferred
+            .iter()
+            .map(|kept| kept.run.as_str())
+            .collect::<Vec<_>>(),
+        [ORPHAN],
+        "open did not defer a young policy"
+    );
+    deferred[0].created = (now - chrono::Duration::hours(1)).fixed_offset();
+    resweep(&api, &mut deferred).await.expect("a round");
+    let requests = cluster.requests.lock().clone();
+    assert!(
+        !deleted(&cluster, ORPHAN),
+        "the deferred sweep swept a policy written after its create as never created \
+         (story:pod-sweep-replays-from-the-policys-create): {requests:#?}"
+    );
+    assert!(deferred.is_empty(), "a kept policy is still checked");
+}
