@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:namespace-lane-verb-case-accepts-only-its-own-refusal
 kind: story
-status: active
+status: implemented
 title: The namespace lane's Role-verb case accepts only a refusal that follows from the removed verb
 relations:
 - informed_by: review-result:wave-2026-10-31-d337-adversary-pass-1
@@ -12,10 +12,11 @@ relations:
 scope:
 - confidence: cited
   path: xtask/src/namespace_lane_run.rs
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T00:28:54Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-01T00:37:23Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-11-01T03:39:31Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 # Story: the namespace lane's Role-verb case accepts only a refusal that follows from the removed verb
 

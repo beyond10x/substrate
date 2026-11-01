@@ -480,6 +480,14 @@ Maintain `CHANGELOG.md` in Keep a Changelog form and cut it under a version head
 tag is the bare version — `0.2.0`, the version and nothing else (atlas § *Naming*) — annotated, at a
 fully gated `main` commit. The full gate comes first; component steps alone are not enough.
 
+A wave that ends in a release carries its release-prepare commit on the wave's integration branch,
+before the full gate: every workspace version and exact internal edge moved, `Cargo.lock`
+(`cargo update --workspace --offline`), `THIRD_PARTY_LICENSES.html` (cargo-about 0.9.1), the
+`CHANGELOG.md` version section and `website/docs/releases.md` (`cargo xtask docs-releases`).
+`release.yml` refuses a tag whose version is not the workspace version, and the four lane trailers
+name the tagged commit, so the lanes can run only once that commit is on `main`; a separate
+release-prepare pull request costs a second CI round and a second lane slot.
+
 **No Substrate crate is published to crates.io.** Every workspace package sets `publish = false`;
 Rust consumers use a local path or an exact Git revision. `cargo xtask check-packages` fails closed
 if any member becomes publishable and retains the runtime source boundary: fixed package names,

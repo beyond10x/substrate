@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-11-01
+
+Fixes only; the wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are
+unchanged. The `pod` adapter now sweeps a `NetworkPolicy` whose Pod was never created, and the
+Kubernetes namespace driver's probe says why each fact it withholds was not proved.
+
 ### Fixed
 
 - Every fact the Kubernetes namespace driver's probe withholds is logged at `warn` as
@@ -15,9 +21,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `state.store-failed`, not `kubernetes.api-failed`, a refused `pods get` while the probe waits
   ends its run at once with `kubernetes.api-failed` and the API's answer, and the probe's
   removal warnings carry the API's answer (`cannot <verb> resource "<resource>"`).
-- An exec end the Kubernetes namespace driver decides after an API call no longer panics, or overwrites the end, when a concurrent observation already ended the exec; the end recorded first stands.
-- The `pod` adapter's open and deferred sweeps remove an old owned `NetworkPolicy` whose run's Pod was never created, once a watch replay from the policy's `resourceVersion` ends in a `BOOKMARK` before any event of the run's Pod; a replay that does not end in one (410, an `ERROR` event, a stream that ends or a silent one) still keeps the policy.
-- A Role-verb case of `cargo xtask namespace-lane observe` passes on the daemon's log only once the first probe has finished and a `WARN` line carries the API's answer refusing that verb (`cannot <verb> resource "<resource>"`); a reason code or a "was not proved" line alone, or another resource's refusal, no longer passes it.
+- An exec end the Kubernetes namespace driver decides after an API call no longer panics, or
+  overwrites the end, when a concurrent observation already ended the exec; the end recorded
+  first stands.
+- The `pod` adapter's open and deferred sweeps remove an old owned `NetworkPolicy` whose run's
+  Pod was never created, once a watch replay from the policy's `resourceVersion` ends in a
+  `BOOKMARK` before any event of the run's Pod; a replay that does not end in one (410, an
+  `ERROR` event, a stream that ends or a silent one) still keeps the policy.
+- A Role-verb case of `cargo xtask namespace-lane observe` passes on the daemon's log only once
+  the first probe has finished and a `WARN` line carries the API's answer refusing that verb
+  (`cannot <verb> resource "<resource>"`); a reason code or a "was not proved" line alone,
+  or another resource's refusal, no longer passes it.
 
 ## [0.18.0] — 2026-10-31
 
