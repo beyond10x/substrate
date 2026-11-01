@@ -752,4 +752,192 @@ mod d364 {
             "a present Pod was replayed"
         );
     }
+
+    /// Adversary pass 1 of wave D364: the safe direction for a written policy whose replay now
+    /// runs, and the warn's reason, per policy and per sweep. Nested so that it shares the one
+    /// global [`Log`] subscriber.
+    mod d364_adv {
+        use super::*;
+
+        /// A kept policy of the deferred sweep, its trace started as open starts a written one.
+        fn kept_written(run: &str) -> Deferred {
+            Deferred {
+                trace: PodTrace::since_written(Some("1")),
+                ..kept(run, chrono::Duration::hours(1))
+            }
+        }
+
+        /// The warns logged for `run`.
+        fn warns(log: &Log, run: &str) -> Vec<Line> {
+            log.of(run)
+                .into_iter()
+                .filter(|line| line.level == tracing::Level::WARN)
+                .collect()
+        }
+
+        /// A written policy whose replay runs but does not show its container terminated or its
+        /// never-bound Pod deleted is kept, by open and by the deferred sweep: a Pod force-deleted
+        /// running, a 410 as a status or as an `ERROR` event, a stream ending without a
+        /// `BOOKMARK`, a bound Pod deleted running, a Pod added without its end.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_written_policy_not_shown_stopped_is_kept() {
+            const DEFERRED: &str = "substrate-run-deferred-written";
+            for watch in [
+                Watch::ForceDeleted,
+                Watch::Gone,
+                Watch::Expired,
+                Watch::Ended,
+                Watch::BoundDeleted,
+                Watch::Added,
+            ] {
+                let fake = cluster(watch);
+                written(&fake, CREATED, Some(WRITES));
+                let api = start(&fake);
+                let mut deferred = vec![kept_written(DEFERRED)];
+                let (open, round) = tokio::join!(sweep(&api), resweep(&api, &mut deferred));
+                let requests = fake.requests.lock().clone();
+                assert_eq!(open.expect("the open sweep").len(), 0, "{watch:?}");
+                round.expect("a round");
+                for run in [ORPHAN, DEFERRED] {
+                    assert!(
+                        !deleted(&fake, run),
+                        "{watch:?}: {run}'s written policy was swept without its container shown \
+                         stopped (story:written-policy-swept-when-shown-stopped): {requests:#?}"
+                    );
+                    let watched = watches(&fake, run);
+                    assert!(
+                        watched.len() == 1 && watched[0].contains("&resourceVersion=1&"),
+                        "{watch:?}: {run}: the replay did not start at the policy's version: \
+                         {watched:?}"
+                    );
+                }
+                assert!(deferred.is_empty(), "{watch:?}: {deferred:?}");
+            }
+        }
+
+        /// A written policy open defers because its replay went unanswered keeps its write into
+        /// the deferred sweep: a `BOOKMARK` alone there keeps it, with one warn naming the write,
+        /// and a replay there that shows its container terminated sweeps it.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_written_policy_deferred_unanswered_keeps_its_write() {
+            for (then, swept) in [(Watch::NeverCreated, false), (Watch::Terminated, true)] {
+                let fake = cluster(Watch::Unavailable);
+                written(&fake, CREATED, Some(WRITES));
+                let api = start(&fake);
+                let mut deferred = sweep(&api).await.expect("the open sweep");
+                assert!(
+                    deferred.len() == 1 && deferred[0].run == ORPHAN && !deleted(&fake, ORPHAN),
+                    "{then:?}: open did not defer an unanswered written policy: {deferred:?}"
+                );
+                *fake.watch.lock() = then;
+                let log = Log::start();
+                resweep(&api, &mut deferred).await.expect("a round");
+                let warned = warns(&log, ORPHAN);
+                drop(log);
+                let requests = fake.requests.lock().clone();
+                assert_eq!(
+                    deleted(&fake, ORPHAN),
+                    swept,
+                    "{then:?}: (story:written-policy-swept-when-shown-stopped): {requests:#?}"
+                );
+                assert!(deferred.is_empty(), "{then:?}: {deferred:?}");
+                if swept {
+                    assert!(warned.is_empty(), "{then:?}: {warned:#?}");
+                } else {
+                    assert!(
+                        warned.len() == 1
+                            && warned[0]
+                                .field("why")
+                                .is_some_and(|why| why.contains(WRITE)),
+                        "{then:?}: (story:kept-written-policy-log-names-the-write): {warned:#?}"
+                    );
+                }
+            }
+        }
+
+        /// Each written policy of a two-page list, old and its Pod gone, logs its own one warn
+        /// naming the write, and no line other than that warn names it.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn each_kept_written_policy_logs_its_own_one_warn() {
+            let fake = Arc::new(Cluster {
+                pages: 2,
+                ..Cluster::default()
+            });
+            *fake.watch.lock() = Watch::NeverCreated;
+            written(&fake, CREATED, Some(WRITES));
+            let api = start(&fake);
+            let log = Log::start();
+            let deferred = sweep(&api).await.expect("the open sweep");
+            let lines: Vec<(String, Vec<Line>)> = (1..=2)
+                .map(|page| {
+                    let run = page_orphan(page);
+                    let lines = log.of(&run);
+                    (run, lines)
+                })
+                .collect();
+            drop(log);
+            assert!(deferred.is_empty(), "{deferred:?}");
+            for (run, lines) in lines {
+                let naming: Vec<&Line> =
+                    lines.iter().filter(|line| line.names_the_write()).collect();
+                assert!(
+                    naming.len() == 1
+                        && naming[0].level == tracing::Level::WARN
+                        && naming[0]
+                            .field("why")
+                            .is_some_and(|why| why.contains(WRITE)),
+                    "{run}: (story:kept-written-policy-log-names-the-write): {lines:#?}"
+                );
+                assert!(!deleted(&fake, &run), "{run}");
+            }
+        }
+
+        /// A policy kept for another reason than a write after its create does not blame the
+        /// write: an unwritten policy whose replay is a 410 or shows a bound Pod deleted running.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn an_unwritten_kept_policy_does_not_name_the_write() {
+            for watch in [Watch::Gone, Watch::BoundDeleted] {
+                let fake = cluster(watch);
+                let api = start(&fake);
+                let log = Log::start();
+                sweep(&api).await.expect("the open sweep");
+                let lines = log.of(ORPHAN);
+                drop(log);
+                let warned: Vec<&Line> = lines
+                    .iter()
+                    .filter(|line| line.level == tracing::Level::WARN)
+                    .collect();
+                assert!(
+                    warned.len() == 1 && !lines.iter().any(Line::names_the_write),
+                    "{watch:?}: {lines:#?}"
+                );
+                assert!(!deleted(&fake, ORPHAN), "{watch:?}");
+            }
+        }
+
+        /// A young written policy the deferred sweep still holds, its Pod gone, is not replayed
+        /// and logs nothing naming the write; it stays deferred.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_young_written_policy_in_the_deferred_sweep_logs_nothing() {
+            let fake = cluster(Watch::NeverCreated);
+            let mut deferred = vec![Deferred {
+                created: chrono::Utc::now().fixed_offset(),
+                ..kept_written("substrate-run-deferred-young")
+            }];
+            let api = start(&fake);
+            let log = Log::start();
+            resweep(&api, &mut deferred).await.expect("a round");
+            let lines = log.of("substrate-run-deferred-young");
+            drop(log);
+            assert_eq!(deferred.len(), 1, "a young policy was dropped");
+            assert!(
+                !lines.iter().any(Line::names_the_write),
+                "(story:kept-written-policy-log-names-the-write): {lines:#?}"
+            );
+            assert!(
+                watches(&fake, "substrate-run-deferred-young").is_empty(),
+                "a young policy was replayed"
+            );
+        }
+    }
 }
