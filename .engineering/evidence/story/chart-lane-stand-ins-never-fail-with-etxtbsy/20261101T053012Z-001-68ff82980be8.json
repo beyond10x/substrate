@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T05:30:12Z",
+  "actor": "human:timo",
+  "artifact": "story:chart-lane-stand-ins-never-fail-with-etxtbsy",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p xtask --bin xtask (build-slot, substrate-d342-u2 at a2efee43)",
+    "reference": "461 passed; 0 failed; 9 ignored; clippy 0"
+  }
+}

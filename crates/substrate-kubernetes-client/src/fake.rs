@@ -203,6 +203,7 @@ struct Store {
     rules: Vec<Value>,
     logs: BTreeMap<String, Vec<u8>>,
     log_refusal: Option<(u16, String)>,
+    exec_refusal: Option<(u16, String)>,
     restricted: bool,
 }
 
@@ -406,6 +407,18 @@ impl FakeCluster {
     /// API answers a Role without `pods/log` `get`.
     pub fn refuse_logs(&self, status: u16, message: &str) {
         self.store().log_refusal = Some((status, message.to_owned()));
+    }
+
+    /// Every `pods/exec` upgrade from now on is refused `status` `Forbidden` with `message`, as
+    /// the API's authorization answers a Role without `pods/exec` `create`: before the upgrade
+    /// and before the Pod is looked up.
+    pub fn refuse_exec(&self, status: u16, message: &str) {
+        self.store().exec_refusal = Some((status, message.to_owned()));
+    }
+
+    /// Ends what [`FakeCluster::refuse_exec`] set: `pods/exec` is upgraded again.
+    pub fn admit_exec(&self) {
+        self.store().exec_refusal = None;
     }
 
     /// Whether Pod Security admission enforces `restricted` from now on. Off, the default, admits
@@ -1102,13 +1115,18 @@ impl Shared {
         pod: &str,
         query: &BTreeMap<String, Vec<String>>,
     ) -> Result<Response<Body>, Refusal> {
-        if !self
-            .lock()
-            .objects
-            .get("pods")
-            .is_some_and(|pods| pods.contains_key(pod))
         {
-            return Err(not_found("pods", pod));
+            let store = self.lock();
+            if let Some((status, message)) = &store.exec_refusal {
+                return Err(Refusal::new(*status, "Forbidden", message.clone()));
+            }
+            if !store
+                .objects
+                .get("pods")
+                .is_some_and(|pods| pods.contains_key(pod))
+            {
+                return Err(not_found("pods", pod));
+            }
         }
         let headers = request.headers();
         let offered = headers

@@ -25,6 +25,10 @@ const STATUS: u8 = 3;
 const CLOSE: u8 = 255;
 /// The input bytes one message carries.
 const STDIN_CHUNK: usize = 64 * 1024;
+/// The bytes of a refused upgrade's body the client reads: a `Status` is far smaller.
+const MAX_REFUSAL_BODY_BYTES: usize = 64 * 1024;
+/// How long the client waits for the rest of a refused upgrade's body after its head.
+const REFUSAL_BODY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What one `pods/exec` call read.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -127,6 +131,27 @@ impl Api {
         Ok(request)
     }
 
+    /// The API's refusal of the upgrade, `response`, with the `Status` its body carries. The
+    /// handshake only borrowed `connection`, so the body can still be read from it: tungstenite
+    /// keeps only the bytes that arrived with the head.
+    async fn refused_upgrade<S>(
+        &self,
+        response: &tungstenite::http::Response<Option<Vec<u8>>>,
+        connection: &mut S,
+    ) -> ApiError
+    where
+        S: tokio::io::AsyncRead + Unpin,
+    {
+        let status = response.status().as_u16();
+        let tail = response.body().as_deref().unwrap_or_default();
+        let body = refusal_body(response.headers(), tail, connection).await;
+        ApiError::Answered {
+            status,
+            reason: self.status_reason(&body),
+            detail: format!("exec answered {status}: {}", self.status_message(&body)),
+        }
+    }
+
     async fn exec_unbounded(
         &self,
         pod: &str,
@@ -138,26 +163,25 @@ impl Api {
         pod_name(pod)?;
         container_name(container)?;
         let request = self.exec_request(pod, container, command)?;
-        let tls = self.connect().await.map_err(ApiError::Unanswered)?;
+        let mut tls = self.connect().await.map_err(ApiError::Unanswered)?;
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_API_BODY_BYTES))
             .max_frame_size(Some(MAX_API_BODY_BYTES));
-        let (socket, _) =
-            match tokio_tungstenite::client_async_with_config(request, tls, Some(config)).await {
-                Ok(connected) => connected,
-                Err(tungstenite::Error::Http(response)) => {
-                    let status = response.status().as_u16();
-                    let body = response.body().as_deref().unwrap_or_default();
-                    return Err(ApiError::Answered {
-                        status,
-                        reason: self.status_reason(body),
-                        detail: format!("exec answered {status}: {}", self.status_message(body)),
-                    });
-                }
-                Err(error) => {
-                    return Err(ApiError::Unanswered(self.redact(&format!("exec: {error}"))));
-                }
-            };
+        let (socket, _) = match tokio_tungstenite::client_async_with_config(
+            request,
+            &mut tls,
+            Some(config),
+        )
+        .await
+        {
+            Ok(connected) => connected,
+            Err(tungstenite::Error::Http(response)) => {
+                return Err(self.refused_upgrade(&response, &mut tls).await);
+            }
+            Err(error) => {
+                return Err(ApiError::Unanswered(self.redact(&format!("exec: {error}"))));
+            }
+        };
         let unanswered = |error: tungstenite::Error| {
             ApiError::Unanswered(self.redact(&format!("exec: {error}")))
         };
@@ -235,6 +259,85 @@ impl Api {
             ));
         }
         Ok(output)
+    }
+}
+
+/// The body of a refused upgrade whose head announced `headers`: `tail`, what arrived with the
+/// head, and what follows it on `connection`, framed as the head states (`Content-Length`,
+/// chunked, or until the server closes), at most [`MAX_REFUSAL_BODY_BYTES`] and within
+/// [`REFUSAL_BODY_WAIT`]. What did not arrive in time is not waited for: the refusal stands
+/// without it.
+async fn refusal_body<S>(headers: &header::HeaderMap, tail: &[u8], connection: &mut S) -> Vec<u8>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+    let chunked = headers
+        .get(header::TRANSFER_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("chunked"));
+    let length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|_| !chunked);
+    let mut raw = tail.to_vec();
+    let complete = |raw: &[u8]| match length {
+        Some(length) => raw.len() >= length,
+        None if chunked => dechunk(raw).1,
+        None => false,
+    };
+    let _ = tokio::time::timeout(REFUSAL_BODY_WAIT, async {
+        let mut buffer = [0_u8; 4096];
+        while !complete(&raw) && raw.len() < MAX_REFUSAL_BODY_BYTES {
+            match connection.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => raw.extend_from_slice(&buffer[..read]),
+            }
+        }
+    })
+    .await;
+    raw.truncate(MAX_REFUSAL_BODY_BYTES);
+    match length {
+        Some(length) => {
+            raw.truncate(length);
+            raw
+        }
+        None if chunked => dechunk(&raw).0,
+        None => raw,
+    }
+}
+
+/// The data of a chunked body read so far, and whether its last chunk arrived. A chunk not yet
+/// whole, or a size line that does not parse, ends the data there.
+fn dechunk(raw: &[u8]) -> (Vec<u8>, bool) {
+    let mut data = Vec::new();
+    let mut rest = raw;
+    loop {
+        let Some(end) = rest.windows(2).position(|pair| pair == b"\r\n") else {
+            return (data, false);
+        };
+        let size = std::str::from_utf8(&rest[..end])
+            .ok()
+            .and_then(|line| line.split(';').next())
+            .and_then(|size| usize::from_str_radix(size.trim(), 16).ok());
+        let Some(size) = size else {
+            return (data, false);
+        };
+        if size == 0 {
+            return (data, true);
+        }
+        let start = end + 2;
+        let after = rest.get(start..).unwrap_or_default();
+        let Some(chunk) = after.get(..size) else {
+            data.extend_from_slice(after);
+            return (data, false);
+        };
+        data.extend_from_slice(chunk);
+        rest = after
+            .get(size..)
+            .and_then(|tail| tail.get(2..))
+            .unwrap_or_default();
     }
 }
 
