@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- An exec end the Kubernetes namespace driver decides after an API call no longer panics, or overwrites the end, when a concurrent observation already ended the exec; the end recorded first stands.
+
 ## [0.18.0] — 2026-10-31
 
 The wire states what a confinement adapter proves, never its name (design 30, ADR 0048), and the

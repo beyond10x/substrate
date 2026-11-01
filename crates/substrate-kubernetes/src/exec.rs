@@ -97,6 +97,10 @@ struct Tracked {
     /// Pod's `deletionTimestamp` ([`read_deleting`]); [`DELETION_CONFIRM`] later a Pod still
     /// holding the bound uid ends the exec `unknown`.
     deletion_accepted_at: Option<DateTime<Utc>>,
+    /// Whether this driver committed the exec's end ([`NamespaceDriver::end`]). Not the
+    /// observation's state: a recovered exec starts from the daemon's record, `unknown`, and is
+    /// still ended once.
+    ended: bool,
 }
 
 /// How a gone Pod's container ended, as the watch shows it.
@@ -179,6 +183,7 @@ impl NamespaceDriver {
                 output_failure: None,
                 wall_deletion_at,
                 deletion_accepted_at: None,
+                ended: false,
             },
         );
         if !input.wait {
@@ -441,7 +446,7 @@ impl NamespaceDriver {
             Some(pod) if uid_of(&pod) == Some(tracked.uid.as_str()) => {
                 let accepted = self.note(id, &pod);
                 if self.deletion_unconfirmed(accepted) {
-                    Ok(self.unconfirmed(id, &tracked.pod))
+                    Ok(self.unconfirmed(id, &tracked))
                 } else if shows_end(&pod) {
                     self.finish(id, &pod, true).await
                 } else if self.past_wall_bound(&tracked) {
@@ -484,13 +489,19 @@ impl NamespaceDriver {
 
     /// Ends the exec `unknown` because its Pod still holds the bound uid [`DELETION_CONFIRM`]
     /// after its deletion was accepted (design 28).
-    fn unconfirmed(&self, id: &str, pod: &str) -> ExecObservation {
+    fn unconfirmed(&self, id: &str, tracked: &Tracked) -> ExecObservation {
         tracing::warn!(
-            pod,
+            pod = tracked.pod,
             "an exec Pod's deletion was not confirmed within its bound; the run is unknown and \
              the garbage round deletes it again"
         );
-        self.end(id, ExecState::Unknown, None, Output::Unknown)
+        self.end(
+            id,
+            &tracked.observation,
+            ExecState::Unknown,
+            None,
+            Output::Unknown,
+        )
     }
 
     /// Delivers the deletion of a tracked exec's Pod under `uid` ([`Self::deliver`]) and records
@@ -556,7 +567,7 @@ impl NamespaceDriver {
             Some(pod) if uid_of(&pod) == Some(tracked.uid.as_str()) => {
                 let accepted = self.note(id, &pod);
                 if self.deletion_unconfirmed(accepted) {
-                    Ok(self.unconfirmed(id, &tracked.pod))
+                    Ok(self.unconfirmed(id, tracked))
                 } else if shows_end(&pod) {
                     self.finish(id, &pod, true).await
                 } else {
@@ -649,10 +660,11 @@ impl NamespaceDriver {
         trace.note(&pod);
         let output_bytes = run_output_bytes(&pod);
         let ended = shows_end(&pod) && pod["metadata"]["deletionTimestamp"].is_null();
+        let recorded = unproven_output(previous);
         lock(&self.execs().tracked).insert(
             id.to_owned(),
             Tracked {
-                observation: unproven_output(previous),
+                observation: recorded.clone(),
                 pod: name.clone(),
                 uid: uid.clone(),
                 trace,
@@ -662,12 +674,13 @@ impl NamespaceDriver {
                 output_failure: None,
                 wall_deletion_at: None,
                 deletion_accepted_at: None,
+                ended: false,
             },
         );
         let recovered = match output_bytes {
             Some(_) if ended => self.finish(id, &pod, true).await,
             _ => match self.deliver(&name, &uid, KILL_GRACE_SECONDS).await {
-                Ok(_) => Ok(self.end(id, ExecState::Unknown, None, Output::Unknown)),
+                Ok(_) => Ok(self.end(id, &recorded, ExecState::Unknown, None, Output::Unknown)),
                 Err(error) => Err(error),
             },
         };
@@ -716,11 +729,17 @@ impl NamespaceDriver {
                 } else {
                     ExecState::Unknown
                 };
-                Ok(self.end(id, state, None, Output::Empty))
+                Ok(self.end(id, &tracked.observation, state, None, Output::Empty))
             }
             Gone::Unproven(why) => {
                 tracing::warn!(why, "an exec Pod is gone without a shown end");
-                Ok(self.end(id, ExecState::Unknown, None, Output::Unknown))
+                Ok(self.end(
+                    id,
+                    &tracked.observation,
+                    ExecState::Unknown,
+                    None,
+                    Output::Unknown,
+                ))
             }
             Gone::Unanswered(why) => Err(DriverError::failed(API_FAILED, why)),
         }
@@ -871,7 +890,7 @@ impl NamespaceDriver {
         } else {
             ExecState::Exited
         };
-        let ended = self.end(id, state, exit, output);
+        let ended = self.end(id, &tracked.observation, state, exit, output);
         if present {
             let path = format!("{}/{}", self.api().pods(), tracked.pod);
             if let Err(error) = self
@@ -940,38 +959,34 @@ impl NamespaceDriver {
     }
 
     /// Commits `state` for a tracked exec and returns its observation.
+    ///
+    /// The caller decided the end from `base`, its snapshot of the exec taken before an await, so
+    /// a concurrent observation may have ended the exec meanwhile. An exec already ended keeps
+    /// its recorded end, which is returned. One the daemon has since acknowledged or discarded,
+    /// and so this driver forgot, is answered as the caller decided it from `base` and is not
+    /// tracked again; the daemon's store holds that exec terminal already, keeps it and answers
+    /// this one `Superseded`.
     fn end(
         &self,
         id: &str,
+        base: &ExecObservation,
         state: ExecState,
         exit: Option<ExecExit>,
         output: Output,
     ) -> ExecObservation {
         let mut tracked = lock(&self.execs().tracked);
         let Some(entry) = tracked.get_mut(id) else {
-            unreachable!("only a tracked exec is ended");
+            let mut late = base.clone();
+            settle(&mut late, state, exit, output);
+            return late;
         };
-        let observation = &mut entry.observation;
-        observation.resource.state = state;
-        observation.resource.exit = exit;
-        observation.resource.observed_at = Utc::now();
-        match output {
-            Output::Read {
-                stdout,
-                stderr,
-                stdout_truncated,
-                stderr_truncated,
-            } => {
-                observation.stdout = stdout;
-                observation.stderr = stderr;
-                observation.stdout_truncated = stdout_truncated;
-                observation.stderr_truncated = stderr_truncated;
-                observation.output_complete = true;
-            }
-            Output::Empty => observation.output_complete = true,
-            Output::Unknown => {}
-            Output::Failed(code, why) => entry.output_failure = Some((code, why)),
+        if entry.ended {
+            return entry.observation.clone();
         }
+        if let Some(failure) = settle(&mut entry.observation, state, exit, output) {
+            entry.output_failure = Some(failure);
+        }
+        entry.ended = true;
         entry.signal = None;
         lock(&self.execs().garbage).insert(entry.pod.clone());
         entry.observation.clone()
@@ -1533,6 +1548,40 @@ fn unproven_output(recorded: &ExecObservation) -> ExecObservation {
         stderr_kept: None,
         output_complete: false,
         ..recorded.clone()
+    }
+}
+
+/// Writes an end decided as `state`, `exit` and `output` into `observation`, and returns why its
+/// output cannot be served when it cannot.
+fn settle(
+    observation: &mut ExecObservation,
+    state: ExecState,
+    exit: Option<ExecExit>,
+    output: Output,
+) -> Option<(&'static str, String)> {
+    observation.resource.state = state;
+    observation.resource.exit = exit;
+    observation.resource.observed_at = Utc::now();
+    match output {
+        Output::Read {
+            stdout,
+            stderr,
+            stdout_truncated,
+            stderr_truncated,
+        } => {
+            observation.stdout = stdout;
+            observation.stderr = stderr;
+            observation.stdout_truncated = stdout_truncated;
+            observation.stderr_truncated = stderr_truncated;
+            observation.output_complete = true;
+            None
+        }
+        Output::Empty => {
+            observation.output_complete = true;
+            None
+        }
+        Output::Unknown => None,
+        Output::Failed(code, why) => Some((code, why)),
     }
 }
 
