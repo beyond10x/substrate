@@ -269,7 +269,11 @@ policy whose Pod is gone: the API must show the container stopped.
   Pod's history (`story:pod-sweep-replays-from-the-policys-create`). The rule therefore applies
   only to a policy whose metadata shows no write after its create: a policy with more than one
   `managedFields` entry, or whose one entry's `time` is after its `creationTimestamp` or cannot be
-  read, is kept and logged as a policy whose container is not shown stopped is. Times have second
+  read, is never deleted as never created. Its replay still starts from its `resourceVersion`:
+  events that show its container stopped release it, as they release any policy, and a `BOOKMARK`
+  alone keeps it, logged with the reason that it was written after its create
+  (`story:written-policy-swept-when-shown-stopped`,
+  `story:kept-written-policy-log-names-the-write`). Times have second
   precision, so another writer within the create's second shows only as another entry, and it is
   counted. A policy whose listed metadata carries no `managedFields` shows no write and is swept
   as before; for it the rule still relies on the adapter being the only writer of its policies.
