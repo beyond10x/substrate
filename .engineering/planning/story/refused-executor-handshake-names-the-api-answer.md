@@ -39,7 +39,9 @@ message cuts it.
 
 - A red case first: `FakeCluster` refuses the exec upgrade with 403 and a `Status` body whose
   message says `cannot create resource "pods/exec"`; the probe's warning carries that text.
-- An exec upgrade refused 4xx (other than 408 and 429) ends the handshake at once with the API's
-  answer, not after `CREATE_BOUND`; other failures keep retrying as now.
+- An exec upgrade refused 401 or 403 ends the handshake at once with the API's answer, not after
+  `CREATE_BOUND`; every other answer, 4xx included, keeps retrying as now (D342: "fails at once on
+  403"; the API answers an exec into a keeper not yet scheduled or not yet running with a 4xx, and
+  the handshake starts right after the keeper's create).
 - The namespace lane keeps the daemon log of a case that gave no record, so the next failure can be
   read.

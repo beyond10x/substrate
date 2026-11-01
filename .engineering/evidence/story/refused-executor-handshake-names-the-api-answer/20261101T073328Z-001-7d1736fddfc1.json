@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T07:33:28Z",
+  "actor": "human:timo",
+  "artifact": "story:refused-executor-handshake-names-the-api-answer",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p b10x-substrate-kubernetes-client; -p b10x-substrate-kubernetes --lib; -p xtask --bin xtask (build-slot, substrate-d339-int at cac4ef5b)",
+    "reference": "client 51 passed; kubernetes lib 139 passed; xtask bin 463 passed, 9 ignored; fmt and clippy -D warnings clean"
+  }
+}
