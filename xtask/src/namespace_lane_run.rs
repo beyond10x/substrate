@@ -77,6 +77,10 @@ const PENDING_BOUND: Duration = Duration::from_mins(4);
 const OUTCOME_UNKNOWN: &str = "operation.outcome-unknown";
 /// Where, under the checkout, each run keeps the daemon logs of its failed cases.
 const KEPT_LOGS: &str = "target/namespace-lane/daemon-logs";
+/// How far a file's modification time may lag the clock a case's start was read from: the kernel
+/// stamps files from its coarse clock, at most one tick (10 ms at 100 Hz) behind. Verb cases run
+/// back to back, so the previous case's log is older than its start by more than this.
+const MTIME_SLACK: Duration = Duration::from_millis(20);
 /// When a Role-verb case whose facts stayed whole tries its dependent route.
 const VERB_ROUTE_AFTER: Duration = Duration::from_secs(5);
 /// How long the privileged dry-run case waits for its refusal.
@@ -2060,8 +2064,8 @@ fn kept_case(work: &Path, kept: &Path, name: &str, since: SystemTime, case: Case
     })
 }
 
-/// Copies every `daemon-*.log` in a directory of `work` last written at or after `since`, less a
-/// second for the file system's coarse clock, into `kept/<case>/` (owner-private), `case` cut to
+/// Copies every `daemon-*.log` in a directory of `work` last written at or after `since`, less
+/// [`MTIME_SLACK`] for the kernel's coarse file clock, into `kept/<case>/` (owner-private), `case` cut to
 /// lower-case letters, digits and dashes; the copies' paths, in name order.
 ///
 /// # Errors
@@ -2074,7 +2078,7 @@ pub fn keep_daemon_logs(
     since: SystemTime,
 ) -> std::io::Result<Vec<PathBuf>> {
     let since = since
-        .checked_sub(Duration::from_secs(1))
+        .checked_sub(MTIME_SLACK)
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut logs = Vec::new();
     for directory in fs::read_dir(work)? {
@@ -3137,6 +3141,51 @@ mod tests {
                 .join("s7-everything-destroyed-through-the-daemon")
                 .exists(),
             "a passed case keeps nothing"
+        );
+    }
+
+    /// Adversary case for D342 U1. The verb cases run back to back in one directory: case N-1's
+    /// daemon is stopped inside `verb`, then `set_role(None)` runs, then N-1 is recorded and `since`
+    /// is taken, so N-1's log was last written a few hundred ms before case N began. A failed
+    /// case N keeps the logs written while it ran, and N-1's is not one of them.
+    #[test]
+    fn a_log_last_written_before_the_case_began_is_not_kept_with_it() {
+        let work = tempfile::tempdir().expect("tempdir");
+        let kept = tempfile::tempdir().expect("tempdir");
+        let verbs = work.path().join("verbs");
+        fs::create_dir_all(&verbs).expect("verbs");
+        let since = SystemTime::now();
+        let previous = verbs.join("daemon-01JA0000000000000000000000.log");
+        fs::write(&previous, "the previous verb case's daemon, stopped\n").expect("written");
+        fs::File::options()
+            .write(true)
+            .open(&previous)
+            .and_then(|file| file.set_modified(since - Duration::from_millis(300)))
+            .expect("aged");
+        let current = verbs.join("daemon-01JB0000000000000000000000.log");
+        fs::write(
+            &current,
+            "WARN code=\"kubernetes.executor-handshake-failed\"\n",
+        )
+        .expect("written");
+
+        let logs = keep_daemon_logs(
+            work.path(),
+            kept.path(),
+            "S6 Role without pods/exec create",
+            since,
+        )
+        .expect("kept");
+        let names: Vec<String> = logs
+            .iter()
+            .filter_map(|log| log.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["daemon-01JB0000000000000000000000.log"],
+            "a log the previous case's daemon wrote before this case began is kept and named \
+             as this case's"
         );
     }
 }

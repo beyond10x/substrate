@@ -328,12 +328,16 @@ fn dechunk(raw: &[u8]) -> (Vec<u8>, bool) {
             return (data, true);
         }
         let start = end + 2;
-        let Some(chunk) = rest.get(start..start + size) else {
-            data.extend_from_slice(&rest[start.min(rest.len())..]);
+        let after = rest.get(start..).unwrap_or_default();
+        let Some(chunk) = after.get(..size) else {
+            data.extend_from_slice(after);
             return (data, false);
         };
         data.extend_from_slice(chunk);
-        rest = rest.get(start + size + 2..).unwrap_or_default();
+        rest = after
+            .get(size..)
+            .and_then(|tail| tail.get(2..))
+            .unwrap_or_default();
     }
 }
 

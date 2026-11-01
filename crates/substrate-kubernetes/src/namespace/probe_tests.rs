@@ -1766,8 +1766,22 @@ const EXEC_REFUSED: &str = "cannot create resource \"pods/exec\"";
 /// API's own answer, the line the namespace lane reads the refusal from.
 #[tokio::test]
 async fn a_refused_executor_handshake_names_the_apis_answer_at_once() {
+    refused_at_once(403, EXEC_FORBIDDEN, EXEC_REFUSED).await;
+}
+
+/// D342: a credential the API does not accept has it refuse the handshake 401. No retry clears
+/// that either, so the probe fails at once with the API's answer.
+#[tokio::test]
+async fn an_executor_handshake_refused_401_names_the_apis_answer_at_once() {
+    refused_at_once(401, "Unauthorized", "exec answered 401: Unauthorized").await;
+}
+
+/// Serves a driver whose exec upgrades the API refuses `status` with `message`, and asserts the
+/// serve loop's warning names [`EXECUTOR_HANDSHAKE_FAILED`] and `expected` before the driver's
+/// clock is moved past [`CREATE_BOUND`].
+async fn refused_at_once(status: u16, message: &str, expected: &str) {
     let rig = rig(Child::Exact, None).await;
-    rig.fake.refuse_exec(403, EXEC_FORBIDDEN);
+    rig.fake.refuse_exec(status, message);
     let log = CapturedLog::start();
     let serving = Arc::clone(&rig.driver).serve();
     tokio::pin!(serving);
@@ -1798,12 +1812,12 @@ async fn a_refused_executor_handshake_names_the_apis_answer_at_once() {
         }
     };
     assert!(
-        line.contains(EXEC_REFUSED),
-        "the warning lost the API's answer: {line}"
+        line.contains(expected),
+        "the warning lost the API's answer to a {status}: {line}"
     );
     assert!(
         !advanced,
-        "the refused handshake was retried until CREATE_BOUND: {line}"
+        "the handshake refused {status} was retried until CREATE_BOUND: {line}"
     );
 }
 

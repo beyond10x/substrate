@@ -2125,3 +2125,41 @@ mod adversary_d339 {
         }
     }
 }
+
+/// Adversary cases for D342 U1: the body of a refused exec upgrade, as `refusal_body` and
+/// `dechunk` read it.
+mod adversary_d342 {
+    use super::{client, raw_http_server};
+
+    /// A chunked 403 whose chunk-size line is the largest `usize` (16 hex digits, which
+    /// `from_str_radix` accepts) is still the API's 403. Reading its body must not panic on
+    /// `start + size` in `dechunk`: the refusal stands, as a body that does not parse does.
+    #[tokio::test]
+    async fn a_refusal_whose_chunk_size_overflows_is_still_the_apis_403() {
+        let (config, _closed) = raw_http_server(Some(
+            b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\
+              Transfer-Encoding: chunked\r\n\r\n\
+              ffffffffffffffff\r\n{\"kind\":\"Status\",\"code\":403}\r\n0\r\n\r\n",
+        ))
+        .await;
+        let mut api = client(&config);
+        api.timeout = std::time::Duration::from_secs(5);
+        let outcome = tokio::spawn(async move {
+            api.exec(
+                "snl-01jabcdefghjkmnpqrstvwxyz0-keeper",
+                "keeper",
+                &["/substrate-executor", "version"],
+                b"",
+                16,
+            )
+            .await
+        })
+        .await;
+        let error = match outcome {
+            Ok(Err(error)) => error,
+            Ok(Ok(output)) => panic!("the refused upgrade was admitted: {output:?}"),
+            Err(join) => panic!("the client panicked reading the refusal's body: {join}"),
+        };
+        assert_eq!(error.status(), Some(403), "{error}");
+    }
+}
