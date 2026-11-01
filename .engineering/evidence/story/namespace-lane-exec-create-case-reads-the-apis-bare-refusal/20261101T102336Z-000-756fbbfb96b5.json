@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T10:23:36Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-lane-exec-create-case-reads-the-apis-bare-refusal",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p xtask (build-slot, substrate-d339-int at 3413131d)",
+    "reference": "13 result lines ok; bin 465 passed, 9 ignored; red first: the_exec_create_case_reads_the_apis_bare_refusal_and_stays_distinct_from_get; clippy -D warnings clean"
+  }
+}
