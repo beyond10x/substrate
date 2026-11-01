@@ -296,6 +296,17 @@ pub fn vectors_verdict(stdout: &str, declared: usize) -> Result<usize, String> {
     }
 }
 
+/// The driver's probe-loop lines that a probe has finished, run or failed: before one, a fact
+/// may be absent only because no probe ran yet.
+pub const PROBE_FINISHED: [&str; 2] = [
+    "the namespace driver's probe ran",
+    "the namespace driver's probe failed",
+];
+
+/// The driver's line that its open was refused: no probe runs after it, and it carries the API's
+/// answer as `message=`.
+pub const NOT_OPEN: &str = "the namespace driver is not open";
+
 /// The reason codes a daemon's log names on its `WARN` lines: `code=` fields, quoted or not.
 pub fn named_codes(log: &str) -> BTreeSet<String> {
     let mut codes = BTreeSet::new();
@@ -358,10 +369,14 @@ pub fn unproved_facts(log: &str) -> BTreeSet<String> {
 /// dependent fact is absent and its refusal named". A reason code on a `WARN` line names it, or
 /// the probe's `WARN` that this very missing fact was not proved, which states why.
 pub fn verb_refusal(
+    log: &str,
+    _since: usize,
+    _resource: &str,
+    _verb: &str,
     missing: &BTreeSet<String>,
-    codes: &BTreeSet<String>,
-    unproved: &BTreeSet<String>,
 ) -> Option<String> {
+    let codes = &named_codes(log);
+    let unproved = &unproved_facts(log);
     if missing.is_empty() {
         return None;
     }
@@ -1748,7 +1763,7 @@ impl Steps<'_> {
             let codes = named_codes(&log);
             let missing: BTreeSet<String> = full.difference(&facts).cloned().collect();
             if started.elapsed() > Duration::from_secs(2)
-                && let Some(refused) = verb_refusal(&missing, &codes, &unproved_facts(&log))
+                && let Some(refused) = verb_refusal(&log, 0, resource, verb, &missing)
             {
                 break Ok(refused);
             }
@@ -2512,9 +2527,37 @@ mod tests {
         );
     }
 
-    /// D337 S6a: the lines the probe writes when the Role lacks `pods/log` `get` refuse the
-    /// `pods/log` verb case by code and by each missing run fact; the line alone it wrote at
-    /// 620e89ce (no code, no fact) refused nothing.
+    /// The line the probe loop writes once the first probe has finished and its facts stand.
+    const PROBE_RAN: &str = "2026-11-01T01:00:03.000Z  INFO substrate_kubernetes::namespace::\
+                             probe: the namespace driver's probe ran\n";
+
+    /// The `WARN` line the driver writes when the API refuses `verb` on `resource`, the API's
+    /// answer worded as the API server words it, in `why=`'s `Display` form (D339 U1) or, when
+    /// `debug`, in the `Debug`-escaped form the driver wrote before it.
+    fn refused_line(resource: &str, verb: &str, debug: bool) -> String {
+        let answer = format!(
+            "answered 403: {resource} \"sbx-pr-x\" is forbidden: User \
+             \"system:serviceaccount:substrate:substrate-driver\" cannot {verb} resource \
+             \"{resource}\" in API group \"\" in the namespace \"substrate\""
+        );
+        let why = if debug {
+            format!("{answer:?}")
+        } else {
+            answer
+        };
+        format!(
+            "2026-11-01T01:00:02.000Z  WARN substrate_kubernetes::namespace::probe: the probe \
+             Pod's run proved nothing code=\"kubernetes.api-failed\" why={why}\n"
+        )
+    }
+
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// D337 S6a, as observed: the lines the probe writes when the Role lacks `pods/log` `get`
+    /// refuse the `pods/log` verb case, by the API's answer they carry once the probe has
+    /// finished; without a finished probe, the same lines refuse nothing.
     #[test]
     fn a_refused_pod_log_read_refuses_the_verb_case() {
         let before = "2026-10-31T19:40:02.112Z  WARN substrate_kubernetes::namespace::probe: \
@@ -2522,52 +2565,183 @@ mod tests {
                       \\\"sbx-pr-x-pod\\\" is forbidden: cannot get resource \\\"pods/log\\\"\"\n";
         let after = "2026-10-31T21:50:02.112Z  WARN substrate_kubernetes::namespace::probe: \
                      the probe Pod's run proved nothing code=\"kubernetes.api-failed\" \
-                     why=\"the exec's log answered 403: pods \\\"sbx-pr-x-pod\\\" is forbidden\"\n\
+                     why=\"the exec's log answered 403: pods \\\"sbx-pr-x-pod\\\" is forbidden: \
+                     cannot get resource \\\"pods/log\\\"\"\n\
                      2026-10-31T21:50:02.113Z  WARN substrate_kubernetes::namespace::probe: \
                      confinement.family.process-run was not proved: the probe Pod's run proved \
                      nothing\n";
-        let missing = BTreeSet::from(["confinement.family.process-run".to_owned()]);
-        assert!(verb_refusal(&missing, &named_codes(before), &unproved_facts(before)).is_none());
-        assert_eq!(
-            unproved_facts(after),
-            BTreeSet::from(["confinement.family.process-run".to_owned()])
+        let missing = set(&["confinement.family.process-run"]);
+        assert!(
+            verb_refusal(before, 0, "pods/log", "get", &missing).is_none(),
+            "no probe has finished"
         );
-        let refused = verb_refusal(&missing, &named_codes(after), &unproved_facts(after))
-            .expect("the probe's warnings refuse the case");
-        assert!(refused.contains("kubernetes.api-failed"), "{refused}");
+        assert!(
+            verb_refusal(after, 0, "pods/log", "get", &missing).is_none(),
+            "no probe has finished"
+        );
+        let finished = format!("{after}{PROBE_RAN}");
+        let refused = verb_refusal(&finished, 0, "pods/log", "get", &missing)
+            .expect("the probe's answer refuses the case");
+        assert!(
+            refused.contains("cannot get resource \"pods/log\""),
+            "{refused}"
+        );
+        for (resource, verb) in [("pods", "get"), ("pods/exec", "get"), ("pods/log", "list")] {
+            assert!(
+                verb_refusal(&finished, 0, resource, verb, &missing).is_none(),
+                "the pods/log answer refuses {resource} {verb}"
+            );
+        }
     }
 
+    /// Acceptance 1: a refusal written before `since`, the Role change, refuses nothing, even
+    /// with the probe finished after it.
     #[test]
-    fn a_missing_fact_is_refused_by_a_code_or_by_its_own_unproved_warn() {
-        let set = |names: &[&str]| -> BTreeSet<String> {
-            names.iter().map(|name| (*name).to_owned()).collect()
-        };
-        let by_warn = verb_refusal(
-            &set(&["exec.argv-only"]),
-            &set(&[]),
-            &set(&["exec.argv-only"]),
-        )
-        .expect("the probe's WARN names the missing fact");
+    fn a_refusal_written_before_the_role_change_refuses_nothing() {
+        let missing = set(&["workspace.guarded-io"]);
+        let earlier = format!("{}{PROBE_RAN}", refused_line("pods", "create", false));
+        assert!(verb_refusal(&earlier, 0, "pods", "create", &missing).is_some());
+        assert!(verb_refusal(&earlier, earlier.len(), "pods", "create", &missing).is_none());
+        let refusal_before = refused_line("pods", "create", false);
+        let log = format!("{refusal_before}{PROBE_RAN}");
         assert!(
-            by_warn.contains("exec.argv-only was not proved"),
-            "{by_warn}"
+            verb_refusal(&log, refusal_before.len(), "pods", "create", &missing).is_none(),
+            "the finished probe alone, after the Role change, carries no refusal"
+        );
+    }
+
+    /// Acceptance 2: a failed run whose line carries another resource's or another verb's
+    /// refusal, a code alone, or a fact's "was not proved" line refuses nothing; `pods` never
+    /// matches `pods/log` or `pods/exec`.
+    #[test]
+    fn a_refusal_naming_another_resource_or_verb_or_none_refuses_nothing() {
+        let missing = set(&["exec.argv-only", "workspace.guarded-io"]);
+        for (resource, verb) in [
+            ("pods/log", "get"),
+            ("pods/exec", "get"),
+            ("pods/exec", "create"),
+            ("pods", "list"),
+            ("persistentvolumeclaims", "get"),
+        ] {
+            for debug in [false, true] {
+                let log = format!("{}{PROBE_RAN}", refused_line(resource, verb, debug));
+                assert!(
+                    verb_refusal(&log, 0, "pods", "get", &missing).is_none(),
+                    "{resource} {verb} (debug {debug}) refuses pods get"
+                );
+            }
+        }
+        let unrelated = format!(
+            "2026-11-01T01:00:02.000Z  WARN substrate_kubernetes::namespace::probe: the probe \
+             Pod's run proved nothing code=\"kubernetes.api-failed\" why=the exec's log was not \
+             read within 60 s\n\
+             2026-11-01T01:00:02.001Z  WARN substrate_kubernetes::namespace::probe: \
+             exec.argv-only was not proved: the probe Pod's run proved nothing\n{PROBE_RAN}"
         );
         assert!(
-            verb_refusal(
-                &set(&["exec.argv-only"]),
-                &set(&[]),
-                &set(&["workspace.guarded-io"])
-            )
-            .is_none()
+            verb_refusal(&unrelated, 0, "pods", "get", &missing).is_none(),
+            "a code and an unproved fact without the API's answer refuse nothing"
         );
-        assert!(verb_refusal(&set(&[]), &set(&["kubernetes.api-failed"]), &set(&[])).is_none());
-        let by_code = verb_refusal(
-            &set(&["workspace.guarded-io"]),
-            &set(&["kubernetes.api-failed"]),
-            &set(&[]),
-        )
-        .expect("a code names the refusal");
-        assert!(by_code.contains("kubernetes.api-failed"), "{by_code}");
+        let info = format!(
+            "{}{PROBE_RAN}",
+            refused_line("pods", "get", false).replace(" WARN ", " INFO ")
+        );
+        assert!(
+            verb_refusal(&info, 0, "pods", "get", &missing).is_none(),
+            "only a WARN line refuses"
+        );
+        let whole = format!("{}{PROBE_RAN}", refused_line("pods", "get", false));
+        assert!(
+            verb_refusal(&whole, 0, "pods", "get", &set(&[])).is_none(),
+            "no fact is missing"
+        );
+    }
+
+    /// D339: the case decides only after the first probe has finished: the probe loop's own
+    /// line that it ran or failed, or the open's refusal, which carries the API's answer and
+    /// after which no probe runs.
+    #[test]
+    fn a_refusal_counts_only_once_the_first_probe_finished_or_the_open_was_refused() {
+        let missing = set(&["workspace.guarded-io"]);
+        let refusal = refused_line("pods", "create", false);
+        assert!(verb_refusal(&refusal, 0, "pods", "create", &missing).is_none());
+        let failed = format!(
+            "{refusal}2026-11-01T01:00:03.000Z  WARN substrate_kubernetes::namespace::probe: the \
+             namespace driver's probe failed; its facts are absent \
+             code=\"kubernetes.api-failed\" message=pods create answered 403\n"
+        );
+        assert!(verb_refusal(&failed, 0, "pods", "create", &missing).is_some());
+        let not_open = "2026-11-01T01:00:01.000Z  WARN substrate_kubernetes::namespace::probe: \
+                        the namespace driver is not open; every driver fact is absent \
+                        code=\"kubernetes.api-failed\" message=get answered 403: leases \
+                        \"b10x-substrate-driver\" is forbidden: User \"system:serviceaccount:x:y\" \
+                        cannot get resource \"leases\" in API group \"coordination.k8s.io\"\n";
+        assert!(verb_refusal(not_open, 0, "leases", "get", &missing).is_some());
+        assert!(
+            verb_refusal(not_open, 0, "leases", "update", &missing).is_none(),
+            "the open's refusal names another verb"
+        );
+        let other_not_open = format!(
+            "{}{refusal}",
+            not_open.replace("cannot get resource \"leases\"", "cannot get resource \"x\"")
+        );
+        assert!(
+            verb_refusal(&other_not_open, 0, "pods", "create", &missing).is_none(),
+            "an open refused for another reason has not finished a probe"
+        );
+    }
+
+    /// Each Role-verb case the lane runs has a refusal rule that can be met: the driver's line
+    /// carrying the API's answer for its own verb, which refuses no other case; `pods list` and
+    /// `persistentvolumeclaims delete` keep the route's HTTP answer besides.
+    #[test]
+    fn every_run_role_verb_case_has_a_refusal_rule_that_can_be_met() {
+        let run: Vec<(String, String)> = role_verbs()
+            .into_iter()
+            .filter(|(resource, verb)| {
+                !ABSENT
+                    .iter()
+                    .any(|(absent, _)| *absent == verb_case(resource, verb))
+            })
+            .collect();
+        assert_eq!(run.len(), 14, "{run:?}");
+        let names = cases();
+        for (resource, verb) in &run {
+            assert!(names.contains(&verb_case(resource, verb)));
+        }
+        for route in [("pods", "list"), ("persistentvolumeclaims", "delete")] {
+            assert!(
+                run.contains(&(route.0.to_owned(), route.1.to_owned())),
+                "{route:?} is a run case whose route answers"
+            );
+        }
+        let missing = set(&["workspace.guarded-io"]);
+        for (resource, verb) in &run {
+            for debug in [false, true] {
+                let log = format!("{}{PROBE_RAN}", refused_line(resource, verb, debug));
+                assert!(
+                    verb_refusal(&log, 0, resource, verb, &missing).is_some(),
+                    "{resource} {verb} (debug {debug}) is not refused by its own answer"
+                );
+                for (other_resource, other_verb) in &run {
+                    if (other_resource, other_verb) != (resource, verb) {
+                        assert!(
+                            verb_refusal(&log, 0, other_resource, other_verb, &missing).is_none(),
+                            "{resource} {verb}'s answer refuses {other_resource} {other_verb}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The lines the lane reads to know the first probe finished are the driver's own words.
+    #[test]
+    fn the_driver_writes_the_lines_that_finish_a_probe() {
+        let source = include_str!("../../crates/substrate-kubernetes/src/namespace/probe.rs");
+        for line in PROBE_FINISHED.iter().chain([&NOT_OPEN]) {
+            assert!(source.contains(line), "the driver no longer writes {line:?}");
+        }
     }
 
     #[test]
