@@ -446,6 +446,56 @@ async fn an_error_event_quoted_for_a_gone_pod_is_bounded_like_every_other_api_me
     );
 }
 
+/// `story:pod-orphaned-policy-is-swept`: a replay of a Pod never read asks for bookmarks from the
+/// trace's version; a `BOOKMARK` alone shows the Pod never created, while an `ERROR` event keeps it
+/// unproven and quotes its message without the bearer token, as [`pod_end`] does.
+#[tokio::test]
+async fn a_replay_ending_in_a_bookmark_alone_shows_the_pod_never_created() {
+    use crate::PodHistory;
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    let watch = format!("{}?watch=1", api.pods());
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: watch.clone(),
+        status: 200,
+        body: json!({"type": "BOOKMARK",
+                     "object": {"kind": "Pod", "metadata": {"resourceVersion": "9"}}}),
+    });
+    let history = api.pod_history("gone", &PodTrace::since(Some("1"))).await;
+    assert_eq!(history, PodHistory::NeverCreated);
+    let requests = fake.requests();
+    assert!(
+        requests.iter().any(|request| request.contains(
+            "fieldSelector=metadata.name%3Dgone&resourceVersion=1&allowWatchBookmarks=true\
+             &timeoutSeconds=5"
+        )),
+        "{requests:#?}"
+    );
+
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    fake.fault(Fault::Answer {
+        method: Method::GET,
+        path: watch,
+        status: 200,
+        body: json!({"type": "ERROR",
+                     "object": {"kind": "Status", "message": format!("refused {CREDENTIAL}")}}),
+    });
+    let history = api.pod_history("gone", &PodTrace::since(Some("1"))).await;
+    let PodHistory::End(PodEnd::Unproven(why)) = history else {
+        panic!("an ERROR event keeps the policy: {history:?}");
+    };
+    assert!(!why.contains(CREDENTIAL), "{why}");
+    for name in ["", "Gone", "x,metadata.namespace=y"] {
+        let history = api.pod_history(name, &PodTrace::since(Some("1"))).await;
+        assert!(
+            matches!(history, PodHistory::End(PodEnd::Unproven(_))),
+            "{name:?}: {history:?}"
+        );
+    }
+}
+
 /// A TLS WebSocket server under its own CA that answers `pods/exec` as a kubelet streams a command
 /// which writes while it reads: every stdin frame is echoed on stdout as it arrives, and the
 /// channel-3 `Success` follows the client's close. Returns the kubeconfig that names it.

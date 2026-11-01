@@ -251,6 +251,18 @@ policy whose Pod is gone: the API must show the container stopped.
   leaves such a policy and logs it; the deferred sweep stops checking it.
   A policy kept this way stays until an operator removes it, labelled as every run object is; the
   next open's sweep reads it again and keeps it while the same holds.
+- A run whose Pod was never created (the adapter stopped between creating the policy and creating
+  the Pod) has no event to show its container stopped (`story:pod-orphaned-policy-is-swept`). When
+  no read of the run ever showed a Pod object and the Pod reads 404, the open and deferred sweeps
+  watch it from the policy's `resourceVersion` with `allowWatchBookmarks=true` and
+  `timeoutSeconds=5`, and read for at most 8 seconds. The API server replays every event of the
+  name first and then sends a `BOOKMARK` shortly before the watch's timeout; for a Pod never created
+  the `BOOKMARK` is the only line (observed on kind v1.37.0, 2026-11-01). A `BOOKMARK` before any
+  event of the name ends a complete replay that shows no Pod ever added, and the policy is deleted.
+  Events of the name decide as above, and a `BOOKMARK` after events that decided nothing keeps the
+  policy. A replay that does not end in a `BOOKMARK` is incomplete and keeps it: a 410, a refusal,
+  an `ERROR` event, the stream ending, or the 8 seconds passing first. Only the `watch` verb is
+  needed.
 
 ## Not decided here
 
