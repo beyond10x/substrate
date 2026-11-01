@@ -709,6 +709,48 @@ impl Api {
         }
     }
 
+    /// The API's `SelfSubjectAccessReview` of this client's credential in its namespace: whether
+    /// it may `verb` the object `name` of `resource` in the API group `group`, a subresource
+    /// written after a slash as a Role writes it (`pods/exec`). `false` is the review's answer
+    /// that it may not: RBAC refuses by holding no rule, so `status.allowed` alone decides. The
+    /// review is not a stored object.
+    ///
+    /// # Errors
+    ///
+    /// No answer, an answer but 200 to 202 (the review's own refusal among them), or an answer
+    /// whose `status.allowed` is not a boolean.
+    pub async fn access_review(
+        &self,
+        group: &str,
+        resource: &str,
+        verb: &str,
+        name: &str,
+    ) -> Result<bool, ApiError> {
+        let (resource, subresource) = resource.split_once('/').unwrap_or((resource, ""));
+        let review = json!({
+            "apiVersion": "authorization.k8s.io/v1",
+            "kind": "SelfSubjectAccessReview",
+            "spec": {"resourceAttributes": {
+                "namespace": self.namespace,
+                "group": group,
+                "resource": resource,
+                "subresource": subresource,
+                "verb": verb,
+                "name": name,
+            }},
+        });
+        let answer = self
+            .post(
+                "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+                &review,
+                "access review",
+            )
+            .await?;
+        answer["status"]["allowed"].as_bool().ok_or_else(|| {
+            ApiError::Invalid("the access review answered no status.allowed".to_owned())
+        })
+    }
+
     /// Reads the list at `path` (which may carry a selector) whole, in pages of `page_items`, at
     /// most `max_pages` of them, each bounded at [`MAX_API_BODY_BYTES`], and at most
     /// `page_items` × `max_pages` items across them all, whether or not the server honours

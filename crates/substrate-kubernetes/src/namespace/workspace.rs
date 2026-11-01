@@ -52,6 +52,19 @@ pub const CREATE_BOUND: Duration = Duration::from_mins(1);
 const HANDSHAKE_POLL: Duration = Duration::from_millis(500);
 /// The bytes a handshake answer may hold: one short JSON line.
 const HANDSHAKE_BYTES: usize = 4096;
+/// What the API writes after the object's name when its authorization refuses a request; its
+/// reason follows. A 403 with nothing after it is bare: kind v1.37 refuses an exec upgrade so when
+/// the Role lacks `pods/exec` `create` (D349).
+const FORBIDDEN: &str = "is forbidden:";
+/// The verbs the API authorizes an exec upgrade under (ADR 0047's addendum of 2026-10-29), in the
+/// order a bare refusal's access review asks them.
+const EXEC_VERBS: [&str; 2] = ["create", "get"];
+/// How long a bare refusal's access reviews may take together: the handshake ends after them,
+/// never after the client's bound on each call.
+const ACCESS_REVIEW_BOUND: Duration = Duration::from_secs(5);
+/// What a bare refusal's error says once the access review denied verbs of [`EXEC_VERBS`],
+/// before them. The namespace lane reads its S6 create case's refusal by this text.
+const ACCESS_REVIEW_DENIES: &str = "a SelfSubjectAccessReview denies pods/exec ";
 /// The keeper's grace on `TERM`, and the grace its deletion asks for.
 const KEEPER_GRACE_SECONDS: u64 = 5;
 /// The grace an exec Pod's deletion asks for during a destroy: `kill`'s (§ 7.3).
@@ -548,7 +561,7 @@ impl NamespaceDriver {
         {
             Ok(output) => output,
             Err(error) if refused_for_good(&error) => {
-                return Handshaken::Refused(api_failed(&error));
+                return Handshaken::Refused(self.refused_handshake(keeper, &error).await);
             }
             Err(error) => return Handshaken::NotReady(api_failed(&error)),
         };
@@ -570,6 +583,56 @@ impl NamespaceDriver {
                 ),
             )),
         }
+    }
+
+    /// The error of a handshake the API refused for good (design 34 § 7.1): its answer, and for a
+    /// bare 403, one that gives no reason after [`FORBIDDEN`], what a `SelfSubjectAccessReview`
+    /// of each of [`EXEC_VERBS`] on the keeper's `pods/exec` found: the verbs it denies, that it
+    /// admits both and so does not decide the refused verb, or, when a review is refused, fails or
+    /// outlasts [`ACCESS_REVIEW_BOUND`], that the verb is unknown. The API's answer stays the
+    /// refusal either way.
+    async fn refused_handshake(&self, keeper: &str, error: &ApiError) -> DriverError {
+        let refused = api_failed(error);
+        if !is_bare_refusal(error) {
+            return refused;
+        }
+        let review =
+            match tokio::time::timeout(ACCESS_REVIEW_BOUND, self.denied_exec_verbs(keeper)).await {
+                Ok(Ok(denied)) if denied.is_empty() => format!(
+                    "a SelfSubjectAccessReview admits pods/exec {}: it does not decide the refused \
+                     verb",
+                    EXEC_VERBS.join(" and ")
+                ),
+                Ok(Ok(denied)) => format!("{ACCESS_REVIEW_DENIES}{}", denied.join(" and ")),
+                Ok(Err(failed)) => format!("the refused verb is unknown: {failed}"),
+                Err(_) => format!(
+                    "the refused verb is unknown: the SelfSubjectAccessReview did not answer \
+                     within {} s",
+                    ACCESS_REVIEW_BOUND.as_secs()
+                ),
+            };
+        DriverError::failed(
+            API_FAILED,
+            format!("{} ({review})", refused.message.trim_end()),
+        )
+    }
+
+    /// The verbs of [`EXEC_VERBS`] a `SelfSubjectAccessReview` of the keeper's `pods/exec` in the
+    /// namespace denies, asked one after the other. The first review that fails ends the asking.
+    async fn denied_exec_verbs(&self, keeper: &str) -> Result<Vec<&'static str>, String> {
+        let mut denied = Vec::new();
+        for verb in EXEC_VERBS {
+            match self.api.access_review("", "pods/exec", verb, keeper).await {
+                Ok(true) => {}
+                Ok(false) => denied.push(verb),
+                Err(error) => {
+                    return Err(format!(
+                        "the SelfSubjectAccessReview of pods/exec {verb} failed: {error}"
+                    ));
+                }
+            }
+        }
+        Ok(denied)
     }
 
     fn claims_path(&self) -> String {
@@ -706,7 +769,8 @@ enum Handshaken {
     /// An executor answered, and it is another protocol or release: waiting does not change it.
     Other(DriverError),
     /// The API refused the exec 401 or 403: a credential it does not accept, or a Role without
-    /// `pods/exec` `create`. Waiting does not change it, so the API's answer is the error.
+    /// `pods/exec` `create`. Waiting does not change it, so the API's answer is the error, with
+    /// what a bare 403's access review found.
     Refused(DriverError),
     /// No executor answered yet: the keeper may still be starting.
     NotReady(DriverError),
@@ -718,6 +782,20 @@ enum Handshaken {
 /// handshake begins right after the keeper's create.
 fn refused_for_good(error: &ApiError) -> bool {
     matches!(error.status(), Some(401 | 403))
+}
+
+/// Whether the API's answer is a 403 that gives no reason after [`FORBIDDEN`].
+fn is_bare_refusal(error: &ApiError) -> bool {
+    match error {
+        ApiError::Answered {
+            status: 403,
+            detail,
+            ..
+        } => detail
+            .rsplit_once(FORBIDDEN)
+            .is_some_and(|(_, reason)| reason.trim().is_empty()),
+        _ => false,
+    }
 }
 
 /// An object whose create may still be stored keeps the workspace `unknown`.
@@ -750,3 +828,7 @@ fn url_encoded(text: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "verb_review_tests.rs"]
+mod verb_review_tests;
