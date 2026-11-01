@@ -622,7 +622,8 @@ impl NamespaceDriver {
 
     /// The verbs of [`EXEC_VERBS`] a `SelfSubjectAccessReview` of the keeper's `pods/exec` in the
     /// namespace denies, asked one after the other. The first review that does not decide, its
-    /// API evaluation error kept, or that fails ends the asking with what the refusal says.
+    /// API evaluation error kept after the verbs already denied, or that fails ends the asking
+    /// with what the refusal says.
     async fn denied_exec_verbs(&self, keeper: &str) -> Result<Vec<&'static str>, String> {
         let mut denied = Vec::new();
         for verb in EXEC_VERBS {
@@ -630,10 +631,18 @@ impl NamespaceDriver {
                 Ok(Ok(true)) => {}
                 Ok(Ok(false)) => denied.push(verb),
                 Ok(Err(evaluation_error)) => {
-                    return Err(format!(
+                    let undecided = format!(
                         "a SelfSubjectAccessReview of pods/exec {verb} {REVIEW_UNDECIDED}: its \
                          evaluationError is {evaluation_error}"
-                    ));
+                    );
+                    return Err(if denied.is_empty() {
+                        undecided
+                    } else {
+                        format!(
+                            "{ACCESS_REVIEW_DENIES}{}, and {undecided}",
+                            denied.join(" and ")
+                        )
+                    });
                 }
                 Err(error) => {
                     return Err(format!(
