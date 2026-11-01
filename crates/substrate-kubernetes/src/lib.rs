@@ -373,7 +373,10 @@ pub(crate) mod interleave {
         let (computed, older_computed) = mpsc::channel();
         let (probed, newer_probed) = mpsc::channel();
         let (published, newer_published) = mpsc::channel::<()>();
-        std::thread::scope(|scope| {
+        // `move`: the scope closure owns every sender the older thread waits on, so a panic in
+        // `newer_probe` or before the newer call drops them, the older thread's waits end, and
+        // the scope joins it and passes the panic on.
+        std::thread::scope(move |scope| {
             let older = scope.spawn(move || {
                 BEFORE_PUBLICATION.with(|hook| {
                     *hook.borrow_mut() = Some(Box::new(move |driver: &NamespaceDriver| {

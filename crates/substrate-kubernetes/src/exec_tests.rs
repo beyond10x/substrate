@@ -2249,3 +2249,35 @@ mod d364 {
         assert_eq!(rig.pod_creates(), 1, "only the newer start created a Pod");
     }
 }
+
+/// Adversary cases for `story:concurrent-snapshots-never-publish-an-older-probe`.
+mod d364_adv {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::mpsc;
+
+    use super::*;
+    use crate::interleave::older_published_last;
+
+    /// The seam both acceptance cases run through: when the newer probe a case plays fails (its
+    /// `expect` panics), the interleave ends with that failure. It must not leave the older call
+    /// waiting for a newer probe that never comes, which turns a red case into a hung suite.
+    #[tokio::test]
+    async fn a_newer_probe_that_fails_ends_the_interleave_instead_of_hanging_it() {
+        let rig = rig().await;
+        let driver: &'static NamespaceDriver = Box::leak(Box::new(rig.driver));
+        let (done, ended) = mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                older_published_last(driver, || panic!("the newer probe fails"))
+            }));
+            let _ = done.send(outcome.is_err());
+        });
+        assert_eq!(
+            ended.recv_timeout(Duration::from_secs(10)),
+            Ok(true),
+            "story:concurrent-snapshots-never-publish-an-older-probe: a failing newer probe left \
+             interleave::older_published_last waiting on the older call for 10 s instead of \
+             returning the failure"
+        );
+    }
+}
