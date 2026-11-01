@@ -2,14 +2,20 @@
 format: aep.planning-md/3
 id: story:namespace-lane-verb-case-accepts-only-its-own-refusal
 kind: story
-status: proposed
+status: active
 title: The namespace lane's Role-verb case accepts only a refusal that follows from the removed verb
 relations:
 - informed_by: review-result:wave-2026-10-31-d337-adversary-pass-1
 - informed_by: approval-record:d338-review-findings-decided-in-session
-revision: 2
+- depends_on: story:probe-withheld-facts-name-the-failed-calls-code
+- informed_by: approval-record:d339-substrate-wave-2026-11-01
+scope:
+- confidence: cited
+  path: xtask/src/namespace_lane_run.rs
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T00:28:54Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-01T00:37:23Z", actor: "human:timo", revision: 5}
 ---
 # Story: the namespace lane's Role-verb case accepts only a refusal that follows from the removed verb
 
@@ -41,3 +47,18 @@ Read only the log written after `set_role` (the lane already holds the offset fo
 - A log whose only code predates the Role change refuses nothing.
 - A log whose failed run names another resource's refusal refuses nothing.
 - The observed D337 `pods/log` lines still refuse the `pods/log` case.
+
+## Design decided by D339
+
+Decided 2026-11-01 (D339, from the scoping): each verb case's daemon log is created after
+`set_role`, so every byte is already written after the Role change. The rule is lane-only:
+`verb_refusal` accepts a refusal only from a `WARN` line that carries the API's answer
+`cannot <verb> resource "<resource>"` for the removed verb (matched in both the `Debug`-escaped
+`why=` form and the plain `message=` form; `pods` never matches `pods/log` or `pods/exec`), and it
+decides only after the first probe has finished, never on facts absent because no probe ran yet.
+A `since` offset, as `pending_destroy_codes` takes, lets a unit test show that an earlier line
+refuses nothing. The route path (`pods list`, `persistentvolumeclaims delete`) keeps its own HTTP
+answer. The five cases whose driver line carries a code only (`pods get`, `pods list`,
+`pods delete`, `persistentvolumeclaims get`, `persistentvolumeclaims delete`) name the resource
+once `story:probe-withheld-facts-name-the-failed-calls-code` carries the API's answer; this story
+depends on it.

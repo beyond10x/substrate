@@ -2,14 +2,29 @@
 format: aep.planning-md/3
 id: story:pod-orphaned-policy-is-swept
 kind: story
-status: proposed
+status: active
 title: A policy whose Pod never existed is swept
 relations:
 - decomposes: epic:confinement-contract-family
 - informed_by: approval-record:d338-review-findings-decided-in-session
-revision: 3
+- informed_by: approval-record:d339-substrate-wave-2026-11-01
+scope:
+- confidence: cited
+  path: crates/substrate-host/src/confinement/pod.rs
+- confidence: inferred
+  path: crates/substrate-host/src/confinement/pod_cleanup_force_deleted.rs
+- confidence: inferred
+  path: crates/substrate-host/src/confinement/pod_cleanup_tests.rs
+- confidence: cited
+  path: crates/substrate-host/tests/adversary_pod.rs
+- confidence: cited
+  path: crates/substrate-kubernetes-client/src/gone.rs
+- confidence: inferred
+  path: docs/design/28-pod-confinement-adapter.md
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T00:28:13Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-01T00:37:24Z", actor: "human:timo", revision: 10}
 ---
 # Story: a policy whose Pod never existed is swept
 

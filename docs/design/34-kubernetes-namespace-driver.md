@@ -254,7 +254,7 @@ Pod, created like a workspace and an exec but with probe rows, then deleted unde
 | the probe Pod runs the executor's `probe-child`, which writes its argv as JSON; the argv holds `$(HOME)`, `$$`, a space and a non-ASCII byte; byte-exact | `exec.argv-only` |
 | the Pod ends, its log frames decode, and its `applied` record matches the rendered memory and CPU | `confinement.family.process-run`, `.process-watch`, `.output-read`, `.wait`, `.limits`, `.audit`, `.workspace` (design 30 § 4.3) |
 | `probe-child` forks a grandchild that writes a heartbeat to the PVC every 100 ms and exits; after the container is shown `terminated`, the keeper's `fs stat` sees the heartbeat unchanged for 2 s | `confinement.whole-tree-kill` |
-| from inside: TCP to `KUBERNETES_SERVICE_HOST:443`, a DNS query to `/etc/resolv.conf`'s nameserver, TCP to `egress_probe_address`; each must be denied (`EPERM`, `EACCES`) within 3 s; a timeout or a missing route never counts (amendments of 2026-10-31, D333, D334) | `confinement.no-egress` (N5) |
+| from inside: TCP to `KUBERNETES_SERVICE_HOST:443`, a DNS query to `/etc/resolv.conf`'s nameserver, TCP to `egress_probe_address`; each must be denied (`EPERM`, `EACCES`) within 3 s; a timeout or a missing route never counts (amendments of 2026-10-31, D333, D334); the fact holds for the probe's node only (§ 6.4, D339) | `confinement.no-egress` (N5) |
 | — | never: `exec.namespaces`, `exec.cgroup-limits`, `exec.cgroup-kill`, `exec.no-egress` |
 
 Declared bounds are published as configuration, as the host publishes them: `workspace.max-current`,
@@ -283,6 +283,12 @@ N6 A widens the last check in `operations.rs`. An exec is admitted on the four L
 and `confinement.no-egress`. Otherwise `exec.sandbox-unavailable` (501), unchanged. The new capsule
 check comes **after** it, so the host driver's answers are unchanged: on the portable lane a capsule
 still hears `exec.sandbox-unavailable` first.
+
+The probe observes one node: the one its keeper was scheduled on. The driver binds that node to the
+snapshot it publishes, and `start_exec` compares it with the workspace keeper's `spec.nodeName`,
+the node the exec Pod is pinned to (§ 7.3), before the Pod create. A keeper on another node is
+`NotDispatched(exec.sandbox-unavailable)` (501), recorded as refused, with no Pod created
+(amendments of 2026-11-01, D339).
 
 ## 7. The executor
 
@@ -402,6 +408,7 @@ The wire refusals, in the daemon's existing check order. Everything here except 
 | `scratch` | `exec.scratch-quota-unserved` (501) | daemon |
 | scoped `workspace_access` | `exec.workspace-scoped-write-unserved` (501) | existing check |
 | neither confinement set proved | `exec.sandbox-unavailable` (501) | widened final check (§ 6.4) |
+| the workspace keeper on a node the probe did not observe | `exec.sandbox-unavailable` (501) | driver, before the Pod create (§ 6.4, D339) |
 | an inline capsule | `exec.inline-capsule-unserved` (501), **new** | after the final check |
 | `signal: int` | `exec.signal-unserved` (501), **new** (§ 14 Q3 A) | driver |
 | a raw-pipe or PTY session | `session.unserved`, `session.pty-unserved` (501) | trait defaults |
@@ -421,7 +428,8 @@ successor-bundle section confirms whether the error schema constrains failure co
 - **Subject:** unchanged. The cluster sees only `operation_digest`.
 - **Argv-only, environment cleared and shaped:** § 7.3, proved by `exec.argv-only`.
 - **No egress:** the operator's default-deny policy is bound into the snapshot and observed from inside
-  (N5). It is weaker than the host driver's namespace by being an observation at probe time (§ 14 Q1).
+  (N5). It is weaker than the host driver's namespace by being an observation at probe time (§ 14 Q1)
+  and on the probe's node only; an exec whose keeper is elsewhere is refused (§ 6.4).
 - **No nested user namespace, read-only root, no privilege:** Pod Security `restricted` enforced
   (startup step 5); `drop: [ALL]`, `RuntimeDefault` seccomp, `allowPrivilegeEscalation: false`.
 - **Bounds:** memory and CPU are read back. Processes per § 14 Q2. The wall bound is
@@ -853,3 +861,9 @@ memory, so it does not survive a restart (§ 5, the signal row).
 - § 6.2: the families also need the exit record to agree with the API's exit code; the heartbeat and the egress observation count only from a run whose argv read back byte for byte.
 - § 6.2 row 5: `confinement.no-egress` is withheld whenever the bound policy set (§ 6.1 step 4, § 14 Q1 B) holds a policy other than the default-deny one with a non-empty `egress` list, whichever Pods it selects; pod-selector overlap is not computed. Only without such a policy do the three attempts decide.
 - § 7.1: the observation line and the check's `kubernetes_service_host` keep `substrate-executor/1`: the release equality already pins the executor to the driver.
+
+## Amendments of 2026-11-01
+
+- § 6.2 row 5, § 6.4, § 8, § 9 (D339, `story:namespace-no-egress-observed-on-every-node`): the probe runs on the one node its keeper was scheduled on, so `confinement.no-egress`, like the families and `confinement.whole-tree-kill`, is an observation of that node. The driver keeps that node with the probe's proof and binds it to the snapshot it publishes; a probe whose keeper node is unread proves nothing. `start_exec` compares it with the workspace keeper's `spec.nodeName` (the node the exec Pod's required affinity names, § 7.3) after the snapshot check and before the Pod create: another node is `NotDispatched(exec.sandbox-unavailable)` (501), recorded as refused. An exec already running is not touched when the next probe lands elsewhere; the next start on that workspace is refused.
+- Not chosen: probing every schedulable node. Nodes are cluster-scoped, and ADR 0047 decision 3 grants the driver one namespaced Role and no `nodes` access, so the driver cannot list them; it would still need the comparison above for a keeper on a node that joined after the probe. Probing the nodes of live keepers, which the driver already lists, is `story:namespace-probe-observes-every-keeper-node`.
+- The snapshot's facts are unchanged: `confinement.no-egress` keeps its name and is still stated machine-wide, and the node is not a wire field. A client that reads the fact can still be refused `exec.sandbox-unavailable` for a workspace whose keeper is on another node; the refusal is the guarantee.

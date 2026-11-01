@@ -2,14 +2,21 @@
 format: aep.planning-md/3
 id: story:probe-withheld-facts-name-the-failed-calls-code
 kind: story
-status: proposed
+status: active
 title: Every probe fact the namespace driver withholds says why, with the failed call's own code
 relations:
 - informed_by: review-result:wave-2026-10-31-d337-adversary-pass-1
 - informed_by: approval-record:d338-review-findings-decided-in-session
-revision: 2
+- informed_by: approval-record:d339-substrate-wave-2026-11-01
+scope:
+- confidence: cited
+  path: crates/substrate-kubernetes/src/namespace/probe.rs
+- confidence: cited
+  path: crates/substrate-kubernetes/src/namespace/probe_tests.rs
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T00:28:53Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-01T00:37:23Z", actor: "human:timo", revision: 6}
 ---
 # Story: every probe fact the namespace driver withholds says why, with the failed call's own code
 
@@ -47,3 +54,11 @@ lost; reword the two property warnings to the shared form, keeping their reasons
   ten fact lines.
 - A probe whose bound NetworkPolicy allows egress, and one whose heartbeat moves, each log
   "`<fact>` was not proved" for the fact withheld.
+
+## Acceptance added by D339
+
+- Added 2026-11-01 (D339, for `story:namespace-lane-verb-case-accepts-only-its-own-refusal`): the
+  probe's removal warnings (`remove_probe_row` and the leftover removal) and the run's refused
+  `pods get` in `scheduled_node` and `ended` carry the API's answer, so a refusal of `pods get`,
+  `pods delete` or `persistentvolumeclaims get` names `cannot <verb> resource "<resource>"` on a
+  `WARN` line.

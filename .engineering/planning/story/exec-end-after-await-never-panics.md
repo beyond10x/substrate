@@ -2,18 +2,22 @@
 format: aep.planning-md/3
 id: story:exec-end-after-await-never-panics
 kind: story
-status: proposed
+status: active
 title: An exec end decided after an await never panics on a concurrent end
 summary: end() after a GET await can reach unreachable! when a concurrent observation ended and acknowledged the exec
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
 - informed_by: approval-record:d338-review-findings-decided-in-session
+- informed_by: approval-record:d339-substrate-wave-2026-11-01
 scope:
 - confidence: cited
   path: crates/substrate-kubernetes/src/exec.rs
-revision: 4
+- confidence: inferred
+  path: crates/substrate-kubernetes/src/exec_tests.rs
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T00:28:13Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-11-01T00:37:23Z", actor: "human:timo", revision: 6}
 ---
 # Story: An exec end decided after an await never panics on a concurrent end
 
