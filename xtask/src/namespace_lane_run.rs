@@ -3395,4 +3395,41 @@ mod tests {
              as this case's"
         );
     }
+
+    /// Adversary cases of wave D354 (`story:driver-names-a-bare-exec-refusals-verb`).
+    mod d354_adv {
+        /// The S6 create case's line is the driver's own words: the lane's
+        /// `REVIEW_DENIES_CREATE` is `ACCESS_REVIEW_DENIES` in the driver with `create` alone,
+        /// in parentheses, and the driver's own test pins that composed line on the probe's
+        /// refusal. A driver that rewords it fails here, not first on the live lane.
+        #[test]
+        fn the_create_cases_review_line_is_the_drivers_own_words() {
+            let workspace =
+                include_str!("../../crates/substrate-kubernetes/src/namespace/workspace.rs");
+            let pinned = include_str!(
+                "../../crates/substrate-kubernetes/src/namespace/verb_review_tests.rs"
+            );
+            let declared = "const ACCESS_REVIEW_DENIES: &str = \"";
+            let start = workspace
+                .find(declared)
+                .map(|at| at + declared.len())
+                .expect("the driver declares ACCESS_REVIEW_DENIES");
+            let denies =
+                &workspace[start..][..workspace[start..].find('"').expect("a closed literal")];
+            assert_eq!(
+                super::super::REVIEW_DENIES_CREATE,
+                format!("({denies}create)"),
+                "story:driver-names-a-bare-exec-refusals-verb"
+            );
+            assert!(
+                workspace.contains("const EXEC_VERBS: [&str; 2] = [\"create\", \"get\"];"),
+                "story:driver-names-a-bare-exec-refusals-verb: the driver reviews create first"
+            );
+            assert!(
+                pinned.contains(&format!("{{BARE}} {}", super::super::REVIEW_DENIES_CREATE)),
+                "story:driver-names-a-bare-exec-refusals-verb: the driver's test no longer pins \
+                 the line the lane reads"
+            );
+        }
+    }
 }
