@@ -142,8 +142,8 @@ async fn a_bare_exec_refusal_whose_review_admits_both_verbs_says_it_did_not_deci
 /// `story:access-review-evaluation-error-is-not-a-denial`, acceptance 1: a review answering
 /// `allowed: false` with `status.evaluationError` is no decision. The refusal keeps the API's
 /// answer and says the review did not decide, with the API's evaluation error, never that it
-/// denies the verb; no further review is asked. A first review that denies `create` and a second
-/// that answers an error does not name `create` alone either: `get` is undecided.
+/// denies the verb; no further review is asked. A first review that denies `create` (acceptance
+/// 2) is still named before a second that answers an error, which does not decide `get`.
 #[tokio::test]
 async fn a_bare_exec_refusal_whose_review_answers_an_evaluation_error_says_it_did_not_decide() {
     const ERROR: &str =
@@ -157,9 +157,27 @@ async fn a_bare_exec_refusal_whose_review_answers_an_evaluation_error_says_it_di
             "status": {"allowed": false, "evaluationError": ERROR},
         }),
     };
-    for (before, verb, asked) in [(0, "create", 1), (1, "get", 2)] {
+    for (create_decided, expected, asked) in [
+        (
+            false,
+            format!(
+                "{BARE} (a SelfSubjectAccessReview of pods/exec create does not decide the \
+                 refused verb: its evaluationError is {ERROR})"
+            ),
+            1,
+        ),
+        (
+            true,
+            format!(
+                "{BARE} (a SelfSubjectAccessReview denies pods/exec create, and a \
+                 SelfSubjectAccessReview of pods/exec get does not decide the refused verb: its \
+                 evaluationError is {ERROR})"
+            ),
+            2,
+        ),
+    ] {
         let (fake, driver) = refusing(&["get"], 403, &format!("pods \"{KEEPER}\" is forbidden: "));
-        if before == 1 {
+        if create_decided {
             fake.fault(Fault::Delay {
                 method: Method::POST,
                 path: ACCESS_REVIEWS.to_owned(),
@@ -169,12 +187,8 @@ async fn a_bare_exec_refusal_whose_review_answers_an_evaluation_error_says_it_di
         fake.fault(undecided());
         let error = handshake_error(&fake, &driver).await;
         assert_eq!(
-            error.message,
-            format!(
-                "{BARE} (a SelfSubjectAccessReview of pods/exec {verb} does not decide the \
-                 refused verb: its evaluationError is {ERROR})"
-            ),
-            "story:access-review-evaluation-error-is-not-a-denial"
+            error.message, expected,
+            "story:access-review-evaluation-error-is-not-a-denial: a denied create is still named"
         );
         assert_eq!(reviews(&fake), asked, "{:#?}", fake.requests());
     }
@@ -450,5 +464,112 @@ mod d354_adv {
             );
             assert_eq!(reviews(&fake), 0, "{reason}: {:#?}", fake.requests());
         }
+    }
+}
+
+/// Adversary cases of wave D364 (`story:access-review-evaluation-error-is-not-a-denial`).
+mod d364_adv {
+    use super::*;
+
+    /// The bearer token of [`passing_fake`]'s driver (`TOKEN` in `driver_tests`).
+    const FAKE_TOKEN: &str = "fake-token-never-quoted";
+
+    fn bare_message() -> String {
+        format!("pods \"{KEEPER}\" is forbidden: ")
+    }
+
+    fn evaluation_error(status: Value) -> Fault {
+        let mut body = json!({"kind": "SelfSubjectAccessReview"});
+        body["status"] = status;
+        Fault::Answer {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            status: 201,
+            body,
+        }
+    }
+
+    /// Acceptance 2: a review answering `allowed: false` with no error still names the denied
+    /// verb, also when the next review does not decide. The `create` review here is the plain
+    /// RBAC denial; only the `get` review after it answers an evaluation error.
+    #[tokio::test]
+    async fn a_denied_create_is_still_named_when_the_get_review_does_not_decide() {
+        let (fake, driver) = refusing(&["get"], 403, &bare_message());
+        fake.fault(Fault::Delay {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            by: Duration::ZERO,
+        });
+        fake.fault(evaluation_error(json!({
+            "allowed": false,
+            "evaluationError": "webhook authorizer: connection refused",
+        })));
+        let error = handshake_error(&fake, &driver).await;
+        assert_eq!(reviews(&fake), 2, "{:#?}", fake.requests());
+        assert!(
+            error
+                .message
+                .contains("a SelfSubjectAccessReview denies pods/exec create"),
+            "story:access-review-evaluation-error-is-not-a-denial: the create review answered \
+             allowed: false with no error, and the refusal does not name create: {}",
+            error.message
+        );
+    }
+
+    /// `denied: true` beside an evaluation error is the API's decision: the refusal is the plain
+    /// denial, word for word the line the namespace lane's S6 create case matches.
+    #[tokio::test]
+    async fn a_denial_beside_an_evaluation_error_is_the_plain_denial_the_lane_matches() {
+        let (fake, driver) = refusing(&["get"], 403, &bare_message());
+        fake.fault(evaluation_error(json!({
+            "allowed": false,
+            "denied": true,
+            "evaluationError": "webhook authorizer: connection refused",
+        })));
+        let error = handshake_error(&fake, &driver).await;
+        assert_eq!(
+            error.message,
+            format!("{BARE} (a SelfSubjectAccessReview denies pods/exec create)"),
+            "story:access-review-evaluation-error-is-not-a-denial"
+        );
+        assert_eq!(reviews(&fake), 2, "{:#?}", fake.requests());
+    }
+
+    /// Acceptance 1, "the API's answer is kept": an evaluation error that echoes the driver's
+    /// bearer token and runs long reaches the refusal cleared of the token and at most 300
+    /// characters, and the exec's own 403 stays the refusal.
+    #[tokio::test]
+    async fn an_evaluation_error_echoing_the_token_reaches_the_refusal_cleared_and_bounded() {
+        let (fake, driver) = refusing(&["get"], 403, &bare_message());
+        let long = format!("{} {FAKE_TOKEN} {}", "w".repeat(10), "e".repeat(1_000));
+        fake.fault(evaluation_error(
+            json!({"allowed": false, "evaluationError": long}),
+        ));
+        let error = handshake_error(&fake, &driver).await;
+        let head = format!(
+            "{BARE} (a SelfSubjectAccessReview of pods/exec create does not decide the refused \
+             verb: its evaluationError is "
+        );
+        assert!(
+            !error.message.contains(FAKE_TOKEN),
+            "story:access-review-evaluation-error-is-not-a-denial: {}",
+            error.message
+        );
+        let quoted = error
+            .message
+            .strip_prefix(&head)
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_else(|| {
+                panic!(
+                    "story:access-review-evaluation-error-is-not-a-denial: {}",
+                    error.message
+                )
+            });
+        assert_eq!(
+            quoted,
+            format!("{} [redacted] {}", "w".repeat(10), "e".repeat(278)),
+            "story:access-review-evaluation-error-is-not-a-denial"
+        );
+        assert_eq!(reviews(&fake), 1, "{:#?}", fake.requests());
     }
 }

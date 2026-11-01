@@ -2306,3 +2306,63 @@ mod adversary_d342 {
         assert_eq!(error.status(), Some(403), "{error}");
     }
 }
+
+/// Adversary cases of wave D364 (`story:access-review-evaluation-error-is-not-a-denial`).
+mod d364_adv {
+    use super::*;
+
+    /// The status shapes beside the unit's own: an explicit `null` error is no error, `denied:
+    /// false` or a `denied` that is not a boolean leaves an error undecided, and an error with no
+    /// `allowed` is unreadable, never a decision.
+    #[tokio::test]
+    async fn an_access_review_reads_the_remaining_status_shapes() {
+        let fake = start();
+        let api = client(&fake.kubeconfig());
+        let error = "webhook authorizer: connection refused";
+        for (status, answered) in [
+            (
+                json!({"allowed": false, "evaluationError": null}),
+                Ok(false),
+            ),
+            (
+                json!({"allowed": false, "denied": false, "evaluationError": error}),
+                Err(error.to_owned()),
+            ),
+            (
+                json!({"allowed": false, "denied": "true", "evaluationError": error}),
+                Err(error.to_owned()),
+            ),
+            (
+                json!({"allowed": false, "evaluationError": "line one\nline two"}),
+                Err("line one\nline two".to_owned()),
+            ),
+        ] {
+            fake.fault(Fault::Answer {
+                method: Method::POST,
+                path: ACCESS_REVIEWS.to_owned(),
+                status: 201,
+                body: json!({"kind": "SelfSubjectAccessReview", "status": status.clone()}),
+            });
+            let review = api
+                .access_review("", "pods/exec", "create", "keeper")
+                .await
+                .unwrap_or_else(|error| panic!("{status} is read: {error}"));
+            assert_eq!(
+                review, answered,
+                "{status} (story:access-review-evaluation-error-is-not-a-denial)"
+            );
+        }
+
+        fake.fault(Fault::Answer {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            status: 201,
+            body: json!({"status": {"evaluationError": error}}),
+        });
+        let unread = api
+            .access_review("", "pods/exec", "create", "keeper")
+            .await
+            .expect_err("story:access-review-evaluation-error-is-not-a-denial: no allowed");
+        assert!(matches!(unread, ApiError::Invalid(_)), "{unread}");
+    }
+}
