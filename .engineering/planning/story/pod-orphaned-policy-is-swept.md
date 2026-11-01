@@ -2,11 +2,14 @@
 format: aep.planning-md/3
 id: story:pod-orphaned-policy-is-swept
 kind: story
-status: draft
+status: proposed
 title: A policy whose Pod never existed is swept
 relations:
 - decomposes: epic:confinement-contract-family
-revision: 1
+- informed_by: approval-record:d338-review-findings-decided-in-session
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-01T00:28:13Z", actor: "human:timo", revision: 2}
 ---
 # Story: a policy whose Pod never existed is swept
 
@@ -30,3 +33,8 @@ on a disposable kind cluster.
 
 Whether the served Kubernetes versions mark the end of a replay (watch bookmarks or
 `sendInitialEvents`) with the Role's verbs alone.
+
+## Adopted
+
+Adopted 2026-11-01 under D338 (the 2026-10-31 findings triage sheet); goes to wave selection as
+written.

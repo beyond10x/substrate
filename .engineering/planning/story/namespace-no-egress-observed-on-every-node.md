@@ -10,7 +10,8 @@ tags:
 - kubernetes
 relations:
 - depends_on: story:namespace-driver-admits-an-exec-on-observed-confinement
-revision: 2
+- informed_by: approval-record:d338-review-findings-decided-in-session
+revision: 3
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-31T15:22:59Z", actor: "human:timo", revision: 2}
 ---
@@ -36,3 +37,9 @@ needs a design 34 amendment before implementation.
 - A probe test with two nodes, one of which reports egress reachable, withholds
   `confinement.no-egress`.
 - A probe test where every node reports blocked publishes it.
+
+## Adopted
+
+Adopted 2026-11-01 under D338 (the 2026-10-31 findings triage sheet, row 1). Blocked until design
+34 is amended to choose between probing every schedulable node and pinning exec Pods to the nodes
+the probe observed; the amendment is the first unit of the wave that takes this story.
