@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T10:13:19Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-lane-exec-create-case-reads-the-apis-bare-refusal",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "health_observation",
+    "source": "namespace lane at bb2b06fe, kept daemon log",
+    "reference": "2026-11-01T10:08:42Z: exec answered 403: pods \"sbx-pr-gbyb7pajquihb757-keeper\" is forbidden: (no reason); lane: no record on S6 Role without pods/exec create"
+  }
+}

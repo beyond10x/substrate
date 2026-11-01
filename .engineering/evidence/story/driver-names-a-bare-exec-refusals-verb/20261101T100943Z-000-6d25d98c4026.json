@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T10:09:43Z",
+  "actor": "human:timo",
+  "artifact": "story:driver-names-a-bare-exec-refusals-verb",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "health_observation",
+    "source": "namespace lane at bb2b06fe, kept daemon log target/namespace-lane/daemon-logs/01M6B9088P0VGQB9QJSQ6YESDM/s6-role-without-pods-exec-create/daemon-01M6B9A2GW2V4D7VCT6BAXFEXA.log",
+    "reference": "2026-11-01T10:08:42Z and 10:09:43Z WARN code=kubernetes.executor-handshake-failed: exec answered 403: pods \"sbx-pr-…-keeper\" is forbidden: (no reason)"
+  }
+}

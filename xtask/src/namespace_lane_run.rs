@@ -381,7 +381,9 @@ pub fn api_refusal(resource: &str, verb: &str) -> String {
 /// dependent fact is absent and its refusal named". Only the log after its first `since` bytes
 /// counts (the lane starts each verb's daemon on a fresh log after the Role change, so `0`), and
 /// in it a `WARN` line must carry the API's answer refusing exactly `verb` on `resource`
-/// ([`api_refusal`]), in the plain form or the `Debug`-escaped one. The case decides only once
+/// ([`api_refusal`]), in the plain form or the `Debug`-escaped one; for `pods/exec` `create`
+/// alone, the API's bare refusal of the exec ([`bare_exec_refusal`]) counts too, since the API
+/// gives that refusal no reason (D349). The case decides only once
 /// the first probe has finished ([`PROBE_FINISHED`]) or the refusal is the open's own
 /// ([`NOT_OPEN`]), after which no probe runs: never on facts absent because no probe ran yet. A
 /// reason code or a fact's "was not proved" line alone names no resource and refuses nothing.
@@ -401,10 +403,19 @@ pub fn verb_refusal(
         .lines()
         .map(|line| without_escapes(line).replace('\\', ""))
         .collect();
-    let answer = api_refusal(resource, verb);
+    let bare = resource == "pods/exec" && verb == "create";
+    let answer = if bare {
+        format!("{} or a bare exec refusal", api_refusal(resource, verb))
+    } else {
+        api_refusal(resource, verb)
+    };
     let refused: Vec<&String> = lines
         .iter()
-        .filter(|line| line.contains("WARN") && line.contains(&answer))
+        .filter(|line| {
+            line.contains("WARN")
+                && (line.contains(&api_refusal(resource, verb))
+                    || (bare && bare_exec_refusal(line)))
+        })
         .collect();
     let finished = lines
         .iter()
@@ -420,6 +431,33 @@ pub fn verb_refusal(
          on: {}; not proved {unproved:?}",
         first.trim()
     ))
+}
+
+/// Whether `line` is the executor handshake refused 403 for the probe's keeper Pod with no reason:
+/// how the API (kind v1.37, D349) refuses an exec upgrade the Role lacks `pods/exec` `create`
+/// for. The message names the keeper (`pods "sbx-pr-…-keeper" is forbidden:`) and nothing follows
+/// it; a line carrying any verb's `cannot … resource` answer is not bare.
+pub fn bare_exec_refusal(line: &str) -> bool {
+    const ANSWERED: &str = "exec answered 403: pods \"";
+    const FORBIDDEN: &str = "\" is forbidden:";
+    if !line.contains("code=\"kubernetes.executor-handshake-failed\"")
+        || (line.contains("cannot ") && line.contains(" resource \""))
+    {
+        return false;
+    }
+    let Some(start) = line.find(ANSWERED) else {
+        return false;
+    };
+    let rest = &line[start + ANSWERED.len()..];
+    let Some(end) = rest.find(FORBIDDEN) else {
+        return false;
+    };
+    let pod = &rest[..end];
+    let reason = rest[end + FORBIDDEN.len()..].trim().trim_end_matches('"');
+    pod.starts_with("sbx-pr-")
+        && pod.ends_with("-keeper")
+        && !pod.contains(['"', ' '])
+        && reason.trim().is_empty()
 }
 
 /// `line` without its ANSI CSI sequences (`ESC [ … final byte`), should the log be coloured.
@@ -2704,6 +2742,86 @@ mod tests {
                 "the pods/log answer refuses {resource} {verb}"
             );
         }
+    }
+
+    /// The line the driver wrote at `bb2b06fe` when the Role lacked `pods/exec` `create`
+    /// (2026-11-01 10:08:42Z, the daemon log the lane kept): the API's `Status.message` names
+    /// the keeper Pod and ends at "is forbidden: ", with no reason.
+    fn bare_exec_line(pod: &str, code: &str, status: u16, reason: &str) -> String {
+        format!(
+            "2026-11-01T10:08:42.729145Z  WARN substrate_kubernetes::namespace::probe: the \
+             namespace driver's probe failed; its facts are absent code=\"{code}\" the cluster \
+             API: exec answered {status}: pods \"{pod}\" is forbidden: {reason}\n"
+        )
+    }
+
+    /// D349: the "pods/exec create" case is refused by the API's bare refusal of the exec, as
+    /// observed, and by nothing else; the "pods/exec get" case stays strict, and neither case's
+    /// line refuses the other.
+    #[test]
+    fn the_exec_create_case_reads_the_apis_bare_refusal_and_stays_distinct_from_get() {
+        let missing = set(&["confinement.family.process-run", "exec.argv-only"]);
+        let keeper = "sbx-pr-gbyb7pajquihb757-keeper";
+        let handshake = "kubernetes.executor-handshake-failed";
+        let bare = bare_exec_line(keeper, handshake, 403, "");
+        let refused = verb_refusal(&bare, 0, "pods/exec", "create", &missing)
+            .expect("the API's bare refusal of the exec refuses the create case");
+        assert!(refused.contains(keeper), "{refused}");
+        assert!(
+            verb_refusal(&bare, 0, "pods/exec", "get", &missing).is_none(),
+            "the bare refusal refuses the get case"
+        );
+        for (resource, verb) in [("pods", "create"), ("pods", "get"), ("pods/log", "get")] {
+            assert!(
+                verb_refusal(&bare, 0, resource, verb, &missing).is_none(),
+                "the bare refusal refuses {resource} {verb}"
+            );
+        }
+        let get = bare_exec_line(
+            "sbx-pr-sztvbtqqus5bw7uy-keeper",
+            handshake,
+            403,
+            "User \"system:serviceaccount:snl-x:substrate-driver\" cannot get resource \
+             \"pods/exec\" in API group \"\" in the namespace \"snl-x\"",
+        );
+        assert!(verb_refusal(&get, 0, "pods/exec", "get", &missing).is_some());
+        assert!(
+            verb_refusal(&get, 0, "pods/exec", "create", &missing).is_none(),
+            "the get case's refusal refuses the create case"
+        );
+        for (line, what) in [
+            (
+                bare_exec_line("sbx-pr-gbyb7pajquihb757-pod", handshake, 403, ""),
+                "another Pod",
+            ),
+            (
+                bare_exec_line(keeper, "kubernetes.api-failed", 403, ""),
+                "another code",
+            ),
+            (bare_exec_line(keeper, handshake, 404, ""), "another status"),
+            (
+                bare_exec_line(keeper, handshake, 403, "cannot list resource \"pods\""),
+                "another verb's refusal",
+            ),
+            (
+                bare_exec_line(keeper, handshake, 403, "the keeper is not running"),
+                "a reason",
+            ),
+            (bare.replace(" WARN ", " INFO "), "an INFO line"),
+        ] {
+            assert!(
+                verb_refusal(&line, 0, "pods/exec", "create", &missing).is_none(),
+                "{what} refuses the create case: {line}"
+            );
+        }
+        assert!(
+            verb_refusal(&bare, bare.len(), "pods/exec", "create", &missing).is_none(),
+            "a bare refusal before the Role change refuses nothing"
+        );
+        assert!(
+            verb_refusal(&bare, 0, "pods/exec", "create", &BTreeSet::new()).is_none(),
+            "with every fact published nothing is refused"
+        );
     }
 
     /// Acceptance 1: a refusal written before `since`, the Role change, refuses nothing, even
