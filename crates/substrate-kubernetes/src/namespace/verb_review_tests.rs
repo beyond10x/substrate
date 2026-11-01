@@ -273,3 +273,141 @@ async fn the_probe_refused_a_bare_exec_names_the_denied_verb_on_its_refusal() {
         format!("{BARE} (a SelfSubjectAccessReview denies pods/exec create)")
     );
 }
+
+/// Adversary cases of wave D354 (`story:driver-names-a-bare-exec-refusals-verb`).
+mod d354_adv {
+    use super::*;
+
+    fn bare_message() -> String {
+        format!("pods \"{KEEPER}\" is forbidden: ")
+    }
+
+    /// Acceptance 2: the 5 s bound holds the two reviews together, not each one: two reviews
+    /// that each answer within 5 s but together outlast it leave the verb unknown, and the
+    /// handshake ends at the shared bound.
+    #[tokio::test]
+    async fn two_reviews_that_together_outlast_five_seconds_leave_the_verb_unknown() {
+        let (fake, driver) = refusing(&["get"], 403, &bare_message());
+        for _ in 0..2 {
+            fake.fault(Fault::Delay {
+                method: Method::POST,
+                path: ACCESS_REVIEWS.to_owned(),
+                by: Duration::from_secs(3),
+            });
+        }
+        let started = Instant::now();
+        let error = handshake_error(&fake, &driver).await;
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_millis(5_900),
+            "the reviews held the handshake {took:?} (story:driver-names-a-bare-exec-refusals-verb)"
+        );
+        assert_eq!(
+            error.message,
+            format!(
+                "{BARE} (the refused verb is unknown: the SelfSubjectAccessReview did not answer \
+                 within 5 s)"
+            ),
+            "story:driver-names-a-bare-exec-refusals-verb"
+        );
+    }
+
+    /// Acceptance 2: the second review failing after the first answered keeps the API's refusal
+    /// and names the verb unknown, with the failed review's verb and why.
+    #[tokio::test]
+    async fn a_second_review_that_fails_keeps_the_refusal_and_names_the_verb_unknown() {
+        let (fake, driver) = refusing(&["get"], 403, &bare_message());
+        fake.fault(Fault::Delay {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            by: Duration::ZERO,
+        });
+        fake.fault(Fault::Answer {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            status: 500,
+            body: json!({"kind": "Status", "message": "etcd is unavailable", "code": 500}),
+        });
+        let error = handshake_error(&fake, &driver).await;
+        let unknown = format!(
+            "{BARE} (the refused verb is unknown: the SelfSubjectAccessReview of pods/exec get \
+             failed: "
+        );
+        assert!(
+            error.message.starts_with(&unknown)
+                && error.message.contains("etcd is unavailable")
+                && error.message.ends_with(')'),
+            "story:driver-names-a-bare-exec-refusals-verb: {}",
+            error.message
+        );
+        assert_eq!(reviews(&fake), 2, "{:#?}", fake.requests());
+    }
+
+    /// Acceptance 1: the review asks about the keeper the API refused, by name: a Role that
+    /// grants `pods/exec` `create` on that keeper alone is admitted (the review does not decide),
+    /// and one that grants it on another Pod alone is denied.
+    #[tokio::test]
+    async fn the_review_asks_about_the_refused_keeper_by_name() {
+        for (granted, expected) in [
+            (
+                KEEPER,
+                "a SelfSubjectAccessReview admits pods/exec create and get: it does not decide \
+                 the refused verb",
+            ),
+            (
+                "sbx-pr-other0000000000000-keeper",
+                "a SelfSubjectAccessReview denies pods/exec create",
+            ),
+        ] {
+            let (fake, driver) = refusing(&["get"], 403, &bare_message());
+            let mut rules = rules_with_exec(&["get"]);
+            rules.push(json!({
+                "verbs": ["create"], "apiGroups": [""], "resources": ["pods/exec"],
+                "resourceNames": [granted],
+            }));
+            fake.set_rules(rules);
+            let error = handshake_error(&fake, &driver).await;
+            assert_eq!(
+                error.message,
+                format!("{BARE} ({expected})"),
+                "create granted on {granted} (story:driver-names-a-bare-exec-refusals-verb)"
+            );
+        }
+    }
+
+    /// Acceptance 1: "no reason after `is forbidden:`" holds however much whitespace follows, or
+    /// none, and the API's own words before it stay as the API wrote them.
+    #[tokio::test]
+    async fn a_bare_refusal_is_bare_whatever_whitespace_follows_it() {
+        for tail in ["", " ", "  \t", " \n"] {
+            let (fake, driver) = refusing(
+                &["get"],
+                403,
+                &format!("pods \"{KEEPER}\" is forbidden:{tail}"),
+            );
+            let error = handshake_error(&fake, &driver).await;
+            assert_eq!(
+                error.message,
+                format!("{BARE} (a SelfSubjectAccessReview denies pods/exec create)"),
+                "a bare refusal ending {tail:?} (story:driver-names-a-bare-exec-refusals-verb)"
+            );
+            assert_eq!(reviews(&fake), 2, "{tail:?}: {:#?}", fake.requests());
+        }
+    }
+
+    /// A reason after `is forbidden:`, however short, is the API's answer alone: no review.
+    #[tokio::test]
+    async fn a_refusal_with_any_reason_after_forbidden_asks_no_review() {
+        for reason in ["the keeper is not running", "x"] {
+            let message = format!("pods \"{KEEPER}\" is forbidden: {reason}");
+            let (fake, driver) = refusing(&["get"], 403, &message);
+            let error = handshake_error(&fake, &driver).await;
+            assert_eq!(
+                error.message,
+                format!("the cluster API: exec answered 403: {message}"),
+                "story:driver-names-a-bare-exec-refusals-verb"
+            );
+            assert_eq!(reviews(&fake), 0, "{reason}: {:#?}", fake.requests());
+        }
+    }
+}
