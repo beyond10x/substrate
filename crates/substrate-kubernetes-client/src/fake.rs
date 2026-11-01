@@ -6,8 +6,9 @@
 //! `dryRun=All`), get, update (refused 409 on a stale `resourceVersion`), paged lists (whole or
 //! metadata alone), chunked watches (an `ERROR` event with code 410 for a version older than
 //! [`FakeCluster::compact`]), and delete with `gracePeriodSeconds` and `preconditions.uid` (409 on
-//! a mismatch); `SelfSubjectRulesReview` answering [`FakeCluster::set_rules`]; `pods/log` with
-//! `limitBytes`; and `pods/exec` over WebSocket `v5.channel.k8s.io`, answered by the
+//! a mismatch); `SelfSubjectRulesReview` answering [`FakeCluster::set_rules`], and
+//! `SelfSubjectAccessReview` answering whether those rules admit the review's resource attributes;
+//! `pods/log` with `limitBytes`; and `pods/exec` over WebSocket `v5.channel.k8s.io`, answered by the
 //! [`ExecHandler`] a test installs. Every request needs the fake's bearer token. Pod Security
 //! admission is switchable ([`FakeCluster::enforce_restricted`]): off, as in a namespace without
 //! the `pod-security.kubernetes.io/enforce` label, every Pod is admitted; on, a Pod with a
@@ -72,6 +73,7 @@ const RESOURCES: [(&str, &str, &str, &str); 4] = [
     ),
 ];
 const RULES_REVIEW: &str = "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews";
+const ACCESS_REVIEW: &str = "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews";
 /// The longest a watch stays open, whatever `timeoutSeconds` asks.
 const MAX_WATCH: Duration = Duration::from_secs(30);
 const MAX_REQUEST_BYTES: usize = 4 * 1_048_576;
@@ -393,7 +395,8 @@ impl FakeCluster {
             .retain(|(_, version), _| *version >= compacted);
     }
 
-    /// The `resourceRules` every `SelfSubjectRulesReview` answers.
+    /// The `resourceRules` every `SelfSubjectRulesReview` answers, and every
+    /// `SelfSubjectAccessReview` decides by.
     pub fn set_rules(&self, rules: Vec<Value>) {
         self.store().rules = rules;
     }
@@ -578,6 +581,13 @@ impl Shared {
             });
             return Ok(answer(201, &answered));
         }
+        if path == ACCESS_REVIEW && method == Method::POST {
+            let review = read_json(request).await?;
+            let allowed = self.admits(&review["spec"]["resourceAttributes"]);
+            let mut answered = review;
+            answered["status"] = json!({"allowed": allowed});
+            return Ok(answer(201, &answered));
+        }
         let target = self.target(&path)?;
         let metadata = request
             .headers()
@@ -635,6 +645,32 @@ impl Shared {
                 format!("the fake does not serve {method} {path}"),
             )),
         }
+    }
+
+    /// Whether one of the rules [`FakeCluster::set_rules`] holds admits an access review's
+    /// `attributes` as RBAC matches them: the fake's own namespace, an API group, the resource
+    /// with `/<subresource>` when one is named, the verb, each matched or `*`, and the name when
+    /// the rule names any.
+    fn admits(&self, attributes: &Value) -> bool {
+        let text = |member: &str| attributes[member].as_str().unwrap_or_default();
+        let resource = match text("subresource") {
+            "" => text("resource").to_owned(),
+            subresource => format!("{}/{subresource}", text("resource")),
+        };
+        let holds = |rule: &Value, member: &str, wanted: &str| {
+            rule[member]
+                .as_array()
+                .is_some_and(|values| values.iter().any(|value| value == "*" || value == wanted))
+        };
+        text("namespace") == self.namespace
+            && self.lock().rules.iter().any(|rule| {
+                holds(rule, "apiGroups", text("group"))
+                    && holds(rule, "resources", &resource)
+                    && holds(rule, "verbs", text("verb"))
+                    && rule["resourceNames"].as_array().is_none_or(|names| {
+                        names.is_empty() || names.iter().any(|name| name == text("name"))
+                    })
+            })
     }
 
     fn target(&self, path: &str) -> Result<Target, Refusal> {

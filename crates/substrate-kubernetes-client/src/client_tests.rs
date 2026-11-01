@@ -217,6 +217,92 @@ async fn a_rules_review_answers_the_rules_of_the_credential_in_its_namespace() {
     assert_eq!(status["incomplete"], false);
 }
 
+const ACCESS_REVIEWS: &str = "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews";
+
+/// `story:driver-names-a-bare-exec-refusals-verb`: a `SelfSubjectAccessReview` answers whether
+/// the credential may do one verb on one named object of a resource or subresource in its
+/// namespace, as the rules the API holds for it decide; it is one POST and stores nothing.
+#[tokio::test]
+async fn an_access_review_answers_whether_the_credential_may_do_one_verb_on_one_object() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    fake.set_rules(vec![
+        json!({"verbs": ["get"], "apiGroups": [""], "resources": ["pods/exec"]}),
+        json!({
+            "verbs": ["create"], "apiGroups": [""], "resources": ["pods/exec"],
+            "resourceNames": ["other-keeper"],
+        }),
+    ]);
+
+    for (resource, verb, name, admitted) in [
+        ("pods/exec", "get", "keeper", true),
+        ("pods/exec", "create", "keeper", false),
+        ("pods/exec", "create", "other-keeper", true),
+        ("pods", "get", "keeper", false),
+        ("pods/log", "get", "keeper", false),
+    ] {
+        let allowed = api
+            .access_review("", resource, verb, name)
+            .await
+            .unwrap_or_else(|error| panic!("{resource} {verb} {name} is reviewed: {error}"));
+        assert_eq!(allowed, admitted, "{resource} {verb} {name}");
+    }
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 5, "{requests:#?}");
+    assert!(
+        requests
+            .iter()
+            .all(|request| *request == format!("POST {ACCESS_REVIEWS}")),
+        "{requests:#?}"
+    );
+    assert!(fake.object("pods", "keeper").is_none());
+}
+
+/// `story:driver-names-a-bare-exec-refusals-verb`: the review's own refusal is the API's answer,
+/// and an answer that states no `status.allowed` boolean is unreadable, never read as a denial.
+#[tokio::test]
+async fn an_access_review_refused_or_answered_without_allowed_is_an_error() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    fake.fault(Fault::Answer {
+        method: Method::POST,
+        path: ACCESS_REVIEWS.to_owned(),
+        status: 403,
+        body: json!({
+            "kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
+            "message": "selfsubjectaccessreviews.authorization.k8s.io is forbidden: the review \
+                        is not granted",
+            "reason": "Forbidden", "code": 403,
+        }),
+    });
+    let refused = api
+        .access_review("", "pods/exec", "create", "keeper")
+        .await
+        .expect_err("the review is refused");
+    assert_eq!(refused.status(), Some(403), "{refused}");
+    assert!(
+        refused.to_string().contains("the review is not granted"),
+        "{refused}"
+    );
+
+    for body in [
+        json!({"kind": "SelfSubjectAccessReview"}),
+        json!({"status": {"allowed": "false"}}),
+    ] {
+        fake.fault(Fault::Answer {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            status: 201,
+            body: body.clone(),
+        });
+        let unread = api
+            .access_review("", "pods/exec", "create", "keeper")
+            .await
+            .expect_err("no allowed boolean");
+        assert!(matches!(unread, ApiError::Invalid(_)), "{body}: {unread}");
+    }
+}
+
 #[tokio::test]
 async fn an_exec_over_websocket_v5_carries_stdin_both_streams_and_the_exit_code() {
     let fake = start();
