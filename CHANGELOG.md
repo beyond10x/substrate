@@ -15,6 +15,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `state.store-failed`, not `kubernetes.api-failed`, a refused `pods get` while the probe waits
   ends its run at once with `kubernetes.api-failed` and the API's answer, and the probe's
   removal warnings carry the API's answer (`cannot <verb> resource "<resource>"`).
+- An exec end the Kubernetes namespace driver decides after an API call no longer panics, or overwrites the end, when a concurrent observation already ended the exec; the end recorded first stands.
 
 ## [0.18.0] — 2026-10-31
 

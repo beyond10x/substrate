@@ -1175,6 +1175,88 @@ async fn a_log_read_while_the_name_is_replaced_is_not_the_execs_output() {
     );
 }
 
+/// Two observations of one ended exec race: the first reads the Pod shown ended and waits on its
+/// log, the second ends the exec meanwhile and deletes its Pod. Returns the first's answer and
+/// the second's end; `acknowledge` has the daemon acknowledge that end before the first resumes,
+/// so the driver forgets the exec.
+async fn race_two_ends(
+    rig: &Rig,
+    id: &str,
+    acknowledge: bool,
+) -> (Result<ExecObservation, DriverError>, ExecObservation) {
+    rig.started(id, &input(&["/bin/true"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    let log = [
+        applied_line(67_108_864, 500),
+        frame(&Frame::Output {
+            stream: substrate_executor::frame::Stream::Stdout,
+            bytes: b"the first end".to_vec(),
+        }),
+        exit_line(0),
+    ]
+    .concat();
+    rig.terminated(&name, 0, log.as_bytes()).await;
+    rig.fake.fault(Fault::Delay {
+        method: Method::GET,
+        path: format!("{}/{name}/log", rig.admin.pods()),
+        by: Duration::from_millis(400),
+    });
+    tokio::join!(rig.driver.exec_observe(id), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let first = rig.driver.exec_observe(id).await.expect("the first end");
+        assert_eq!(first.resource.state, ExecState::Exited);
+        assert_eq!(first.stdout, b"the first end");
+        if acknowledge {
+            rig.driver.exec_acknowledge(&first);
+        }
+        first
+    })
+}
+
+/// D339 U3: an end decided after a GET await, when a concurrent observation ended the exec and
+/// the daemon acknowledged it meanwhile, finds the exec forgotten. It is answered, never a panic,
+/// and the forgotten exec is not tracked again.
+#[tokio::test]
+async fn an_end_decided_after_a_concurrent_acknowledged_end_does_not_panic() {
+    let rig = rig().await;
+    let id = "exec_late_acknowledged";
+    let (late, _first) = Box::pin(race_two_ends(&rig, id, true)).await;
+    let late = late.expect("the late observation is answered");
+    assert_ne!(late.resource.state, ExecState::Running, "{late:?}");
+    assert!(
+        rig.driver.exec_completed().is_empty(),
+        "a late end tracks the acknowledged exec again"
+    );
+    let forgotten = rig
+        .driver
+        .exec_observe(id)
+        .await
+        .expect_err("the acknowledged exec stays forgotten");
+    assert_eq!(forgotten.class, DriverErrorClass::NotFound);
+}
+
+/// D339 U3: an end decided after a GET await, when a concurrent observation ended the exec and
+/// the daemon has not yet acknowledged it, returns the recorded end and never overwrites it.
+#[tokio::test]
+async fn an_end_decided_after_a_concurrent_end_returns_the_recorded_end() {
+    let rig = rig().await;
+    let id = "exec_late_recorded";
+    let (late, first) = Box::pin(race_two_ends(&rig, id, false)).await;
+    let late = late.expect("the late observation is answered");
+    assert_eq!(late, first, "the late observation is the recorded end");
+    assert_eq!(
+        rig.driver.exec_completed(),
+        vec![first],
+        "the recorded end is not overwritten"
+    );
+    assert_eq!(
+        rig.output(id, OutputStream::Stdout)
+            .expect("the recorded output is still served"),
+        b"the first end"
+    );
+}
+
 /// Design 34 § 7.3: the exit alone cannot tell a run from a refusal, because the executor exits
 /// 125 when the limits read back differ and writes the refusal only to the log. A Pod deleted
 /// before its log was read leaves the exec `unknown` with no exit, for the limits-unapplied 125
