@@ -13,13 +13,13 @@ use std::time::Duration;
 
 use serde_json::json;
 use substrate_executor::frame::{Frame, Stream};
-use substrate_host::{Driver as _, DriverErrorClass, ExecObservation};
+use substrate_host::{DispatchOutcome, Driver as _, DriverErrorClass, ExecObservation};
 use substrate_kubernetes_client::Method;
 use substrate_kubernetes_client::fake::Fault;
 use substrate_wire::ExecState;
 
 use super::{
-    DEPLOYMENT, Rig, SNAPSHOT, applied_line, driver_over, exit_line, frame, input, rig, uid,
+    DEPLOYMENT, NODE, Rig, SNAPSHOT, applied_line, driver_over, exit_line, frame, input, rig, uid,
 };
 use crate::names::{self, DEPLOYMENT_LABEL, MANAGED_BY, MANAGED_BY_LABEL, OPERATION_ANNOTATION};
 use crate::pod::KILL_GRACE_SECONDS;
@@ -49,13 +49,40 @@ async fn take_over(rig: &mut Rig, reopened: NamespaceDriver) {
     rig.clock.set(TAKEOVER);
     reopened.open().await.expect("the Lease is taken over");
     let generation = reopened.binding().expect("bound").config_generation();
-    reopened.publish_exec_snapshot(SNAPSHOT, generation);
+    reopened.publish_exec_snapshot(SNAPSHOT, generation, Some(NODE));
     drop(std::mem::replace(&mut rig.driver, reopened));
 }
 
 async fn restart(rig: &mut Rig) {
     let reopened = driver_over(&rig.fake, &rig.ledger, &rig.clock);
     take_over(rig, reopened).await;
+}
+
+/// Design 34 § 6.4 and its amendment of 2026-11-01 (D339),
+/// `story:namespace-no-egress-observed-on-every-node`: the process that takes the namespace over
+/// publishes no probe node until its own probe ran, whatever node the earlier process's probe
+/// observed, so a start under the snapshot it publishes is refused before any Pod.
+#[tokio::test]
+async fn a_driver_taken_over_publishes_no_probe_node_until_its_own_probe() {
+    let mut rig = rig().await;
+    restart(&mut rig).await;
+    let snapshot = rig.driver.machine();
+    assert_eq!(rig.driver.published_exec_node(), None);
+    let mut start = input(&["/bin/true"]);
+    start.sandbox.capability_snapshot = snapshot.snapshot;
+    let DispatchOutcome::NotDispatched(refused) = rig.start("exec_taken_over", &start).await else {
+        panic!(
+            "story:namespace-no-egress-observed-on-every-node: a start with no observed node \
+             was dispatched"
+        );
+    };
+    assert_eq!(
+        refused.code, "exec.sandbox-unavailable",
+        "{}",
+        refused.message
+    );
+    assert_eq!(refused.class, DriverErrorClass::Unserved);
+    assert_eq!(rig.pod_creates(), 0, "no Pod create was sent");
 }
 
 /// N8 A: a Pod still running across a restart is deleted with grace 1 s under its uid and the
