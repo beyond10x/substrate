@@ -18,7 +18,7 @@ name = "b10x-substrate-conformance"
 path = "src/main.rs"
 
 [dependencies]
-b10x-substrate-sdk = { path = "../b10x-substrate-sdk", version = "=0.18.0" }
+b10x-substrate-sdk = { path = "../b10x-substrate-sdk", version = "=0.18.1" }
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -31,7 +31,7 @@ rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.18.0" }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.18.1" }
 tokio.workspace = true
 tokio-rustls.workspace = true
 ulid.workspace = true

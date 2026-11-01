@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:probe-withheld-facts-name-the-failed-calls-code
 kind: story
-status: active
+status: implemented
 title: Every probe fact the namespace driver withholds says why, with the failed call's own code
 relations:
 - informed_by: review-result:wave-2026-10-31-d337-adversary-pass-1
@@ -13,10 +13,11 @@ scope:
   path: crates/substrate-kubernetes/src/namespace/probe.rs
 - confidence: cited
   path: crates/substrate-kubernetes/src/namespace/probe_tests.rs
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T00:28:53Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-01T00:37:23Z", actor: "human:timo", revision: 6}
+- {from: "active", to: "implemented", at: "2026-11-01T03:39:31Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 # Story: every probe fact the namespace driver withholds says why, with the failed call's own code
 
