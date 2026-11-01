@@ -2180,3 +2180,72 @@ mod d354_adv {
         assert_eq!(rig.pod_creates(), 0);
     }
 }
+
+/// `story:concurrent-snapshots-never-publish-an-older-probe`: after two `machine()` calls
+/// interleave, a start is held to the newer probe's tuple.
+mod d364 {
+    use super::*;
+    use crate::interleave::older_published_last;
+
+    const OTHER_NODE: &str = "node-b";
+
+    /// Acceptance 2: the older call computes under a probe on `OTHER_NODE`, a newer probe proves
+    /// the keeper's node `NODE`, and the older call publishes last. A start naming the newer
+    /// snapshot is dispatched on `NODE`; one naming the older snapshot is
+    /// `exec.capability-stale` before any Pod.
+    #[tokio::test]
+    async fn a_start_after_the_interleave_compares_against_the_newer_probes_tuple() {
+        let rig = rig().await;
+        rig.driver.prove_on(OTHER_NODE);
+        let (older, newer) = older_published_last(&rig.driver, || {
+            rig.clock.set(Duration::from_secs(1));
+            rig.driver.prove_on(NODE);
+        });
+        assert_ne!(older.snapshot, newer.snapshot, "the control");
+
+        let mut current = input(&["/bin/true"]);
+        current
+            .sandbox
+            .capability_snapshot
+            .clone_from(&newer.snapshot);
+        match rig.start("exec_newer", &current).await {
+            DispatchOutcome::Observed(observation) => {
+                assert_eq!(observation.resource.state, ExecState::Running);
+            }
+            DispatchOutcome::NotDispatched(refused)
+            | DispatchOutcome::ContainedAbsent(refused)
+            | DispatchOutcome::OutcomeUnknown(refused) => panic!(
+                "story:concurrent-snapshots-never-publish-an-older-probe: a start under the \
+                 newer probe's snapshot was compared against the older tuple: {}: {}",
+                refused.code, refused.message
+            ),
+        }
+        let pod = rig
+            .pod(&names::exec_pod(DEPLOYMENT, "exec_newer"))
+            .expect("the Pod is stored");
+        assert_eq!(
+            pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+                ["nodeSelectorTerms"][0]["matchExpressions"][0]["values"],
+            json!([NODE])
+        );
+
+        let mut stale = input(&["/bin/true"]);
+        stale
+            .sandbox
+            .capability_snapshot
+            .clone_from(&older.snapshot);
+        let DispatchOutcome::NotDispatched(refused) = rig.start("exec_older", &stale).await else {
+            panic!(
+                "story:concurrent-snapshots-never-publish-an-older-probe: a start under the \
+                 older snapshot was dispatched"
+            );
+        };
+        assert_eq!(
+            refused.code, CAPABILITY_STALE,
+            "story:concurrent-snapshots-never-publish-an-older-probe: the older snapshot is \
+             still admitted: {}: {}",
+            refused.code, refused.message
+        );
+        assert_eq!(rig.pod_creates(), 1, "only the newer start created a Pod");
+    }
+}
