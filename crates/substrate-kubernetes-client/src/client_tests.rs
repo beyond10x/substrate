@@ -1970,3 +1970,37 @@ async fn the_delete_after_a_409_carries_the_read_uid_and_spares_a_late_replaceme
         "the removal took the replacement as its own Pod"
     );
 }
+
+/// Adversary pass of wave D339, unit 4 (`story:pod-orphaned-policy-is-swept`).
+mod adversary_d339 {
+    use super::*;
+    use crate::PodHistory;
+
+    /// A `BOOKMARK` says every event up to its own `resourceVersion` was sent. One that carries the
+    /// version the replay started from, or none, says nothing of what followed that version, so it
+    /// cannot show the replay from it complete: the Pod is not shown never created. (An older
+    /// version is not told apart: versions are opaque.)
+    #[tokio::test]
+    async fn a_bookmark_at_the_start_version_or_none_does_not_show_the_pod_never_created() {
+        for (carried, metadata) in [
+            ("the start version", json!({"resourceVersion": "9"})),
+            ("no version", json!({})),
+        ] {
+            let fake = start();
+            let api = client(&fake.kubeconfig());
+            fake.fault(Fault::Answer {
+                method: Method::GET,
+                path: format!("{}?watch=1", api.pods()),
+                status: 200,
+                body: json!({"type": "BOOKMARK",
+                             "object": {"kind": "Pod", "apiVersion": "v1", "metadata": metadata}}),
+            });
+            let history = api.pod_history("gone", &PodTrace::since(Some("9"))).await;
+            assert_ne!(
+                history,
+                PodHistory::NeverCreated,
+                "a BOOKMARK carrying {carried} showed a replay from version 9 complete"
+            );
+        }
+    }
+}

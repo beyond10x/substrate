@@ -301,6 +301,7 @@ impl Api {
         if let Err(invalid) = pod_name(name) {
             return PodHistory::End(PodEnd::Unproven(invalid.to_string()));
         }
+        let since = version.clone();
         let version: String = url::form_urlencoded::byte_serialize(version.as_bytes()).collect();
         let path = format!(
             "{}?watch=1&fieldSelector=metadata.name%3D{name}&resourceVersion={version}\
@@ -309,14 +310,15 @@ impl Api {
             WATCH_LIMIT.as_secs()
         );
         let mut trace = trace.clone();
-        let history = tokio::time::timeout(REPLAY_LIMIT, self.history(&path, name, &mut trace))
-            .await
-            .unwrap_or_else(|_| {
-                PodHistory::End(PodEnd::Unproven(format!(
-                    "the watch sent no bookmark within {REPLAY_LIMIT:?}, so its replay may be \
+        let history =
+            tokio::time::timeout(REPLAY_LIMIT, self.history(&path, name, &since, &mut trace))
+                .await
+                .unwrap_or_else(|_| {
+                    PodHistory::End(PodEnd::Unproven(format!(
+                        "the watch sent no bookmark within {REPLAY_LIMIT:?}, so its replay may be \
                      incomplete"
-                )))
-            });
+                    )))
+                });
         match history {
             PodHistory::End(PodEnd::Unproven(why)) => {
                 PodHistory::End(PodEnd::Unproven(self.redact(&why)))
@@ -330,8 +332,17 @@ impl Api {
 
     /// Reads the watch at `path`, which asks for bookmarks, event by event until one of `name`
     /// decides [`PodEnd`], a `BOOKMARK` ends the replay, the stream ends, or it passes
-    /// [`crate::MAX_API_BODY_BYTES`].
-    async fn history(&self, path: &str, name: &str, trace: &mut PodTrace) -> PodHistory {
+    /// [`crate::MAX_API_BODY_BYTES`]. A `BOOKMARK` shows the replay complete only when it carries a
+    /// `resourceVersion` other than `since`, the one the watch started from: a server sends every
+    /// event up to a bookmark's version before it, so one at the start version, or without one,
+    /// says nothing of what followed. Versions are opaque, so an older one is not told apart.
+    async fn history(
+        &self,
+        path: &str,
+        name: &str,
+        since: &str,
+        trace: &mut PodTrace,
+    ) -> PodHistory {
         // The connection goes with the watch, however the read ends.
         let mut watch = match self.watch(path).await {
             Ok(watch) => watch,
@@ -372,7 +383,17 @@ impl Api {
                         "the replay showed the Pod added and not its container stopped".to_owned(),
                     ));
                 }
-                Some("BOOKMARK") => return PodHistory::NeverCreated,
+                Some("BOOKMARK") => {
+                    let at = event["object"]["metadata"]["resourceVersion"].as_str();
+                    if at.is_some_and(|at| !at.is_empty() && at != since) {
+                        return PodHistory::NeverCreated;
+                    }
+                    return PodHistory::End(PodEnd::Unproven(
+                        "the watch's bookmark carried no resourceVersion past the one it started \
+                         from, so its replay may be incomplete"
+                            .to_owned(),
+                    ));
+                }
                 Some("ADDED" | "MODIFIED" | "DELETED")
                     if event["object"]["metadata"]["name"].as_str() == Some(name) =>
                 {

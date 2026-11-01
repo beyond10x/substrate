@@ -261,8 +261,12 @@ policy whose Pod is gone: the API must show the container stopped.
   event of the name ends a complete replay that shows no Pod ever added, and the policy is deleted.
   Events of the name decide as above, and a `BOOKMARK` after events that decided nothing keeps the
   policy. A replay that does not end in a `BOOKMARK` is incomplete and keeps it: a 410, a refusal,
-  an `ERROR` event, the stream ending, or the 8 seconds passing first. Only the `watch` verb is
-  needed.
+  an `ERROR` event, the stream ending, or the 8 seconds passing first. So does a `BOOKMARK` that
+  carries no `resourceVersion` or the one the watch started from (versions are opaque, so an
+  older one is not told apart). Only the `watch` verb is needed. The rule relies on the adapter
+  being the only writer of its policies, as it is of every object it labels: the policy's
+  `resourceVersion` is its last write, so a policy another writer changed after the Pod was created
+  would start the replay past the Pod's history (`story:pod-sweep-replays-from-the-policys-create`).
 
 ## Not decided here
 
