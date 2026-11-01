@@ -4128,16 +4128,16 @@ mod tests {
         // A second run started while the first is still creating its cluster finds the name free,
         // then `kind create` refuses it because the first run holds it. The guard built before the
         // create deletes by that name on drop, which would delete the first run's cluster.
-        use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().expect("temporary directory");
         let log = directory.path().join("kind.log");
-        let kind = directory.path().join("kind");
-        let script = format!(
-            "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = create ]; then\necho 'ERROR: node(s) already exist for a cluster with the name \"substrate-chart-lane\"' >&2\nexit 1\nfi\nexit 0\n",
-            log.display()
+        let kind = stand_in(
+            directory.path(),
+            "kind",
+            &format!(
+                "echo \"$*\" >> '{}'\nif [ \"$1\" = create ]; then\necho 'ERROR: node(s) already exist for a cluster with the name \"substrate-chart-lane\"' >&2\nexit 1\nfi\nexit 0\n",
+                log.display()
+            ),
         );
-        fs::write(&kind, script).expect("the stand-in kind");
-        fs::set_permissions(&kind, fs::Permissions::from_mode(0o755)).expect("executable");
         let args = Args {
             image: "b10x-substrate-daemon:9.9.9".to_owned(),
             node_image: "kindest/node:v1.37.0".to_owned(),
@@ -4180,10 +4180,35 @@ mod tests {
     }
 
     /// An executable shell script at `directory/name` with `body` after the interpreter line.
+    ///
+    /// A child process writes it, so this process never holds it open for writing. A child that
+    /// another test forks inherits every descriptor this process holds until it execs, and an exec
+    /// of a file any process holds open for writing fails `ETXTBSY`; a rename into place does not
+    /// help, because the inode is the same.
     fn stand_in(directory: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let path = directory.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}")).expect("the stand-in");
+        // The body goes in on a pipe, not as an argument, so its size is not bounded by
+        // MAX_ARG_STRLEN; only the child ever holds the script open for writing.
+        let mut writer = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\"", "stand-in"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("the stand-in writer");
+        {
+            use std::io::Write as _;
+            let mut input = writer.stdin.take().expect("the writer's stdin");
+            input
+                .write_all(format!("#!/bin/sh\n{body}").as_bytes())
+                .expect("the stand-in body");
+        }
+        let status = writer.wait().expect("the stand-in writer");
+        assert!(
+            status.success(),
+            "writing {} exited {status}",
+            path.display()
+        );
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
         path
     }
@@ -4343,6 +4368,55 @@ mod tests {
     }
 
     #[test]
+    fn a_stand_in_starts_while_other_threads_fork() {
+        // Another test's spawn forks this process; a child forked while a stand-in is open for
+        // writing holds that descriptor until it execs, and an exec of the stand-in in that window
+        // fails `ETXTBSY` (main's Gate run 41234221370).
+        const STARTS: usize = 1000;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let forking = Arc::new(AtomicBool::new(true));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let forking = Arc::clone(&forking);
+                thread::spawn(move || {
+                    while forking.load(Ordering::SeqCst) {
+                        let _ = Command::new("true")
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                    }
+                })
+            })
+            .collect();
+        let mut failed = Vec::new();
+        for start in 0..STARTS {
+            let script = stand_in(directory.path(), &format!("stand-in-{start}"), "exit 0\n");
+            // The spawn is where `ETXTBSY` surfaces; `output` would add its 50 ms poll per start.
+            let started = Command::new(&script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            match started {
+                Ok(status) if status.success() => {}
+                Ok(status) => failed.push(format!("{} exited {status}", script.display())),
+                Err(error) => failed.push(format!("starting {}: {error}", script.display())),
+            }
+        }
+        forking.store(false, Ordering::SeqCst);
+        for forker in forkers {
+            forker.join().expect("the forker");
+        }
+        assert!(
+            failed.is_empty(),
+            "{} of {STARTS} stand-ins failed to start; the first: {}",
+            failed.len(),
+            failed[0]
+        );
+    }
+
+    #[test]
     fn an_all_passed_run_that_is_no_record_says_so_last_on_stderr() {
         let at = UNIX_EPOCH + Duration::from_hours(497_986);
         let report = report_lines(
@@ -4425,5 +4499,76 @@ mod tests {
         );
         assert!(!chart_dir.join("templates/b.yaml").exists());
         assert_eq!(seccomp, "{\"committed\": true}\n\n");
+    }
+
+    /// Adversary pass, wave D342 unit U2: `stand_in` writes through a `/bin/sh` child, and the
+    /// script it leaves must be the bytes `fs::write` left before.
+    mod adversary_d342 {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn expected(body: &str) -> Vec<u8> {
+            format!("#!/bin/sh\n{body}").into_bytes()
+        }
+
+        #[test]
+        fn a_stand_in_holds_its_body_byte_for_byte() {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let bodies = [
+                "",
+                "exit 0\n",
+                "%s %d %% %b\n",
+                "-n\n",
+                "--\n",
+                "-e x",
+                "\\n\\t\\\\ \\0 \\c tail\n",
+                "'\"$1 $@ `x` $(y)\n",
+                "no trailing newline",
+                "\n\n\n",
+                "a\r\nb\r\n",
+                "\u{e9} \u{2713}\n",
+                "\t leading tab and trailing spaces   \n",
+            ];
+            for (index, body) in bodies.iter().enumerate() {
+                let path = stand_in(directory.path(), &format!("s{index}"), body);
+                assert_eq!(
+                    fs::read(&path).expect("the stand-in"),
+                    expected(body),
+                    "body {body:?}"
+                );
+                let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+                assert_eq!(mode & 0o777, 0o755, "body {body:?}");
+            }
+        }
+
+        #[test]
+        fn a_stand_in_written_over_an_existing_longer_file_is_truncated() {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            stand_in(directory.path(), "kind", &"echo long\n".repeat(50));
+            let path = stand_in(directory.path(), "kind", "exit 3\n");
+            assert_eq!(fs::read(&path).expect("the stand-in"), expected("exit 3\n"));
+            let status = Command::new(&path)
+                .stdin(Stdio::null())
+                .status()
+                .expect("start");
+            assert_eq!(status.code(), Some(3));
+        }
+
+        #[test]
+        #[should_panic(expected = "exited")]
+        fn a_stand_in_that_cannot_be_written_is_reported() {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            stand_in(&directory.path().join("missing"), "kind", "exit 0\n");
+        }
+
+        /// `fs::write` took any `&str`; one argv string is capped at 128 KiB on Linux
+        /// (`MAX_ARG_STRLEN`), so a larger body is no longer written.
+        #[test]
+        fn a_stand_in_body_larger_than_one_argument_is_written() {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let body = format!("# {}\nexit 0\n", "x".repeat(200 * 1024));
+            let path = stand_in(directory.path(), "large", &body);
+            assert_eq!(fs::read(&path).expect("the stand-in"), expected(&body));
+        }
     }
 }

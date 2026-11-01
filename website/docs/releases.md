@@ -47,3 +47,6 @@ Kubernetes namespace driver's probe says why each fact it withholds was not prov
   "pods/exec"`) instead of retrying until its 60 s bound; every other answer is still retried.
   `cargo xtask namespace-lane observe` keeps the daemon logs of a failed case under
   `target/namespace-lane/daemon-logs/` and names them in the case's failure.
+- `cargo test -p xtask` no longer fails a chart-lane test with `Text file busy (os error 26)`: a
+  child process writes each stand-in script, so no child another test forks meanwhile inherits it
+  open for writing.
