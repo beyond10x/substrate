@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:refused-executor-handshake-names-the-api-answer
 kind: story
-status: active
+status: implemented
 title: A refused executor handshake names the API's answer at once
 relations:
 - decomposes: epic:confinement-contract-family
@@ -16,10 +16,11 @@ scope:
   path: crates/substrate-kubernetes/src/namespace/workspace.rs
 - confidence: cited
   path: xtask/src/namespace_lane_run.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T05:07:15Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-01T05:07:15Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-01T10:16:34Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 # Story: a refused executor handshake names the API's answer at once
 
