@@ -24,16 +24,16 @@ getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-substrate-executor = { package = "b10x-substrate-executor", path = "../substrate-executor", version = "=0.18.1" }
-substrate-guarded = { package = "b10x-substrate-guarded", path = "../substrate-guarded", version = "=0.18.1" }
-substrate-host = { package = "b10x-substrate-host", path = "../substrate-host", version = "=0.18.1" }
-substrate-kubernetes-client = { package = "b10x-substrate-kubernetes-client", path = "../substrate-kubernetes-client", version = "=0.18.1" }
-substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.18.1" }
+substrate-executor = { package = "b10x-substrate-executor", path = "../substrate-executor", version = "=0.19.0" }
+substrate-guarded = { package = "b10x-substrate-guarded", path = "../substrate-guarded", version = "=0.19.0" }
+substrate-host = { package = "b10x-substrate-host", path = "../substrate-host", version = "=0.19.0" }
+substrate-kubernetes-client = { package = "b10x-substrate-kubernetes-client", path = "../substrate-kubernetes-client", version = "=0.19.0" }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.19.0" }
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-substrate-kubernetes-client = { package = "b10x-substrate-kubernetes-client", path = "../substrate-kubernetes-client", version = "=0.18.1", features = ["fake"] }
+substrate-kubernetes-client = { package = "b10x-substrate-kubernetes-client", path = "../substrate-kubernetes-client", version = "=0.19.0", features = ["fake"] }
 tempfile.workspace = true
 tracing-subscriber.workspace = true
 

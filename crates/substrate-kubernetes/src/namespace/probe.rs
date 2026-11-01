@@ -30,6 +30,11 @@
 //! A proof lasts until `valid_until`, the next run plus 60 s, and only under the binding and the
 //! Lease it was taken under: a failed or late probe, a lost Lease or a new binding leaves the
 //! facts absent, never stale.
+//!
+//! Every run proof is an observation of one node, the one the probe's keeper was scheduled on.
+//! The driver publishes that node beside the snapshot, never in it, and an exec start whose
+//! workspace keeper is on another node is `exec.sandbox-unavailable` (§ 6.4, D339). A run whose
+//! keeper node could not be read proves nothing and leaves no node published.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -93,6 +98,10 @@ pub(crate) struct Probed {
     valid_until: DateTime<Utc>,
     workspace: WorkspaceProofs,
     run: RunProofs,
+    /// The node the probe's keeper was scheduled on and its Pod ran on, which every proof in
+    /// `run` observed (design 34 § 6.4); `None` when the run proved nothing, as it does when the
+    /// keeper's node could not be read.
+    node: Option<String>,
 }
 
 /// What the probe Pod's run proved (design 34 § 6.2 rows 2 to 5), each on its own observation.
@@ -220,10 +229,11 @@ pub(crate) struct ProbeState {
     lease_epoch: u64,
 }
 
-/// What one run observed.
+/// What one run observed, and the node its run proofs hold on.
 struct Observation {
     workspace: WorkspaceProofs,
     run: RunProofs,
+    node: Option<String>,
 }
 
 impl Observation {
@@ -309,6 +319,7 @@ impl NamespaceDriver {
                     valid_until: now + interval + VALIDITY_SLACK,
                     workspace: observation.workspace,
                     run: observation.run,
+                    node: observation.node,
                 });
                 state.next_at = Some(now + interval);
                 Ok(())
@@ -407,8 +418,9 @@ impl NamespaceDriver {
     /// The snapshot (§ 6.3): the daemon's own facts always; the declared bounds while the driver
     /// is open, which takes a probe under the current binding that passed the handshake, and
     /// holds the Lease; each proved fact only under that binding and Lease, and before its
-    /// `valid_until`.
-    pub(crate) fn capability_snapshot(&self) -> CapabilitySnapshot {
+    /// `valid_until`. Beside it, from the same proof, the node that proof observed (§ 6.4),
+    /// which is neither in the digest nor in the snapshot.
+    pub(crate) fn capability_snapshot(&self) -> (CapabilitySnapshot, Option<String>) {
         use sha2::Digest as _;
         let binding = self.binding();
         let config_generation = binding
@@ -478,7 +490,8 @@ impl NamespaceDriver {
             "facts": facts,
         }))
         .expect("snapshot material serializes");
-        CapabilitySnapshot {
+        let node = proved.as_ref().and_then(|proved| proved.node.clone());
+        let snapshot = CapabilitySnapshot {
             snapshot: format!("sha256:{}", policy::hex(&sha2::Sha256::digest(material))),
             driver: HostDriverKind::Kubernetes,
             driver_version: driver_version.to_owned(),
@@ -486,7 +499,8 @@ impl NamespaceDriver {
             probed_at: proved.map_or(now, |proved| proved.at),
             valid_until,
             facts,
-        }
+        };
+        (snapshot, node)
     }
 
     async fn probe_with(
@@ -562,11 +576,11 @@ impl NamespaceDriver {
         };
         sent.push(pod.name.clone());
         let claim = (pvc.name.as_str(), pvc_uid.as_str());
-        let run = match self
+        let (run, node) = match self
             .probe_run(nonce, claim, &keeper.name, &pod, service_host)
             .await
         {
-            Ok(run) => run,
+            Ok((run, node)) => (run, Some(node)),
             Err(RunFailed { code, why }) => {
                 if let Some(code) = code {
                     tracing::warn!(code, why = %why, "the probe Pod's run proved nothing");
@@ -576,10 +590,14 @@ impl NamespaceDriver {
                 for fact in RUN_FACTS {
                     not_proved(fact, "the probe Pod's run proved nothing");
                 }
-                RunProofs::default()
+                (RunProofs::default(), None)
             }
         };
-        Ok(Observation { workspace, run })
+        Ok(Observation {
+            workspace,
+            run,
+            node,
+        })
     }
 
     async fn create_probe_object(
@@ -605,7 +623,7 @@ impl NamespaceDriver {
     /// The probe Pod's run (§ 6.2 rows 2 to 5): `probe-child` under the executor, told its
     /// targets. The end proves the families and the first line `exec.argv-only` ([`read_run`]);
     /// the observation line after it, with the heartbeat the keeper reads after the end, proves the
-    /// two properties.
+    /// two properties. Beside the proofs, the node they were observed on (§ 6.4).
     async fn probe_run(
         &self,
         nonce: &str,
@@ -613,7 +631,7 @@ impl NamespaceDriver {
         keeper: &str,
         row: &BackendRecord,
         kubernetes_service_host: Option<IpAddr>,
-    ) -> Result<RunProofs, RunFailed> {
+    ) -> Result<(RunProofs, String), RunFailed> {
         let mut argv = vec![
             format!("{EXECUTOR_MOUNT}/substrate-executor"),
             PROBE_CHILD.to_owned(),
@@ -625,7 +643,7 @@ impl NamespaceDriver {
             resolv_conf: RESOLV_CONF.to_owned(),
             egress_probe_address: self.config.egress_probe_address,
         };
-        let (end, code) = self
+        let (end, code, node) = self
             .run_probe_pod(nonce, claim, keeper, row, &argv, &targets)
             .await?;
         let (argv_only, observed) = read_run(end, code, &argv)?;
@@ -657,16 +675,19 @@ impl NamespaceDriver {
             }
             ObservedProofs::default()
         };
-        Ok(RunProofs {
-            argv_only,
-            families: true,
-            observed,
-        })
+        Ok((
+            RunProofs {
+                argv_only,
+                families: true,
+                observed,
+            },
+            node,
+        ))
     }
 
     /// The probe Pod on the keeper's node, on the probe's volume, writable for the heartbeat: its
-    /// decoded end and the API's exit code, once its log decoded and its applied bounds are the
-    /// spec's.
+    /// decoded end, the API's exit code and that node, once its log decoded and its applied
+    /// bounds are the spec's.
     async fn run_probe_pod(
         &self,
         nonce: &str,
@@ -675,7 +696,7 @@ impl NamespaceDriver {
         row: &BackendRecord,
         argv: &[String],
         targets: &ProbeTargets,
-    ) -> Result<(RunEnd, Option<i64>), RunFailed> {
+    ) -> Result<(RunEnd, Option<i64>, String), RunFailed> {
         let node = self.scheduled_node(keeper).await?;
         let config = &self.config;
         let output_limit = pod::output_limit_bytes(config.container_log_max_bytes);
@@ -743,7 +764,7 @@ impl NamespaceDriver {
                 .to_owned()
                 .into());
         }
-        Ok((decoded.end, code))
+        Ok((decoded.end, code, node))
     }
 
     /// Whether the keeper sees the heartbeat present and unchanged across [`HEARTBEAT_STILL`].

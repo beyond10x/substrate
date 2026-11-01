@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T15:50:19Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-no-egress-observed-on-every-node",
+  "kind": "story",
+  "revision": 16,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p b10x-substrate-kubernetes --lib --locked (unit/d354-u1)",
+    "reference": "staged red 140 passed 6 failed (6 new d354 cases) vs 804d433c green 146 passed 0 failed: VERIFIED (new behaviour)"
+  }
+}

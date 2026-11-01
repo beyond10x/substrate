@@ -61,6 +61,9 @@ struct Cluster {
     first_run_read_held: Mutex<Option<Duration>>,
     /// How a watch of one Pod answers (`story:pod-force-deleted-keeps-its-policy`).
     watch: Mutex<Watch>,
+    /// While set, an object whose members replace those of each listed policy's `metadata`
+    /// (`story:pod-sweep-replays-from-the-policys-create`).
+    policy_metadata: Mutex<Option<Value>>,
 }
 
 /// What a watch of one Pod from a `resourceVersion` replays.
@@ -242,7 +245,7 @@ fn page(cluster: &Cluster, page: u32, accept: &str) -> String {
     } else {
         json!("")
     };
-    let policy = json!({
+    let mut policy = json!({
         "kind": "NetworkPolicy",
         "metadata": {
             "name": name,
@@ -255,6 +258,11 @@ fn page(cluster: &Cluster, page: u32, accept: &str) -> String {
             "policyTypes": ["Ingress", "Egress"],
         },
     });
+    if let Some(Value::Object(members)) = cluster.policy_metadata.lock().clone() {
+        for (key, value) in members {
+            policy["metadata"][key] = value;
+        }
+    }
     list(accept, "NetworkPolicy", vec![policy], &token)
 }
 

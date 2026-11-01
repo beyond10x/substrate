@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T20:46:30Z",
+  "actor": "human:timo",
+  "artifact": "story:driver-names-a-bare-exec-refusals-verb",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh phases tests and static at 99779d9d: workspace tests --release 2567 passed, 0 failed; clippy --release -D warnings clean; static phase passed",
+    "reference": "99779d9d"
+  }
+}

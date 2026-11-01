@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-01T20:26:16Z",
+  "actor": "human:timo",
+  "artifact": "story:pod-sweep-replays-from-the-policys-create",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:wave-2026-11-01-d354-u4-adversary-pass-1",
+    "reference": "7b8c1dd9",
+    "review": "review-result:wave-2026-11-01-d354-u4-adversary-pass-1",
+    "outcome": "no-op"
+  }
+}

@@ -263,10 +263,18 @@ policy whose Pod is gone: the API must show the container stopped.
   policy. A replay that does not end in a `BOOKMARK` is incomplete and keeps it: a 410, a refusal,
   an `ERROR` event, the stream ending, or the 8 seconds passing first. So does a `BOOKMARK` that
   carries no `resourceVersion` or the one the watch started from (versions are opaque, so an
-  older one is not told apart). Only the `watch` verb is needed. The rule relies on the adapter
-  being the only writer of its policies, as it is of every object it labels: the policy's
-  `resourceVersion` is its last write, so a policy another writer changed after the Pod was created
-  would start the replay past the Pod's history (`story:pod-sweep-replays-from-the-policys-create`).
+  older one is not told apart). Only the `watch` verb is needed.
+- The policy's `resourceVersion` is its last write, not its create, so a policy another writer
+  changed after the Pod was created (an operator adding a label) would start the replay past the
+  Pod's history (`story:pod-sweep-replays-from-the-policys-create`). The rule therefore applies
+  only to a policy whose metadata shows no write after its create: a policy with more than one
+  `managedFields` entry, or whose one entry's `time` is after its `creationTimestamp` or cannot be
+  read, is kept and logged as a policy whose container is not shown stopped is. Times have second
+  precision, so another writer within the create's second shows only as another entry, and it is
+  counted. A policy whose listed metadata carries no `managedFields` shows no write and is swept
+  as before; for it the rule still relies on the adapter being the only writer of its policies.
+  Whether the sweep's metadata-only list (`PartialObjectMetadataList`) carries `managedFields` on
+  the served Kubernetes versions is not observed here.
 
 ## Not decided here
 

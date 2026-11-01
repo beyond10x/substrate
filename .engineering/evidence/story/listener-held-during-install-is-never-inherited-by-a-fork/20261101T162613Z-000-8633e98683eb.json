@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T16:26:13Z",
+  "actor": "human:timo",
+  "artifact": "story:listener-held-during-install-is-never-inherited-by-a-fork",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p b10x-substrate-host --lib at 5b6ae087: 404 passed, 0 failed; egress 33/0 and 200 consecutive egress runs passed; clippy -D warnings clean",
+    "reference": "e55417d0"
+  }
+}

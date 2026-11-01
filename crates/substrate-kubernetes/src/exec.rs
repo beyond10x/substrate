@@ -65,8 +65,10 @@ const DELETION_CONFIRM: Duration = Duration::from_mins(1);
 /// The exec state one driver keeps.
 #[derive(Debug, Default)]
 pub(crate) struct Execs {
-    /// The snapshot the daemon admits starts under, and the binding generation it was taken at.
-    published: Mutex<Option<(String, u64)>>,
+    /// The snapshot the daemon admits starts under, the binding generation it was taken at, and
+    /// the node its probe observed (design 34 § 6.4): the node is bound to the snapshot here,
+    /// beside it, and is neither in its digest nor on the wire.
+    published: Mutex<Option<(String, u64, Option<String>)>>,
     tracked: Mutex<BTreeMap<String, Tracked>>,
     /// Pods of ended execs whose rows a garbage round settles once they read absent.
     garbage: Mutex<BTreeSet<String>>,
@@ -129,10 +131,21 @@ enum Holder {
 }
 
 impl NamespaceDriver {
-    /// Publishes the snapshot starts are admitted under and the binding generation it was taken
-    /// at; a start naming any other snapshot is `exec.capability-stale`.
-    pub fn publish_exec_snapshot(&self, snapshot: &str, generation: u64) {
-        *lock(&self.execs().published) = Some((snapshot.to_owned(), generation));
+    /// Publishes the snapshot starts are admitted under, the binding generation it was taken at,
+    /// and the node its probe observed; a start naming any other snapshot is
+    /// `exec.capability-stale`, and one whose workspace keeper is on any other node, or under a
+    /// snapshot with no observed node, is `exec.sandbox-unavailable` (§ 6.4).
+    pub fn publish_exec_snapshot(&self, snapshot: &str, generation: u64, node: Option<&str>) {
+        *lock(&self.execs().published) =
+            Some((snapshot.to_owned(), generation, node.map(str::to_owned)));
+    }
+
+    /// The node the latest published probe observed, if any: what a start's keeper node is
+    /// compared with, read when the comparison runs.
+    pub(crate) fn published_exec_node(&self) -> Option<String> {
+        lock(&self.execs().published)
+            .as_ref()
+            .and_then(|(_, _, node)| node.clone())
     }
 
     /// Execs whose executor read back bounds other than its spec's (§ 7.3 run step 1).
@@ -141,7 +154,8 @@ impl NamespaceDriver {
     }
 
     /// § 5 exec start: every request-level refusal first, then the Lease and the binding re-read
-    /// (§ 6.3), then one Pod create whose uid is bound to the exec's `pod` row.
+    /// (§ 6.3), then the keeper's node against the probe's (§ 6.4), then one Pod create whose uid
+    /// is bound to the exec's `pod` row.
     pub async fn exec_start(
         &self,
         id: &str,
@@ -246,6 +260,9 @@ impl NamespaceDriver {
         let (claim_uid, node) = self.placement(&input.workspace, root_name).await?;
         let generation = self.admitted_generation(&input.sandbox.capability_snapshot)?;
         self.check_binding(generation).await?;
+        // Read after the await, not with the snapshot: a later probe published while the policy
+        // re-read was in flight is the latest probe, and the start is held to its node.
+        observed_on(&node, self.published_exec_node().as_deref())?;
         let spec = RunSpec {
             argv: input.argv.clone(),
             env,
@@ -279,7 +296,7 @@ impl NamespaceDriver {
     /// The generation the start's snapshot was published at, or `exec.capability-stale`.
     fn admitted_generation(&self, snapshot: &str) -> Result<u64, DriverError> {
         match &*lock(&self.execs().published) {
-            Some((published, generation)) if published == snapshot => Ok(*generation),
+            Some((published, generation, _)) if published == snapshot => Ok(*generation),
             _ => Err(DriverError::refused(
                 crate::CAPABILITY_STALE,
                 "The admitted capability snapshot is stale: the start names a snapshot this \
@@ -1373,6 +1390,25 @@ enum Output {
 
 /// § 8: the start members this driver does not serve, each refused by name, in the daemon's
 /// check order. The daemon refuses most of them first; this is the driver's own backstop.
+/// § 6.4 (D339): the exec Pod is pinned to its workspace keeper's node, and the snapshot's proofs
+/// hold only on the node the probe observed. A keeper on any other node, or a snapshot published
+/// with no observed node, is `exec.sandbox-unavailable` (501), naming both nodes.
+fn observed_on(keeper: &str, probed: Option<&str>) -> Result<(), DriverError> {
+    let why = match probed {
+        Some(probed) if probed == keeper => return Ok(()),
+        Some(probed) => format!("the capability probe observed node {probed}"),
+        None => "the capability probe observed no node".to_owned(),
+    };
+    Err(DriverError::unserved(
+        substrate_host::seatbelt::SANDBOX_UNAVAILABLE,
+        format!(
+            "Required confinement is not observed where this exec would run: the workspace's \
+             keeper is on node {keeper}, and {why}."
+        ),
+        substrate_wire::CONFINEMENT_NO_EGRESS_FACT,
+    ))
+}
+
 fn unserved(input: &ExecStartInput) -> Option<DriverError> {
     let refuse = |code: &'static str, message: &str, address: &str| {
         Some(DriverError::unserved(code, message, address))

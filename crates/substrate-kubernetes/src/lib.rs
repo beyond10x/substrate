@@ -93,8 +93,12 @@ impl substrate_host::Driver for NamespaceDriver {
     // --- the snapshot (U10) and the exec routes (U9) -------------------------------------
 
     fn machine(&self) -> substrate_wire::CapabilitySnapshot {
-        let snapshot = self.capability_snapshot();
-        self.publish_exec_snapshot(&snapshot.snapshot, snapshot.config_generation);
+        let (snapshot, node) = self.capability_snapshot();
+        self.publish_exec_snapshot(
+            &snapshot.snapshot,
+            snapshot.config_generation,
+            node.as_deref(),
+        );
         snapshot
     }
 

@@ -210,7 +210,7 @@ async fn rig() -> Rig {
     let driver = driver_over(&fake, &ledger, &clock);
     driver.open().await.expect("the driver opens");
     let generation = driver.binding().expect("bound").config_generation();
-    driver.publish_exec_snapshot(SNAPSHOT, generation);
+    driver.publish_exec_snapshot(SNAPSHOT, generation, Some(NODE));
 
     let labels = |role: &str| {
         json!({
@@ -1988,4 +1988,195 @@ async fn adversary_w1031_the_applied_record_echoes_the_starts_requires() {
         Some(&requires),
         "design 30 § 4.4: the applied record echoes the requires that was checked"
     );
+}
+
+/// Design 34 § 6.4 and its amendment of 2026-11-01 (D339),
+/// `story:namespace-no-egress-observed-on-every-node`: the probe observed one node, the driver
+/// published it with the snapshot, and a start whose workspace keeper is on any other node is
+/// `exec.sandbox-unavailable` (501) after the snapshot check and before any Pod.
+mod d354 {
+    use super::*;
+
+    const OTHER_NODE: &str = "node-b";
+    const SANDBOX_UNAVAILABLE: &str = "exec.sandbox-unavailable";
+
+    /// Publishes `SNAPSHOT` at the open binding's generation with `node` as the probe's.
+    fn publish(rig: &Rig, node: Option<&str>) {
+        let generation = rig.driver.binding().expect("bound").config_generation();
+        rig.driver.publish_exec_snapshot(SNAPSHOT, generation, node);
+    }
+
+    /// `id`'s start was refused `exec.sandbox-unavailable`, unserved (the daemon's 501, recorded
+    /// as refused), and nothing was created under its row.
+    async fn refused_before_any_pod(rig: &Rig, id: &str) -> DriverError {
+        let creates = rig.pod_creates();
+        let DispatchOutcome::NotDispatched(refused) = rig.start(id, &input(&["/bin/true"])).await
+        else {
+            panic!(
+                "story:namespace-no-egress-observed-on-every-node: a start on a node the probe \
+                 did not observe was dispatched"
+            );
+        };
+        assert_eq!(refused.code, SANDBOX_UNAVAILABLE, "{}", refused.message);
+        assert_eq!(
+            refused.class,
+            DriverErrorClass::Unserved,
+            "the daemon answers 501"
+        );
+        assert!(!refused.retriable);
+        assert_eq!(rig.pod_creates(), creates, "no Pod create was sent");
+        let pod = names::exec_pod(DEPLOYMENT, id);
+        assert_eq!(rig.ledger.row(&pod).uid, None, "no uid is bound to the row");
+        assert_eq!(rig.pod(&pod), None);
+        refused
+    }
+
+    /// Acceptance 1: the keeper is on `NODE`, the probe ran on another node.
+    #[tokio::test]
+    async fn a_keeper_on_a_node_the_probe_did_not_observe_is_refused_before_any_pod() {
+        let rig = rig().await;
+        publish(&rig, Some(OTHER_NODE));
+        let refused = refused_before_any_pod(&rig, "exec_elsewhere").await;
+        assert!(
+            refused.message.contains(NODE) && refused.message.contains(OTHER_NODE),
+            "the refusal names the keeper's node and the probe's: {}",
+            refused.message
+        );
+        assert_eq!(
+            refused.address.as_deref(),
+            Some(substrate_wire::CONFINEMENT_NO_EGRESS_FACT)
+        );
+    }
+
+    /// No probe node published (no probe ran, or its keeper node was unread): no node is
+    /// observed, so every start is refused.
+    #[tokio::test]
+    async fn a_snapshot_published_with_no_probe_node_refuses_every_start_before_any_pod() {
+        let rig = rig().await;
+        publish(&rig, None);
+        let refused = refused_before_any_pod(&rig, "exec_unobserved").await;
+        assert!(refused.message.contains(NODE), "{}", refused.message);
+    }
+
+    /// Acceptance 2: the keeper is on the probe's node; the start is dispatched as before and
+    /// its Pod is pinned there.
+    #[tokio::test]
+    async fn a_keeper_on_the_probes_node_is_dispatched_and_pinned_there() {
+        let rig = rig().await;
+        publish(&rig, Some(NODE));
+        let id = "exec_here";
+        let observation = rig.started(id, &input(&["/bin/true"])).await;
+        assert_eq!(observation.resource.state, ExecState::Running);
+        assert_eq!(rig.pod_creates(), 1);
+        let pod = rig
+            .pod(&names::exec_pod(DEPLOYMENT, id))
+            .expect("the Pod is stored");
+        assert_eq!(
+            pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+                ["nodeSelectorTerms"][0]["matchExpressions"][0]["values"],
+            json!([NODE])
+        );
+    }
+
+    /// Acceptance 4: after a later probe lands on another node, the next start on the workspace
+    /// on the first node is refused, and the exec already running there is untouched.
+    #[tokio::test]
+    async fn a_later_probe_elsewhere_refuses_the_next_start_and_leaves_a_running_exec_alone() {
+        let rig = rig().await;
+        let first = "exec_before";
+        rig.started(first, &input(&["/bin/sleep", "600"])).await;
+        let name = names::exec_pod(DEPLOYMENT, first);
+        rig.running(&name).await;
+        let pod_uid = uid(&rig.pod(&name).expect("the first Pod runs"));
+
+        publish(&rig, Some(OTHER_NODE));
+        refused_before_any_pod(&rig, "exec_after").await;
+        assert_eq!(rig.pod_creates(), 1, "only the first start created a Pod");
+
+        let observed = rig.driver.exec_observe(first).await.expect("observed");
+        assert_eq!(observed.resource.state, ExecState::Running);
+        assert_eq!(
+            uid(&rig
+                .pod(&name)
+                .expect("the running exec's Pod is still there")),
+            pod_uid
+        );
+        assert_eq!(
+            deletes(&rig, &name),
+            0,
+            "the running exec's Pod is not deleted"
+        );
+    }
+}
+
+/// Adversary pass 1 on `story:namespace-no-egress-observed-on-every-node` (D354): the probe's
+/// node against the keeper's, attacked where the start reads it and where it orders it.
+mod d354_adv {
+    use super::*;
+
+    const OTHER_NODE: &str = "node-b";
+    const LATER_SNAPSHOT: &str = "sha256:a-later-probe-on-another-node";
+    const SANDBOX_UNAVAILABLE: &str = "exec.sandbox-unavailable";
+    const POLICIES: &str = "/apis/networking.k8s.io/v1/namespaces/substrate/networkpolicies";
+
+    /// Acceptance 1 and 4: the start reads the probe's node before it awaits the policy re-read
+    /// (§ 6.3) and compares after it. A later probe that lands on another node, published while
+    /// that read is in flight, is the latest probe by the time the comparison runs; the keeper is
+    /// on the first node, so the start is refused before any Pod, not dispatched there.
+    #[tokio::test]
+    async fn a_probe_published_elsewhere_during_the_policy_reread_refuses_the_start() {
+        let rig = rig().await;
+        rig.fake.fault(Fault::Delay {
+            method: Method::GET,
+            path: POLICIES.to_owned(),
+            by: Duration::from_millis(400),
+        });
+        let generation = rig.driver.binding().expect("bound").config_generation();
+        let start = input(&["/bin/true"]);
+        let (outcome, ()) = tokio::join!(rig.start("exec_raced", &start), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            rig.driver
+                .publish_exec_snapshot(LATER_SNAPSHOT, generation, Some(OTHER_NODE));
+        });
+        assert_eq!(
+            rig.driver.published_exec_node().as_deref(),
+            Some(OTHER_NODE),
+            "the control: the later probe's node was published while the start ran"
+        );
+        match outcome {
+            DispatchOutcome::NotDispatched(refused) => assert!(
+                refused.code == SANDBOX_UNAVAILABLE || refused.code == CAPABILITY_STALE,
+                "{}: {}",
+                refused.code,
+                refused.message
+            ),
+            DispatchOutcome::Observed(_) => panic!(
+                "story:namespace-no-egress-observed-on-every-node: the latest probe is on \
+                 {OTHER_NODE} and the keeper on {NODE}, yet the start was dispatched to {NODE}"
+            ),
+            DispatchOutcome::ContainedAbsent(error) | DispatchOutcome::OutcomeUnknown(error) => {
+                panic!("{}: {}", error.code, error.message)
+            }
+        }
+        assert_eq!(rig.pod_creates(), 0, "no Pod create was sent");
+    }
+
+    /// Design amendment of 2026-11-01: the node comparison runs after the snapshot check. A start
+    /// naming a snapshot that is no longer published hears `exec.capability-stale` (422), not
+    /// `exec.sandbox-unavailable`, even when the published node is another one.
+    #[tokio::test]
+    async fn a_stale_snapshot_is_capability_stale_before_the_node_is_compared() {
+        let rig = rig().await;
+        let generation = rig.driver.binding().expect("bound").config_generation();
+        rig.driver
+            .publish_exec_snapshot(LATER_SNAPSHOT, generation, Some(OTHER_NODE));
+        let DispatchOutcome::NotDispatched(refused) =
+            rig.start("exec_stale", &input(&["/bin/true"])).await
+        else {
+            panic!("a start under an unpublished snapshot was dispatched");
+        };
+        assert_eq!(refused.code, CAPABILITY_STALE, "{}", refused.message);
+        assert_eq!(refused.class, DriverErrorClass::Refused);
+        assert_eq!(rig.pod_creates(), 0);
+    }
 }

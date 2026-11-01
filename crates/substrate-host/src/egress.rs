@@ -60,7 +60,7 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -418,44 +418,6 @@ impl InstalledAperture {
     }
 }
 
-/// The listening socket an aperture's helper made inside the run's namespace, as the installing
-/// process holds it from the handback until the whole list is installed, and no longer.
-///
-/// Dropping it shuts the socket down before closing this descriptor. A socket stops listening when
-/// its *last* descriptor closes, and this process does not hold the last one: any child another
-/// thread forks while the descriptor is open holds a copy until that child closes its inherited
-/// table or execs, however briefly. Killing and reaping the forwarder therefore did not by itself
-/// stop the listener answering inside; on a loaded host a copy outlived both, and a connection from
-/// inside was accepted by a set that had been refused. `shutdown` acts on the socket every copy
-/// shares, so from that point no copy accepts and a connection inside is refused.
-///
-/// Once every aperture is installed, [`Listener::release`] closes this process's descriptor
-/// *without* that shutdown. The forwarder's copy is then the one the run depends on: a forwarder
-/// that dies during the run takes the listener with it, and a connection inside is refused rather
-/// than completed into a backlog nothing accepts.
-#[derive(Debug)]
-struct Listener(OwnedFd);
-
-impl Listener {
-    /// Closes this process's descriptor and leaves the socket listening for the forwarder.
-    fn release(self) {
-        let listener = std::mem::ManuallyDrop::new(self);
-        // SAFETY: `listener` is never dropped or read again, so the descriptor moves out of it
-        // exactly once and is closed exactly once, here.
-        drop(unsafe { std::ptr::read(&raw const listener.0) });
-    }
-}
-
-impl Drop for Listener {
-    fn drop(&mut self) {
-        // SAFETY: `shutdown` on a descriptor this value owns; its result is not needed, because
-        // the descriptor is closed right after whether or not the socket was still listening.
-        unsafe {
-            libc::shutdown(self.0.as_raw_fd(), libc::SHUT_RDWR);
-        }
-    }
-}
-
 impl Drop for InstalledAperture {
     fn drop(&mut self) {
         // SAFETY: `forwarder` is a pid this process forked and has not yet reaped, so the number
@@ -516,152 +478,70 @@ pub(crate) fn install_all(
 ) -> Result<InstalledApertures, DriverError> {
     let addresses = listen_addresses(apertures.len())?;
     let mut installed = Vec::with_capacity(apertures.len());
-    let mut listeners = Vec::with_capacity(apertures.len());
     for (aperture, address) in apertures.iter().zip(addresses) {
         let listen = SocketAddrV4::new(address, aperture.port);
-        // All or nothing: the `?` drops `listeners` first, shutting every earlier socket down, and
-        // then `installed`, each value in which kills and reaps its own forwarder.
-        let (one, listener) = install_one(aperture, listen, sandbox_pid, cgroup_procs)?;
-        installed.push(one);
-        listeners.push(listener);
+        // All or nothing: the `?` drops `installed`, each value in which kills and reaps its own
+        // forwarder, and with it the only descriptor of that aperture's listener.
+        installed.push(install_one(aperture, listen, sandbox_pid, cgroup_procs)?);
     }
-    listeners.into_iter().for_each(Listener::release);
     Ok(InstalledApertures { installed })
 }
 
-/// Installs one aperture on `listen`: its listener inside, then its own counters and forwarder.
-/// The listener comes back beside the aperture for [`install_all`] to hold until the list is in.
+/// Installs one aperture on `listen`: its own counters, then its forwarder, which makes the
+/// listener inside.
 fn install_one(
     aperture: &EgressAperture,
     listen: SocketAddrV4,
     sandbox_pid: u32,
     cgroup_procs: Option<&Path>,
-) -> Result<(InstalledAperture, Listener), DriverError> {
-    let listener = listen_inside(sandbox_pid, listen, cgroup_procs)?;
+) -> Result<InstalledAperture, DriverError> {
     let counters =
         SharedCounters::new().map_err(|error| install_failed("aperture byte counters", &error))?;
-    let cgroup = open_cgroup(cgroup_procs)?;
     let forwarder = spawn_forwarder(
-        &listener.0,
+        sandbox_pid,
+        listen,
         aperture.pinned,
         &counters,
-        cgroup.as_ref(),
+        cgroup_procs,
         aperture.max_bytes,
     )?;
-    Ok((
-        InstalledAperture {
-            forwarder,
-            counters,
-            name: aperture.name.clone(),
-            destination: aperture.pinned.to_string(),
-            max_bytes: aperture.max_bytes,
-            listen,
-        },
-        listener,
-    ))
+    Ok(InstalledAperture {
+        forwarder,
+        counters,
+        name: aperture.name.clone(),
+        destination: aperture.pinned.to_string(),
+        max_bytes: aperture.max_bytes,
+        listen,
+    })
 }
 
-/// Creates the listening socket **inside** the sandbox's network namespace and hands it back.
-///
-/// The helper does not also verify the aperture: at this point nothing is accepting on it yet, so a
-/// connect from inside would sit in the backlog and the read behind it would never return. What
-/// checks the aperture end to end is [`reaches_from_inside`], after the forwarder exists.
-///
-/// `listen` is the loopback `address:port` inside the namespace; the `sockaddr_in` the helper binds
-/// is built from it here, before the fork, like every other value the helper reads.
-fn listen_inside(
-    sandbox_pid: u32,
-    listen: SocketAddrV4,
-    cgroup_procs: Option<&Path>,
-) -> Result<Listener, DriverError> {
-    let address = sockaddr_in(*listen.ip(), listen.port());
-    let netns = File::open(format!("/proc/{sandbox_pid}/ns/net"))
-        .map_err(|error| install_failed("sandbox network namespace", &error))?;
-    // Trap 1. The child's own `ns/user` is bubblewrap's *nested* namespace and joining it is
-    // `EPERM`; the namespace that owns the netns is the one the daemon can enter.
-    // SAFETY: an ioctl on a namespace descriptor this process opened, returning a new descriptor
-    // or -1.
-    let owner = unsafe { libc::ioctl(netns.as_raw_fd(), NS_GET_USERNS) };
-    if owner < 0 {
-        return Err(install_failed(
-            "owning user namespace",
-            &io::Error::last_os_error(),
-        ));
-    }
-    // SAFETY: `owner` is a fresh descriptor the ioctl just returned and nothing else owns it.
-    let owner = unsafe { OwnedFd::from_raw_fd(owner) };
-    let cgroup = open_cgroup(cgroup_procs)?;
+/// The forwarder's own stages, reported beside the helper's (2 to 8) when an install fails.
+const STAGE_FORWARDER_HANDBACK: i32 = 9;
+const STAGE_FORWARDER_HELPER: i32 = 10;
+const STAGE_FORWARDER_LOST: i32 = 11;
 
-    let (parent_end, child_end) =
-        handback_pair().map_err(|error| install_failed("aperture handback socket", &error))?;
-
-    let cgroup_fd = cgroup.as_ref().map_or(-1, AsRawFd::as_raw_fd);
-    let netns_fd = netns.as_raw_fd();
-    let owner_fd = owner.as_raw_fd();
-    let child_fd = child_end.as_raw_fd();
-    let parent_fd = parent_end.as_raw_fd();
-    // SAFETY: `fork` from a threaded process yields a single-threaded child, which is what
-    // `setns(CLONE_NEWUSER)` requires. The child below touches nothing but libc entry points and
-    // descriptor numbers that existed before the fork.
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return Err(install_failed(
-            "aperture helper",
-            &io::Error::last_os_error(),
-        ));
-    }
-    if pid == 0 {
-        // SAFETY: post-fork child. Async-signal-safe calls only, no allocation, and `_exit` so no
-        // atexit handler inherited from the daemon ever runs.
-        unsafe {
-            libc::close(parent_fd);
-            libc::_exit(helper_body(
-                cgroup_fd, owner_fd, netns_fd, &address, child_fd,
-            ));
-        }
-    }
-    drop(child_end);
-    let handback = receive_descriptor(parent_fd);
-    let mut status = 0;
-    loop {
-        // SAFETY: reaping a child this process just forked.
-        let waited = unsafe { libc::waitpid(pid, &raw mut status, 0) };
-        if waited == pid {
-            break;
-        }
-        let error = io::Error::last_os_error();
-        if waited < 0 && error.raw_os_error() == Some(libc::EINTR) {
-            continue;
-        }
-        return Err(install_failed("aperture helper reaping", &error));
-    }
-    let helper_exit = if libc::WIFEXITED(status) {
-        libc::WEXITSTATUS(status)
-    } else {
-        -1
-    };
-    match (handback, helper_exit) {
-        (HelperHandback::Descriptor(listener), 0) => Ok(listener),
-        (HelperHandback::Failure { stage, errno }, _) => Err(DriverError::failed(
-            "exec.aperture-install-failed",
-            format!(
-                "The egress aperture could not be installed exactly as declared (stage {stage}, errno {errno}: {}).",
-                io::Error::from_raw_os_error(errno)
-            ),
-        )),
-        (_, code) => Err(DriverError::failed(
-            "exec.aperture-install-failed",
-            format!(
-                "The egress aperture could not be installed exactly as declared (stage {code}, errno unavailable)."
-            ),
-        )),
-    }
+/// Everything the forwarder and its helper read, fixed before the fork.
+#[derive(Clone, Copy)]
+struct ForwarderPlan {
+    cgroup_fd: RawFd,
+    owner_fd: RawFd,
+    netns_fd: RawFd,
+    report_fd: RawFd,
+    listen: libc::sockaddr_in,
+    destination: libc::sockaddr_in,
+    to_destination: *const AtomicU64,
+    from_destination: *const AtomicU64,
+    ceiling: u64,
 }
 
 /// Everything the helper does inside the sandbox's namespaces, in the order it must do it.
 ///
 /// The return value is the stage that failed, so an install failure names *where* rather than
 /// leaving an operator to guess between a namespace, a bind and a handback.
+///
+/// The helper does not also verify the aperture: at this point nothing is accepting on it yet, so a
+/// connect from inside would sit in the backlog and the read behind it would never return. What
+/// checks the aperture end to end is [`reaches_from_inside`], after the forwarder accepts.
 ///
 /// # Safety
 ///
@@ -675,11 +555,10 @@ unsafe fn helper_body(
     handback_fd: RawFd,
 ) -> i32 {
     unsafe {
-        // Everything the daemon had open is in this fd table, and one of those descriptors is the
-        // spawn barrier the sandbox is waiting on: hold it and the sandbox never runs. Closing the
-        // inherited table first is not hygiene, it is the difference between a run and a deadlock.
+        // Whatever the parent had open is in this fd table; nothing but the namespaces and the
+        // handback belongs in a process that is about to enter the sandbox's network.
         keep_only(&[0, 1, 2, cgroup_fd, owner_fd, netns_fd, handback_fd]);
-        // The cgroup next, and before any socket exists: a forwarder that outlives its sandbox
+        // The cgroup next, and before any socket exists: a process that outlives its sandbox
         // while holding sockets is what `cgroup.kill` has to be able to reach.
         if cgroup_fd >= 0 && !join_cgroup(cgroup_fd) {
             return helper_failure(handback_fd, 2);
@@ -768,23 +647,26 @@ unsafe fn bind_when_loopback_is_ready(socket: RawFd, address: &libc::sockaddr_in
 unsafe fn helper_failure(handback_fd: RawFd, stage: i32) -> i32 {
     unsafe {
         let errno = *libc::__errno_location();
-        let record = [stage, errno];
+        send_record(handback_fd, &[stage, errno]);
+        stage
+    }
+}
+
+/// Sends `record` as one message, retrying an interrupted send; allocation-free.
+///
+/// # Safety
+///
+/// `socket` is a live descriptor. Safe in a post-fork child.
+unsafe fn send_record<T>(socket: RawFd, record: &[T]) {
+    unsafe {
+        let length = std::mem::size_of_val(record);
         loop {
-            let sent = libc::send(
-                handback_fd,
-                record.as_ptr().cast(),
-                std::mem::size_of_val(&record),
-                libc::MSG_NOSIGNAL,
-            );
-            if sent == isize::try_from(std::mem::size_of_val(&record)).unwrap_or(8) {
-                break;
-            }
+            let sent = libc::send(socket, record.as_ptr().cast(), length, libc::MSG_NOSIGNAL);
             if sent < 0 && *libc::__errno_location() == libc::EINTR {
                 continue;
             }
             break;
         }
-        stage
     }
 }
 
@@ -900,12 +782,29 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Forks the long-lived forwarder: host netns, run cgroup, one relay per connection.
+/// Forks the long-lived forwarder, which makes its own listener inside the sandbox: host netns, run
+/// cgroup, one relay per connection.
+///
+/// The installing process never holds the listener, not even between a handback and the fork of
+/// the forwarder. A socket listens until its *last* descriptor closes, and every child another
+/// thread of this process forks copies the whole descriptor table and keeps it until it closes the
+/// table or execs. A listener this process held during an install was therefore in any child forked
+/// in that window, and one that lived on (a test's drain, any fork that never execs) kept the
+/// aperture listening after its forwarder died: a connection from inside completed into a backlog
+/// nothing accepts, where it should be refused. So the forwarder, a single-threaded process from
+/// its first instruction, forks the helper itself and receives the listener over a socket pair it
+/// made; the only processes that ever hold the listener are the helper (until it exits), the
+/// forwarder, and for an instant each relay before it closes it. This process reads only a report:
+/// one byte when the forwarder is accepting, or the failed stage and its errno.
+///
+/// `listen` is the loopback `address:port` inside the namespace; the `sockaddr_in` the helper binds
+/// is built from it here, before the fork, like every other value the forked children read.
 fn spawn_forwarder(
-    listener: &OwnedFd,
+    sandbox_pid: u32,
+    listen: SocketAddrV4,
     destination: SocketAddr,
     counters: &SharedCounters,
-    cgroup: Option<&File>,
+    cgroup_procs: Option<&Path>,
     max_bytes: Option<u64>,
 ) -> Result<libc::pid_t, DriverError> {
     let SocketAddr::V4(destination) = destination else {
@@ -914,20 +813,45 @@ fn spawn_forwarder(
             "Only IPv4 destinations are served by this mechanism.",
         ));
     };
-    let address = sockaddr_in(*destination.ip(), destination.port());
-    let listener_fd = listener.as_raw_fd();
-    let cgroup_fd = cgroup.map_or(-1, AsRawFd::as_raw_fd);
-    let to_destination: *const AtomicU64 = std::ptr::from_ref(counters.outbound());
-    let from_destination: *const AtomicU64 = std::ptr::from_ref(counters.inbound());
-    // Fixed before the fork, like every other value the forked children read. `u64::MAX` is "no
-    // declared ceiling" and `0` is a ceiling of zero, so every value an operator can declare means
-    // the same thing to the relay as it does to `InstalledAperture::ceiling_exceeded`. A sentinel
-    // of `0` made those two disagree exactly at zero: the parent called the run exhausted at byte
-    // zero and the relay passed everything (ADR 0014).
-    let ceiling = max_bytes.unwrap_or(u64::MAX);
+    let netns = File::open(format!("/proc/{sandbox_pid}/ns/net"))
+        .map_err(|error| install_failed("sandbox network namespace", &error))?;
+    // Trap 1. The child's own `ns/user` is bubblewrap's *nested* namespace and joining it is
+    // `EPERM`; the namespace that owns the netns is the one the daemon can enter.
+    // SAFETY: an ioctl on a namespace descriptor this process opened, returning a new descriptor
+    // or -1.
+    let owner = unsafe { libc::ioctl(netns.as_raw_fd(), NS_GET_USERNS) };
+    if owner < 0 {
+        return Err(install_failed(
+            "owning user namespace",
+            &io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: `owner` is a fresh descriptor the ioctl just returned and nothing else owns it.
+    let owner = unsafe { OwnedFd::from_raw_fd(owner) };
+    let cgroup = open_cgroup(cgroup_procs)?;
+    let (parent_end, child_end) =
+        handback_pair().map_err(|error| install_failed("aperture report socket", &error))?;
+    let plan = ForwarderPlan {
+        cgroup_fd: cgroup.as_ref().map_or(-1, AsRawFd::as_raw_fd),
+        owner_fd: owner.as_raw_fd(),
+        netns_fd: netns.as_raw_fd(),
+        report_fd: child_end.as_raw_fd(),
+        listen: sockaddr_in(*listen.ip(), listen.port()),
+        destination: sockaddr_in(*destination.ip(), destination.port()),
+        to_destination: std::ptr::from_ref(counters.outbound()),
+        from_destination: std::ptr::from_ref(counters.inbound()),
+        // `u64::MAX` is "no declared ceiling" and `0` is a ceiling of zero, so every value an
+        // operator can declare means the same thing to the relay as it does to
+        // `InstalledAperture::ceiling_exceeded`. A sentinel of `0` made those two disagree exactly
+        // at zero: the parent called the run exhausted at byte zero and the relay passed
+        // everything (ADR 0014).
+        ceiling: max_bytes.unwrap_or(u64::MAX),
+    };
 
-    // SAFETY: as in `listen_inside` — the child runs post-fork with libc calls only, over
-    // descriptors, a `sockaddr_in` and a shared mapping that all existed before the fork.
+    // SAFETY: `fork` from a threaded process yields a single-threaded child, which is what the
+    // helper's `setns(CLONE_NEWUSER)` requires of the process it forks from. The child runs with
+    // libc calls only, over descriptors, `sockaddr_in`s and a shared mapping that all existed
+    // before the fork.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         return Err(install_failed(
@@ -938,22 +862,59 @@ fn spawn_forwarder(
     if pid == 0 {
         // SAFETY: post-fork child; `_exit` rather than `exit` so no inherited atexit handler runs.
         unsafe {
-            libc::_exit(forwarder_body(
-                cgroup_fd,
-                listener_fd,
-                &address,
-                to_destination,
-                from_destination,
-                ceiling,
-            ));
+            libc::_exit(forwarder_body(&plan));
         }
+    }
+    drop(child_end);
+    if let Err(refusal) = receive_report(parent_end.as_raw_fd()) {
+        // SAFETY: `pid` is a child this process forked and has not reaped; killing one that has
+        // already exited is harmless, and the wait reaps it either way.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            let mut status = 0;
+            libc::waitpid(pid, &raw mut status, 0);
+        }
+        return Err(refusal);
     }
     #[cfg(test)]
     SPAWNED_FORWARDERS.with_borrow_mut(|spawned| spawned.push(pid));
     Ok(pid)
 }
 
-/// The forwarder loop. Accepts inside-out connections and relays each one in its own child.
+/// Reads the forwarder's report: one byte when it is accepting, else `[stage, errno]`, with a
+/// negative errno when the stage has none.
+fn receive_report(socket: RawFd) -> Result<(), DriverError> {
+    let mut record = [0_u8; 8];
+    loop {
+        // SAFETY: a `recv` into a stack buffer of exactly the length passed.
+        let received = unsafe { libc::recv(socket, record.as_mut_ptr().cast(), record.len(), 0) };
+        if received < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        let (stage, errno) = match received {
+            1 => return Ok(()),
+            8 => (
+                i32::from_ne_bytes(record[..4].try_into().unwrap_or_default()),
+                i32::from_ne_bytes(record[4..].try_into().unwrap_or_default()),
+            ),
+            _ => (STAGE_FORWARDER_LOST, -1),
+        };
+        let message = if errno < 0 {
+            format!(
+                "The egress aperture could not be installed exactly as declared (stage {stage}, errno unavailable)."
+            )
+        } else {
+            format!(
+                "The egress aperture could not be installed exactly as declared (stage {stage}, errno {errno}: {}).",
+                io::Error::from_raw_os_error(errno)
+            )
+        };
+        return Err(DriverError::failed("exec.aperture-install-failed", message));
+    }
+}
+
+/// The forwarder: joins the run's cgroup, has its helper make the listener inside, reports, then
+/// accepts inside-out connections and relays each one in its own child.
 ///
 /// A relay per connection rather than a multiplexer, because the run's own `pids` bound already
 /// caps how many there can be — a forwarder that had to police that itself would be a second,
@@ -962,23 +923,38 @@ fn spawn_forwarder(
 /// # Safety
 ///
 /// Post-fork child only. Nothing here allocates.
-unsafe fn forwarder_body(
-    cgroup_fd: RawFd,
-    listener: RawFd,
-    destination: &libc::sockaddr_in,
-    to_destination: *const AtomicU64,
-    from_destination: *const AtomicU64,
-    ceiling: u64,
-) -> i32 {
+unsafe fn forwarder_body(plan: &ForwarderPlan) -> i32 {
     unsafe {
-        // As in the helper: the daemon's whole fd table came across the fork, and the run's own
-        // spawn barrier is in it.
-        keep_only(&[0, 1, 2, cgroup_fd, listener]);
-        // Before the first byte and before the first accept: the cgroup is what reaps this.
-        if cgroup_fd >= 0 && !join_cgroup(cgroup_fd) {
-            return 2;
+        // Everything the daemon had open is in this fd table, and one of those descriptors is the
+        // spawn barrier the sandbox is waiting on: hold it and the sandbox never runs. Closing the
+        // inherited table first is not hygiene, it is the difference between a run and a deadlock.
+        keep_only(&[
+            0,
+            1,
+            2,
+            plan.cgroup_fd,
+            plan.owner_fd,
+            plan.netns_fd,
+            plan.report_fd,
+        ]);
+        // Before the listener exists and before the first accept: the cgroup is what reaps this,
+        // and the helper forked below is in it from its start.
+        if plan.cgroup_fd >= 0 && !join_cgroup(plan.cgroup_fd) {
+            return helper_failure(plan.report_fd, 2);
         }
-        // Relays are fire and forget; the kernel reaps them so this loop never has to.
+        let listener = match listen_through_helper(plan) {
+            Ok(listener) => listener,
+            Err((stage, errno)) => {
+                send_record(plan.report_fd, &[stage, errno]);
+                return stage;
+            }
+        };
+        libc::close(plan.owner_fd);
+        libc::close(plan.netns_fd);
+        send_record(plan.report_fd, &[1_u8]);
+        libc::close(plan.report_fd);
+        // Relays are fire and forget; the kernel reaps them so this loop never has to. Only after
+        // the helper is reaped, which this setting would otherwise do behind `waitpid`'s back.
         libc::signal(libc::SIGCHLD, libc::SIG_IGN);
         loop {
             let accepted = libc::accept4(
@@ -998,15 +974,74 @@ unsafe fn forwarder_body(
                 libc::close(listener);
                 libc::_exit(relay_body(
                     accepted,
-                    destination,
-                    to_destination,
-                    from_destination,
-                    ceiling,
+                    &plan.destination,
+                    plan.to_destination,
+                    plan.from_destination,
+                    plan.ceiling,
                 ));
             }
             // A failed fork means the run is out of process budget. Refusing this one connection
             // is the whole response: the aperture stays installed and the next may still succeed.
             libc::close(accepted);
+        }
+    }
+}
+
+/// Forks the helper that makes the listener **inside** the sandbox's network namespace, receives
+/// it over a socket pair only this process and the helper hold, and reaps the helper.
+///
+/// Returns the listener, or the failed stage and its errno (negative when the stage has none).
+///
+/// # Safety
+///
+/// Post-fork child only, in the forwarder. Nothing here allocates.
+unsafe fn listen_through_helper(plan: &ForwarderPlan) -> Result<RawFd, (i32, i32)> {
+    unsafe {
+        let mut pair = [-1_i32; 2];
+        if libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            pair.as_mut_ptr(),
+        ) != 0
+        {
+            return Err((STAGE_FORWARDER_HANDBACK, *libc::__errno_location()));
+        }
+        let helper = libc::fork();
+        if helper < 0 {
+            let errno = *libc::__errno_location();
+            libc::close(pair[0]);
+            libc::close(pair[1]);
+            return Err((STAGE_FORWARDER_HELPER, errno));
+        }
+        if helper == 0 {
+            libc::_exit(helper_body(
+                -1,
+                plan.owner_fd,
+                plan.netns_fd,
+                &plan.listen,
+                pair[1],
+            ));
+        }
+        libc::close(pair[1]);
+        let handback = receive_descriptor(pair[0]);
+        libc::close(pair[0]);
+        let mut status = 0;
+        while libc::waitpid(helper, &raw mut status, 0) != helper {
+            if *libc::__errno_location() != libc::EINTR {
+                status = -1;
+                break;
+            }
+        }
+        let helper_exit = if status != -1 && libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else {
+            -1
+        };
+        match (handback, helper_exit) {
+            (HelperHandback::Descriptor(listener), 0) => Ok(listener.into_raw_fd()),
+            (HelperHandback::Failure { stage, errno }, _) => Err((stage, errno)),
+            (_, code) => Err((code, -1)),
         }
     }
 }
@@ -1290,12 +1325,10 @@ fn probe_through_sandbox(bubblewrap: &Path, destination: SocketAddr) -> bool {
         // aperture is installed — and then reached from inside the sandbox, which is the claim.
         let installed = SharedCounters::new().ok().and_then(|counters| {
             let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, destination.port());
-            let listener = listen_inside(sandbox_pid, listen, None).ok()?;
             // The probe proves the *mechanism*, never a declaration: no ceiling, because there is
             // no operator statement here to enforce.
             let forwarder =
-                spawn_forwarder(&listener.0, destination, &counters, None, None).ok()?;
-            listener.release();
+                spawn_forwarder(sandbox_pid, listen, destination, &counters, None, None).ok()?;
             Some(InstalledAperture {
                 forwarder,
                 counters,
@@ -1450,8 +1483,8 @@ unsafe fn send_descriptor(socket: RawFd, descriptor: RawFd) -> bool {
 
 /// Receives one descriptor sent as `SCM_RIGHTS`, or nothing if the sender failed before sending.
 enum HelperHandback {
-    // A `Listener` from receipt on, so every refusal after it shuts the socket down.
-    Descriptor(Listener),
+    // Owned from receipt on, so every refusal after it closes the listener.
+    Descriptor(OwnedFd),
     Failure { stage: i32, errno: i32 },
     Missing,
 }
@@ -1519,7 +1552,7 @@ fn receive_descriptor(socket: RawFd) -> HelperHandback {
             }
             let descriptor = std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>());
             return if descriptor >= 0 {
-                HelperHandback::Descriptor(Listener(OwnedFd::from_raw_fd(descriptor)))
+                HelperHandback::Descriptor(OwnedFd::from_raw_fd(descriptor))
             } else {
                 HelperHandback::Missing
             };
@@ -1573,7 +1606,7 @@ mod tests {
 
     use super::{
         EgressAperture, GeneratedResolution, HelperHandback, InstalledAperture,
-        egress_apertures_fact, handback_pair, install_all, listen_address, listen_inside,
+        egress_apertures_fact, handback_pair, install_all, install_one, listen_address,
         read_sandbox_pid, receive_descriptor, sandbox_pid_from,
     };
     use crate::{DriverError, DriverErrorClass, HostConfig};
@@ -1807,9 +1840,10 @@ mod tests {
             .expect("read the reserved port")
             .port();
         let tuple = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
-        let _first = listen_inside(sandbox.pid, tuple, None).expect("bind the first listener");
-        let failure = listen_inside(sandbox.pid, tuple, None)
-            .expect_err("a second listener on the same sandbox tuple must fail");
+        let _first = occupy(sandbox.pid, tuple);
+        let Err(failure) = install_one(&occupier(tuple), tuple, sandbox.pid, None) else {
+            panic!("a second listener on the same sandbox tuple must fail");
+        };
         assert_eq!(failure.class, DriverErrorClass::Failed);
         assert_eq!(failure.code, "exec.aperture-install-failed");
         assert!(
@@ -2006,6 +2040,18 @@ mod tests {
             max_bytes: Some(max_bytes),
             ..aperture(name, pinned)
         }
+    }
+
+    /// An aperture listening on `tuple`, pinned at a port nothing connects to.
+    fn occupier(tuple: SocketAddrV4) -> EgressAperture {
+        let pinned = SocketAddr::from((Ipv4Addr::LOCALHOST, 9));
+        named_aperture("occupier", "occupier.example.invalid", tuple.port(), pinned)
+    }
+
+    /// Takes `tuple` inside the sandbox through the production install, so the next listener
+    /// there fails to bind; dropping the value kills and reaps its forwarder.
+    fn occupy(sandbox_pid: u32, tuple: SocketAddrV4) -> InstalledAperture {
+        install_one(&occupier(tuple), tuple, sandbox_pid, None).expect("occupy the listen tuple")
     }
 
     /// A declaration with its own host and its own listen port, as an operator writes one.
@@ -2527,8 +2573,7 @@ mod tests {
         // The second aperture's own tuple, taken before the install: its bind fails at stage 6
         // with the first aperture's forwarder already forked.
         let second = SocketAddrV4::new(listen_address(1).expect("a second address"), 443);
-        let occupied =
-            listen_inside(sandbox.pid, second, None).expect("occupy the second listen tuple");
+        let occupied = occupy(sandbox.pid, second);
         let _ = take_spawned_forwarders();
         let Err(refusal) = install_all(&declared, sandbox.pid, None) else {
             panic!("an aperture set with an uninstallable member was installed");
@@ -3296,7 +3341,7 @@ mod tests {
         }
 
         /// All or nothing, after the second install: the third aperture fails (an IPv6
-        /// destination, refused after its listener is bound), and neither earlier forwarder still
+        /// destination, refused before its forwarder is forked), and neither earlier forwarder still
         /// answers inside. Observed from inside the namespace rather than from a pid list: a
         /// forwarder that survived holds its listener, and a child connecting to its address
         /// would be accepted.
@@ -3419,8 +3464,8 @@ mod tests {
         /// The case above, with a neighbour thread forking throughout the install
         /// (`story:egress-third-install-case-holds-under-load`). A forwarder's listener copied
         /// into a neighbour's child outlives the forwarder that was killed and reaped, so a set
-        /// whose teardown relied on the last descriptor closing still answered inside. Each
-        /// listener is shut down at the socket, which every copy shares.
+        /// whose teardown relied on the last descriptor closing still answered inside. The installing
+        /// process now never holds a listener, so no neighbour's child can copy one.
         ///
         /// The install runs in a process of its own, this test binary running only
         /// [`forking_neighbour_third_install_helper`]: the neighbour's children copy every
@@ -3552,6 +3597,98 @@ mod tests {
             );
         }
 
+        const DEAD_FORWARDER_HELPER: &str =
+            "egress::tests::observed_inside::forking_neighbour_dead_forwarder_helper";
+
+        /// The case above, with a neighbour thread forking throughout the install
+        /// (`story:listener-held-during-install-is-never-inherited-by-a-fork`). A child the
+        /// neighbour forks while the installing thread holds a listener keeps a copy of it; once
+        /// the aperture's forwarder dies that copy still listens, and a connection from inside
+        /// completes into a backlog nobody accepts. Two apertures, so the first listener is
+        /// in this process across the whole second install.
+        ///
+        /// In a process of its own, this test binary running only
+        /// [`forking_neighbour_dead_forwarder_helper`], for the reason the third-install case
+        /// above gives.
+        #[test]
+        fn a_listener_held_during_install_is_not_inherited_by_a_concurrent_fork() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    DEAD_FORWARDER_HELPER,
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(FORKING_HELPER_ENV, "1")
+                .output()
+                .expect("run the helper");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let report = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "the helper failed: {report}");
+            assert!(
+                stdout.contains("test result: ok. 1 passed;"),
+                "the helper did not run exactly once: {report}"
+            );
+            if stdout.contains("FORKING-NEIGHBOUR absent") {
+                return;
+            }
+            assert!(
+                stdout.contains("FORKING-NEIGHBOUR refused"),
+                "the helper ran without reaching its assertion: {report}"
+            );
+        }
+
+        /// Run only by the case above, in a process of its own.
+        #[test]
+        #[ignore = "run by a_listener_held_during_install_is_not_inherited_by_a_concurrent_fork"]
+        fn forking_neighbour_dead_forwarder_helper() {
+            if std::env::var_os(FORKING_HELPER_ENV).is_none() {
+                return;
+            }
+            let scratch = tempfile::tempdir().unwrap();
+            let model = Destination::serving(b"model".to_vec());
+            let audit = Destination::serving(b"audit".to_vec());
+            let declared = [
+                aperture("model", "model.example.invalid", model.address, None),
+                aperture("audit", "audit.example.invalid", audit.address, None),
+            ];
+            let script = "if (exec 3<>/dev/tcp/127.0.0.1/443) 2>/dev/null; then printf open; \
+                          else printf refused; fi";
+            let Some(sandbox) = ScriptedSandbox::open(scratch.path(), None, script) else {
+                println!("FORKING-NEIGHBOUR absent");
+                return;
+            };
+            let neighbour = ForkingNeighbour::start(Duration::from_secs(5));
+            let installed = install_all(&declared, sandbox.pid, None);
+            neighbour.stop();
+            let installed = installed.expect("install both apertures");
+            let forwarder = installed.apertures()[0].forwarder;
+            // SAFETY: as in the case above; `WNOWAIT` leaves the pid for the aperture's drop.
+            unsafe {
+                libc::kill(forwarder, libc::SIGKILL);
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                let waited = libc::waitid(
+                    libc::P_PID,
+                    libc::id_t::try_from(forwarder).expect("forwarder pid"),
+                    &raw mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                );
+                assert_eq!(waited, 0, "wait for the killed forwarder");
+            }
+            let printed = sandbox.finish(Duration::from_secs(30));
+            drop(installed);
+            let forked = neighbour.join();
+            assert!(forked > 0, "the neighbour forked nothing");
+            assert_eq!(
+                printed, "refused",
+                "story:listener-held-during-install-is-never-inherited-by-a-fork: with its \
+                 forwarder dead, the aperture still completed a connection from inside while \
+                 {forked} children of a neighbour thread were alive"
+            );
+            println!("FORKING-NEIGHBOUR refused");
+        }
+
         /// Each ceiling is independent under concurrent connections (ADR 0014 per aperture;
         /// design 26 § 2): four relays at once through a capped aperture and four through an
         /// uncapped one on the same port. The uncapped one passes every byte, and the capped one
@@ -3611,6 +3748,374 @@ mod tests {
             assert!(capped.ceiling_exceeded());
             assert!(!open.ceiling_exceeded());
             drop(installed);
+        }
+
+        /// Adversary, `story:listener-held-during-install-is-never-inherited-by-a-fork` pass 1.
+        mod d354_adv {
+            use std::net::SocketAddr;
+            use std::path::Path;
+            use std::process::{Child, Command, Stdio};
+            use std::sync::mpsc;
+            use std::time::{Duration, Instant};
+
+            use super::super::reaped;
+            use super::{Destination, ForkingNeighbour, ScriptedSandbox, aperture};
+            use crate::egress::{EgressAperture, install_all};
+
+            const HELPER_ENV: &str = "SUBSTRATE_TEST_D354_ADV_HELPER";
+            const LISTENER_HELPER: &str =
+                "egress::tests::observed_inside::d354_adv::listener_holders_helper";
+
+            /// A pinned destination nothing connects to: these cases never get a relay going.
+            fn pinned() -> SocketAddr {
+                SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 9))
+            }
+
+            /// Runs `helper` alone in a fresh copy of this binary, as the forking-neighbour cases
+            /// above do, and returns its standard output once it passed exactly once.
+            fn run_alone(helper: &str) -> String {
+                let output = Command::new(std::env::current_exe().expect("test binary"))
+                    .args([
+                        helper,
+                        "--exact",
+                        "--ignored",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(HELPER_ENV, "1")
+                    .output()
+                    .expect("run the helper");
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let report = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+                assert!(output.status.success(), "the helper failed: {report}");
+                assert!(
+                    stdout.contains("test result: ok. 1 passed;"),
+                    "the helper did not run exactly once: {report}"
+                );
+                stdout
+            }
+
+            /// The children thread `tid` of this process forked and nobody reaped, zombies too.
+            fn children_of(tid: libc::pid_t) -> Vec<libc::pid_t> {
+                std::fs::read_to_string(format!("/proc/self/task/{tid}/children"))
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse().ok())
+                    .collect()
+            }
+
+            /// Every descriptor number of `pid` above the standard three.
+            fn descriptors_of(pid: libc::pid_t) -> Vec<u32> {
+                std::fs::read_dir(format!("/proc/{pid}/fd"))
+                    .map(|entries| {
+                        entries
+                            .filter_map(Result::ok)
+                            .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+                            .filter(|fd| *fd > 2)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+
+            /// Every descriptor of `pid` that is a socket, as `(fd, inode)`; empty if unreadable.
+            fn sockets_of(pid: libc::pid_t) -> Vec<(u32, u64)> {
+                let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+                    return Vec::new();
+                };
+                entries
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| {
+                        let fd = entry.file_name().to_str()?.parse().ok()?;
+                        let target = std::fs::read_link(entry.path()).ok()?;
+                        let inode = target
+                            .to_str()?
+                            .strip_prefix("socket:[")?
+                            .strip_suffix(']')?
+                            .parse()
+                            .ok()?;
+                        Some((fd, inode))
+                    })
+                    .collect()
+            }
+
+            /// `pid`'s parent, from `/proc/<pid>/stat`.
+            fn parent_of(pid: libc::pid_t) -> Option<libc::pid_t> {
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                stat.rsplit_once(')')?
+                    .1
+                    .split_whitespace()
+                    .nth(1)?
+                    .parse()
+                    .ok()
+            }
+
+            /// A process in a user and network namespace of its own, whose loopback nobody
+            /// brought up: a helper there retries its bind for about a second before it fails, so
+            /// the forwarder sits in front of its report for that long.
+            struct DownNamespace(Child);
+
+            impl DownNamespace {
+                fn open() -> Option<Self> {
+                    let unshare = Path::new("/usr/bin/unshare");
+                    let sleep = Path::new("/usr/bin/sleep");
+                    if !unshare.is_file() || !sleep.is_file() {
+                        return None;
+                    }
+                    let child = Command::new(unshare)
+                        .args(["--user", "--map-root-user", "--net", "--"])
+                        .arg(sleep)
+                        .arg("60")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .ok()?;
+                    let namespace = Self(child);
+                    let started = Instant::now();
+                    while started.elapsed() < Duration::from_secs(5) {
+                        let comm =
+                            std::fs::read_to_string(format!("/proc/{}/comm", namespace.pid()))
+                                .ok()?;
+                        if comm.trim() == "sleep" {
+                            return Some(namespace);
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    None
+                }
+
+                fn pid(&self) -> u32 {
+                    self.0.id()
+                }
+            }
+
+            impl Drop for DownNamespace {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+
+            /// Installs `declared` on a thread of its own, kills the first child that thread forks
+            /// (its first forwarder, before that forwarder has reported) and returns the install's
+            /// refusal, the forwarder's pid and how long the install took to return after the
+            /// kill. An install that has not returned 20 s after the kill is `HUNG`.
+            fn install_killing_the_forwarder(
+                sandbox_pid: u32,
+                declared: Vec<EgressAperture>,
+            ) -> (Result<(), String>, libc::pid_t, Duration) {
+                let (tid_sender, tid) = mpsc::channel();
+                let (done_sender, done) = mpsc::channel();
+                std::thread::spawn(move || {
+                    // SAFETY: `gettid` has no preconditions.
+                    let _ = tid_sender.send(unsafe { libc::gettid() });
+                    let result = install_all(&declared, sandbox_pid, None)
+                        .map(|_installed| ())
+                        .map_err(|refusal| refusal.message);
+                    let _ = done_sender.send(result);
+                });
+                let tid = tid.recv().expect("the installing thread's id");
+                let started = Instant::now();
+                let forwarder = loop {
+                    if let Some(pid) = children_of(tid).first() {
+                        break *pid;
+                    }
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "the installing thread forked no forwarder"
+                    );
+                    std::thread::yield_now();
+                };
+                // SAFETY: a pid the installing thread forked and has not reaped: it waits for the
+                // forwarder's report before it reaps anything.
+                unsafe {
+                    libc::kill(forwarder, libc::SIGKILL);
+                }
+                let killed = Instant::now();
+                let result = done
+                    .recv_timeout(Duration::from_secs(20))
+                    .unwrap_or_else(|_| Err("HUNG".to_owned()));
+                (result, forwarder, killed.elapsed())
+            }
+
+            /// A forwarder that dies before it reports (EOF on the report socket) is a refusal at
+            /// once, stage 11, and the installer reaps it. The helper it forked is still retrying
+            /// its bind for most of a second when the refusal arrives, so this also shows the
+            /// installer never waits on the helper.
+            #[test]
+            fn a_forwarder_that_dies_before_its_report_is_refused_at_once_and_reaped() {
+                let Some(namespace) = DownNamespace::open() else {
+                    return;
+                };
+                let declared = vec![aperture("model", "model.example.invalid", pinned(), None)];
+                let (result, forwarder, after_kill) =
+                    install_killing_the_forwarder(namespace.pid(), declared);
+                let Err(message) = result else {
+                    panic!("an aperture whose forwarder died before its report was installed");
+                };
+                assert!(
+                    message.contains("stage 11, errno unavailable"),
+                    "a forwarder lost before its report was not named as such: {message}"
+                );
+                assert!(
+                    after_kill < Duration::from_millis(500),
+                    "the refusal arrived {after_kill:?} after the forwarder died"
+                );
+                assert!(
+                    reaped(forwarder),
+                    "the dead forwarder {forwarder} was left unreaped"
+                );
+            }
+
+            /// A refusal at the forwarder's own stage (2, its cgroup) and at the helper's (6, a bind
+            /// that never finds loopback up) leaves the installing thread with no child at all:
+            /// no forwarder, no zombie, and so nothing that could hold a listener.
+            #[test]
+            fn a_refused_stage_leaves_the_installing_thread_no_child() {
+                let Some(namespace) = DownNamespace::open() else {
+                    return;
+                };
+                // SAFETY: `gettid` has no preconditions.
+                let tid = unsafe { libc::gettid() };
+                let namespace_pid = libc::pid_t::try_from(namespace.pid()).expect("pid");
+                let others = || {
+                    children_of(tid)
+                        .into_iter()
+                        .filter(|pid| *pid != namespace_pid)
+                        .collect::<Vec<_>>()
+                };
+                let declared = [aperture("model", "model.example.invalid", pinned(), None)];
+                let Err(cgroup) =
+                    install_all(&declared, namespace.pid(), Some(Path::new("/dev/full")))
+                else {
+                    panic!("an aperture whose forwarder could not join its cgroup was installed");
+                };
+                assert!(
+                    cgroup.message.contains("stage 2, errno 28"),
+                    "the cgroup refusal named another stage: {}",
+                    cgroup.message
+                );
+                assert_eq!(others(), Vec::<libc::pid_t>::new(), "after stage 2");
+                let Err(bind) = install_all(&declared, namespace.pid(), None) else {
+                    panic!("an aperture whose listener could not bind was installed");
+                };
+                assert!(
+                    bind.message.contains("stage 6"),
+                    "the bind refusal named another stage: {}",
+                    bind.message
+                );
+                assert_eq!(others(), Vec::<libc::pid_t>::new(), "after stage 6");
+            }
+
+            /// The Acceptance's second bullet, measured: once `install_all` returns, no process
+            /// but each aperture's own forwarder holds that aperture's listener, while a neighbour
+            /// thread forked before, during and after every forwarder's report and kept each child
+            /// alive past the scan. It also measures what each forwarder holds after the hand-off:
+            /// its listener and nothing else above the standard three.
+            #[test]
+            fn no_process_but_its_forwarder_holds_a_listener_once_install_returns() {
+                let stdout = run_alone(LISTENER_HELPER);
+                if stdout.contains("D354-ADV absent") {
+                    return;
+                }
+                assert!(
+                    stdout.contains("D354-ADV forwarders-only"),
+                    "the helper ran without reaching its assertion: {stdout}"
+                );
+            }
+
+            /// Run only by the case above, in a process of its own.
+            #[test]
+            #[ignore = "run by no_process_but_its_forwarder_holds_a_listener_once_install_returns"]
+            fn listener_holders_helper() {
+                if std::env::var_os(HELPER_ENV).is_none() {
+                    return;
+                }
+                let scratch = tempfile::tempdir().unwrap();
+                let model = Destination::serving(b"model".to_vec());
+                let audit = Destination::serving(b"audit".to_vec());
+                let mail = Destination::serving(b"mail".to_vec());
+                let declared = [
+                    aperture("model", "model.example.invalid", model.address, None),
+                    aperture("audit", "audit.example.invalid", audit.address, None),
+                    aperture("mail", "mail.example.invalid", mail.address, None),
+                ];
+                let Some(sandbox) = ScriptedSandbox::open(scratch.path(), None, "printf done")
+                else {
+                    println!("D354-ADV absent");
+                    return;
+                };
+                let sandbox_pid = libc::pid_t::try_from(sandbox.child.id()).expect("pid");
+                let neighbour = ForkingNeighbour::start(Duration::from_secs(3));
+                // The neighbour is forking before the first forwarder exists.
+                std::thread::sleep(Duration::from_millis(50));
+                let installed =
+                    install_all(&declared, sandbox.pid, None).expect("install three apertures");
+                std::thread::sleep(Duration::from_millis(200));
+                neighbour.stop();
+                let forwarders: Vec<libc::pid_t> = installed
+                    .apertures()
+                    .iter()
+                    .map(|one| one.forwarder)
+                    .collect();
+                let mut listeners = Vec::new();
+                for forwarder in &forwarders {
+                    let held = descriptors_of(*forwarder);
+                    let sockets: Vec<(u32, u64)> = sockets_of(*forwarder)
+                        .into_iter()
+                        .filter(|(fd, _)| *fd > 2)
+                        .collect();
+                    assert_eq!(
+                        (held.len(), sockets.len()),
+                        (1, 1),
+                        "forwarder {forwarder} holds more than its listener after the hand-off: \
+                         descriptors {held:?}, sockets {sockets:?}"
+                    );
+                    listeners.push(sockets[0].1);
+                }
+                // SAFETY: `getpid` has no preconditions.
+                let me = unsafe { libc::getpid() };
+                let mut children_scanned = 0_usize;
+                let mut holders = Vec::new();
+                for entry in std::fs::read_dir("/proc").expect("read /proc").flatten() {
+                    let Some(pid) = entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| name.parse::<libc::pid_t>().ok())
+                    else {
+                        continue;
+                    };
+                    if forwarders.contains(&pid) {
+                        continue;
+                    }
+                    let sockets = sockets_of(pid);
+                    if pid != sandbox_pid && parent_of(pid) == Some(me) && !sockets.is_empty() {
+                        children_scanned += 1;
+                    }
+                    holders.extend(
+                        sockets
+                            .into_iter()
+                            .filter(|(_, inode)| listeners.contains(inode))
+                            .map(|(fd, inode)| (pid, fd, inode)),
+                    );
+                }
+                let printed = sandbox.finish(Duration::from_secs(30));
+                drop(installed);
+                let forked = neighbour.join();
+                assert!(forked > 0, "the neighbour forked nothing");
+                assert!(
+                    children_scanned > 0,
+                    "no live neighbour child of this process was scanned"
+                );
+                assert!(
+                    holders.is_empty(),
+                    "story:listener-held-during-install-is-never-inherited-by-a-fork: once the \
+                     install returned, processes other than the forwarders held a listener \
+                     (pid, fd, inode) {holders:?}; {children_scanned} neighbour children scanned"
+                );
+                assert_eq!(printed, "done");
+                println!("D354-ADV forwarders-only");
+            }
         }
     }
 }

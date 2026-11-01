@@ -382,8 +382,9 @@ pub fn api_refusal(resource: &str, verb: &str) -> String {
 /// counts (the lane starts each verb's daemon on a fresh log after the Role change, so `0`), and
 /// in it a `WARN` line must carry the API's answer refusing exactly `verb` on `resource`
 /// ([`api_refusal`]), in the plain form or the `Debug`-escaped one; for `pods/exec` `create`
-/// alone, the API's bare refusal of the exec ([`bare_exec_refusal`]) counts too, since the API
-/// gives that refusal no reason (D349). The case decides only once
+/// alone, the API's bare refusal of the exec counts too once the driver's access review names
+/// `create` as the verb it denies ([`bare_exec_refusal`]), since the API gives that refusal no
+/// reason (D349, `story:driver-names-a-bare-exec-refusals-verb`). The case decides only once
 /// the first probe has finished ([`PROBE_FINISHED`]) or the refusal is the open's own
 /// ([`NOT_OPEN`]), after which no probe runs: never on facts absent because no probe ran yet. A
 /// reason code or a fact's "was not proved" line alone names no resource and refuses nothing.
@@ -405,7 +406,10 @@ pub fn verb_refusal(
         .collect();
     let bare = resource == "pods/exec" && verb == "create";
     let answer = if bare {
-        format!("{} or a bare exec refusal", api_refusal(resource, verb))
+        format!(
+            "{} or a bare exec refusal {REVIEW_DENIES_CREATE}",
+            api_refusal(resource, verb)
+        )
     } else {
         api_refusal(resource, verb)
     };
@@ -433,16 +437,23 @@ pub fn verb_refusal(
     ))
 }
 
-/// Whether `line` is the executor handshake refused 403 for the probe's keeper Pod with no reason:
-/// how the API (kind v1.37, D349) refuses an exec upgrade the Role lacks `pods/exec` `create`
-/// for. The message names the keeper (`pods "sbx-pr-…-keeper" is forbidden:`) and nothing follows
-/// it; a line carrying any verb's `cannot … resource` answer is not bare.
+/// What the driver writes after the API's bare refusal of an exec once its
+/// `SelfSubjectAccessReview` denies `pods/exec` `create` alone (`ACCESS_REVIEW_DENIES` in
+/// `crates/substrate-kubernetes/src/namespace/workspace.rs`, design 34 § 7.1).
+const REVIEW_DENIES_CREATE: &str = "(a SelfSubjectAccessReview denies pods/exec create)";
+
+/// Whether `line` is the executor handshake refused 403 for the probe's keeper Pod with no reason
+/// from the API, and the driver's access review naming `create` alone as the verb it denies: how
+/// the API (kind v1.37, D349) refuses an exec upgrade the Role lacks `pods/exec` `create` for, and
+/// what the driver adds to it (`story:driver-names-a-bare-exec-refusals-verb`). The message names
+/// the keeper (`pods "sbx-pr-…-keeper" is forbidden:`) and nothing follows it but
+/// [`REVIEW_DENIES_CREATE`]. A bare refusal whose review names no verb, denies `get` or both, did
+/// not decide or failed is not the create case's refusal, and neither is a line carrying any
+/// other reason.
 pub fn bare_exec_refusal(line: &str) -> bool {
     const ANSWERED: &str = "exec answered 403: pods \"";
     const FORBIDDEN: &str = "\" is forbidden:";
-    if !line.contains("code=\"kubernetes.executor-handshake-failed\"")
-        || (line.contains("cannot ") && line.contains(" resource \""))
-    {
+    if !line.contains("code=\"kubernetes.executor-handshake-failed\"") {
         return false;
     }
     let Some(start) = line.find(ANSWERED) else {
@@ -457,7 +468,7 @@ pub fn bare_exec_refusal(line: &str) -> bool {
     pod.starts_with("sbx-pr-")
         && pod.ends_with("-keeper")
         && !pod.contains(['"', ' '])
-        && reason.trim().is_empty()
+        && reason.trim() == REVIEW_DENIES_CREATE
 }
 
 /// `line` without its ANSI CSI sequences (`ESC [ … final byte`), should the log be coloured.
@@ -2746,7 +2757,9 @@ mod tests {
 
     /// The line the driver wrote at `bb2b06fe` when the Role lacked `pods/exec` `create`
     /// (2026-11-01 10:08:42Z, the daemon log the lane kept): the API's `Status.message` names
-    /// the keeper Pod and ends at "is forbidden: ", with no reason.
+    /// the keeper Pod and ends at "is forbidden: ", with no reason. Since
+    /// `story:driver-names-a-bare-exec-refusals-verb` the driver writes `reason` after it: what
+    /// its access review found.
     fn bare_exec_line(pod: &str, code: &str, status: u16, reason: &str) -> String {
         format!(
             "2026-11-01T10:08:42.729145Z  WARN substrate_kubernetes::namespace::probe: the \
@@ -2755,18 +2768,45 @@ mod tests {
         )
     }
 
-    /// D349: the "pods/exec create" case is refused by the API's bare refusal of the exec, as
-    /// observed, and by nothing else; the "pods/exec get" case stays strict, and neither case's
-    /// line refuses the other.
+    /// What the driver writes after a bare refusal once its access review denies `pods/exec`
+    /// `create` alone, and once it found anything else.
+    const REVIEW_DENIES_CREATE: &str = "(a SelfSubjectAccessReview denies pods/exec create)";
+    const REVIEW_DENIES_GET: &str = "(a SelfSubjectAccessReview denies pods/exec get)";
+    const REVIEW_DENIES_BOTH: &str = "(a SelfSubjectAccessReview denies pods/exec create and get)";
+    const REVIEW_UNDECIDED: &str = "(a SelfSubjectAccessReview admits pods/exec create and get: \
+         it does not decide the refused verb)";
+    const REVIEW_FAILED: &str = "(the refused verb is unknown: the SelfSubjectAccessReview of \
+         pods/exec create failed: access review answered 403: \
+         selfsubjectaccessreviews.authorization.k8s.io is forbidden: User \
+         \"system:serviceaccount:snl-x:substrate-driver\" cannot create resource \
+         \"selfsubjectaccessreviews\" in API group \"authorization.k8s.io\" at the cluster scope)";
+
+    /// D349, then `story:driver-names-a-bare-exec-refusals-verb`: the "pods/exec create" case is
+    /// refused by the API's bare refusal of the exec once the driver's access review names
+    /// `create` alone as the verb it denies; the "pods/exec get" case stays strict, and neither
+    /// case's line refuses the other.
     #[test]
     fn the_exec_create_case_reads_the_apis_bare_refusal_and_stays_distinct_from_get() {
         let missing = set(&["confinement.family.process-run", "exec.argv-only"]);
         let keeper = "sbx-pr-gbyb7pajquihb757-keeper";
         let handshake = "kubernetes.executor-handshake-failed";
-        let bare = bare_exec_line(keeper, handshake, 403, "");
-        let refused = verb_refusal(&bare, 0, "pods/exec", "create", &missing)
-            .expect("the API's bare refusal of the exec refuses the create case");
+        let bare = bare_exec_line(keeper, handshake, 403, REVIEW_DENIES_CREATE);
+        let refused = verb_refusal(&bare, 0, "pods/exec", "create", &missing).expect(
+            "the bare refusal whose review denies create refuses the create case \
+             (story:driver-names-a-bare-exec-refusals-verb)",
+        );
         assert!(refused.contains(keeper), "{refused}");
+        assert!(refused.contains(REVIEW_DENIES_CREATE), "{refused}");
+        let escaped = format!(
+            "2026-11-01T10:08:42.729145Z  WARN substrate_kubernetes::namespace::probe: the \
+             namespace driver's probe failed; its facts are absent \
+             code=\"{handshake}\" message=\"the cluster API: exec answered 403: pods \
+             \\\"{keeper}\\\" is forbidden: {REVIEW_DENIES_CREATE}\"\n"
+        );
+        assert!(
+            verb_refusal(&escaped, 0, "pods/exec", "create", &missing).is_some(),
+            "the Debug-escaped line refuses nothing: {escaped}"
+        );
         assert!(
             verb_refusal(&bare, 0, "pods/exec", "get", &missing).is_none(),
             "the bare refusal refuses the get case"
@@ -2789,31 +2829,6 @@ mod tests {
             verb_refusal(&get, 0, "pods/exec", "create", &missing).is_none(),
             "the get case's refusal refuses the create case"
         );
-        for (line, what) in [
-            (
-                bare_exec_line("sbx-pr-gbyb7pajquihb757-pod", handshake, 403, ""),
-                "another Pod",
-            ),
-            (
-                bare_exec_line(keeper, "kubernetes.api-failed", 403, ""),
-                "another code",
-            ),
-            (bare_exec_line(keeper, handshake, 404, ""), "another status"),
-            (
-                bare_exec_line(keeper, handshake, 403, "cannot list resource \"pods\""),
-                "another verb's refusal",
-            ),
-            (
-                bare_exec_line(keeper, handshake, 403, "the keeper is not running"),
-                "a reason",
-            ),
-            (bare.replace(" WARN ", " INFO "), "an INFO line"),
-        ] {
-            assert!(
-                verb_refusal(&line, 0, "pods/exec", "create", &missing).is_none(),
-                "{what} refuses the create case: {line}"
-            );
-        }
         assert!(
             verb_refusal(&bare, bare.len(), "pods/exec", "create", &missing).is_none(),
             "a bare refusal before the Role change refuses nothing"
@@ -2822,6 +2837,80 @@ mod tests {
             verb_refusal(&bare, 0, "pods/exec", "create", &BTreeSet::new()).is_none(),
             "with every fact published nothing is refused"
         );
+    }
+
+    /// `story:driver-names-a-bare-exec-refusals-verb`: no line but the driver's bare refusal of
+    /// the keeper's exec under the handshake code, followed by nothing but the review naming
+    /// `create` alone, refuses the "pods/exec create" case.
+    #[test]
+    fn the_exec_create_case_refuses_on_no_line_but_the_drivers_naming_create_alone() {
+        let missing = set(&["confinement.family.process-run", "exec.argv-only"]);
+        let keeper = "sbx-pr-gbyb7pajquihb757-keeper";
+        let handshake = "kubernetes.executor-handshake-failed";
+        let bare = bare_exec_line(keeper, handshake, 403, REVIEW_DENIES_CREATE);
+        for (line, what) in [
+            (
+                bare_exec_line(
+                    "sbx-pr-gbyb7pajquihb757-pod",
+                    handshake,
+                    403,
+                    REVIEW_DENIES_CREATE,
+                ),
+                "another Pod",
+            ),
+            (
+                bare_exec_line(keeper, "kubernetes.api-failed", 403, REVIEW_DENIES_CREATE),
+                "another code",
+            ),
+            (
+                bare_exec_line(keeper, handshake, 404, REVIEW_DENIES_CREATE),
+                "another status",
+            ),
+            (
+                bare_exec_line(keeper, handshake, 403, "cannot list resource \"pods\""),
+                "another verb's refusal",
+            ),
+            (
+                bare_exec_line(keeper, handshake, 403, "the keeper is not running"),
+                "a reason",
+            ),
+            (
+                bare_exec_line(
+                    keeper,
+                    handshake,
+                    403,
+                    &format!("{REVIEW_DENIES_CREATE} the keeper is not running"),
+                ),
+                "a reason after the review",
+            ),
+            (
+                bare_exec_line(keeper, handshake, 403, ""),
+                "a bare refusal naming no verb, which D349 accepted until the driver named one \
+                 (story:driver-names-a-bare-exec-refusals-verb)",
+            ),
+            (
+                bare_exec_line(keeper, handshake, 403, REVIEW_DENIES_GET),
+                "a review denying get, the get case's verb",
+            ),
+            (
+                bare_exec_line(keeper, handshake, 403, REVIEW_DENIES_BOTH),
+                "a review denying both verbs",
+            ),
+            (
+                bare_exec_line(keeper, handshake, 403, REVIEW_UNDECIDED),
+                "a review that did not decide",
+            ),
+            (
+                bare_exec_line(keeper, handshake, 403, REVIEW_FAILED),
+                "a failed review",
+            ),
+            (bare.replace(" WARN ", " INFO "), "an INFO line"),
+        ] {
+            assert!(
+                verb_refusal(&line, 0, "pods/exec", "create", &missing).is_none(),
+                "{what} refuses the create case: {line}"
+            );
+        }
     }
 
     /// Acceptance 1: a refusal written before `since`, the Role change, refuses nothing, even
@@ -3305,5 +3394,42 @@ mod tests {
             "a log the previous case's daemon wrote before this case began is kept and named \
              as this case's"
         );
+    }
+
+    /// Adversary cases of wave D354 (`story:driver-names-a-bare-exec-refusals-verb`).
+    mod d354_adv {
+        /// The S6 create case's line is the driver's own words: the lane's
+        /// `REVIEW_DENIES_CREATE` is `ACCESS_REVIEW_DENIES` in the driver with `create` alone,
+        /// in parentheses, and the driver's own test pins that composed line on the probe's
+        /// refusal. A driver that rewords it fails here, not first on the live lane.
+        #[test]
+        fn the_create_cases_review_line_is_the_drivers_own_words() {
+            let workspace =
+                include_str!("../../crates/substrate-kubernetes/src/namespace/workspace.rs");
+            let pinned = include_str!(
+                "../../crates/substrate-kubernetes/src/namespace/verb_review_tests.rs"
+            );
+            let declared = "const ACCESS_REVIEW_DENIES: &str = \"";
+            let start = workspace
+                .find(declared)
+                .map(|at| at + declared.len())
+                .expect("the driver declares ACCESS_REVIEW_DENIES");
+            let denies =
+                &workspace[start..][..workspace[start..].find('"').expect("a closed literal")];
+            assert_eq!(
+                super::super::REVIEW_DENIES_CREATE,
+                format!("({denies}create)"),
+                "story:driver-names-a-bare-exec-refusals-verb"
+            );
+            assert!(
+                workspace.contains("const EXEC_VERBS: [&str; 2] = [\"create\", \"get\"];"),
+                "story:driver-names-a-bare-exec-refusals-verb: the driver reviews create first"
+            );
+            assert!(
+                pinned.contains(&format!("{{BARE}} {}", super::super::REVIEW_DENIES_CREATE)),
+                "story:driver-names-a-bare-exec-refusals-verb: the driver's test no longer pins \
+                 the line the lane reads"
+            );
+        }
     }
 }

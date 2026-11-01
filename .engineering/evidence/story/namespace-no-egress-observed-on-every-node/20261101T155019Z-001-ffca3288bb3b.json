@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T15:50:19Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-no-egress-observed-on-every-node",
+  "kind": "story",
+  "revision": 16,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p b10x-substrate-kubernetes --lib --locked at 804d433c: 146 passed, 0 failed; clippy -D warnings clean",
+    "reference": "867c5ad5"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T20:26:16Z",
+  "actor": "human:timo",
+  "artifact": "story:pod-sweep-replays-from-the-policys-create",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "U4 tree at 21de4b9b: host --lib 411/0, confinement::pod::cleanup_tests 43/0",
+    "reference": "7b8c1dd9"
+  }
+}

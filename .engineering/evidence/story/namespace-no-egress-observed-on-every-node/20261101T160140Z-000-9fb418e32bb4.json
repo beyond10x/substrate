@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-01T16:01:40Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-no-egress-observed-on-every-node",
+  "kind": "story",
+  "revision": 16,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:wave-2026-11-01-d354-u1-adversary-pass-1",
+    "reference": "b83df354",
+    "review": "review-result:wave-2026-11-01-d354-u1-adversary-pass-1",
+    "outcome": "fixed"
+  }
+}

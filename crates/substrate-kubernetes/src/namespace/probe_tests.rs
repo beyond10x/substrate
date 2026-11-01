@@ -50,10 +50,12 @@ enum Child {
     Expanded,
 }
 
-/// How the played kubelet runs the probe Pod: its child's argv line, the observation line that
-/// follows it, what becomes of the heartbeat file in the probe's volume, and how the run ends.
+/// How the played kubelet runs the probe Pod: the node it schedules the probe keeper on, its
+/// child's argv line, the observation line that follows it, what becomes of the heartbeat file in
+/// the probe's volume, and how the run ends.
 #[derive(Clone)]
 struct Play {
+    node: &'static str,
     child: Child,
     observed: Option<String>,
     heartbeat: Heartbeat,
@@ -61,9 +63,11 @@ struct Play {
 }
 
 impl Play {
-    /// The default run: the argv read back, no observation line, no heartbeat, exit 0.
+    /// The default run: the keeper on `NODE`, the argv read back, no observation line, no
+    /// heartbeat, exit 0.
     const fn of(child: Child) -> Self {
         Self {
+            node: NODE,
             child,
             observed: None,
             heartbeat: Heartbeat::Absent,
@@ -222,7 +226,7 @@ async fn rig_with(play: Play, handshake: Option<String>, check: Option<Value>) -
     }
 }
 
-/// Binds every probe keeper to `NODE` and ends every probe Pod as `play` states, writing its
+/// Binds every probe keeper to `play.node` and ends every probe Pod as `play` states, writing its
 /// heartbeat into `volume`, the directory the keeper's `fs` calls serve.
 async fn play_kubelet(
     admin: Api,
@@ -250,7 +254,7 @@ async fn play_kubelet(
             let path = format!("{}/{name}", admin.pods());
             match pod["metadata"]["labels"]["b10x-substrate/role"].as_str() {
                 Some("keeper") if pod["spec"]["nodeName"].is_null() => {
-                    pod["spec"]["nodeName"] = json!(NODE);
+                    pod["spec"]["nodeName"] = json!(play.node);
                     let _ = admin.update(&path, &pod).await;
                 }
                 Some("pod") => {
@@ -2080,7 +2084,7 @@ mod d339 {
 
     /// The API's 403 for a Role without `verb` on `resource`, worded as the API server words it,
     /// for the next `method` request whose path starts with `path`.
-    fn forbidden(method: Method, path: String, verb: &str, resource: &str) -> Fault {
+    pub(super) fn forbidden(method: Method, path: String, verb: &str, resource: &str) -> Fault {
         Fault::Answer {
             method,
             path,
@@ -2098,7 +2102,7 @@ mod d339 {
     }
 
     /// The name of this probe's object in `role`, from its unsettled row.
-    fn probe_object(ledger: &MemoryLedger, role: BackendRole) -> String {
+    pub(super) fn probe_object(ledger: &MemoryLedger, role: BackendRole) -> String {
         ledger
             .rows_of(BackendKind::Probe)
             .into_iter()
@@ -2469,5 +2473,190 @@ mod adversary_d339 {
                 refused.message
             );
         }
+    }
+}
+
+/// Design 34 § 6.4 and its amendment of 2026-11-01 (D339),
+/// `story:namespace-no-egress-observed-on-every-node`: the probe observes the one node its keeper
+/// was scheduled on, and the driver publishes that node beside the snapshot, never in it.
+mod d354 {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::adversary_d337::answer_keeper;
+    use super::d339::{forbidden, probe_object};
+    use super::*;
+
+    const OTHER_NODE: &str = "node-b";
+
+    /// The node the probe Pod's required affinity names.
+    fn pinned_to(pod: &Value) -> Value {
+        pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+            ["nodeSelectorTerms"][0]["matchExpressions"][0]["values"]
+            .clone()
+    }
+
+    /// Acceptance 1, 2 and 4, the driver's half: the snapshot is published with the node the
+    /// probe's keeper ran on, and a later probe whose keeper lands on another node moves it. The
+    /// node is not a wire field: the published snapshot never names it.
+    #[tokio::test]
+    async fn the_snapshot_is_published_with_the_probes_node_and_a_later_probe_moves_it() {
+        let mut rig = rig(Child::Exact, None).await;
+        rig.driver.probe().await.expect("the probe runs");
+        let first = rig.machine();
+        assert_eq!(
+            families(&first.facts),
+            [Some(true); 7],
+            "the control: the run proved its end"
+        );
+        assert_eq!(pinned_to(&lock(&rig.ran)[0]), json!([NODE]));
+        assert_eq!(
+            rig.driver.published_exec_node().as_deref(),
+            Some(NODE),
+            "story:namespace-no-egress-observed-on-every-node: the probe's node is published \
+             with its snapshot"
+        );
+
+        rig.kubelet.abort();
+        rig.kubelet = tokio::spawn(play_kubelet(
+            admin(&rig.fake),
+            Arc::clone(&rig.fake),
+            Play {
+                node: OTHER_NODE,
+                ..Play::of(Child::Exact)
+            },
+            Arc::clone(&rig.ran),
+            rig.root.path().to_path_buf(),
+        ));
+        rig.driver.probe().await.expect("the later probe runs");
+        let second = rig.machine();
+        assert_eq!(families(&second.facts), [Some(true); 7]);
+        assert_eq!(pinned_to(&lock(&rig.ran)[1]), json!([OTHER_NODE]));
+        assert_eq!(
+            rig.driver.published_exec_node().as_deref(),
+            Some(OTHER_NODE),
+            "story:namespace-no-egress-observed-on-every-node: a later probe on another node \
+             moves the published node"
+        );
+        let wire = serde_json::to_string(&second).expect("the snapshot serializes");
+        assert!(
+            !wire.contains(OTHER_NODE) && !wire.contains(NODE),
+            "the node is not a wire field: {wire}"
+        );
+    }
+
+    /// Acceptance 3: a probe whose keeper node could not be read proves no run fact, and the node
+    /// an earlier probe observed is not published in its place.
+    #[tokio::test]
+    async fn a_probe_whose_keeper_node_is_unread_proves_no_run_fact_and_publishes_no_node() {
+        let fake = Arc::new(passing_fake());
+        let clock = ManualClock::new();
+        let (driver, ledger) = driver(&fake, &clock);
+        driver.open().await.expect("the driver opens");
+        let refuse = Arc::new(AtomicBool::new(false));
+        let armed = Arc::clone(&refuse);
+        let weak = Arc::downgrade(&fake);
+        let rows = Arc::clone(&ledger);
+        answer_keeper(&fake, move || {
+            if armed.load(Ordering::SeqCst)
+                && let Some(fake) = weak.upgrade()
+            {
+                let keeper = probe_object(&rows, BackendRole::Keeper);
+                fake.fault(forbidden(
+                    Method::GET,
+                    format!("/api/v1/namespaces/substrate/pods/{keeper}"),
+                    "get",
+                    "pods",
+                ));
+            }
+        });
+        let root = tempfile::tempdir().expect("a temporary PVC");
+        let kubelet = tokio::spawn(play_kubelet(
+            admin(&fake),
+            Arc::clone(&fake),
+            Play::of(Child::Exact),
+            Arc::new(Mutex::new(Vec::new())),
+            root.path().to_path_buf(),
+        ));
+        driver.probe().await.expect("the first probe runs");
+        let first = Driver::machine(&driver);
+        assert_eq!(families(&first.facts), [Some(true); 7], "the control");
+        assert_eq!(driver.published_exec_node().as_deref(), Some(NODE));
+
+        refuse.store(true, Ordering::SeqCst);
+        driver.probe().await.expect("the second probe runs");
+        kubelet.abort();
+        let second = Driver::machine(&driver);
+        assert_eq!(families(&second.facts), [None; 7], "no run fact is proved");
+        assert_eq!(second.facts.exec_argv_only, None);
+        assert_no_observed_property(&second);
+        assert_eq!(
+            driver.published_exec_node(),
+            None,
+            "story:namespace-no-egress-observed-on-every-node: an unread keeper node leaves no \
+             node published, not the earlier probe's"
+        );
+    }
+}
+
+/// Adversary pass 1 on `story:namespace-no-egress-observed-on-every-node` (D354): the published
+/// node after a later probe that read its keeper's node and then failed, and after the proof
+/// lapsed.
+mod d354_adv {
+    use super::*;
+
+    /// A later probe whose keeper node was read but whose run then failed (the executor refused
+    /// unapplied limits) proves no run fact on any node: the earlier probe's node is not kept.
+    #[tokio::test]
+    async fn a_later_run_that_fails_after_its_keeper_node_was_read_clears_the_published_node() {
+        let mut rig = rig(Child::Exact, None).await;
+        rig.driver.probe().await.expect("the probe runs");
+        let first = rig.machine();
+        assert_eq!(families(&first.facts), [Some(true); 7], "the control");
+        assert_eq!(rig.driver.published_exec_node().as_deref(), Some(NODE));
+
+        rig.kubelet.abort();
+        rig.kubelet = tokio::spawn(play_kubelet(
+            admin(&rig.fake),
+            Arc::clone(&rig.fake),
+            Play {
+                end: End::LimitsUnapplied,
+                ..Play::of(Child::Exact)
+            },
+            Arc::clone(&rig.ran),
+            rig.root.path().to_path_buf(),
+        ));
+        rig.driver.probe().await.expect("the later probe runs");
+        let second = rig.machine();
+        assert_eq!(lock(&rig.ran).len(), 2, "the later probe's Pod ran");
+        assert_eq!(families(&second.facts), [None; 7]);
+        assert_eq!(
+            rig.driver.published_exec_node(),
+            None,
+            "story:namespace-no-egress-observed-on-every-node: a run that proved nothing leaves \
+             no node published, not the earlier probe's"
+        );
+    }
+
+    /// The proof lapses at `valid_until`: the snapshot taken after it publishes no node, as it
+    /// publishes no run fact, so no start is dispatched on the lapsed probe's node.
+    #[tokio::test]
+    async fn a_lapsed_proof_publishes_no_node() {
+        let rig = rig(Child::Exact, None).await;
+        rig.driver.probe().await.expect("the probe runs");
+        rig.machine();
+        assert_eq!(rig.driver.published_exec_node().as_deref(), Some(NODE));
+        rig.clock.set(INTERVAL + SLACK);
+        let lapsed = rig.machine();
+        assert_eq!(
+            families(&lapsed.facts),
+            [None; 7],
+            "the control: the proof lapsed"
+        );
+        assert_eq!(
+            rig.driver.published_exec_node(),
+            None,
+            "story:namespace-no-egress-observed-on-every-node: a lapsed proof leaves no node \
+             published"
+        );
     }
 }

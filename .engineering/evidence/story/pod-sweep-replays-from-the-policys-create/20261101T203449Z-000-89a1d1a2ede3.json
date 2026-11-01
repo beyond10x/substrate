@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-01T20:34:49Z",
+  "actor": "human:timo",
+  "artifact": "story:pod-sweep-replays-from-the-policys-create",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:wave-2026-11-01-d354-close",
+    "review": "review-result:wave-2026-11-01-d354-close",
+    "outcome": "no-op"
+  }
+}

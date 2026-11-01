@@ -39,7 +39,7 @@ curl and OpenSSL stack. Four packages follow:
 
 | directory | package | depends on (workspace) | holds |
 |---|---|---|---|
-| `crates/substrate-kubernetes-client` | `b10x-substrate-kubernetes-client` | none | design 28's kubeconfig loader and refusals; the HTTPS client (`Api`), bounded bodies, paging, metadata lists, watch streams, `DELETE` with `preconditions.uid`, `dryRun=All`, `pods/log`, `pods/exec` over WebSocket `v5.channel.k8s.io`, `Lease` read and update, `SelfSubjectRulesReview`; the gone-Pod evidence (`PodTrace`, `watch_event`, `replay`, `never_bound`) |
+| `crates/substrate-kubernetes-client` | `b10x-substrate-kubernetes-client` | none | design 28's kubeconfig loader and refusals; the HTTPS client (`Api`), bounded bodies, paging, metadata lists, watch streams, `DELETE` with `preconditions.uid`, `dryRun=All`, `pods/log`, `pods/exec` over WebSocket `v5.channel.k8s.io`, `Lease` read and update, `SelfSubjectRulesReview`, `SelfSubjectAccessReview` (`Api::access_review`); the gone-Pod evidence (`PodTrace`, `watch_event`, `replay`, `never_bound`) |
 | `crates/substrate-guarded` | `b10x-substrate-guarded` | `substrate-wire` | `fs.rs` moved whole; `DriverError`, `DriverErrorClass` and `Listed` moved with it and re-exported by `substrate-host`, so every existing path compiles; the environment rule (`check`, `baseline_value`) |
 | `crates/substrate-executor` | `b10x-substrate-executor`, binary `substrate-executor` | `substrate-wire`, `substrate-guarded` | the protocol types and frame codec (lib); the executor (bin) |
 | `crates/substrate-kubernetes` | `b10x-substrate-kubernetes` | `substrate-host`, `substrate-kubernetes-client`, `substrate-executor` (lib), `substrate-wire` | `NamespaceDriver: Driver` |
@@ -223,6 +223,9 @@ and the reason code is logged. These codes are log reasons, not wire refusals.
    `kubernetes.pod-security-unenforced`. This depends on O2.
 6. Reconcile (§ 5), then list and watch (§ 5.2).
 7. Probe (§ 6.2). Its keeper performs the executor handshake: `kubernetes.executor-handshake-failed`.
+   An exec the API refuses 401 or 403 ends the handshake at once. A 403 that gives no reason after
+   `is forbidden:` costs at most two more API calls, a `SelfSubjectAccessReview` each for
+   `pods/exec` `create` and `get` (§ 7.1).
 
 A lost Lease while serving makes every fact absent and refuses a start `exec.capability-stale` (422)
 until the Lease is retaken (decision 2). Reconciliation pauses. Retaking it runs steps 4 to 7 again.
@@ -299,6 +302,20 @@ One static binary, three roles. Every role refuses an unknown subcommand and exi
 `substrate-executor version` writes one JSON line `{"protocol":"substrate-executor/1","version":"<crate
 version>","source":"<git sha or \"unknown\">"}`. The driver requires `protocol` equal and `version`
 equal to its own. A daemon talks only to the executor of its own release (N4 A).
+
+An exec upgrade the API refuses 401 or 403 ends the handshake at once, with the API's answer as
+the error; no retry clears it (D342). kind v1.37 refuses the upgrade under a Role without
+`pods/exec` `create` with a 403 whose message ends at `is forbidden:` and names no verb (D349). For
+such a bare 403 the driver makes one extra API call per verb, a `SelfSubjectAccessReview`
+(`POST /apis/authorization.k8s.io/v1/selfsubjectaccessreviews`) for `pods/exec` on the keeper in
+its namespace, first `create`, then `get`, both within 5 s, and appends what they found to the
+API's answer in parentheses: the verbs the review denies
+(`a SelfSubjectAccessReview denies pods/exec create`), or that it admits both and does not decide
+the refused verb. A review that is refused, fails or outlasts the 5 s keeps the API's answer and
+names the verb unknown, with why. The handshake ends at once in every case, and a 401 or a 403 that
+gives its reason asks no review. The review needs no Role rule: every authenticated subject may
+create one through `system:basic-user`, which O8 observed on the lane (`DEFAULT_RESOURCE_RULES` in
+`crates/substrate-kubernetes/src/rules.rs`).
 
 ### 7.2 Keeper and file operations (N3 A)
 
@@ -451,8 +468,9 @@ successor-bundle section confirms whether the error schema constrains failure co
 - pods, PVCs, NetworkPolicies, Leases: create, get, list (paged, metadata), watch (chunked, with
   410 for an expired version and `ERROR` events), delete with `gracePeriodSeconds` and
   `preconditions.uid` (409 on mismatch), `dryRun=All`, and a switchable Pod Security admission;
-- `SelfSubjectRulesReview` answering configured rules; a ResourceQuota refusal as a fault-plan
-  answer carrying the 403 Status O7 recorded (`quota_refusal` in
+- `SelfSubjectRulesReview` answering configured rules, and `SelfSubjectAccessReview` answering
+  from the same rules whether they admit its resource attributes; a ResourceQuota refusal as a
+  fault-plan answer carrying the 403 Status O7 recorded (`quota_refusal` in
   `crates/substrate-kubernetes/src/namespace/workspace_tests.rs`, D184);
 - `pods/log` with `limitBytes`, and `pods/exec` over WebSocket v5, which runs the **real**
   `substrate-executor fs` against a temporary directory as `/workspace`;
@@ -867,3 +885,4 @@ memory, so it does not survive a restart (§ 5, the signal row).
 - § 6.2 row 5, § 6.4, § 8, § 9 (D339, `story:namespace-no-egress-observed-on-every-node`): the probe runs on the one node its keeper was scheduled on, so `confinement.no-egress`, like the families and `confinement.whole-tree-kill`, is an observation of that node. The driver keeps that node with the probe's proof and binds it to the snapshot it publishes; a probe whose keeper node is unread proves nothing. `start_exec` compares it with the workspace keeper's `spec.nodeName` (the node the exec Pod's required affinity names, § 7.3) after the snapshot check and before the Pod create: another node is `NotDispatched(exec.sandbox-unavailable)` (501), recorded as refused. An exec already running is not touched when the next probe lands elsewhere; the next start on that workspace is refused.
 - Not chosen: probing every schedulable node. Nodes are cluster-scoped, and ADR 0047 decision 3 grants the driver one namespaced Role and no `nodes` access, so the driver cannot list them; it would still need the comparison above for a keeper on a node that joined after the probe. Probing the nodes of live keepers, which the driver already lists, is `story:namespace-probe-observes-every-keeper-node`.
 - The snapshot's facts are unchanged: `confinement.no-egress` keeps its name and is still stated machine-wide, and the node is not a wire field. A client that reads the fact can still be refused `exec.sandbox-unavailable` for a workspace whose keeper is on another node; the refusal is the guarantee.
+- § 2, § 6.1 step 7, § 7.1, § 10.1 (`story:driver-names-a-bare-exec-refusals-verb`): a handshake refused 403 with no reason after `is forbidden:` makes the driver ask a `SelfSubjectAccessReview` for `pods/exec` `create` and `get` on the keeper, at most two extra API calls within 5 s, and name the verb it denies, or that it did not decide; a refused or failed review keeps the API's answer and names the verb unknown. The handshake still ends at once. Neither ADR 0047 decision 3's Role nor the namespace lane's gains a rule, because `system:basic-user` grants every authenticated subject `selfsubjectaccessreviews` `create` and O8 observed it; the chart renders no Role. The lane's S6 `pods/exec` `create` case now requires the driver's line naming `create` alone.
