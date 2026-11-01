@@ -2597,3 +2597,66 @@ mod d354 {
         );
     }
 }
+
+/// Adversary pass 1 on `story:namespace-no-egress-observed-on-every-node` (D354): the published
+/// node after a later probe that read its keeper's node and then failed, and after the proof
+/// lapsed.
+mod d354_adv {
+    use super::*;
+
+    /// A later probe whose keeper node was read but whose run then failed (the executor refused
+    /// unapplied limits) proves no run fact on any node: the earlier probe's node is not kept.
+    #[tokio::test]
+    async fn a_later_run_that_fails_after_its_keeper_node_was_read_clears_the_published_node() {
+        let mut rig = rig(Child::Exact, None).await;
+        rig.driver.probe().await.expect("the probe runs");
+        let first = rig.machine();
+        assert_eq!(families(&first.facts), [Some(true); 7], "the control");
+        assert_eq!(rig.driver.published_exec_node().as_deref(), Some(NODE));
+
+        rig.kubelet.abort();
+        rig.kubelet = tokio::spawn(play_kubelet(
+            admin(&rig.fake),
+            Arc::clone(&rig.fake),
+            Play {
+                end: End::LimitsUnapplied,
+                ..Play::of(Child::Exact)
+            },
+            Arc::clone(&rig.ran),
+            rig.root.path().to_path_buf(),
+        ));
+        rig.driver.probe().await.expect("the later probe runs");
+        let second = rig.machine();
+        assert_eq!(lock(&rig.ran).len(), 2, "the later probe's Pod ran");
+        assert_eq!(families(&second.facts), [None; 7]);
+        assert_eq!(
+            rig.driver.published_exec_node(),
+            None,
+            "story:namespace-no-egress-observed-on-every-node: a run that proved nothing leaves \
+             no node published, not the earlier probe's"
+        );
+    }
+
+    /// The proof lapses at `valid_until`: the snapshot taken after it publishes no node, as it
+    /// publishes no run fact, so no start is dispatched on the lapsed probe's node.
+    #[tokio::test]
+    async fn a_lapsed_proof_publishes_no_node() {
+        let rig = rig(Child::Exact, None).await;
+        rig.driver.probe().await.expect("the probe runs");
+        rig.machine();
+        assert_eq!(rig.driver.published_exec_node().as_deref(), Some(NODE));
+        rig.clock.set(INTERVAL + SLACK);
+        let lapsed = rig.machine();
+        assert_eq!(
+            families(&lapsed.facts),
+            [None; 7],
+            "the control: the proof lapsed"
+        );
+        assert_eq!(
+            rig.driver.published_exec_node(),
+            None,
+            "story:namespace-no-egress-observed-on-every-node: a lapsed proof leaves no node \
+             published"
+        );
+    }
+}

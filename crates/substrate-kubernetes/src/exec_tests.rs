@@ -2108,3 +2108,31 @@ mod d354 {
         );
     }
 }
+
+/// Adversary pass 1 on `story:namespace-no-egress-observed-on-every-node` (D354): the probe's
+/// node against the keeper's, attacked where the start reads it and where it orders it.
+mod d354_adv {
+    use super::*;
+
+    const OTHER_NODE: &str = "node-b";
+    const LATER_SNAPSHOT: &str = "sha256:a-later-probe-on-another-node";
+
+    /// Design amendment of 2026-11-01: the node comparison runs after the snapshot check. A start
+    /// naming a snapshot that is no longer published hears `exec.capability-stale` (422), not
+    /// `exec.sandbox-unavailable`, even when the published node is another one.
+    #[tokio::test]
+    async fn a_stale_snapshot_is_capability_stale_before_the_node_is_compared() {
+        let rig = rig().await;
+        let generation = rig.driver.binding().expect("bound").config_generation();
+        rig.driver
+            .publish_exec_snapshot(LATER_SNAPSHOT, generation, Some(OTHER_NODE));
+        let DispatchOutcome::NotDispatched(refused) =
+            rig.start("exec_stale", &input(&["/bin/true"])).await
+        else {
+            panic!("a start under an unpublished snapshot was dispatched");
+        };
+        assert_eq!(refused.code, CAPABILITY_STALE, "{}", refused.message);
+        assert_eq!(refused.class, DriverErrorClass::Refused);
+        assert_eq!(rig.pod_creates(), 0);
+    }
+}
