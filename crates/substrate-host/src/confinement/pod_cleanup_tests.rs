@@ -64,6 +64,9 @@ struct Cluster {
     /// While set, an object whose members replace those of each listed policy's `metadata`
     /// (`story:pod-sweep-replays-from-the-policys-create`).
     policy_metadata: Mutex<Option<Value>>,
+    /// While set, a read of a page orphan's Pod answers it present
+    /// (`story:kept-written-policy-log-names-the-write`).
+    page_pods_present: AtomicBool,
 }
 
 /// What a watch of one Pod from a `resourceVersion` replays.
@@ -362,6 +365,15 @@ fn answer(cluster: &Cluster, method: &str, path: &str, accept: &str) -> (u16, St
                 .is_some_and(|name| name.starts_with("substrate-run-page-"))
     };
     if method == "GET" && orphan(&format!("/api/v1/namespaces/{NAMESPACE}/pods/")) {
+        if cluster.page_pods_present.load(Ordering::SeqCst) {
+            let name = pod_path.rsplit('/').next().unwrap_or_default();
+            let pod = json!({"metadata": {
+                "name": name,
+                "uid": format!("uid-{name}"),
+                "resourceVersion": "10",
+            }});
+            return (200, pod.to_string());
+        }
         return gone;
     }
     if method == "DELETE" && orphan(&format!("{policies}/")) {
