@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Every fact the Kubernetes namespace driver's probe withholds is logged at `warn` as
+  "`<fact>` was not proved: `<reason>`", and a failed call keeps its own reason code: a store
+  write that fails while the probe creates its PVC or keeper refuses the probe with
+  `state.store-failed`, not `kubernetes.api-failed`, a refused `pods get` while the probe waits
+  ends its run at once with `kubernetes.api-failed` and the API's answer, and the probe's
+  removal warnings carry the API's answer (`cannot <verb> resource "<resource>"`).
+
 ## [0.18.0] — 2026-10-31
 
 The wire states what a confinement adapter proves, never its name (design 30, ADR 0048), and the
