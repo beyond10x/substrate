@@ -28,6 +28,7 @@ use substrate_wire::{
 };
 
 use super::NamespaceDriver;
+use super::workspace::CREATE_BOUND;
 use crate::driver_tests::{
     DEPLOYMENT, ManualClock, MemoryLedger, admin, driver, driver_over, passing_fake,
 };
@@ -108,7 +109,7 @@ enum End {
 struct Rig {
     fake: Arc<FakeCluster>,
     clock: Arc<ManualClock>,
-    driver: NamespaceDriver,
+    driver: Arc<NamespaceDriver>,
     ledger: Arc<MemoryLedger>,
     /// Every probe Pod the kubelet ran, as the driver created it, in order.
     ran: Arc<Mutex<Vec<Value>>>,
@@ -213,7 +214,7 @@ async fn rig_with(play: Play, handshake: Option<String>, check: Option<Value>) -
     Rig {
         fake,
         clock,
-        driver,
+        driver: Arc::new(driver),
         ledger,
         ran,
         root,
@@ -371,7 +372,7 @@ fn probe_log(spec: &RunSpec, play: &Play) -> Vec<u8> {
 
 impl Rig {
     fn machine(&self) -> CapabilitySnapshot {
-        Driver::machine(&self.driver)
+        Driver::machine(&*self.driver)
     }
 
     fn probe_names(&self) -> Vec<String> {
@@ -747,7 +748,7 @@ async fn probe_objects_a_stopped_process_left_are_removed_by_the_next_process() 
     assert_eq!(held.code, crate::LEASE_HELD, "{}", held.message);
     rig.clock.set(Duration::from_secs(30));
     reopened.open().await.expect("the Lease is taken over");
-    drop(std::mem::replace(&mut rig.driver, reopened));
+    drop(std::mem::replace(&mut rig.driver, Arc::new(reopened)));
 
     rig.driver.probe().await.expect("the next process probes");
     for row in &left {
@@ -1746,6 +1747,93 @@ async fn a_refused_pod_log_names_its_reason_and_each_unproved_fact() {
             warnings.iter().any(|line| line.contains(&stated)),
             "no warning says {fact} was not proved: {warnings:#?}"
         );
+    }
+}
+
+/// What the API's authorization answers an exec upgrade under a Role without `pods/exec`
+/// `create`, with names of the length the namespace lane gives them (D342).
+const EXEC_FORBIDDEN: &str = "pods \"snl-01jabcdefghjkmnpqrstvwxyz0-keeper\" is forbidden: User \
+     \"system:serviceaccount:substrate-namespace-lane-6n7mxygg265x:substrate-namespace\" cannot \
+     create resource \"pods/exec\" in API group \"\" in the namespace \
+     \"substrate-namespace-lane-6n7mxygg265x\"";
+
+/// The part of [`EXEC_FORBIDDEN`] the namespace lane reads a refusal by.
+const EXEC_REFUSED: &str = "cannot create resource \"pods/exec\"";
+
+/// D342: a Role without `pods/exec` `create` has the API refuse the keeper's handshake 403. No
+/// retry clears that, so the probe fails at once, long before [`CREATE_BOUND`] on the driver's
+/// clock, and the serve loop's warning names `kubernetes.executor-handshake-failed` with the
+/// API's own answer, the line the namespace lane reads the refusal from.
+#[tokio::test]
+async fn a_refused_executor_handshake_names_the_apis_answer_at_once() {
+    let rig = rig(Child::Exact, None).await;
+    rig.fake.refuse_exec(403, EXEC_FORBIDDEN);
+    let log = CapturedLog::start();
+    let serving = Arc::clone(&rig.driver).serve();
+    tokio::pin!(serving);
+    let started = std::time::Instant::now();
+    let mut advanced = false;
+    let line = loop {
+        if let Some(line) = log
+            .warnings()
+            .into_iter()
+            .find(|line| line.contains(EXECUTOR_HANDSHAKE_FAILED))
+        {
+            break line;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "no warning names {EXECUTOR_HANDSHAKE_FAILED}: {:#?}",
+            log.warnings()
+        );
+        if !advanced && started.elapsed() >= Duration::from_secs(3) {
+            // Past CREATE_BOUND on the driver's clock, a handshake that still retries ends, so
+            // the case shows what its warning would have said.
+            rig.clock.set(CREATE_BOUND + Duration::from_secs(1));
+            advanced = true;
+        }
+        tokio::select! {
+            () = &mut serving => panic!("the serve loop ended"),
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    };
+    assert!(
+        line.contains(EXEC_REFUSED),
+        "the warning lost the API's answer: {line}"
+    );
+    assert!(
+        !advanced,
+        "the refused handshake was retried until CREATE_BOUND: {line}"
+    );
+}
+
+/// D342: what a retry can clear is retried as before. An exec upgrade answered 400 or 404 (a
+/// keeper not yet bound to a node, or whose container is not running yet), 408, 429 or 503 is
+/// tried again, and the probe passes once the API admits it.
+#[tokio::test]
+async fn a_handshake_answered_anything_but_401_or_403_is_retried_until_the_api_admits_it() {
+    for (status, message) in [
+        (
+            400,
+            "pod snl-01jabcdefghjkmnpqrstvwxyz0-keeper does not have a host assigned",
+        ),
+        (404, "container not found (\"keeper\")"),
+        (408, "the request timed out"),
+        (429, "too many requests"),
+        (503, "the API is unavailable"),
+    ] {
+        let rig = rig(Child::Exact, None).await;
+        rig.fake.refuse_exec(status, message);
+        let fake = Arc::clone(&rig.fake);
+        let admit = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_200)).await;
+            fake.admit_exec();
+        });
+        rig.driver
+            .probe()
+            .await
+            .unwrap_or_else(|refused| panic!("{status} is retried: {refused}"));
+        admit.await.expect("the exec is admitted");
     }
 }
 

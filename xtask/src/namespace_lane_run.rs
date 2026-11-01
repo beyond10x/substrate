@@ -23,7 +23,7 @@ use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde_json::{Value, json};
@@ -75,6 +75,8 @@ const VERB_BOUND: Duration = Duration::from_mins(2);
 const PENDING_BOUND: Duration = Duration::from_mins(4);
 /// The daemon's answer to a mutation whose driver reported progress, not an end.
 const OUTCOME_UNKNOWN: &str = "operation.outcome-unknown";
+/// Where, under the checkout, each run keeps the daemon logs of its failed cases.
+const KEPT_LOGS: &str = "target/namespace-lane/daemon-logs";
 /// When a Role-verb case whose facts stayed whole tries its dependent route.
 const VERB_ROUTE_AFTER: Duration = Duration::from_secs(5);
 /// How long the privileged dry-run case waits for its refusal.
@@ -1113,7 +1115,15 @@ impl Steps<'_> {
     /// Steps 3 to 7, each case once.
     pub async fn run(&self, binary: &Path) -> Vec<(String, Case)> {
         let mut outcomes: Vec<(String, Case)> = Vec::new();
+        // The run's directory is temporary; a failed case's daemon logs outlive it here.
+        let kept = self
+            .root
+            .join(KEPT_LOGS)
+            .join(ulid::Ulid::generate().to_string());
+        let mut since = SystemTime::now();
         let mut record = |name: &str, case: Case| {
+            let case = kept_case(self.work, &kept, name, since, case);
+            since = SystemTime::now();
             match &case {
                 Case::Passed(evidence) => println!("namespace lane: {name}: passed: {evidence}"),
                 Case::Absent(reason) => println!("namespace lane: {name}: absent: {reason}"),
@@ -2030,6 +2040,81 @@ fn to_case(result: Result<String>) -> Case {
         Ok(evidence) => Case::Passed(evidence),
         Err(error) => Case::Failed(format!("{error:#}")),
     }
+}
+
+/// `case`; when it failed, with the daemon logs written while it ran kept under `kept`
+/// ([`keep_daemon_logs`]) and their paths named in its failure, so a run that is no record can
+/// still be read once the run's temporary directory is gone.
+fn kept_case(work: &Path, kept: &Path, name: &str, since: SystemTime, case: Case) -> Case {
+    let Case::Failed(error) = case else {
+        return case;
+    };
+    Case::Failed(match keep_daemon_logs(work, kept, name, since) {
+        Ok(logs) if logs.is_empty() => format!("{error}; no daemon log was written during it"),
+        Ok(logs) => {
+            let paths: Vec<String> = logs.iter().map(|log| log.display().to_string()).collect();
+            let noun = if paths.len() == 1 { "log" } else { "logs" };
+            format!("{error}; daemon {noun} kept at {}", paths.join(", "))
+        }
+        Err(kept_error) => format!("{error}; its daemon logs were not kept: {kept_error}"),
+    })
+}
+
+/// Copies every `daemon-*.log` in a directory of `work` last written at or after `since`, less a
+/// second for the file system's coarse clock, into `kept/<case>/` (owner-private), `case` cut to
+/// lower-case letters, digits and dashes; the copies' paths, in name order.
+///
+/// # Errors
+///
+/// A directory could not be read or created, or a log could not be copied.
+pub fn keep_daemon_logs(
+    work: &Path,
+    kept: &Path,
+    case: &str,
+    since: SystemTime,
+) -> std::io::Result<Vec<PathBuf>> {
+    let since = since
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut logs = Vec::new();
+    for directory in fs::read_dir(work)? {
+        let directory = directory?.path();
+        if !directory.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("daemon-")
+                && Path::new(&name)
+                    .extension()
+                    .is_some_and(|extension| extension == "log")
+                && entry.metadata()?.modified()? >= since
+            {
+                logs.push((name, entry.path()));
+            }
+        }
+    }
+    logs.sort();
+    if logs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let slug = case
+        .to_ascii_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let target = kept.join(slug);
+    fs::create_dir_all(&target)?;
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700))?;
+    logs.into_iter()
+        .map(|(name, log)| {
+            let copy = target.join(name);
+            fs::copy(&log, &copy)?;
+            Ok(copy)
+        })
+        .collect()
 }
 
 /// One request to a daemon: the status and the JSON body.
@@ -2963,5 +3048,95 @@ mod tests {
             sweep(&mut stuck, Duration::from_millis(50)).expect_err("a stuck one fails")
         );
         assert!(error.contains("ws_a"), "{error}");
+    }
+
+    /// D342: a failed case keeps the daemon logs written while it ran, outside the run's
+    /// temporary directory, and its failure names where; a log no daemon wrote during the case,
+    /// and a file that is no daemon log, are not kept.
+    #[test]
+    fn a_failed_case_keeps_the_daemon_logs_written_while_it_ran_and_names_them() {
+        let work = tempfile::tempdir().expect("tempdir");
+        let kept = tempfile::tempdir().expect("tempdir");
+        let verbs = work.path().join("verbs");
+        let lane = work.path().join("lane");
+        fs::create_dir_all(&verbs).expect("verbs");
+        fs::create_dir_all(&lane).expect("lane");
+        let earlier = lane.join("daemon-01JA0000000000000000000000.log");
+        fs::write(&earlier, "an earlier case's daemon\n").expect("written");
+        fs::File::options()
+            .write(true)
+            .open(&earlier)
+            .and_then(|file| {
+                file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000))
+            })
+            .expect("aged");
+        let since = SystemTime::now();
+        let current = verbs.join("daemon-01JB0000000000000000000000.log");
+        fs::write(
+            &current,
+            "WARN code=\"kubernetes.executor-handshake-failed\"\n",
+        )
+        .expect("written");
+        fs::write(verbs.join("state.db"), "not a log").expect("written");
+
+        let failed = kept_case(
+            work.path(),
+            kept.path(),
+            "S6 Role without pods/exec create",
+            since,
+            Case::Failed("nothing refused within 120 s".to_owned()),
+        );
+        let Case::Failed(error) = failed else {
+            panic!("the case stays failed: {failed:?}");
+        };
+        let copy = kept
+            .path()
+            .join("s6-role-without-pods-exec-create")
+            .join("daemon-01JB0000000000000000000000.log");
+        assert!(
+            error.starts_with("nothing refused within 120 s; daemon log kept at ")
+                && error.contains(&copy.display().to_string()),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&copy).expect("kept"),
+            fs::read_to_string(&current).expect("read")
+        );
+        let case_directory = kept.path().join("s6-role-without-pods-exec-create");
+        let names: Vec<String> = fs::read_dir(&case_directory)
+            .expect("listed")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, ["daemon-01JB0000000000000000000000.log"]);
+        assert_eq!(
+            fs::metadata(&case_directory)
+                .expect("kept")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        let passed = kept_case(
+            work.path(),
+            kept.path(),
+            "S7 everything destroyed through the daemon",
+            since,
+            Case::Passed("destroyed".to_owned()),
+        );
+        assert_eq!(passed, Case::Passed("destroyed".to_owned()));
+        assert!(
+            !kept
+                .path()
+                .join("s7-everything-destroyed-through-the-daemon")
+                .exists(),
+            "a passed case keeps nothing"
+        );
     }
 }

@@ -672,6 +672,127 @@ async fn tls_endpoint() -> (tokio_rustls::TlsAcceptor, tokio::net::TcpListener, 
     )
 }
 
+/// What the API's authorization answers an exec upgrade under a Role without `pods/exec`
+/// `create`, with names of the length the namespace lane gives them (D342).
+const EXEC_FORBIDDEN: &str = "pods \"snl-01jabcdefghjkmnpqrstvwxyz0-keeper\" is forbidden: User \
+     \"system:serviceaccount:substrate-namespace-lane-6n7mxygg265x:substrate-namespace\" cannot \
+     create resource \"pods/exec\" in API group \"\" in the namespace \
+     \"substrate-namespace-lane-6n7mxygg265x\"";
+
+/// The part of [`EXEC_FORBIDDEN`] the namespace lane reads a refusal by.
+const EXEC_REFUSED: &str = "cannot create resource \"pods/exec\"";
+
+/// D342: an exec upgrade the API refuses 403 is an answer, and its error carries the API's own
+/// `Status.message`, so the reader learns which verb on which resource was refused.
+#[tokio::test]
+async fn a_refused_exec_upgrade_carries_the_apis_message() {
+    let fake = start();
+    let api = client(&fake.kubeconfig());
+    fake.seed("pods", pod("snl-01jabcdefghjkmnpqrstvwxyz0-keeper"))
+        .expect("seeded");
+    fake.refuse_exec(403, EXEC_FORBIDDEN);
+
+    let error = api
+        .exec(
+            "snl-01jabcdefghjkmnpqrstvwxyz0-keeper",
+            "keeper",
+            &["/substrate-executor", "version"],
+            b"",
+            16,
+        )
+        .await
+        .expect_err("the upgrade is refused");
+    assert_eq!(error.status(), Some(403), "{error}");
+    let ApiError::Answered { reason, .. } = &error else {
+        panic!("not an answer: {error:?}");
+    };
+    assert_eq!(reason, "Forbidden");
+    assert!(
+        error.to_string().contains(EXEC_REFUSED),
+        "the API's answer is lost: {error}"
+    );
+}
+
+/// The error of an exec whose upgrade a server refuses 403 with an [`EXEC_FORBIDDEN`] `Status`,
+/// writing the response head first and its body 100 ms later: by `Content-Length`, or chunked.
+async fn exec_refused_apart(chunked: bool) -> ApiError {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (acceptor, listener, config) = tls_endpoint().await;
+    tokio::spawn(async move {
+        let Ok((tcp, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(mut tls) = acceptor.accept(tcp).await else {
+            return;
+        };
+        let mut head = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+            match tls.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(read) => head.extend_from_slice(&buffer[..read]),
+            }
+        }
+        let status = serde_json::to_vec(&json!({
+            "kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
+            "message": EXEC_FORBIDDEN, "reason": "Forbidden",
+            "details": {"name": "snl-01jabcdefghjkmnpqrstvwxyz0-keeper", "kind": "pods"},
+            "code": 403,
+        }))
+        .unwrap_or_default();
+        let (framing, body) = if chunked {
+            let (first, second) = status.split_at(status.len() / 2);
+            let mut body = Vec::new();
+            for chunk in [first, second] {
+                body.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+                body.extend_from_slice(chunk);
+                body.extend_from_slice(b"\r\n");
+            }
+            body.extend_from_slice(b"0\r\n\r\n");
+            ("Transfer-Encoding: chunked".to_owned(), body)
+        } else {
+            (format!("Content-Length: {}", status.len()), status)
+        };
+        let head = format!(
+            "HTTP/1.1 403 Forbidden\r\nCache-Control: no-cache, private\r\n\
+             Content-Type: application/json\r\nX-Content-Type-Options: nosniff\r\n\
+             {framing}\r\n\r\n"
+        );
+        let _ = tls.write_all(head.as_bytes()).await;
+        let _ = tls.flush().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = tls.write_all(&body).await;
+        let _ = tls.flush().await;
+        let mut rest = [0_u8; 64];
+        let _ = tls.read(&mut rest).await;
+    });
+    let mut api = client(&config);
+    api.timeout = std::time::Duration::from_secs(5);
+    api.exec(
+        "snl-01jabcdefghjkmnpqrstvwxyz0-keeper",
+        "keeper",
+        &["/substrate-executor", "version"],
+        b"",
+        16,
+    )
+    .await
+    .expect_err("the upgrade is refused")
+}
+
+/// D342: an API server may write the refusal's head and its body apart. The client reads the
+/// body the head announces, not only what arrived with the head.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_exec_upgrade_whose_body_follows_its_head_carries_the_apis_message() {
+    for chunked in [false, true] {
+        let error = exec_refused_apart(chunked).await;
+        assert_eq!(error.status(), Some(403), "{error}");
+        assert!(
+            error.to_string().contains(EXEC_REFUSED),
+            "the API's answer is lost (chunked: {chunked}): {error}"
+        );
+    }
+}
+
 /// An HTTPS server that reads each request head, writes `answer` verbatim (or nothing), and then
 /// reads until the client closes the connection, which it reports on the returned channel.
 async fn raw_http_server(

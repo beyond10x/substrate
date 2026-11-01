@@ -256,7 +256,9 @@ impl NamespaceDriver {
         }
         match self.handshake(&keeper_row.name).await {
             Handshaken::Current => {}
-            Handshaken::Other(error) | Handshaken::NotReady(error) => return Err(error),
+            Handshaken::Other(error) | Handshaken::Refused(error) | Handshaken::NotReady(error) => {
+                return Err(error);
+            }
         }
         let mut observed = previous.clone();
         id.clone_into(&mut observed.id);
@@ -505,14 +507,15 @@ impl NamespaceDriver {
         }
     }
 
-    /// Runs the handshake until it passes, an executor of another release answers, or
-    /// [`CREATE_BOUND`] passes on the driver's monotonic clock.
+    /// Runs the handshake until it passes, an executor of another release answers, the API
+    /// refuses the exec in a way no retry clears, or [`CREATE_BOUND`] passes on the driver's
+    /// monotonic clock.
     pub(super) async fn await_handshake(&self, keeper: &str) -> Result<(), DriverError> {
         let started = self.clock.now();
         loop {
             match self.handshake(keeper).await {
                 Handshaken::Current => return Ok(()),
-                Handshaken::Other(error) => return Err(error),
+                Handshaken::Other(error) | Handshaken::Refused(error) => return Err(error),
                 Handshaken::NotReady(error) => {
                     if self.clock.now().saturating_duration_since(started) >= CREATE_BOUND {
                         return Err(DriverError::failed(
@@ -544,6 +547,9 @@ impl NamespaceDriver {
             .await
         {
             Ok(output) => output,
+            Err(error) if refused_for_good(&error) => {
+                return Handshaken::Refused(api_failed(&error));
+            }
             Err(error) => return Handshaken::NotReady(api_failed(&error)),
         };
         let line = std::str::from_utf8(&output.stdout).unwrap_or_default();
@@ -699,8 +705,19 @@ enum Handshaken {
     Current,
     /// An executor answered, and it is another protocol or release: waiting does not change it.
     Other(DriverError),
+    /// The API refused the exec 401 or 403: a credential it does not accept, or a Role without
+    /// `pods/exec` `create`. Waiting does not change it, so the API's answer is the error.
+    Refused(DriverError),
     /// No executor answered yet: the keeper may still be starting.
     NotReady(DriverError),
+}
+
+/// Whether the API's answer to an exec is a refusal no retry clears: 401 or 403. Every other
+/// answer may pass on the next try, 4xx included: the API answers an exec into a keeper the
+/// scheduler has not bound yet, or whose container is not running yet, with a 4xx, and the
+/// handshake begins right after the keeper's create.
+fn refused_for_good(error: &ApiError) -> bool {
+    matches!(error.status(), Some(401 | 403))
 }
 
 /// An object whose create may still be stored keeps the workspace `unknown`.

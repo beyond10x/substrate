@@ -40,3 +40,10 @@ Kubernetes namespace driver's probe says why each fact it withholds was not prov
   the first probe has finished and a `WARN` line carries the API's answer refusing that verb
   (`cannot <verb> resource "<resource>"`); a reason code or a "was not proved" line alone,
   or another resource's refusal, no longer passes it.
+- A `pods/exec` upgrade the Kubernetes API refuses keeps the API's `Status.message` when the
+  refusal's body arrives after its head (by `Content-Length` or chunked), and the namespace
+  driver's executor handshake ends at once on a 401 or 403 with
+  `kubernetes.executor-handshake-failed` and the API's answer (`cannot create resource
+  "pods/exec"`) instead of retrying until its 60 s bound; every other answer is still retried.
+  `cargo xtask namespace-lane observe` keeps the daemon logs of a failed case under
+  `target/namespace-lane/daemon-logs/` and names them in the case's failure.
