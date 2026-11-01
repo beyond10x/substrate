@@ -4188,13 +4188,22 @@ mod tests {
     fn stand_in(directory: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let path = directory.join(name);
-        let status = Command::new("/bin/sh")
-            .args(["-c", "printf '%s' \"$1\" > \"$2\"", "stand-in"])
-            .arg(format!("#!/bin/sh\n{body}"))
+        // The body goes in on a pipe, not as an argument, so its size is not bounded by
+        // MAX_ARG_STRLEN; only the child ever holds the script open for writing.
+        let mut writer = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\"", "stand-in"])
             .arg(&path)
-            .stdin(Stdio::null())
-            .status()
+            .stdin(Stdio::piped())
+            .spawn()
             .expect("the stand-in writer");
+        {
+            use std::io::Write as _;
+            let mut input = writer.stdin.take().expect("the writer's stdin");
+            input
+                .write_all(format!("#!/bin/sh\n{body}").as_bytes())
+                .expect("the stand-in body");
+        }
+        let status = writer.wait().expect("the stand-in writer");
         assert!(
             status.success(),
             "writing {} exited {status}",
@@ -4490,5 +4499,76 @@ mod tests {
         );
         assert!(!chart_dir.join("templates/b.yaml").exists());
         assert_eq!(seccomp, "{\"committed\": true}\n\n");
+    }
+
+    /// Adversary pass, wave D342 unit U2: `stand_in` writes through a `/bin/sh` child, and the
+    /// script it leaves must be the bytes `fs::write` left before.
+    mod adversary_d342 {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn expected(body: &str) -> Vec<u8> {
+            format!("#!/bin/sh\n{body}").into_bytes()
+        }
+
+        #[test]
+        fn a_stand_in_holds_its_body_byte_for_byte() {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let bodies = [
+                "",
+                "exit 0\n",
+                "%s %d %% %b\n",
+                "-n\n",
+                "--\n",
+                "-e x",
+                "\\n\\t\\\\ \\0 \\c tail\n",
+                "'\"$1 $@ `x` $(y)\n",
+                "no trailing newline",
+                "\n\n\n",
+                "a\r\nb\r\n",
+                "\u{e9} \u{2713}\n",
+                "\t leading tab and trailing spaces   \n",
+            ];
+            for (index, body) in bodies.iter().enumerate() {
+                let path = stand_in(directory.path(), &format!("s{index}"), body);
+                assert_eq!(
+                    fs::read(&path).expect("the stand-in"),
+                    expected(body),
+                    "body {body:?}"
+                );
+                let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+                assert_eq!(mode & 0o777, 0o755, "body {body:?}");
+            }
+        }
+
+        #[test]
+        fn a_stand_in_written_over_an_existing_longer_file_is_truncated() {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            stand_in(directory.path(), "kind", &"echo long\n".repeat(50));
+            let path = stand_in(directory.path(), "kind", "exit 3\n");
+            assert_eq!(fs::read(&path).expect("the stand-in"), expected("exit 3\n"));
+            let status = Command::new(&path)
+                .stdin(Stdio::null())
+                .status()
+                .expect("start");
+            assert_eq!(status.code(), Some(3));
+        }
+
+        #[test]
+        #[should_panic(expected = "exited")]
+        fn a_stand_in_that_cannot_be_written_is_reported() {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            stand_in(&directory.path().join("missing"), "kind", "exit 0\n");
+        }
+
+        /// `fs::write` took any `&str`; one argv string is capped at 128 KiB on Linux
+        /// (`MAX_ARG_STRLEN`), so a larger body is no longer written.
+        #[test]
+        fn a_stand_in_body_larger_than_one_argument_is_written() {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let body = format!("# {}\nexit 0\n", "x".repeat(200 * 1024));
+            let path = stand_in(directory.path(), "large", &body);
+            assert_eq!(fs::read(&path).expect("the stand-in"), expected(&body));
+        }
     }
 }
