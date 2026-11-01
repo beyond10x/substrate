@@ -2116,6 +2116,50 @@ mod d354_adv {
 
     const OTHER_NODE: &str = "node-b";
     const LATER_SNAPSHOT: &str = "sha256:a-later-probe-on-another-node";
+    const SANDBOX_UNAVAILABLE: &str = "exec.sandbox-unavailable";
+    const POLICIES: &str = "/apis/networking.k8s.io/v1/namespaces/substrate/networkpolicies";
+
+    /// Acceptance 1 and 4: the start reads the probe's node before it awaits the policy re-read
+    /// (§ 6.3) and compares after it. A later probe that lands on another node, published while
+    /// that read is in flight, is the latest probe by the time the comparison runs; the keeper is
+    /// on the first node, so the start is refused before any Pod, not dispatched there.
+    #[tokio::test]
+    async fn a_probe_published_elsewhere_during_the_policy_reread_refuses_the_start() {
+        let rig = rig().await;
+        rig.fake.fault(Fault::Delay {
+            method: Method::GET,
+            path: POLICIES.to_owned(),
+            by: Duration::from_millis(400),
+        });
+        let generation = rig.driver.binding().expect("bound").config_generation();
+        let start = input(&["/bin/true"]);
+        let (outcome, ()) = tokio::join!(rig.start("exec_raced", &start), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            rig.driver
+                .publish_exec_snapshot(LATER_SNAPSHOT, generation, Some(OTHER_NODE));
+        });
+        assert_eq!(
+            rig.driver.published_exec_node().as_deref(),
+            Some(OTHER_NODE),
+            "the control: the later probe's node was published while the start ran"
+        );
+        match outcome {
+            DispatchOutcome::NotDispatched(refused) => assert!(
+                refused.code == SANDBOX_UNAVAILABLE || refused.code == CAPABILITY_STALE,
+                "{}: {}",
+                refused.code,
+                refused.message
+            ),
+            DispatchOutcome::Observed(_) => panic!(
+                "story:namespace-no-egress-observed-on-every-node: the latest probe is on \
+                 {OTHER_NODE} and the keeper on {NODE}, yet the start was dispatched to {NODE}"
+            ),
+            DispatchOutcome::ContainedAbsent(error) | DispatchOutcome::OutcomeUnknown(error) => {
+                panic!("{}: {}", error.code, error.message)
+            }
+        }
+        assert_eq!(rig.pod_creates(), 0, "no Pod create was sent");
+    }
 
     /// Design amendment of 2026-11-01: the node comparison runs after the snapshot check. A start
     /// naming a snapshot that is no longer published hears `exec.capability-stale` (422), not

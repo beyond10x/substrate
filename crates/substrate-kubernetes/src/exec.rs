@@ -140,8 +140,8 @@ impl NamespaceDriver {
             Some((snapshot.to_owned(), generation, node.map(str::to_owned)));
     }
 
-    /// The node published with the snapshot, if any.
-    #[cfg(test)]
+    /// The node the latest published probe observed, if any: what a start's keeper node is
+    /// compared with, read when the comparison runs.
     pub(crate) fn published_exec_node(&self) -> Option<String> {
         lock(&self.execs().published)
             .as_ref()
@@ -258,9 +258,11 @@ impl NamespaceDriver {
                 DriverError::failed(API_FAILED, "the exec's pod row is not reserved unbound")
             })?;
         let (claim_uid, node) = self.placement(&input.workspace, root_name).await?;
-        let (generation, probed) = self.admitted(&input.sandbox.capability_snapshot)?;
+        let generation = self.admitted_generation(&input.sandbox.capability_snapshot)?;
         self.check_binding(generation).await?;
-        observed_on(&node, probed.as_deref())?;
+        // Read after the await, not with the snapshot: a later probe published while the policy
+        // re-read was in flight is the latest probe, and the start is held to its node.
+        observed_on(&node, self.published_exec_node().as_deref())?;
         let spec = RunSpec {
             argv: input.argv.clone(),
             env,
@@ -291,13 +293,10 @@ impl NamespaceDriver {
         Ok((row, rendered, bounds.output_bytes, bounds.deadline_seconds))
     }
 
-    /// The generation the start's snapshot was published at and the node its probe observed, or
-    /// `exec.capability-stale`.
-    fn admitted(&self, snapshot: &str) -> Result<(u64, Option<String>), DriverError> {
+    /// The generation the start's snapshot was published at, or `exec.capability-stale`.
+    fn admitted_generation(&self, snapshot: &str) -> Result<u64, DriverError> {
         match &*lock(&self.execs().published) {
-            Some((published, generation, node)) if published == snapshot => {
-                Ok((*generation, node.clone()))
-            }
+            Some((published, generation, _)) if published == snapshot => Ok(*generation),
             _ => Err(DriverError::refused(
                 crate::CAPABILITY_STALE,
                 "The admitted capability snapshot is stale: the start names a snapshot this \
