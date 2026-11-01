@@ -455,6 +455,7 @@ mod d354_adv {
 /// (`story:kept-written-policy-log-names-the-write`).
 mod d364 {
     use std::cell::RefCell;
+    use std::rc::Rc;
 
     use super::*;
 
@@ -499,7 +500,8 @@ mod d364 {
     }
 
     thread_local! {
-        static CAPTURE: RefCell<Option<Vec<Line>>> = const { RefCell::new(None) };
+        /// The lines of the [`Log`] this thread holds, if any.
+        static CAPTURE: RefCell<Option<Rc<RefCell<Vec<Line>>>>> = const { RefCell::new(None) };
     }
 
     /// The process's global subscriber, installed once: it keeps the events of a thread that holds
@@ -522,13 +524,13 @@ mod d364 {
 
         fn event(&self, event: &tracing::Event<'_>) {
             CAPTURE.with(|capture| {
-                if let Some(lines) = capture.borrow_mut().as_mut() {
+                if let Some(lines) = capture.borrow().as_ref() {
                     let mut line = Line {
                         level: *event.metadata().level(),
                         fields: Vec::new(),
                     };
                     event.record(&mut line);
-                    lines.push(line);
+                    lines.borrow_mut().push(line);
                 }
             });
         }
@@ -540,7 +542,9 @@ mod d364 {
 
     /// Every event the adapter logs on this thread while it is held. A sweep a case awaits runs on
     /// the case's own thread.
-    struct Log;
+    struct Log {
+        lines: Rc<RefCell<Vec<Line>>>,
+    }
 
     impl Log {
         fn start() -> Self {
@@ -548,21 +552,19 @@ mod d364 {
             INSTALLED.call_once(|| {
                 tracing::subscriber::set_global_default(Capture).expect("one global subscriber");
             });
-            CAPTURE.with(|capture| *capture.borrow_mut() = Some(Vec::new()));
-            Self
+            let lines = Rc::new(RefCell::new(Vec::new()));
+            CAPTURE.with(|capture| *capture.borrow_mut() = Some(Rc::clone(&lines)));
+            Self { lines }
         }
 
         /// The lines logged for the policy of `run`.
         fn of(&self, run: &str) -> Vec<Line> {
-            CAPTURE.with(|capture| {
-                capture
-                    .borrow()
-                    .iter()
-                    .flatten()
-                    .filter(|line| line.field("policy") == Some(run))
-                    .cloned()
-                    .collect()
-            })
+            self.lines
+                .borrow()
+                .iter()
+                .filter(|line| line.field("policy") == Some(run))
+                .cloned()
+                .collect()
         }
     }
 
