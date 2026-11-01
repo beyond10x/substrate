@@ -139,6 +139,47 @@ async fn a_bare_exec_refusal_whose_review_admits_both_verbs_says_it_did_not_deci
     assert_eq!(reviews(&fake), 2, "{:#?}", fake.requests());
 }
 
+/// `story:access-review-evaluation-error-is-not-a-denial`, acceptance 1: a review answering
+/// `allowed: false` with `status.evaluationError` is no decision. The refusal keeps the API's
+/// answer and says the review did not decide, with the API's evaluation error, never that it
+/// denies the verb; no further review is asked. A first review that denies `create` and a second
+/// that answers an error does not name `create` alone either: `get` is undecided.
+#[tokio::test]
+async fn a_bare_exec_refusal_whose_review_answers_an_evaluation_error_says_it_did_not_decide() {
+    const ERROR: &str =
+        "webhook authorizer: Post \"https://authz.invalid/review\": connection refused";
+    let undecided = || Fault::Answer {
+        method: Method::POST,
+        path: ACCESS_REVIEWS.to_owned(),
+        status: 201,
+        body: json!({
+            "kind": "SelfSubjectAccessReview",
+            "status": {"allowed": false, "evaluationError": ERROR},
+        }),
+    };
+    for (before, verb, asked) in [(0, "create", 1), (1, "get", 2)] {
+        let (fake, driver) = refusing(&["get"], 403, &format!("pods \"{KEEPER}\" is forbidden: "));
+        if before == 1 {
+            fake.fault(Fault::Delay {
+                method: Method::POST,
+                path: ACCESS_REVIEWS.to_owned(),
+                by: Duration::ZERO,
+            });
+        }
+        fake.fault(undecided());
+        let error = handshake_error(&fake, &driver).await;
+        assert_eq!(
+            error.message,
+            format!(
+                "{BARE} (a SelfSubjectAccessReview of pods/exec {verb} does not decide the \
+                 refused verb: its evaluationError is {ERROR})"
+            ),
+            "story:access-review-evaluation-error-is-not-a-denial"
+        );
+        assert_eq!(reviews(&fake), asked, "{:#?}", fake.requests());
+    }
+}
+
 /// Acceptance 2: the review refused, its answer lost, a server error or an answer without
 /// `status.allowed` keeps the API's refusal of the exec and names the verb unknown, with why the
 /// review failed; the handshake still ends at once, and no second review is asked.
