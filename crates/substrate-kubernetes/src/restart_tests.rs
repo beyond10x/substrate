@@ -14,6 +14,8 @@ use std::time::Duration;
 use serde_json::json;
 use substrate_executor::frame::{Frame, Stream};
 use substrate_host::{Driver as _, DriverErrorClass, ExecObservation};
+use substrate_kubernetes_client::Method;
+use substrate_kubernetes_client::fake::Fault;
 use substrate_wire::ExecState;
 
 use super::{
@@ -138,6 +140,43 @@ async fn a_pod_already_being_deleted_across_a_restart_stays_unknown() {
     assert_eq!(recovered.resource.exit, None);
     assert!(recovered.stdout.is_empty());
     assert!(rig.pod(&name).is_none(), "the deletion was sent again");
+}
+
+/// D339 U3: a reconciliation of a running exec decides `unknown` once its deletion is answered.
+/// While that delete is in flight, an observation answers the exec as the daemon recorded it,
+/// `unknown`, and the daemon acknowledges that answer, so the driver forgets the exec. The
+/// reconciliation's late end is answered, never a panic, and the forgotten exec is not tracked
+/// again.
+#[tokio::test]
+async fn a_recovery_whose_exec_was_ended_and_acknowledged_meanwhile_does_not_panic() {
+    let mut rig = rig().await;
+    let id = "exec_restart_raced";
+    let started = rig.started(id, &input(&["/bin/sleep", "600"])).await;
+    let name = names::exec_pod(DEPLOYMENT, id);
+    rig.running(&name).await;
+    restart(&mut rig).await;
+    rig.fake.fault(Fault::Delay {
+        method: Method::DELETE,
+        path: format!("{}/{name}", rig.admin.pods()),
+        by: Duration::from_millis(400),
+    });
+
+    let previous = recorded_unknown(&started);
+    let (late, first) = tokio::join!(rig.driver.recover_exec(&previous), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let first = rig.driver.exec_observe(id).await.expect("the first end");
+        rig.driver.exec_acknowledge(&first);
+        first
+    });
+    assert_eq!(first.resource.state, ExecState::Unknown);
+    let late = late.expect("the late reconciliation is answered");
+    assert_eq!(late.resource.state, ExecState::Unknown);
+    assert_eq!(late.resource.exit, None);
+    assert!(rig.pod(&name).is_none(), "the running Pod is gone");
+    assert!(
+        rig.driver.exec_completed().is_empty(),
+        "a late end tracks the acknowledged exec again"
+    );
 }
 
 /// A Pod whose container is shown `terminated` across a restart keeps its end: the log is read
