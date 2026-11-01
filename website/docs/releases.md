@@ -47,6 +47,11 @@ Kubernetes namespace driver's probe says why each fact it withholds was not prov
   "pods/exec"`) instead of retrying until its 60 s bound; every other answer is still retried.
   `cargo xtask namespace-lane observe` keeps the daemon logs of a failed case under
   `target/namespace-lane/daemon-logs/` and names them in the case's failure.
+- The `cargo xtask namespace-lane observe` case "Role without pods/exec create" also passes on
+  the API's bare refusal of the exec: a `kubernetes.executor-handshake-failed` line whose
+  `exec answered 403` names the probe's keeper Pod and gives no reason, which is how the API
+  refuses that verb; every other Role-verb case still needs the API's `cannot <verb> resource`
+  answer.
 - `cargo test -p xtask` no longer fails a chart-lane test with `Text file busy (os error 26)`: a
   child process writes each stand-in script, so no child another test forks meanwhile inherits it
   open for writing.
