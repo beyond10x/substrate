@@ -309,3 +309,142 @@ async fn a_deferred_policy_written_after_its_create_is_not_swept_as_never_create
     );
     assert!(deferred.is_empty(), "a kept policy is still checked");
 }
+
+/// Adversary pass 1 of wave D354 (`story:pod-sweep-replays-from-the-policys-create`): the edges of
+/// what the listed metadata shows of a write after the create.
+mod d354_adv {
+    use super::*;
+
+    /// Lists the orphan with `metadata` merged into its own, sweeps once, and returns whether the
+    /// policy was deleted, with what open deferred.
+    async fn swept_with(cluster: &Arc<Cluster>, metadata: Value) -> (bool, Vec<Deferred>) {
+        *cluster.policy_metadata.lock() = Some(metadata);
+        let api = start(cluster);
+        let deferred = sweep(&api).await.expect("the open sweep");
+        (deleted(cluster, ORPHAN), deferred)
+    }
+
+    /// One `managedFields` entry whose `time` cannot be read (absent, `null`, not a string, not
+    /// RFC 3339) does not show the policy unchanged since its create: it is kept, not deferred.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_entry_without_a_readable_time_is_kept() {
+        let began = Instant::now();
+        for entry in [
+            json!({"manager": "b10x-substrate-pod", "operation": "Update"}),
+            json!({"manager": "b10x-substrate-pod", "operation": "Update", "time": null}),
+            json!({"manager": "b10x-substrate-pod", "operation": "Update", "time": 0}),
+            json!({"manager": "b10x-substrate-pod", "operation": "Update", "time": "yesterday"}),
+            json!({"manager": "b10x-substrate-pod", "operation": "Update", "time": ""}),
+        ] {
+            let cluster = cluster(Watch::NeverCreated);
+            let (deleted, deferred) = swept_with(
+                &cluster,
+                json!({"creationTimestamp": CREATED, "managedFields": [entry]}),
+            )
+            .await;
+            let requests = cluster.requests.lock().clone();
+            assert!(
+                !deleted,
+                "{entry}: an unreadable entry time swept the policy as never created \
+                 (story:pod-sweep-replays-from-the-policys-create): {requests:#?}"
+            );
+            assert!(deferred.is_empty(), "{entry}: {deferred:?}");
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+
+    /// `managedFields` that is neither absent nor a list is not read as unchanged: kept.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn managed_fields_that_is_not_a_list_is_kept() {
+        for fields in [json!({}), json!("b10x-substrate-pod"), json!(1)] {
+            let cluster = cluster(Watch::NeverCreated);
+            let (deleted, deferred) = swept_with(
+                &cluster,
+                json!({"creationTimestamp": CREATED, "managedFields": fields}),
+            )
+            .await;
+            assert!(
+                !deleted,
+                "{fields}: swept as never created (story:pod-sweep-replays-from-the-policys-create)"
+            );
+            assert!(deferred.is_empty(), "{fields}: {deferred:?}");
+        }
+    }
+
+    /// `managedFields` listed empty or `null` shows no write, as none listed does: swept as before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn managed_fields_empty_or_null_is_swept_as_before() {
+        for fields in [json!([]), Value::Null] {
+            let cluster = cluster(Watch::NeverCreated);
+            let (deleted, deferred) = swept_with(
+                &cluster,
+                json!({"creationTimestamp": CREATED, "managedFields": fields}),
+            )
+            .await;
+            let requests = cluster.requests.lock().clone();
+            assert!(
+                deleted,
+                "{fields}: open kept a policy whose metadata shows no write: {requests:#?}"
+            );
+            assert!(deferred.is_empty(), "{fields}: {deferred:?}");
+        }
+    }
+
+    /// Times are compared as instants, not as text: the create's own instant written in another
+    /// offset or with fractional zeros is swept, one second past it in another offset is kept.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_entry_time_is_compared_as_an_instant() {
+        for (time, swept) in [
+            ("2020-01-01T01:00:00+01:00", true),
+            ("2020-01-01T00:00:00.000Z", true),
+            ("2019-12-31T19:00:00-05:00", true),
+            ("2020-01-01T01:00:01+01:00", false),
+            ("2019-12-31T19:00:01-05:00", false),
+        ] {
+            let cluster = cluster(Watch::NeverCreated);
+            written(&cluster, CREATED, Some(&[time]));
+            let api = start(&cluster);
+            let deferred = sweep(&api).await.expect("the open sweep");
+            let requests = cluster.requests.lock().clone();
+            assert_eq!(
+                deleted(&cluster, ORPHAN),
+                swept,
+                "{time}: (story:pod-sweep-replays-from-the-policys-create): {requests:#?}"
+            );
+            assert!(deferred.is_empty(), "{time}: {deferred:?}");
+        }
+    }
+
+    /// Every page's policy is judged on its own metadata: written after its create on both pages
+    /// of a two-page list, both are kept, and the list is still read whole and each Pod read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_written_policy_on_every_page_is_kept() {
+        let cluster = Arc::new(Cluster {
+            pages: 2,
+            ..Cluster::default()
+        });
+        *cluster.watch.lock() = Watch::NeverCreated;
+        written(&cluster, CREATED, Some(&[CREATED, CREATED]));
+        let api = start(&cluster);
+        let deferred = sweep(&api).await.expect("the open sweep");
+        let requests = cluster.requests.lock().clone();
+        for page in 1..=2 {
+            let run = page_orphan(page);
+            assert!(
+                !deleted(&cluster, &run),
+                "{run}: swept as never created \
+                 (story:pod-sweep-replays-from-the-policys-create): {requests:#?}"
+            );
+            let read = format!("GET /api/v1/namespaces/{NAMESPACE}/pods/{run}");
+            assert!(
+                requests.iter().any(|request| request == &read),
+                "{run}'s Pod was not read: {requests:#?}"
+            );
+        }
+        assert!(deferred.is_empty(), "{deferred:?}");
+    }
+}
