@@ -4128,16 +4128,16 @@ mod tests {
         // A second run started while the first is still creating its cluster finds the name free,
         // then `kind create` refuses it because the first run holds it. The guard built before the
         // create deletes by that name on drop, which would delete the first run's cluster.
-        use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().expect("temporary directory");
         let log = directory.path().join("kind.log");
-        let kind = directory.path().join("kind");
-        let script = format!(
-            "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = create ]; then\necho 'ERROR: node(s) already exist for a cluster with the name \"substrate-chart-lane\"' >&2\nexit 1\nfi\nexit 0\n",
-            log.display()
+        let kind = stand_in(
+            directory.path(),
+            "kind",
+            &format!(
+                "echo \"$*\" >> '{}'\nif [ \"$1\" = create ]; then\necho 'ERROR: node(s) already exist for a cluster with the name \"substrate-chart-lane\"' >&2\nexit 1\nfi\nexit 0\n",
+                log.display()
+            ),
         );
-        fs::write(&kind, script).expect("the stand-in kind");
-        fs::set_permissions(&kind, fs::Permissions::from_mode(0o755)).expect("executable");
         let args = Args {
             image: "b10x-substrate-daemon:9.9.9".to_owned(),
             node_image: "kindest/node:v1.37.0".to_owned(),
@@ -4180,10 +4180,26 @@ mod tests {
     }
 
     /// An executable shell script at `directory/name` with `body` after the interpreter line.
+    ///
+    /// A child process writes it, so this process never holds it open for writing. A child that
+    /// another test forks inherits every descriptor this process holds until it execs, and an exec
+    /// of a file any process holds open for writing fails `ETXTBSY`; a rename into place does not
+    /// help, because the inode is the same.
     fn stand_in(directory: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let path = directory.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}")).expect("the stand-in");
+        let status = Command::new("/bin/sh")
+            .args(["-c", "printf '%s' \"$1\" > \"$2\"", "stand-in"])
+            .arg(format!("#!/bin/sh\n{body}"))
+            .arg(&path)
+            .stdin(Stdio::null())
+            .status()
+            .expect("the stand-in writer");
+        assert!(
+            status.success(),
+            "writing {} exited {status}",
+            path.display()
+        );
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
         path
     }
@@ -4340,6 +4356,55 @@ mod tests {
         let error = remove_own_profile(&lane, "substrate-chart-lane-worker")
             .expect_err("a failed uninstall is a failed removal");
         assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    }
+
+    #[test]
+    fn a_stand_in_starts_while_other_threads_fork() {
+        // Another test's spawn forks this process; a child forked while a stand-in is open for
+        // writing holds that descriptor until it execs, and an exec of the stand-in in that window
+        // fails `ETXTBSY` (main's Gate run 41234221370).
+        const STARTS: usize = 1000;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let forking = Arc::new(AtomicBool::new(true));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let forking = Arc::clone(&forking);
+                thread::spawn(move || {
+                    while forking.load(Ordering::SeqCst) {
+                        let _ = Command::new("true")
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                    }
+                })
+            })
+            .collect();
+        let mut failed = Vec::new();
+        for start in 0..STARTS {
+            let script = stand_in(directory.path(), &format!("stand-in-{start}"), "exit 0\n");
+            // The spawn is where `ETXTBSY` surfaces; `output` would add its 50 ms poll per start.
+            let started = Command::new(&script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            match started {
+                Ok(status) if status.success() => {}
+                Ok(status) => failed.push(format!("{} exited {status}", script.display())),
+                Err(error) => failed.push(format!("starting {}: {error}", script.display())),
+            }
+        }
+        forking.store(false, Ordering::SeqCst);
+        for forker in forkers {
+            forker.join().expect("the forker");
+        }
+        assert!(
+            failed.is_empty(),
+            "{} of {STARTS} stand-ins failed to start; the first: {}",
+            failed.len(),
+            failed[0]
+        );
     }
 
     #[test]

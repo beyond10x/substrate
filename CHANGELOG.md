@@ -32,6 +32,9 @@ Kubernetes namespace driver's probe says why each fact it withholds was not prov
   the first probe has finished and a `WARN` line carries the API's answer refusing that verb
   (`cannot <verb> resource "<resource>"`); a reason code or a "was not proved" line alone,
   or another resource's refusal, no longer passes it.
+- `cargo test -p xtask` no longer fails a chart-lane test with `Text file busy (os error 26)`: a
+  child process writes each stand-in script, so no child another test forks meanwhile inherits it
+  open for writing.
 
 ## [0.18.0] — 2026-10-31
 

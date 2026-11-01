@@ -1523,7 +1523,16 @@ mod tests {
     fn a_failed_cluster_or_registry_removal_is_returned_once_and_withholds_the_record() {
         let tools = tempfile::tempdir().expect("tools");
         let failing = tools.path().join("failing");
-        fs::write(&failing, "#!/bin/sh\nexit 1\n").expect("stand-in");
+        // A child writes the stand-in, so no child another test forks inherits it open for
+        // writing and fails its exec with `ETXTBSY`.
+        let written = Command::new("/bin/sh")
+            .args(["-c", "printf '%s' \"$1\" > \"$2\"", "stand-in"])
+            .arg("#!/bin/sh\nexit 1\n")
+            .arg(&failing)
+            .stdin(Stdio::null())
+            .status()
+            .expect("stand-in");
+        assert!(written.success(), "writing the stand-in exited {written}");
         fs::set_permissions(
             &failing,
             std::os::unix::fs::PermissionsExt::from_mode(0o755),

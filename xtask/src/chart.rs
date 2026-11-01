@@ -2564,11 +2564,19 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().expect("temporary directory");
         let helm = directory.path().join("helm");
-        std::fs::write(
-            &helm,
-            "#!/bin/sh\nif [ -n \"$KUBECONFIG\" ] && [ -f \"$KUBECONFIG\" ] && [ ! -s \"$KUBECONFIG\" ]; then echo empty; else echo \"ambient:$KUBECONFIG\"; fi\nenv | grep '^HELM_KUBE' || true\n",
-        )
-        .expect("the stand-in helm");
+        // A child writes the stand-in, so no child another test forks inherits it open for
+        // writing and fails its exec with `ETXTBSY`.
+        let written = std::process::Command::new("/bin/sh")
+            .args(["-c", "printf '%s' \"$1\" > \"$2\"", "stand-in"])
+            .arg("#!/bin/sh\nif [ -n \"$KUBECONFIG\" ] && [ -f \"$KUBECONFIG\" ] && [ ! -s \"$KUBECONFIG\" ]; then echo empty; else echo \"ambient:$KUBECONFIG\"; fi\nenv | grep '^HELM_KUBE' || true\n")
+            .arg(&helm)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .expect("the stand-in helm");
+        assert!(
+            written.success(),
+            "writing the stand-in helm exited {written}"
+        );
         std::fs::set_permissions(&helm, std::fs::Permissions::from_mode(0o755))
             .expect("executable");
         let chart = std::path::Path::new(ROOT);
