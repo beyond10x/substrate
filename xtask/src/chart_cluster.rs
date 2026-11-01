@@ -4196,19 +4196,20 @@ mod tests {
             .stdin(Stdio::piped())
             .spawn()
             .expect("the stand-in writer");
-        {
+        // A writer whose redirect fails exits without reading, so the write may meet a closed
+        // pipe; its exit status says why, so it is read before the write's own error.
+        let written = {
             use std::io::Write as _;
             let mut input = writer.stdin.take().expect("the writer's stdin");
-            input
-                .write_all(format!("#!/bin/sh\n{body}").as_bytes())
-                .expect("the stand-in body");
-        }
+            input.write_all(format!("#!/bin/sh\n{body}").as_bytes())
+        };
         let status = writer.wait().expect("the stand-in writer");
         assert!(
             status.success(),
             "writing {} exited {status}",
             path.display()
         );
+        written.expect("the stand-in body");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
         path
     }
@@ -4559,6 +4560,17 @@ mod tests {
         fn a_stand_in_that_cannot_be_written_is_reported() {
             let directory = tempfile::tempdir().expect("temporary directory");
             stand_in(&directory.path().join("missing"), "kind", "exit 0\n");
+        }
+
+        /// A body larger than the pipe's buffer always meets a writer that already exited, so the
+        /// write fails with a broken pipe; the writer's exit is still what is reported (PR 208,
+        /// where CI met the broken pipe with the small body too).
+        #[test]
+        #[should_panic(expected = "exited")]
+        fn a_stand_in_that_cannot_be_written_is_reported_by_its_exit_past_a_broken_pipe() {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let body = format!("# {}\nexit 0\n", "x".repeat(1024 * 1024));
+            stand_in(&directory.path().join("missing"), "kind", &body);
         }
 
         /// `fs::write` took any `&str`; one argv string is capped at 128 KiB on Linux
