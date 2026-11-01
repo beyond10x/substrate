@@ -424,7 +424,8 @@ fn owner_selector() -> String {
 /// for the run that label names, at least [`SWEEP_AGE_FLOOR`] old by the API server's clock, whose
 /// run's Pod the API no longer has, in any phase, and whose container the API shows stopped
 /// ([`pod_end`]) or whose Pod a complete replay from the policy's `resourceVersion` shows never
-/// created ([`gone_pod`]). A policy without the label is never a candidate.
+/// created ([`gone_pod`]), for a policy whose metadata shows no write after its create
+/// ([`written_after_create`]). A policy without the label is never a candidate.
 /// The list is read whole first, in at most [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`],
 /// each policy's metadata alone ([`kubernetes::METADATA_LIST`]) and each page bounded in bytes;
 /// every request is bounded by [`API_TIMEOUT`], a watch by [`kubernetes::gone::REPLAY_LIMIT`], and
@@ -558,10 +559,41 @@ async fn sweep_page(
             .signed_duration_since(created)
             .to_std()
             .is_ok_and(|age| age >= SWEEP_AGE_FLOOR);
-        let trace = PodTrace::since(policy["metadata"]["resourceVersion"].as_str());
-        candidates.push((run.to_owned(), created, old, trace));
+        // A policy written after its create has a `resourceVersion` past it, and a replay from
+        // there may start past the Pod's whole history: its trace starts at no version, so the
+        // never-created rule keeps it (`story:pod-sweep-replays-from-the-policys-create`).
+        let since = if written_after_create(policy, created) {
+            tracing::info!(
+                policy = run,
+                "pod: a NetworkPolicy the sweep listed was written after its create, so its \
+                 run's Pod is not replayed from its resourceVersion"
+            );
+            None
+        } else {
+            policy["metadata"]["resourceVersion"].as_str()
+        };
+        candidates.push((run.to_owned(), created, old, PodTrace::since(since)));
     }
     Ok(continuation(&list))
+}
+
+/// Whether `policy`'s metadata shows a write after its create at `created`: more than one
+/// `managedFields` entry, its one entry's `time` after `created` or unreadable, or `managedFields`
+/// that is not a list. Times have second precision, so another writer within the create's second
+/// shows only as another entry. A policy that lists no `managedFields` shows no write.
+fn written_after_create(policy: &Value, created: chrono::DateTime<chrono::FixedOffset>) -> bool {
+    match &policy["metadata"]["managedFields"] {
+        Value::Null => false,
+        Value::Array(entries) => match entries.as_slice() {
+            [] => false,
+            [entry] => entry["time"]
+                .as_str()
+                .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+                .is_none_or(|time| time > created),
+            _ => true,
+        },
+        _ => true,
+    }
 }
 
 /// [`pod_end`] for the run's task, asked again every `notice` while the API does not answer:
