@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-02T01:24:56Z",
+  "actor": "human:timo",
+  "artifact": "story:aperture-install-sees-forwarder-death-at-once",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local full gate at d62aabb3: cargo test --workspace --release --locked 2600 passed, 0 failed; clippy --workspace --all-targets --release -D warnings clean; bash scripts/gate.sh static passed (ESS 0.81.0)",
+    "reference": "d62aabb3"
+  }
+}

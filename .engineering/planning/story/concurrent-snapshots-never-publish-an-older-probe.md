@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:concurrent-snapshots-never-publish-an-older-probe
 kind: story
-status: active
+status: implemented
 title: Concurrent driver snapshots never publish an older probe result over a newer one
 relations:
 - informed_by: review-result:wave-2026-11-01-d354-u1-adversary-pass-1
@@ -15,10 +15,11 @@ scope:
   path: crates/substrate-kubernetes/src/namespace/probe.rs
 - confidence: inferred
   path: crates/substrate-kubernetes/src/namespace/probe_tests.rs
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T20:34:24Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-01T23:08:45Z", actor: "human:timo", revision: 6}
+- {from: "active", to: "implemented", at: "2026-11-02T01:24:56Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":2}}}
 ---
 # Story: concurrent driver snapshots never publish an older probe result over a newer one
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:aperture-install-sees-forwarder-death-at-once
 kind: story
-status: active
+status: implemented
 title: An aperture install sees a forwarder's death at once, whatever another thread forks
 relations:
 - informed_by: review-result:wave-2026-11-01-d354-u3-adversary-pass-1
@@ -13,10 +13,11 @@ scope:
   path: crates/substrate-host/src/host_process/mod.rs
 - confidence: inferred
   path: crates/substrate-host/src/host_process/pidfd.rs
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T20:34:24Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-01T23:08:45Z", actor: "human:timo", revision: 6}
+- {from: "active", to: "implemented", at: "2026-11-02T01:24:56Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 # Story: an aperture install sees a forwarder's death at once, whatever another thread forks
 
