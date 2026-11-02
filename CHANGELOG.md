@@ -7,6 +7,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-11-02
+
+Fixes only; the wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are
+unchanged. The Kubernetes namespace driver no longer reads an undecided access review as a denial or
+publishes an older probe over a newer one, the `pod` adapter sweeps a written `NetworkPolicy` once a
+replay shows its run stopped, and an egress aperture install sees its forwarder die at once.
+
+### Changed
+
+- The ESS pin moves from 0.80.0 to 0.81.0.
+
+### Fixed
+
+- The Kubernetes namespace driver no longer reads a `SelfSubjectAccessReview` that answers
+  `allowed: false` with a `status.evaluationError`, and no `denied: true`, as a denial. A bare exec
+  refusal names any verb an earlier review denied, then says that this review does not decide the
+  refused verb and quotes the API's evaluation error, bearer token cleared and bounded to 300
+  characters (design 34 § 7.1).
+- Two snapshot calls that overlap in the Kubernetes namespace driver no longer publish an older
+  probe's snapshot, generation and node over a newer one; the snapshot is computed and published
+  under one lock.
+- The `pod` adapter's sweep again removes a `NetworkPolicy` written after its create once a watch
+  replay from the policy's own `resourceVersion` shows its run's container terminated; a replay
+  that ends in a `BOOKMARK` alone still keeps it (design 28).
+- A `NetworkPolicy` the `pod` adapter keeps because it was written after its create logs one
+  `warn` that names the write, and the `info` line every open sweep logged for every written policy
+  is gone.
+- An egress aperture install whose forwarder dies before its report is refused at once, even when
+  a child that another thread forked during the install still holds the report socket: the
+  installer waits on the forwarder's pidfd beside the socket. A pidfd that cannot be opened refuses
+  the install with `exec.aperture-install-failed`.
+
 ## [0.19.0] — 2026-11-01
 
 The wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are unchanged.
