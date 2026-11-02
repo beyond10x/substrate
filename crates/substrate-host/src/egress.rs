@@ -4334,6 +4334,547 @@ mod tests {
                 assert_eq!(printed, "done");
                 println!("D354-ADV forwarders-only");
             }
+
+            /// Adversary cases of wave D364 against
+            /// `story:aperture-install-sees-forwarder-death-at-once`: the report socket and the
+            /// forwarder's pidfd are waited on together, so neither may cost the other its answer.
+            mod d364_adv {
+                use std::sync::Arc;
+                use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+                use std::sync::mpsc;
+                use std::time::{Duration, Instant};
+
+                use super::super::super::reaped;
+                use super::super::{ScriptedSandbox, aperture};
+                use super::{
+                    DownNamespace, HELPER_ENV, children_of, descriptors_of, pinned, run_alone,
+                };
+                use crate::egress::install_all;
+
+                const INTERRUPTED_HELPER: &str = "egress::tests::observed_inside::d354_adv::\
+                                                  d364_adv::interrupted_report_wait_helper";
+                const DESCRIPTOR_HELPER: &str = "egress::tests::observed_inside::d354_adv::\
+                                                 d364_adv::forwarder_descriptor_refused_helper";
+
+                /// The state letter of `pid` from `/proc/<pid>/stat`, `None` once it is gone.
+                fn state_of(pid: libc::pid_t) -> Option<char> {
+                    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                    stat.rsplit_once(')')?.1.trim_start().chars().next()
+                }
+
+                /// The descriptor numbers of this process that are pidfds naming `pid`.
+                fn pidfds_on(pid: libc::pid_t) -> Vec<String> {
+                    let wanted = format!("Pid:\t{pid}");
+                    std::fs::read_dir("/proc/self/fdinfo")
+                        .map(|entries| {
+                            entries
+                                .filter_map(Result::ok)
+                                .filter(|entry| {
+                                    std::fs::read_to_string(entry.path())
+                                        .is_ok_and(|info| info.lines().any(|line| line == wanted))
+                                })
+                                .filter_map(|entry| entry.file_name().into_string().ok())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+
+                /// The forwarder sends its record and then exits, and both are already true when
+                /// the wait begins: the hook holds a second copy of the end it reports on, so no
+                /// EOF ever comes, and returns only once the forwarder is a zombie. Its pidfd and
+                /// the socket are then readable together, and the record it sent (the helper's bind
+                /// failure, stage 6) must be what the install refuses with, not a lost forwarder.
+                #[test]
+                fn a_record_sent_before_the_forwarder_exits_is_read_while_its_end_is_held() {
+                    let Some(namespace) = DownNamespace::open() else {
+                        return;
+                    };
+                    let (window_sender, window) = mpsc::channel();
+                    crate::egress::IN_REPORT_WINDOW.set(Some(Box::new(
+                        move |forwarder, report_end| {
+                            // SAFETY: a close-on-exec duplicate of a live descriptor.
+                            let held = unsafe { libc::fcntl(report_end, libc::F_DUPFD_CLOEXEC, 0) };
+                            let started = Instant::now();
+                            let mut zombie = false;
+                            while started.elapsed() < Duration::from_secs(10) {
+                                if state_of(forwarder) == Some('Z') {
+                                    zombie = true;
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            let _ = window_sender.send((forwarder, held, zombie, Instant::now()));
+                        },
+                    )));
+                    let declared = [aperture("model", "model.example.invalid", pinned(), None)];
+                    let result = install_all(&declared, namespace.pid(), None);
+                    let returned = Instant::now();
+                    crate::egress::IN_REPORT_WINDOW.set(None);
+                    let (forwarder, held, zombie, left_window) = window
+                        .try_recv()
+                        .expect("the install never reached the window before its report");
+                    if held >= 0 {
+                        // SAFETY: the duplicate the hook made; nothing else owns it.
+                        unsafe {
+                            libc::close(held);
+                        }
+                    }
+                    assert!(held >= 0, "the hook could not duplicate the report end");
+                    assert!(
+                        zombie,
+                        "the forwarder {forwarder} had not exited 10 s into the window"
+                    );
+                    let Err(refusal) = result else {
+                        panic!("an aperture whose helper never bound was installed");
+                    };
+                    assert!(
+                        refusal.message.contains("stage 6"),
+                        "story:aperture-install-sees-forwarder-death-at-once: the record the \
+                         forwarder sent before it exited was lost to its exit: {}",
+                        refusal.message
+                    );
+                    assert!(
+                        returned.duration_since(left_window) < Duration::from_millis(500),
+                        "the refusal took {:?} after the window although record and exit were \
+                         both there",
+                        returned.duration_since(left_window)
+                    );
+                    assert!(
+                        reaped(forwarder),
+                        "the forwarder {forwarder} was left unreaped"
+                    );
+                }
+
+                /// An installed forwarder leaves the installer no pidfd on it: the descriptor the
+                /// wait used is closed once the report is read.
+                #[test]
+                fn an_installed_forwarder_leaves_the_installer_no_descriptor_on_it() {
+                    let scratch = tempfile::tempdir().unwrap();
+                    let Some(sandbox) = ScriptedSandbox::open(scratch.path(), None, "printf done")
+                    else {
+                        return;
+                    };
+                    let declared = [aperture("model", "model.example.invalid", pinned(), None)];
+                    let installed =
+                        install_all(&declared, sandbox.pid, None).expect("install one aperture");
+                    let forwarder = installed.apertures()[0].forwarder;
+                    let leaked = pidfds_on(forwarder);
+                    // The scan sees a pidfd when there is one.
+                    let probe = crate::host_process::pidfd::open(
+                        u32::try_from(forwarder).expect("forwarder pid"),
+                    )
+                    .expect("pidfd_open")
+                    .expect("the forwarder is alive");
+                    let seen = pidfds_on(forwarder);
+                    drop(probe);
+                    let printed = sandbox.finish(Duration::from_secs(30));
+                    drop(installed);
+                    assert_eq!(
+                        seen.len(),
+                        1,
+                        "the scan did not see a pidfd opened on purpose"
+                    );
+                    assert_eq!(
+                        leaked,
+                        Vec::<String>::new(),
+                        "story:aperture-install-sees-forwarder-death-at-once: the installer still \
+                         holds a pidfd on its installed forwarder {forwarder}"
+                    );
+                    assert_eq!(printed, "done");
+                }
+
+                static INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
+
+                extern "C" fn count_interrupt(_signal: libc::c_int) {
+                    INTERRUPTS.fetch_add(1, Ordering::Relaxed);
+                }
+
+                /// The report wait interrupted, over and over, by a handled signal (installed with
+                /// `SA_RESTART`, as a runtime installs its `SIGCHLD` handler: `poll` returns
+                /// `EINTR` whatever the flag) still ends on the forwarder's own report.
+                #[test]
+                fn a_report_wait_interrupted_by_a_handled_signal_still_reads_the_report() {
+                    let stdout = run_alone(INTERRUPTED_HELPER);
+                    if stdout.contains("D364-ADV absent") {
+                        return;
+                    }
+                    assert!(
+                        stdout.contains("D364-ADV interrupted-and-read"),
+                        "the helper ran without reaching its assertion: {stdout}"
+                    );
+                }
+
+                /// Run only by the case above, in a process of its own.
+                #[test]
+                #[ignore = "child process entry point: run by a_report_wait_interrupted_by_a_handled_signal_still_reads_the_report"]
+                fn interrupted_report_wait_helper() {
+                    if std::env::var_os(HELPER_ENV).is_none() {
+                        return;
+                    }
+                    let Some(namespace) = DownNamespace::open() else {
+                        println!("D364-ADV absent");
+                        return;
+                    };
+                    // SAFETY: a zeroed `sigaction` is a valid initial value; the handler only
+                    // increments an atomic, which is async-signal-safe.
+                    unsafe {
+                        let mut action: libc::sigaction = std::mem::zeroed();
+                        action.sa_sigaction = count_interrupt as *const () as libc::sighandler_t;
+                        action.sa_flags = libc::SA_RESTART;
+                        libc::sigemptyset(&raw mut action.sa_mask);
+                        assert_eq!(
+                            libc::sigaction(libc::SIGUSR1, &raw const action, std::ptr::null_mut()),
+                            0,
+                            "sigaction"
+                        );
+                    }
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let stopping = Arc::clone(&stop);
+                    let (signaller_sender, signaller) = mpsc::channel();
+                    crate::egress::IN_REPORT_WINDOW.set(Some(Box::new(
+                        move |_forwarder, _report_end| {
+                            // SAFETY: neither call has preconditions.
+                            let (pid, tid) = unsafe { (libc::getpid(), libc::gettid()) };
+                            let handle = std::thread::spawn(move || {
+                                let mut sent = 0_usize;
+                                while !stopping.load(Ordering::Acquire) {
+                                    // SAFETY: a signal this process handles, to one of its own
+                                    // threads.
+                                    unsafe {
+                                        libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGUSR1);
+                                    }
+                                    sent += 1;
+                                    std::thread::sleep(Duration::from_millis(20));
+                                }
+                                sent
+                            });
+                            let _ = signaller_sender.send(handle);
+                        },
+                    )));
+                    let declared = [aperture("model", "model.example.invalid", pinned(), None)];
+                    let result = install_all(&declared, namespace.pid(), None);
+                    stop.store(true, Ordering::Release);
+                    crate::egress::IN_REPORT_WINDOW.set(None);
+                    let sent = signaller
+                        .try_recv()
+                        .expect("the install never reached the window")
+                        .join()
+                        .expect("the signaller");
+                    let interrupts = INTERRUPTS.load(Ordering::Relaxed);
+                    let Err(refusal) = result else {
+                        panic!("an aperture whose helper never bound was installed");
+                    };
+                    assert!(
+                        interrupts > 1,
+                        "only {interrupts} of {sent} signals were handled during the wait"
+                    );
+                    assert!(
+                        refusal.message.contains("stage 6"),
+                        "story:aperture-install-sees-forwarder-death-at-once: a report wait \
+                         interrupted {interrupts} times was refused as: {}",
+                        refusal.message
+                    );
+                    println!("D364-ADV interrupted-and-read");
+                }
+
+                /// A forwarder whose pidfd cannot be opened is refused as such, killed and reaped,
+                /// and the refusal leaves the installer no descriptor it did not have before.
+                #[test]
+                fn a_forwarder_without_a_descriptor_is_refused_killed_and_reaped() {
+                    let stdout = run_alone(DESCRIPTOR_HELPER);
+                    if stdout.contains("D364-ADV absent") {
+                        return;
+                    }
+                    assert!(
+                        stdout.contains("D364-ADV descriptor-refused"),
+                        "the helper ran without reaching its assertion: {stdout}"
+                    );
+                }
+
+                /// Run only by the case above, in a process of its own: it fills this process's
+                /// descriptor table and frees one more descriptor per attempt until the install
+                /// gets past the fork and fails at `pidfd_open`.
+                #[test]
+                #[ignore = "child process entry point: run by a_forwarder_without_a_descriptor_is_refused_killed_and_reaped"]
+                fn forwarder_descriptor_refused_helper() {
+                    if std::env::var_os(HELPER_ENV).is_none() {
+                        return;
+                    }
+                    let Some(namespace) = DownNamespace::open() else {
+                        println!("D364-ADV absent");
+                        return;
+                    };
+                    let namespace_pid = libc::pid_t::try_from(namespace.pid()).expect("pid");
+                    // SAFETY: neither call has preconditions.
+                    let (me, tid) = unsafe { (libc::getpid(), libc::gettid()) };
+                    let mut before = descriptors_of(me);
+                    before.sort_unstable();
+                    let highest = before.iter().copied().max().unwrap_or(2);
+                    // SAFETY: a zeroed `rlimit` is valid storage for `getrlimit` to fill.
+                    let mut saved: libc::rlimit = unsafe { std::mem::zeroed() };
+                    // SAFETY: valid storage for one `rlimit`.
+                    assert_eq!(
+                        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut saved) },
+                        0
+                    );
+                    let lowered = libc::rlimit {
+                        rlim_cur: u64::from(highest) + 64,
+                        rlim_max: saved.rlim_max,
+                    };
+                    // SAFETY: a soft limit below the hard one.
+                    assert_eq!(
+                        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lowered) },
+                        0
+                    );
+                    let mut filler = Vec::new();
+                    let fill = |filler: &mut Vec<libc::c_int>| loop {
+                        // SAFETY: a close-on-exec duplicate of standard input.
+                        let fd = unsafe { libc::fcntl(0, libc::F_DUPFD_CLOEXEC, 0) };
+                        if fd < 0 {
+                            break;
+                        }
+                        filler.push(fd);
+                    };
+                    fill(&mut filler);
+                    let declared = [aperture("model", "model.example.invalid", pinned(), None)];
+                    let mut messages = Vec::new();
+                    let mut refused = None;
+                    for free in 0..16 {
+                        for _ in 0..free {
+                            if let Some(fd) = filler.pop() {
+                                // SAFETY: a duplicate this case made and owns.
+                                unsafe {
+                                    libc::close(fd);
+                                }
+                            }
+                        }
+                        let result = install_all(&declared, namespace.pid(), None);
+                        fill(&mut filler);
+                        let Err(refusal) = result else {
+                            messages.push(format!("{free}: installed"));
+                            break;
+                        };
+                        messages.push(format!("{free}: {}", refusal.message));
+                        if refusal.message.contains("aperture forwarder descriptor") {
+                            refused = Some(refusal.message);
+                            break;
+                        }
+                        if refusal.message.contains("stage") {
+                            break;
+                        }
+                    }
+                    for fd in filler {
+                        // SAFETY: a duplicate this case made and owns.
+                        unsafe {
+                            libc::close(fd);
+                        }
+                    }
+                    // SAFETY: restores the limit read above.
+                    assert_eq!(
+                        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const saved) },
+                        0
+                    );
+                    let mut after = descriptors_of(me);
+                    after.sort_unstable();
+                    let children: Vec<libc::pid_t> = children_of(tid)
+                        .into_iter()
+                        .filter(|pid| *pid != namespace_pid)
+                        .collect();
+                    let Some(message) = refused else {
+                        panic!(
+                            "no number of free descriptors stopped the install at the forwarder's \
+                             descriptor: {messages:#?}"
+                        );
+                    };
+                    assert!(
+                        message.contains("os error 24"),
+                        "the refusal did not carry the errno that stopped it: {message}"
+                    );
+                    assert_eq!(
+                        children,
+                        Vec::<libc::pid_t>::new(),
+                        "story:aperture-install-sees-forwarder-death-at-once: a forwarder refused \
+                         for want of its descriptor was left a child of the installer"
+                    );
+                    assert_eq!(
+                        before, after,
+                        "the refused install left the installer other descriptors than it had"
+                    );
+                    println!("D364-ADV descriptor-refused {messages:?}");
+                }
+            }
+
+            /// Security cases of wave D364 against
+            /// `story:aperture-install-sees-forwarder-death-at-once`: the descriptor the report
+            /// wait adds names the installer's own child, is close-on-exec, and is gone with the
+            /// forwarder on a refusal.
+            mod d364_sec {
+                use std::sync::mpsc;
+
+                use super::super::super::reaped;
+                use super::super::aperture;
+                use super::{
+                    DownNamespace, HELPER_ENV, children_of, descriptors_of, parent_of, pinned,
+                    run_alone,
+                };
+                use crate::egress::install_all;
+
+                const WINDOW_DESCRIPTORS_HELPER: &str = "egress::tests::observed_inside::\
+                                                         d354_adv::d364_sec::\
+                                                         window_descriptors_helper";
+
+                /// `O_CLOEXEC` as `/proc/<pid>/fdinfo` prints `flags:`, in octal.
+                const CLOSE_ON_EXEC: u32 = 0o2_000_000;
+
+                /// The `flags:` of this process's descriptor `fd`, `None` if it is not open.
+                fn flags_of(fd: i32) -> Option<u32> {
+                    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).ok()?;
+                    let flags = info.lines().find_map(|line| line.strip_prefix("flags:"))?;
+                    u32::from_str_radix(flags.trim(), 8).ok()
+                }
+
+                /// Every descriptor of this process that is a pidfd, by its link target.
+                fn pidfds() -> Vec<i32> {
+                    std::fs::read_dir("/proc/self/fd")
+                        .map(|entries| {
+                            entries
+                                .filter_map(Result::ok)
+                                .filter(|entry| {
+                                    std::fs::read_link(entry.path()).is_ok_and(|target| {
+                                        target.to_string_lossy().contains("pidfd")
+                                    })
+                                })
+                                .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+
+                /// The pidfds of this process whose fdinfo names `pid`.
+                fn pidfds_naming(pid: libc::pid_t) -> Vec<i32> {
+                    let wanted = format!("Pid:\t{pid}");
+                    pidfds()
+                        .into_iter()
+                        .filter(|fd| {
+                            std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}"))
+                                .is_ok_and(|info| info.lines().any(|line| line == wanted))
+                        })
+                        .collect()
+                }
+
+                /// Inside the report window, the one pidfd the wait holds names the forwarder,
+                /// which is still this process's unreaped child, and that pidfd and the report
+                /// end are close-on-exec; once the install is refused (stage 6) the forwarder is
+                /// reaped and the installer holds no pidfd and no descriptor it did not have.
+                #[test]
+                fn the_report_wait_descriptor_names_the_own_child_and_leaves_with_the_refusal() {
+                    let stdout = run_alone(WINDOW_DESCRIPTORS_HELPER);
+                    if stdout.contains("D364-SEC absent") {
+                        return;
+                    }
+                    assert!(
+                        stdout.contains("D364-SEC window-descriptors"),
+                        "the helper ran without reaching its assertion: {stdout}"
+                    );
+                }
+
+                /// Run only by the case above, in a process of its own.
+                #[test]
+                #[ignore = "child process entry point: run by the_report_wait_descriptor_names_the_own_child_and_leaves_with_the_refusal"]
+                fn window_descriptors_helper() {
+                    if std::env::var_os(HELPER_ENV).is_none() {
+                        return;
+                    }
+                    let Some(namespace) = DownNamespace::open() else {
+                        println!("D364-SEC absent");
+                        return;
+                    };
+                    let namespace_pid = libc::pid_t::try_from(namespace.pid()).expect("pid");
+                    // SAFETY: neither call has preconditions.
+                    let (me, tid) = unsafe { (libc::getpid(), libc::gettid()) };
+                    let mut before = descriptors_of(me);
+                    before.sort_unstable();
+                    let pidfds_before = pidfds();
+                    let (window_sender, window) = mpsc::channel();
+                    crate::egress::IN_REPORT_WINDOW.set(Some(Box::new(
+                        move |forwarder, report_end| {
+                            let naming = pidfds_naming(forwarder);
+                            let pidfd_flags: Vec<Option<u32>> =
+                                naming.iter().map(|fd| flags_of(*fd)).collect();
+                            let _ = window_sender.send((
+                                forwarder,
+                                naming,
+                                pidfd_flags,
+                                flags_of(report_end),
+                                parent_of(forwarder),
+                            ));
+                        },
+                    )));
+                    let declared = [aperture("model", "model.example.invalid", pinned(), None)];
+                    let result = install_all(&declared, namespace.pid(), None);
+                    crate::egress::IN_REPORT_WINDOW.set(None);
+                    let mut after = descriptors_of(me);
+                    after.sort_unstable();
+                    let pidfds_after = pidfds();
+                    let children: Vec<libc::pid_t> = children_of(tid)
+                        .into_iter()
+                        .filter(|pid| *pid != namespace_pid)
+                        .collect();
+                    let (forwarder, naming, pidfd_flags, report_flags, parent) = window
+                        .try_recv()
+                        .expect("the install never reached the window before its report");
+                    let Err(refusal) = result else {
+                        panic!("an aperture whose helper never bound was installed");
+                    };
+                    assert_eq!(
+                        naming.len(),
+                        1,
+                        "story:aperture-install-sees-forwarder-death-at-once: the installer held \
+                         {} pidfds on its forwarder {forwarder} in the report window",
+                        naming.len()
+                    );
+                    assert_eq!(
+                        parent,
+                        Some(me),
+                        "the forwarder {forwarder} the pidfd names was not this process's child"
+                    );
+                    assert!(
+                        pidfd_flags
+                            .iter()
+                            .all(|flags| flags.is_some_and(|flags| flags & CLOSE_ON_EXEC != 0)),
+                        "story:aperture-install-sees-forwarder-death-at-once: the forwarder's \
+                         pidfd is not close-on-exec: {pidfd_flags:?}"
+                    );
+                    assert!(
+                        report_flags.is_some_and(|flags| flags & CLOSE_ON_EXEC != 0),
+                        "the report end is not close-on-exec: {report_flags:?}"
+                    );
+                    assert!(
+                        refusal.message.contains("stage 6"),
+                        "the helper's bind failure was not what refused the install: {}",
+                        refusal.message
+                    );
+                    assert!(
+                        reaped(forwarder),
+                        "the forwarder {forwarder} was left unreaped"
+                    );
+                    assert_eq!(
+                        children,
+                        Vec::<libc::pid_t>::new(),
+                        "a refused forwarder was left a child of the installer"
+                    );
+                    assert_eq!(
+                        pidfds_after, pidfds_before,
+                        "story:aperture-install-sees-forwarder-death-at-once: the refused install \
+                         left the installer a pidfd"
+                    );
+                    assert_eq!(
+                        before, after,
+                        "the refused install left the installer other descriptors than it had"
+                    );
+                    println!("D364-SEC window-descriptors");
+                }
+            }
         }
     }
 }
