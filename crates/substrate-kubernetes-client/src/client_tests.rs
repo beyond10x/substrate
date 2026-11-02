@@ -2366,3 +2366,49 @@ mod d364_adv {
         assert!(matches!(unread, ApiError::Invalid(_)), "{unread}");
     }
 }
+
+/// Adversary cases of wave D364, pass 2 (`story:access-review-evaluation-error-is-not-a-denial`).
+mod d364_adv2 {
+    use super::*;
+
+    /// The 300-character bound counts characters, not bytes: a long error of two-byte characters
+    /// is cut at 300 of them, on a character boundary, and an `allowed` that is not a boolean is
+    /// unreadable whatever error sits beside it.
+    #[tokio::test]
+    async fn an_access_review_error_is_bounded_in_characters_and_allowed_must_be_a_boolean() {
+        let fake = start();
+        let api = client(&fake.kubeconfig());
+        fake.fault(Fault::Answer {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            status: 201,
+            body: json!({"status": {"allowed": false, "evaluationError": "é".repeat(400)}}),
+        });
+        let review = api
+            .access_review("", "pods/exec", "create", "keeper")
+            .await
+            .expect("story:access-review-evaluation-error-is-not-a-denial: read");
+        assert_eq!(
+            review,
+            Err("é".repeat(300)),
+            "story:access-review-evaluation-error-is-not-a-denial"
+        );
+
+        for allowed in [json!("false"), json!(0)] {
+            fake.fault(Fault::Answer {
+                method: Method::POST,
+                path: ACCESS_REVIEWS.to_owned(),
+                status: 201,
+                body: json!({"status": {"allowed": allowed, "evaluationError": "webhook"}}),
+            });
+            let unread = api
+                .access_review("", "pods/exec", "create", "keeper")
+                .await
+                .expect_err("story:access-review-evaluation-error-is-not-a-denial: allowed");
+            assert!(
+                matches!(unread, ApiError::Invalid(_)),
+                "{allowed}: {unread}"
+            );
+        }
+    }
+}
