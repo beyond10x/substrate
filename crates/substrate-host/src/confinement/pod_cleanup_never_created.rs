@@ -453,6 +453,7 @@ mod d354_adv {
 /// container terminated, as before D354 (`story:written-policy-swept-when-shown-stopped`), and one
 /// kept because of that write says so once, where it is old and its Pod gone
 /// (`story:kept-written-policy-log-names-the-write`).
+#[cfg(test)]
 mod d364 {
     use std::cell::RefCell;
     use std::rc::Rc;
