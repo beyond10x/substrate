@@ -60,7 +60,7 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd as _, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -71,6 +71,7 @@ use substrate_wire::{
 
 use crate::DriverError;
 pub use crate::aperture::EgressAperture;
+use crate::host_process::pidfd;
 
 /// `_IO(NSIO, 0x1)` from `linux/nsfs.h`: the user namespace that owns a namespace descriptor.
 const NS_GET_USERNS: libc::c_ulong = 0xb701;
@@ -782,6 +783,19 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// What [`IN_REPORT_WINDOW`] holds.
+#[cfg(test)]
+type ReportWindowHook = Box<dyn FnOnce(libc::pid_t, RawFd)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Called once, on the installing thread, after the forwarder is forked and before this
+    /// process closes its end of the report socket, with the forwarder's pid and that end: the
+    /// window in which a fork on any other thread copies the end the forwarder reports on.
+    static IN_REPORT_WINDOW: std::cell::RefCell<Option<ReportWindowHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Forks the long-lived forwarder, which makes its own listener inside the sandbox: host netns, run
 /// cgroup, one relay per connection.
 ///
@@ -865,15 +879,29 @@ fn spawn_forwarder(
             libc::_exit(forwarder_body(&plan));
         }
     }
-    drop(child_end);
-    if let Err(refusal) = receive_report(parent_end.as_raw_fd()) {
-        // SAFETY: `pid` is a child this process forked and has not reaped; killing one that has
-        // already exited is harmless, and the wait reaps it either way.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-            let mut status = 0;
-            libc::waitpid(pid, &raw mut status, 0);
+    // The forwarder is this process's unreaped child until its report is read, so no other process
+    // can hold its pid yet and the descriptor names exactly it. Without one the install is refused:
+    // the report socket alone sees the forwarder's death only once every copy of its other end is
+    // closed, and a child another thread forks before `drop(child_end)` holds one.
+    let forwarder = match pidfd::open(u32::try_from(pid).unwrap_or(0)) {
+        Ok(Some(forwarder)) => forwarder,
+        failed => {
+            abandon_forwarder(pid);
+            let error = failed
+                .err()
+                .unwrap_or_else(|| io::Error::from_raw_os_error(libc::ESRCH));
+            return Err(install_failed("aperture forwarder descriptor", &error));
         }
+    };
+    #[cfg(test)]
+    {
+        if let Some(hook) = IN_REPORT_WINDOW.take() {
+            hook(pid, child_end.as_raw_fd());
+        }
+    }
+    drop(child_end);
+    if let Err(refusal) = receive_report(parent_end.as_raw_fd(), forwarder.as_fd()) {
+        abandon_forwarder(pid);
         return Err(refusal);
     }
     #[cfg(test)]
@@ -881,13 +909,56 @@ fn spawn_forwarder(
     Ok(pid)
 }
 
+/// Kills and reaps a forwarder whose install is refused.
+fn abandon_forwarder(pid: libc::pid_t) {
+    // SAFETY: `pid` is a child this process forked and has not reaped; killing one that has
+    // already exited is harmless, and the wait reaps it either way.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        let mut status = 0;
+        libc::waitpid(pid, &raw mut status, 0);
+    }
+}
+
 /// Reads the forwarder's report: one byte when it is accepting, else `[stage, errno]`, with a
 /// negative errno when the stage has none.
-fn receive_report(socket: RawFd) -> Result<(), DriverError> {
+///
+/// The wait ends on the report or on the forwarder's exit, whichever comes first, because EOF on
+/// `socket` comes only once *every* copy of its other end is closed: a child another thread
+/// forked while the installer still held that end keeps one for as long as it lives. A record the
+/// forwarder sent before it exited is queued before `forwarder` polls readable, so it is still
+/// read; only its absence is the loss.
+fn receive_report(socket: RawFd, forwarder: BorrowedFd<'_>) -> Result<(), DriverError> {
     let mut record = [0_u8; 8];
     loop {
+        let mut waiting = [
+            libc::pollfd {
+                fd: socket,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: forwarder.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: two initialized pollfds and no timeout.
+        if unsafe { libc::poll(waiting.as_mut_ptr(), 2, -1) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(install_failed("aperture report wait", &error));
+        }
+        let flags = if waiting[0].revents == 0 {
+            libc::MSG_DONTWAIT
+        } else {
+            0
+        };
         // SAFETY: a `recv` into a stack buffer of exactly the length passed.
-        let received = unsafe { libc::recv(socket, record.as_mut_ptr().cast(), record.len(), 0) };
+        let received =
+            unsafe { libc::recv(socket, record.as_mut_ptr().cast(), record.len(), flags) };
         if received < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
             continue;
         }
@@ -3965,6 +4036,153 @@ mod tests {
                     reaped(forwarder),
                     "the dead forwarder {forwarder} was left unreaped"
                 );
+            }
+
+            const HELD_REPORT_HELPER: &str = "egress::tests::observed_inside::d354_adv::\
+                                              forwarder_death_while_a_fork_holds_the_report_helper";
+
+            /// How long the neighbour's child keeps its copies of this process's descriptors.
+            const NEIGHBOUR_HOLD_MS: libc::c_int = 2_000;
+
+            /// Whether `pid` is alive: neither gone nor a zombie.
+            fn running(pid: libc::pid_t) -> bool {
+                std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .ok()
+                    .and_then(|stat| Some(stat.rsplit_once(')')?.1.trim_start().to_owned()))
+                    .is_some_and(|fields| !fields.starts_with(['Z', 'X']))
+            }
+
+            /// The case above, with a neighbour thread's child forked inside the window between
+            /// the report socket's creation and the installer closing its end of it
+            /// (`story:aperture-install-sees-forwarder-death-at-once`). That child holds a copy of
+            /// the end the forwarder reports on and stays alive, so the socket's EOF waits for the
+            /// child, not for the forwarder. The forwarder's own exit must end the wait: the
+            /// install is refused within 500 ms of the kill.
+            ///
+            /// In a process of its own, this test binary running only
+            /// [`forwarder_death_while_a_fork_holds_the_report_helper`]: the neighbour's child
+            /// copies every descriptor of the process it forks from.
+            #[test]
+            fn a_forwarder_that_dies_before_its_report_is_refused_at_once_while_another_thread_forks()
+             {
+                let stdout = run_alone(HELD_REPORT_HELPER);
+                if stdout.contains("D364 absent") {
+                    return;
+                }
+                assert!(
+                    stdout.contains("D364 refused-at-once"),
+                    "the helper ran without reaching its assertion: {stdout}"
+                );
+            }
+
+            /// Run only by the case above, in a process of its own.
+            #[test]
+            #[ignore = "child process entry point: run by a_forwarder_that_dies_before_its_report_is_refused_at_once_while_another_thread_forks"]
+            fn forwarder_death_while_a_fork_holds_the_report_helper() {
+                if std::env::var_os(HELPER_ENV).is_none() {
+                    return;
+                }
+                let Some(namespace) = DownNamespace::open() else {
+                    println!("D364 absent");
+                    return;
+                };
+                // The neighbour forks once each time it is asked. Its child keeps a copy of every
+                // descriptor this process had at the fork until its hold ends or it is killed.
+                let (ask, asked) = mpsc::channel::<()>();
+                let (forked_sender, forked) = mpsc::channel::<libc::pid_t>();
+                let neighbour = std::thread::spawn(move || {
+                    let mut children = Vec::new();
+                    while asked.recv().is_ok() {
+                        // SAFETY: the child calls only `poll` with no descriptors and `_exit`,
+                        // both async-signal-safe, and never returns into Rust code.
+                        let pid = unsafe { libc::fork() };
+                        if pid == 0 {
+                            // SAFETY: post-fork child, async-signal-safe calls only.
+                            unsafe {
+                                libc::poll(std::ptr::null_mut(), 0, NEIGHBOUR_HOLD_MS);
+                                libc::_exit(0);
+                            }
+                        }
+                        assert!(pid > 0, "fork");
+                        children.push(pid);
+                        let _ = forked_sender.send(pid);
+                    }
+                    for pid in &children {
+                        let mut status = 0;
+                        // SAFETY: reaping a child this thread forked.
+                        unsafe {
+                            libc::waitpid(*pid, &raw mut status, 0);
+                        }
+                    }
+                    children.len()
+                });
+                // In the window: the neighbour forks, its child is checked to hold the end the
+                // forwarder reports on, and only then is the forwarder killed, before its report.
+                let (window_sender, window) = mpsc::channel();
+                crate::egress::IN_REPORT_WINDOW.set(Some(Box::new(
+                    move |forwarder, report_end| {
+                        ask.send(()).expect("ask the neighbour to fork");
+                        let child = forked.recv().expect("the neighbour's child");
+                        // SAFETY: `getpid` has no preconditions.
+                        let me = unsafe { libc::getpid() };
+                        let report = sockets_of(me)
+                            .into_iter()
+                            .find(|(fd, _)| i32::try_from(*fd) == Ok(report_end))
+                            .map(|(_, inode)| inode);
+                        let inherited = report.is_some_and(|report| {
+                            sockets_of(child).iter().any(|(_, inode)| *inode == report)
+                        });
+                        // SAFETY: the installer's unreaped child: it waits for the report before it
+                        // reaps anything.
+                        unsafe {
+                            libc::kill(forwarder, libc::SIGKILL);
+                        }
+                        let _ = window_sender.send((forwarder, child, inherited, Instant::now()));
+                    },
+                )));
+                let declared = [aperture("model", "model.example.invalid", pinned(), None)];
+                let result = install_all(&declared, namespace.pid(), None);
+                let returned = Instant::now();
+                crate::egress::IN_REPORT_WINDOW.set(None);
+                let (forwarder, child, inherited, killed) = window
+                    .try_recv()
+                    .expect("the install never reached the window before its report");
+                let child_alive = running(child);
+                // SAFETY: a child of the neighbour thread, which reaps it; this ends its hold.
+                unsafe {
+                    libc::kill(child, libc::SIGKILL);
+                }
+                let forks = neighbour.join().expect("the neighbour thread");
+                let after_kill = returned.duration_since(killed);
+                let Err(refusal) = result else {
+                    panic!("an aperture whose forwarder died before its report was installed");
+                };
+                assert!(
+                    inherited,
+                    "the neighbour's child {child} held no copy of the report socket's other end, \
+                     so this case never reached the window it is about"
+                );
+                assert!(
+                    refusal.message.contains("stage 11, errno unavailable"),
+                    "a forwarder lost before its report was not named as such: {}",
+                    refusal.message
+                );
+                assert!(
+                    after_kill < Duration::from_millis(500),
+                    "story:aperture-install-sees-forwarder-death-at-once: the refusal arrived \
+                     {after_kill:?} after the forwarder died, while the neighbour's child {child} \
+                     held the report socket's other end"
+                );
+                assert!(
+                    child_alive,
+                    "the neighbour's child {child} had exited before the install returned"
+                );
+                assert!(
+                    reaped(forwarder),
+                    "the dead forwarder {forwarder} was left unreaped"
+                );
+                assert_eq!(forks, 1, "the neighbour forked once, in the window");
+                println!("D364 refused-at-once");
             }
 
             /// A refusal at the forwarder's own stage (2, its cgroup) and at the helper's (6, a bind
