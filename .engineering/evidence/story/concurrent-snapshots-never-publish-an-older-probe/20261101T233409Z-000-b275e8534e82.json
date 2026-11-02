@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T23:34:09Z",
+  "actor": "human:timo",
+  "artifact": "story:concurrent-snapshots-never-publish-an-older-probe",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p b10x-substrate-kubernetes --lib --locked d364 (base + cases: 2 failed, older tuple published; c88c3e00: 2 passed; lib 163 passed)",
+    "reference": "unit/d364-u1 c88c3e00, merged 2cf5e891; red.log vs green.log in the unit scratch"
+  }
+}

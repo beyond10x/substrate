@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T23:46:12Z",
+  "actor": "human:timo",
+  "artifact": "story:concurrent-snapshots-never-publish-an-older-probe",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p b10x-substrate-kubernetes --lib --locked (red at c88c3e00 + adversary case: 1 failed, Err(Timeout); green at 875bc575: 164 passed)",
+    "reference": "unit/d364-u1 a74550b1+875bc575, merged d186c378; r1-red.log vs r1-green.log in the unit scratch"
+  }
+}

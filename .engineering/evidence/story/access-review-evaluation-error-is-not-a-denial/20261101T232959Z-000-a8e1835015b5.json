@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T23:29:59Z",
+  "actor": "human:timo",
+  "artifact": "story:access-review-evaluation-error-is-not-a-denial",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p b10x-substrate-kubernetes --lib verb_review (red at 8b9818dc + case: 1 failed; green at a2bece7b: 162 passed)",
+    "reference": "unit/d364-u2 a2bece7b, merged 26597e3c; red-kube.log vs green-kube.log in the unit scratch"
+  }
+}

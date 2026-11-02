@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-01T23:36:58Z",
+  "actor": "human:timo",
+  "artifact": "story:kept-written-policy-log-names-the-write",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p b10x-substrate-host --lib confinement::pod (base + cases: 4 failed; 2404260e: 53 passed)",
+    "reference": "unit/d364-u4 969b02ce+2404260e, merged 7746a5d5; red.log vs green-2.log in the unit scratch"
+  }
+}
