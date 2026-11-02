@@ -4703,6 +4703,178 @@ mod tests {
                     println!("D364-ADV descriptor-refused {messages:?}");
                 }
             }
+
+            /// Security cases of wave D364 against
+            /// `story:aperture-install-sees-forwarder-death-at-once`: the descriptor the report
+            /// wait adds names the installer's own child, is close-on-exec, and is gone with the
+            /// forwarder on a refusal.
+            mod d364_sec {
+                use std::sync::mpsc;
+
+                use super::super::super::reaped;
+                use super::super::aperture;
+                use super::{
+                    DownNamespace, HELPER_ENV, children_of, descriptors_of, parent_of, pinned,
+                    run_alone,
+                };
+                use crate::egress::install_all;
+
+                const WINDOW_DESCRIPTORS_HELPER: &str = "egress::tests::observed_inside::\
+                                                         d354_adv::d364_sec::\
+                                                         window_descriptors_helper";
+
+                /// `O_CLOEXEC` as `/proc/<pid>/fdinfo` prints `flags:`, in octal.
+                const CLOSE_ON_EXEC: u32 = 0o2_000_000;
+
+                /// The `flags:` of this process's descriptor `fd`, `None` if it is not open.
+                fn flags_of(fd: i32) -> Option<u32> {
+                    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).ok()?;
+                    let flags = info.lines().find_map(|line| line.strip_prefix("flags:"))?;
+                    u32::from_str_radix(flags.trim(), 8).ok()
+                }
+
+                /// Every descriptor of this process that is a pidfd, by its link target.
+                fn pidfds() -> Vec<i32> {
+                    std::fs::read_dir("/proc/self/fd")
+                        .map(|entries| {
+                            entries
+                                .filter_map(Result::ok)
+                                .filter(|entry| {
+                                    std::fs::read_link(entry.path()).is_ok_and(|target| {
+                                        target.to_string_lossy().contains("pidfd")
+                                    })
+                                })
+                                .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+
+                /// The pidfds of this process whose fdinfo names `pid`.
+                fn pidfds_naming(pid: libc::pid_t) -> Vec<i32> {
+                    let wanted = format!("Pid:\t{pid}");
+                    pidfds()
+                        .into_iter()
+                        .filter(|fd| {
+                            std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}"))
+                                .is_ok_and(|info| info.lines().any(|line| line == wanted))
+                        })
+                        .collect()
+                }
+
+                /// Inside the report window, the one pidfd the wait holds names the forwarder,
+                /// which is still this process's unreaped child, and that pidfd and the report
+                /// end are close-on-exec; once the install is refused (stage 6) the forwarder is
+                /// reaped and the installer holds no pidfd and no descriptor it did not have.
+                #[test]
+                fn the_report_wait_descriptor_names_the_own_child_and_leaves_with_the_refusal() {
+                    let stdout = run_alone(WINDOW_DESCRIPTORS_HELPER);
+                    if stdout.contains("D364-SEC absent") {
+                        return;
+                    }
+                    assert!(
+                        stdout.contains("D364-SEC window-descriptors"),
+                        "the helper ran without reaching its assertion: {stdout}"
+                    );
+                }
+
+                /// Run only by the case above, in a process of its own.
+                #[test]
+                #[ignore = "child process entry point: run by the_report_wait_descriptor_names_the_own_child_and_leaves_with_the_refusal"]
+                fn window_descriptors_helper() {
+                    if std::env::var_os(HELPER_ENV).is_none() {
+                        return;
+                    }
+                    let Some(namespace) = DownNamespace::open() else {
+                        println!("D364-SEC absent");
+                        return;
+                    };
+                    let namespace_pid = libc::pid_t::try_from(namespace.pid()).expect("pid");
+                    // SAFETY: neither call has preconditions.
+                    let (me, tid) = unsafe { (libc::getpid(), libc::gettid()) };
+                    let mut before = descriptors_of(me);
+                    before.sort_unstable();
+                    let pidfds_before = pidfds();
+                    let (window_sender, window) = mpsc::channel();
+                    crate::egress::IN_REPORT_WINDOW.set(Some(Box::new(
+                        move |forwarder, report_end| {
+                            let naming = pidfds_naming(forwarder);
+                            let pidfd_flags: Vec<Option<u32>> =
+                                naming.iter().map(|fd| flags_of(*fd)).collect();
+                            let _ = window_sender.send((
+                                forwarder,
+                                naming,
+                                pidfd_flags,
+                                flags_of(report_end),
+                                parent_of(forwarder),
+                            ));
+                        },
+                    )));
+                    let declared = [aperture("model", "model.example.invalid", pinned(), None)];
+                    let result = install_all(&declared, namespace.pid(), None);
+                    crate::egress::IN_REPORT_WINDOW.set(None);
+                    let mut after = descriptors_of(me);
+                    after.sort_unstable();
+                    let pidfds_after = pidfds();
+                    let children: Vec<libc::pid_t> = children_of(tid)
+                        .into_iter()
+                        .filter(|pid| *pid != namespace_pid)
+                        .collect();
+                    let (forwarder, naming, pidfd_flags, report_flags, parent) = window
+                        .try_recv()
+                        .expect("the install never reached the window before its report");
+                    let Err(refusal) = result else {
+                        panic!("an aperture whose helper never bound was installed");
+                    };
+                    assert_eq!(
+                        naming.len(),
+                        1,
+                        "story:aperture-install-sees-forwarder-death-at-once: the installer held \
+                         {} pidfds on its forwarder {forwarder} in the report window",
+                        naming.len()
+                    );
+                    assert_eq!(
+                        parent,
+                        Some(me),
+                        "the forwarder {forwarder} the pidfd names was not this process's child"
+                    );
+                    assert!(
+                        pidfd_flags
+                            .iter()
+                            .all(|flags| flags.is_some_and(|flags| flags & CLOSE_ON_EXEC != 0)),
+                        "story:aperture-install-sees-forwarder-death-at-once: the forwarder's \
+                         pidfd is not close-on-exec: {pidfd_flags:?}"
+                    );
+                    assert!(
+                        report_flags.is_some_and(|flags| flags & CLOSE_ON_EXEC != 0),
+                        "the report end is not close-on-exec: {report_flags:?}"
+                    );
+                    assert!(
+                        refusal.message.contains("stage 6"),
+                        "the helper's bind failure was not what refused the install: {}",
+                        refusal.message
+                    );
+                    assert!(
+                        reaped(forwarder),
+                        "the forwarder {forwarder} was left unreaped"
+                    );
+                    assert_eq!(
+                        children,
+                        Vec::<libc::pid_t>::new(),
+                        "a refused forwarder was left a child of the installer"
+                    );
+                    assert_eq!(
+                        pidfds_after, pidfds_before,
+                        "story:aperture-install-sees-forwarder-death-at-once: the refused install \
+                         left the installer a pidfd"
+                    );
+                    assert_eq!(
+                        before, after,
+                        "the refused install left the installer other descriptors than it had"
+                    );
+                    println!("D364-SEC window-descriptors");
+                }
+            }
         }
     }
 }
