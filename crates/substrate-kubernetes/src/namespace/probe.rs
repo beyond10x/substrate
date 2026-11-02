@@ -253,6 +253,42 @@ impl Observation {
     }
 }
 
+#[cfg(test)]
+impl NamespaceDriver {
+    /// Records what a probe that proved every fact on `node` records, at the clock's now, under
+    /// the current binding and Lease: for exec cases whose fake plays no probe.
+    pub(crate) fn prove_on(&self, node: &str) {
+        let generation = self
+            .binding()
+            .expect("the driver is open")
+            .config_generation();
+        let now = self.clock.wall();
+        let interval = Duration::from_secs(self.config.probe_interval_seconds);
+        let mut state = lock(&self.probe);
+        state.proved = Some(Probed {
+            generation,
+            lease_epoch: state.lease_epoch,
+            at: now,
+            valid_until: now + interval + VALIDITY_SLACK,
+            workspace: WorkspaceProofs {
+                openat2_beneath: true,
+                guarded_io: true,
+                atomic_replace: true,
+            },
+            run: RunProofs {
+                argv_only: true,
+                families: true,
+                observed: ObservedProofs {
+                    whole_tree_kill: true,
+                    no_egress: true,
+                },
+            },
+            node: Some(node.to_owned()),
+        });
+        state.next_at = Some(now + interval);
+    }
+}
+
 impl NamespaceDriver {
     /// One probe, now: leftovers of earlier probes are removed first, then the PVC, the keeper
     /// and the probe Pod are created under fresh rows, observed and removed. A proof the run

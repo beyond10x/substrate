@@ -8,7 +8,7 @@
 use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd};
 
 /// Opens a descriptor on `pid`. `None` when no process holds that number now.
-pub(super) fn open(pid: u32) -> std::io::Result<Option<OwnedFd>> {
+pub(crate) fn open(pid: u32) -> std::io::Result<Option<OwnedFd>> {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return Ok(None);
     };

@@ -2660,3 +2660,66 @@ mod d354_adv {
         );
     }
 }
+
+/// `story:concurrent-snapshots-never-publish-an-older-probe`: two `machine()` calls that
+/// interleave leave the newer probe's snapshot, generation and node published.
+mod d364 {
+    use super::*;
+    use crate::interleave::older_published_last;
+
+    const OTHER_NODE: &str = "node-b";
+
+    /// Acceptance 1: the older call computes its snapshot under the first probe (on `NODE`), a
+    /// later probe lands on another node, and the newer call runs before the older one
+    /// publishes. The newer probe's tuple is what stays published.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_older_snapshot_computed_first_and_published_last_does_not_replace_the_newer() {
+        let mut rig = rig(Child::Exact, None).await;
+        rig.driver.probe().await.expect("the first probe runs");
+        rig.kubelet.abort();
+        rig.kubelet = tokio::spawn(play_kubelet(
+            admin(&rig.fake),
+            Arc::clone(&rig.fake),
+            Play {
+                node: OTHER_NODE,
+                ..Play::of(Child::Exact)
+            },
+            Arc::clone(&rig.ran),
+            rig.root.path().to_path_buf(),
+        ));
+        let runtime = tokio::runtime::Handle::current();
+        let (older, newer) = tokio::task::block_in_place(|| {
+            older_published_last(&rig.driver, || {
+                rig.clock.set(Duration::from_secs(1));
+                runtime
+                    .block_on(rig.driver.probe())
+                    .expect("the newer probe runs");
+            })
+        });
+        assert_eq!(families(&older.facts), [Some(true); 7], "the control");
+        assert_eq!(families(&newer.facts), [Some(true); 7], "the control");
+        assert_eq!(pinned_to_node(&lock(&rig.ran)[1]), json!([OTHER_NODE]));
+        assert_ne!(
+            older.snapshot, newer.snapshot,
+            "the control: the newer probe moved the snapshot"
+        );
+        assert_eq!(
+            lock(&rig.driver.execs().published).clone(),
+            Some((
+                newer.snapshot.clone(),
+                newer.config_generation,
+                Some(OTHER_NODE.to_owned())
+            )),
+            "story:concurrent-snapshots-never-publish-an-older-probe: the older call (snapshot \
+             {}, node {NODE}) published its tuple over the newer probe's",
+            older.snapshot
+        );
+    }
+
+    /// The node the probe Pod's required affinity names.
+    fn pinned_to_node(pod: &Value) -> Value {
+        pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+            ["nodeSelectorTerms"][0]["matchExpressions"][0]["values"]
+            .clone()
+    }
+}

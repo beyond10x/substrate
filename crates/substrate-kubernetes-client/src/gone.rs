@@ -42,7 +42,16 @@ pub struct PodTrace {
     /// it, so its terminated state is not noted. A Pod's phase is no such evidence: the Pod garbage
     /// collector marks a Pod `Failed` before it force-deletes it.
     stopped: bool,
+    /// The trace started at the version of an object written after its create
+    /// ([`PodTrace::since_written`]), which may be past the Pod's whole history.
+    written: bool,
 }
+
+/// Why [`Api::pod_history`] does not read a `BOOKMARK` alone as a Pod never created for a trace
+/// that starts at the version of an object written after its create ([`PodTrace::since_written`]).
+pub const WRITTEN_AFTER_CREATE: &str = "the object the replay started from was written after its \
+     create, so its version may be past the Pod's whole history and a bookmark alone does not \
+     show the Pod never created";
 
 impl PodTrace {
     /// A trace starting at `version`: the `resourceVersion` of an object created before the Pod.
@@ -50,6 +59,18 @@ impl PodTrace {
         Self {
             resource_version: version.map(str::to_owned),
             ..Self::default()
+        }
+    }
+
+    /// A trace starting at `version`: the `resourceVersion` of an object created before the Pod
+    /// and written after its create, so possibly past the Pod's whole history. A replay from it
+    /// decides on the events it shows, as one from [`PodTrace::since`] does, but its `BOOKMARK`
+    /// alone does not show the Pod never created ([`Api::pod_history`],
+    /// `story:written-policy-swept-when-shown-stopped`).
+    pub fn since_written(version: Option<&str>) -> Self {
+        Self {
+            written: true,
+            ..Self::since(version)
         }
     }
 
@@ -131,7 +152,7 @@ pub enum PodEnd {
 pub enum PodHistory {
     /// The replay from the version read before the Pod ended in a `BOOKMARK` before any event of
     /// the Pod's name: the API server replayed every change since, and no Pod of that name was
-    /// ever added.
+    /// ever added. Never for a trace from [`PodTrace::since_written`].
     NeverCreated,
     /// What the replay's events of the name decided, as [`Api::quoted_watch_event`] decides them,
     /// or why the replay decides nothing.
@@ -283,7 +304,9 @@ impl Api {
     /// bookmarks too (`allowWatchBookmarks=true`, `timeoutSeconds` [`WATCH_LIMIT`]), and is read
     /// for at most [`REPLAY_LIMIT`]. The API server replays every event of the name since that
     /// version first and then sends a `BOOKMARK`, so a `BOOKMARK` before any event of the name ends
-    /// a complete replay that shows no Pod of it ever added: [`PodHistory::NeverCreated`]. Events of
+    /// a complete replay that shows no Pod of it ever added: [`PodHistory::NeverCreated`], unless
+    /// the trace starts at a version written after its create ([`PodTrace::since_written`]), where
+    /// it is unproven ([`WRITTEN_AFTER_CREATE`]). Events of
     /// the name decide as [`Api::quoted_watch_event`] decides them, and a `BOOKMARK` after events
     /// of the name that decided nothing is unproven. So is a replay that does not end in a
     /// `BOOKMARK`: a 410, a refusal, an `ERROR` event, a line that is not JSON, the byte bound, or
@@ -386,6 +409,11 @@ impl Api {
                 Some("BOOKMARK") => {
                     let at = event["object"]["metadata"]["resourceVersion"].as_str();
                     if at.is_some_and(|at| !at.is_empty() && at != since) {
+                        if trace.written {
+                            return PodHistory::End(PodEnd::Unproven(
+                                WRITTEN_AFTER_CREATE.to_owned(),
+                            ));
+                        }
                         return PodHistory::NeverCreated;
                     }
                     return PodHistory::End(PodEnd::Unproven(

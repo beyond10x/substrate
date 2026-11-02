@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-01T23:46:20Z",
+  "actor": "human:timo",
+  "artifact": "story:written-policy-swept-when-shown-stopped",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:wave-2026-11-02-d364-u4-security-pass-1",
+    "review": "review-result:wave-2026-11-02-d364-u4-security-pass-1",
+    "outcome": "no-op"
+  }
+}

@@ -22,7 +22,7 @@
 
 mod log;
 #[cfg(target_os = "linux")]
-mod pidfd;
+pub(crate) mod pidfd;
 mod ports;
 #[cfg(target_os = "linux")]
 #[cfg(test)]

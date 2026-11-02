@@ -711,21 +711,27 @@ impl Api {
 
     /// The API's `SelfSubjectAccessReview` of this client's credential in its namespace: whether
     /// it may `verb` the object `name` of `resource` in the API group `group`, a subresource
-    /// written after a slash as a Role writes it (`pods/exec`). `false` is the review's answer
-    /// that it may not: RBAC refuses by holding no rule, so `status.allowed` alone decides. The
-    /// review is not a stored object.
+    /// written after a slash as a Role writes it (`pods/exec`). `Ok(Ok(false))` is the review's
+    /// answer that it may not: RBAC refuses by holding no rule, so `status.allowed: false` with no
+    /// evaluation error decides. `Ok(Err(error))` is a review that did not decide: `allowed:
+    /// false` with a non-empty `status.evaluationError` and no `denied: true`, an authorizer that
+    /// failed or had no opinion; `error` is the API's evaluation error, quoted as an error quotes
+    /// an API message (cleared of the bearer token, then bounded to 300 characters). `allowed:
+    /// true`, or `denied: true`, decides whatever error is beside it. The review is not a stored
+    /// object.
     ///
     /// # Errors
     ///
     /// No answer, an answer but 200 to 202 (the review's own refusal among them), or an answer
-    /// whose `status.allowed` is not a boolean.
+    /// whose `status.allowed` is not a boolean or whose `status.evaluationError` is present and
+    /// not a string.
     pub async fn access_review(
         &self,
         group: &str,
         resource: &str,
         verb: &str,
         name: &str,
-    ) -> Result<bool, ApiError> {
+    ) -> Result<Result<bool, String>, ApiError> {
         let (resource, subresource) = resource.split_once('/').unwrap_or((resource, ""));
         let review = json!({
             "apiVersion": "authorization.k8s.io/v1",
@@ -746,9 +752,26 @@ impl Api {
                 "access review",
             )
             .await?;
-        answer["status"]["allowed"].as_bool().ok_or_else(|| {
+        let status = &answer["status"];
+        let allowed = status["allowed"].as_bool().ok_or_else(|| {
             ApiError::Invalid("the access review answered no status.allowed".to_owned())
-        })
+        })?;
+        let error = match &status["evaluationError"] {
+            Value::Null => "",
+            Value::String(error) => error.as_str(),
+            _ => {
+                return Err(ApiError::Invalid(
+                    "the access review answered a status.evaluationError that is not a string"
+                        .to_owned(),
+                ));
+            }
+        };
+        let denied = status["denied"].as_bool() == Some(true);
+        if allowed || denied || error.is_empty() {
+            Ok(Ok(allowed))
+        } else {
+            Ok(Err(self.quote(error)))
+        }
     }
 
     /// Reads the list at `path` (which may carry a selector) whole, in pages of `page_items`, at

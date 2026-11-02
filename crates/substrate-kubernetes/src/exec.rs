@@ -68,7 +68,7 @@ pub(crate) struct Execs {
     /// The snapshot the daemon admits starts under, the binding generation it was taken at, and
     /// the node its probe observed (design 34 § 6.4): the node is bound to the snapshot here,
     /// beside it, and is neither in its digest nor on the wire.
-    published: Mutex<Option<(String, u64, Option<String>)>>,
+    pub(crate) published: Mutex<Option<(String, u64, Option<String>)>>,
     tracked: Mutex<BTreeMap<String, Tracked>>,
     /// Pods of ended execs whose rows a garbage round settles once they read absent.
     garbage: Mutex<BTreeSet<String>>,

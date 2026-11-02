@@ -423,9 +423,10 @@ fn owner_selector() -> String {
 /// (`approval-record:pod-orphan-policy-sweep-d124`): each carrying the adapter's owner label, named
 /// for the run that label names, at least [`SWEEP_AGE_FLOOR`] old by the API server's clock, whose
 /// run's Pod the API no longer has, in any phase, and whose container the API shows stopped
-/// ([`pod_end`]) or whose Pod a complete replay from the policy's `resourceVersion` shows never
-/// created ([`gone_pod`]), for a policy whose metadata shows no write after its create
-/// ([`written_after_create`]). A policy without the label is never a candidate.
+/// ([`pod_end`]), a replay from the policy's `resourceVersion` included, or, for a policy whose
+/// metadata shows no write after its create ([`written_after_create`]), whose Pod a complete
+/// replay from that version shows never created ([`gone_pod`]). A policy without the label is
+/// never a candidate.
 /// The list is read whole first, in at most [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`],
 /// each policy's metadata alone ([`kubernetes::METADATA_LIST`]) and each page bounded in bytes;
 /// every request is bounded by [`API_TIMEOUT`], a watch by [`kubernetes::gone::REPLAY_LIMIT`], and
@@ -560,19 +561,18 @@ async fn sweep_page(
             .to_std()
             .is_ok_and(|age| age >= SWEEP_AGE_FLOOR);
         // A policy written after its create has a `resourceVersion` past it, and a replay from
-        // there may start past the Pod's whole history: its trace starts at no version, so the
-        // never-created rule keeps it (`story:pod-sweep-replays-from-the-policys-create`).
-        let since = if written_after_create(policy, created) {
-            tracing::info!(
-                policy = run,
-                "pod: a NetworkPolicy the sweep listed was written after its create, so its \
-                 run's Pod is not replayed from its resourceVersion"
-            );
-            None
+        // there may start past the Pod's whole history: its trace still starts there, so a replay
+        // that shows its run's container terminated releases it
+        // (`story:written-policy-swept-when-shown-stopped`), but a `BOOKMARK` alone does not show
+        // its Pod never created (`story:pod-sweep-replays-from-the-policys-create`), and the
+        // warn that keeps it says why (`story:kept-written-policy-log-names-the-write`).
+        let since = policy["metadata"]["resourceVersion"].as_str();
+        let trace = if written_after_create(policy, created) {
+            PodTrace::since_written(since)
         } else {
-            policy["metadata"]["resourceVersion"].as_str()
+            PodTrace::since(since)
         };
-        candidates.push((run.to_owned(), created, old, PodTrace::since(since)));
+        candidates.push((run.to_owned(), created, old, trace));
     }
     Ok(continuation(&list))
 }

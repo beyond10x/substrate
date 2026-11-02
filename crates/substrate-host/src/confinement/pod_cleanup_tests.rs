@@ -64,6 +64,9 @@ struct Cluster {
     /// While set, an object whose members replace those of each listed policy's `metadata`
     /// (`story:pod-sweep-replays-from-the-policys-create`).
     policy_metadata: Mutex<Option<Value>>,
+    /// While set, a read of a page orphan's Pod answers it present
+    /// (`story:kept-written-policy-log-names-the-write`).
+    page_pods_present: AtomicBool,
 }
 
 /// What a watch of one Pod from a `resourceVersion` replays.
@@ -362,6 +365,15 @@ fn answer(cluster: &Cluster, method: &str, path: &str, accept: &str) -> (u16, St
                 .is_some_and(|name| name.starts_with("substrate-run-page-"))
     };
     if method == "GET" && orphan(&format!("/api/v1/namespaces/{NAMESPACE}/pods/")) {
+        if cluster.page_pods_present.load(Ordering::SeqCst) {
+            let name = pod_path.rsplit('/').next().unwrap_or_default();
+            let pod = json!({"metadata": {
+                "name": name,
+                "uid": format!("uid-{name}"),
+                "resourceVersion": "10",
+            }});
+            return (200, pod.to_string());
+        }
         return gone;
     }
     if method == "DELETE" && orphan(&format!("{policies}/")) {
@@ -908,3 +920,153 @@ mod adversary_watch;
 
 #[path = "pod_cleanup_never_created.rs"]
 mod never_created;
+
+/// Wave D364 security review, pass 1: a policy written after its create now has its run's Pod
+/// replayed from its own `resourceVersion` (`story:written-policy-swept-when-shown-stopped`). Only a
+/// replay that shows the run's container terminated, or its never-bound Pod deleted, may release
+/// it; every other replay the API can answer keeps it, in open and in the deferred sweep.
+mod d364_sec {
+    use super::*;
+
+    /// The open sweep's one orphan: page 1's, its Pod gone and never read.
+    const ORPHAN: &str = "substrate-run-page-1";
+
+    /// Every replay the fake answers that shows neither the run's container terminated nor its
+    /// never-bound Pod deleted.
+    const UNPROVING: &[Watch] = &[
+        Watch::ForceDeleted,
+        Watch::Gone,
+        Watch::Expired,
+        Watch::NeverCreated,
+        Watch::Ended,
+        Watch::BoundDeleted,
+        Watch::Added,
+        Watch::Unavailable,
+    ];
+
+    fn cluster(watch: Watch) -> Arc<Cluster> {
+        let cluster = Arc::new(Cluster {
+            pages: 1,
+            ..Cluster::default()
+        });
+        *cluster.watch.lock() = watch;
+        cluster
+    }
+
+    fn deleted(cluster: &Cluster) -> bool {
+        let delete = format!(
+            "DELETE /apis/networking.k8s.io/v1/namespaces/{NAMESPACE}/networkpolicies/{ORPHAN}"
+        );
+        cluster.requests.lock().contains(&delete)
+    }
+
+    /// The watches of the orphan's Pod the fake was asked for.
+    fn watches(cluster: &Cluster) -> Vec<String> {
+        cluster
+            .requests
+            .lock()
+            .iter()
+            .filter(|request| {
+                request.starts_with(&format!("GET /api/v1/namespaces/{NAMESPACE}/pods?watch="))
+                    && request.contains(&format!("fieldSelector=metadata.name%3D{ORPHAN}&"))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Makes the listed policy created at `created` and written again at `later` by another
+    /// writer, as an operator adding a label does.
+    fn written(cluster: &Cluster, created: &str, later: &str) {
+        let fields: Vec<Value> = [created, later]
+            .iter()
+            .enumerate()
+            .map(|(index, time)| {
+                json!({
+                    "manager": if index == 0 { "b10x-substrate-pod" } else { "kubectl-label" },
+                    "operation": "Update",
+                    "apiVersion": "networking.k8s.io/v1",
+                    "time": time,
+                    "fieldsType": "FieldsV1",
+                    "fieldsV1": {"f:metadata": {"f:labels": {"f:team": {}}}},
+                })
+            })
+            .collect();
+        *cluster.policy_metadata.lock() =
+            Some(json!({"creationTimestamp": created, "managedFields": fields}));
+    }
+
+    /// An old written policy whose Pod is gone and whose replay from its own version shows no
+    /// stop: open replays it once from that version and keeps it, deferring only the one whose
+    /// watch went unanswered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn open_keeps_a_written_policy_on_every_replay_that_shows_no_stop() {
+        for &watch in UNPROVING.iter().chain([&Watch::Silent]) {
+            let fake = cluster(watch);
+            written(&fake, "2020-01-01T00:00:00Z", "2020-01-02T09:30:00Z");
+            let api = start(&fake);
+            let deferred = sweep(&api).await.expect("the open sweep");
+            let requests = fake.requests.lock().clone();
+            assert!(
+                !deleted(&fake),
+                "{watch:?}: open removed a written policy on a replay that shows its run's \
+                 container neither terminated nor its Pod deleted unbound \
+                 (story:written-policy-swept-when-shown-stopped): {requests:#?}"
+            );
+            let watched = watches(&fake);
+            assert!(
+                watched.len() == 1 && watched[0].contains("&resourceVersion=1&"),
+                "{watch:?}: the replay did not run once from the policy's version: {watched:?}"
+            );
+            let unanswered = matches!(watch, Watch::Unavailable);
+            assert_eq!(
+                deferred
+                    .iter()
+                    .map(|kept| kept.run.as_str())
+                    .collect::<Vec<_>>(),
+                if unanswered { vec![ORPHAN] } else { vec![] },
+                "{watch:?}: open deferred the wrong policies"
+            );
+        }
+    }
+
+    /// A young written policy open defers, aged past the floor with its Pod gone: the deferred
+    /// sweep keeps it on every replay that shows no stop, and checks again only the one whose
+    /// watch went unanswered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_deferred_sweep_keeps_a_written_policy_on_every_replay_that_shows_no_stop() {
+        for &watch in UNPROVING {
+            let fake = cluster(watch);
+            let now = chrono::Utc::now();
+            let created = (now - chrono::Duration::minutes(1))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let later = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            written(&fake, &created, &later);
+            let api = start(&fake);
+            let mut deferred = sweep(&api).await.expect("the open sweep");
+            assert!(
+                deferred.len() == 1 && deferred[0].run == ORPHAN && watches(&fake).is_empty(),
+                "{watch:?}: open did not defer a young written policy unreplayed: {deferred:?}"
+            );
+            deferred[0].created = (now - chrono::Duration::hours(1)).fixed_offset();
+            resweep(&api, &mut deferred).await.expect("a round");
+            let requests = fake.requests.lock().clone();
+            assert!(
+                !deleted(&fake),
+                "{watch:?}: the deferred sweep removed a written policy on a replay that shows \
+                 its run's container neither terminated nor its Pod deleted unbound \
+                 (story:written-policy-swept-when-shown-stopped): {requests:#?}"
+            );
+            let watched = watches(&fake);
+            assert!(
+                watched.len() == 1 && watched[0].contains("&resourceVersion=1&"),
+                "{watch:?}: the replay did not run once from the policy's version: {watched:?}"
+            );
+            let unanswered = matches!(watch, Watch::Unavailable);
+            assert_eq!(
+                deferred.len(),
+                usize::from(unanswered),
+                "{watch:?}: the deferred sweep kept checking the wrong policies: {deferred:?}"
+            );
+        }
+    }
+}

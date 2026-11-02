@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-02T00:34:06Z",
+  "actor": "human:timo",
+  "artifact": "story:aperture-install-sees-forwarder-death-at-once",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p b10x-substrate-host --lib a_forwarder_that_dies_before_its_report_is_refused_at_once_while_another_thread_forks (red at 8b9818dc + case: refused after 2.014s; green at cd572120: 1 passed), egress lane 37 passed 4 ignored, host_process 41 passed",
+    "reference": "unit/d364-u3 cd572120; red.log, green-case.log, egress-after.log in the unit scratch"
+  }
+}
