@@ -75,6 +75,11 @@ const VERB_BOUND: Duration = Duration::from_mins(2);
 const PENDING_BOUND: Duration = Duration::from_mins(4);
 /// The daemon's answer to a mutation whose driver reported progress, not an end.
 const OUTCOME_UNKNOWN: &str = "operation.outcome-unknown";
+/// How long an accepted operation whose outcome is unknown may take to end: the bound the
+/// clean-room runner settles one within when step 4 runs it (`--restart-timeout`).
+const SETTLE_BOUND: Duration = RUNNER_RESTART;
+/// The pause between two reads of an operation while it settles, the clean-room runner's.
+const SETTLE_POLL: Duration = Duration::from_millis(500);
 /// Where, under the checkout, each run keeps the daemon logs of its failed cases.
 const KEPT_LOGS: &str = "target/namespace-lane/daemon-logs";
 /// How far a file's modification time may lag the clock a case's start was read from: the kernel
@@ -842,18 +847,133 @@ impl Daemon {
     ///
     /// The daemon did not answer.
     pub async fn create_workspace(&mut self) -> Result<Result<String, (u16, String)>> {
-        let body = json!({
-            "op": ulid::Ulid::generate().to_string(),
-            "input": {"source": "empty", "labels": {"lane": "namespace"}},
-        });
-        let (status, answer) = self.call("POST", "/v1/workspaces", Some(&body)).await?;
+        let (status, answer) = self
+            .post_workspace(&ulid::Ulid::generate().to_string())
+            .await?;
         if status == 201 {
-            return Ok(Ok(answer["result"]["id"]
-                .as_str()
-                .ok_or_else(|| anyhow!("a created workspace names no id: {answer}"))?
-                .to_owned()));
+            return Ok(Ok(created_id(&answer)?));
         }
         Ok(Err((status, code_of(&answer))))
+    }
+
+    /// `POST /v1/workspaces` for an empty workspace under `operation`.
+    async fn post_workspace(&mut self, operation: &str) -> Result<(u16, Value)> {
+        let body = json!({
+            "op": operation,
+            "input": {"source": "empty", "labels": {"lane": "namespace"}},
+        });
+        self.call("POST", "/v1/workspaces", Some(&body)).await
+    }
+
+    /// Step 6's create: an empty workspace's id. A retriable `operation.outcome-unknown` is not a
+    /// refusal: as design 01 § 6 says and the clean-room runner does (`settled` in
+    /// `crates/b10x-substrate-conformance/src/cases.rs`), the create's operation is read until it
+    /// ends, and the workspace it made is the one the case goes on with. The create is never
+    /// resent under a fresh id.
+    ///
+    /// # Errors
+    ///
+    /// The daemon did not answer, refused the create, or the operation did not succeed within
+    /// `bound`; an operation that ended otherwise is named with its answer.
+    pub async fn create_workspace_settled(
+        &mut self,
+        bound: Duration,
+        pause: Duration,
+    ) -> Result<String> {
+        let operation = ulid::Ulid::generate().to_string();
+        let (status, answer) = self.post_workspace(&operation).await?;
+        if status == 201 {
+            return created_id(&answer);
+        }
+        let code = code_of(&answer);
+        ensure!(
+            code == OUTCOME_UNKNOWN && answer["error"]["retriable"] == true,
+            "creating the workspace answered {status} {code}"
+        );
+        let result = self
+            .settled(&operation, bound, pause)
+            .await
+            .with_context(|| format!("creating the workspace answered {status} {code}"))?;
+        result["id"].as_str().map(str::to_owned).ok_or_else(|| {
+            anyhow!("the create's operation {operation} succeeded naming no workspace: {result}")
+        })
+    }
+
+    /// Reads `GET /v1/ops/{operation}` every `pause` until the operation is terminal, within
+    /// `bound`, and answers its successful result: the clean-room runner's `settled`, over the
+    /// lane's socket.
+    ///
+    /// # Errors
+    ///
+    /// The read failed, the operation did not end within `bound`, or it ended refused or with an
+    /// error, named with its state and code.
+    pub async fn settled(
+        &mut self,
+        operation: &str,
+        bound: Duration,
+        pause: Duration,
+    ) -> Result<Value> {
+        let until = Instant::now() + bound;
+        loop {
+            let (status, answer) = self
+                .call("GET", &format!("/v1/ops/{operation}"), None)
+                .await?;
+            ensure!(
+                status == 200,
+                "reading operation {operation} answered {status} {}",
+                code_of(&answer)
+            );
+            let record: substrate_wire::OperationRecord =
+                serde_json::from_value(answer["result"].clone())
+                    .with_context(|| format!("operation {operation} reads no record: {answer}"))?;
+            match record.state {
+                substrate_wire::OperationState::Terminal
+                | substrate_wire::OperationState::Refused => {
+                    let state = answer["result"]["state"].as_str().unwrap_or_default();
+                    return match record.outcome {
+                        Some(substrate_wire::OperationOutcome::Success { result }) => Ok(result),
+                        Some(substrate_wire::OperationOutcome::Error { error }) => bail!(
+                            "operation {operation} ended {state} {}: {}",
+                            error.code,
+                            error.message
+                        ),
+                        None => bail!("operation {operation} ended {state} with no outcome"),
+                    };
+                }
+                substrate_wire::OperationState::Accepted
+                | substrate_wire::OperationState::Unknown => {}
+            }
+            ensure!(
+                Instant::now() < until,
+                "operation {operation} did not end within {} s",
+                bound.as_secs()
+            );
+            tokio::time::sleep(pause).await;
+        }
+    }
+
+    /// Waits until `workspace`, whose destroy step 6 asked for, reads absent, reading it every
+    /// `pause` within `bound`.
+    ///
+    /// # Errors
+    ///
+    /// The daemon did not answer, or the workspace still reads present after `bound`.
+    pub async fn destroy_completes(
+        &mut self,
+        workspace: &str,
+        bound: Duration,
+        pause: Duration,
+    ) -> Result<()> {
+        let deadline = Instant::now() + bound;
+        while !self.absent(workspace).await? {
+            ensure!(
+                Instant::now() < deadline,
+                "the destroy did not complete within {} s once the foreign Pod was gone",
+                bound.as_secs()
+            );
+            tokio::time::sleep(pause).await;
+        }
+        Ok(())
     }
 
     /// Asks the daemon to destroy `workspace`: `Ok` once absent, else the refusal's status and
@@ -928,6 +1048,13 @@ impl Drop for Daemon {
 fn nix_uid() -> u32 {
     // SAFETY: `getuid(2)` cannot fail and touches no memory.
     unsafe { libc::getuid() }
+}
+
+fn created_id(answer: &Value) -> Result<String> {
+    Ok(answer["result"]["id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("a created workspace names no id: {answer}"))?
+        .to_owned())
 }
 
 fn code_of(answer: &Value) -> String {
@@ -1591,9 +1718,8 @@ impl Steps<'_> {
     async fn foreign_keeper(&self, daemon: &mut Daemon, other_deployment: bool) -> Result<String> {
         let before = self.keepers(LANE_DEPLOYMENT).await?;
         let workspace = daemon
-            .create_workspace()
-            .await?
-            .map_err(|(status, code)| anyhow!("creating the workspace answered {status} {code}"))?;
+            .create_workspace_settled(SETTLE_BOUND, SETTLE_POLL)
+            .await?;
         let after = self.keepers(LANE_DEPLOYMENT).await?;
         let keeper = match after.difference(&before).collect::<Vec<_>>().as_slice() {
             [keeper] => (*keeper).clone(),
@@ -1637,19 +1763,9 @@ impl Steps<'_> {
         let codes = named_codes(&daemon.log());
         let _ = self.admin.delete(&path, 0).await;
         self.wait_gone(&path).await?;
-        let completed = async {
-            let deadline = Instant::now() + ABSENCE_BOUND;
-            while !daemon.absent(&workspace).await? {
-                ensure!(
-                    Instant::now() < deadline,
-                    "the destroy did not complete within {} s once the foreign Pod was gone",
-                    ABSENCE_BOUND.as_secs()
-                );
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Ok::<(), anyhow::Error>(())
-        }
-        .await;
+        let completed = daemon
+            .destroy_completes(&workspace, ABSENCE_BOUND, Duration::from_secs(2))
+            .await;
         let (status, code) = match refused {
             Ok(()) => bail!(
                 "the destroy reported {workspace} absent while a foreign {keeper} held its name"
@@ -3259,6 +3375,253 @@ mod tests {
             sweep(&mut stuck, Duration::from_millis(50)).expect_err("a stuck one fails")
         );
         assert!(error.contains("ws_a"), "{error}");
+    }
+
+    /// The lane daemon as step 6's create once met it: the create is accepted, its answer is lost
+    /// and it answers 500 `operation.outcome-unknown`; its operation reads `unknown` once, then
+    /// ends with `end`. A destroy is left to reconciliation and the workspace reads absent on the
+    /// read after it.
+    struct Ledger {
+        /// The operation's end: its state and outcome, as `GET /v1/ops/{op}` carries them.
+        end: (&'static str, Value),
+        /// The create's operation id, once a create came.
+        operation: Option<String>,
+        reads: u32,
+        /// Each workspace the daemon holds, and whether its destroy was asked for.
+        workspaces: BTreeMap<String, bool>,
+        creates: u32,
+    }
+
+    impl Ledger {
+        fn ending(state: &'static str, outcome: Value) -> Self {
+            Self {
+                end: (state, outcome),
+                operation: None,
+                reads: 0,
+                workspaces: BTreeMap::new(),
+                creates: 0,
+            }
+        }
+
+        fn error(class: &str, code: &str, retriable: bool) -> Value {
+            json!({"class": class, "code": code, "message": "m", "retriable": retriable})
+        }
+
+        fn record(operation: &str, state: &str, outcome: &Value) -> Value {
+            json!({"api_version": "v1", "request_id": "req", "result": {
+                "operation": operation,
+                "operation_kind": "workspace.create",
+                "request_hash": "sha256:00",
+                "state": state,
+                "accepted_at": "2026-11-04T00:00:00Z",
+                "terminal_at": null,
+                "capability_snapshot": null,
+                "actor": "local",
+                "principal": null,
+                "resource": "ws_settled",
+                "outcome": outcome,
+            }})
+        }
+
+        fn answer(&mut self, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
+            let segments: Vec<&str> = path.trim_start_matches("/v1/").split('/').collect();
+            match (method, segments.as_slice()) {
+                ("POST", ["workspaces"]) => {
+                    self.creates += 1;
+                    if self.operation.is_some() {
+                        // A create resent under a fresh id makes a second workspace.
+                        self.workspaces
+                            .insert(format!("ws_{}", self.creates), false);
+                        return (
+                            201,
+                            json!({"result": {"id": format!("ws_{}", self.creates)}}),
+                        );
+                    }
+                    let operation = body.and_then(|body| body["op"].as_str()).unwrap_or("");
+                    self.operation = Some(operation.to_owned());
+                    if self.end.1["kind"] == "success" {
+                        self.workspaces.insert("ws_settled".to_owned(), false);
+                    }
+                    (
+                        500,
+                        json!({"error": Self::error("failed", OUTCOME_UNKNOWN, true)}),
+                    )
+                }
+                ("GET", ["ops", operation]) if self.operation.as_deref() == Some(*operation) => {
+                    self.reads += 1;
+                    if self.reads == 1 {
+                        return (200, Self::record(operation, "unknown", &Value::Null));
+                    }
+                    (200, Self::record(operation, self.end.0, &self.end.1))
+                }
+                ("DELETE", ["workspaces", id]) if self.workspaces.contains_key(*id) => {
+                    self.workspaces.insert((*id).to_owned(), true);
+                    (
+                        500,
+                        json!({"error": Self::error("failed", OUTCOME_UNKNOWN, true)}),
+                    )
+                }
+                ("GET", ["workspaces", id]) => match self.workspaces.get(*id) {
+                    Some(true) => {
+                        self.workspaces.remove(*id);
+                        (200, json!({"result": {"id": id, "state": "destroying"}}))
+                    }
+                    Some(false) => (200, json!({"result": {"id": id, "state": "ready"}})),
+                    None => (
+                        404,
+                        json!({"error": Self::error("refused", "resource.not-found", false)}),
+                    ),
+                },
+                _ => (
+                    404,
+                    json!({"error": Self::error("refused", "resource.not-found", false)}),
+                ),
+            }
+        }
+    }
+
+    /// One request off a lane daemon's socket: the method, the path and the JSON body.
+    fn read_request(
+        stream: &mut std::os::unix::net::UnixStream,
+    ) -> (String, String, Option<Value>) {
+        let mut received = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            if let Some(boundary) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&received[..boundary]).into_owned();
+                let length: usize = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .and_then(|length| length.trim().parse().ok())
+                    .unwrap_or(0);
+                if received.len() >= boundary + 4 + length {
+                    let mut words = head.split_whitespace();
+                    let method = words.next().unwrap_or_default().to_owned();
+                    let path = words.next().unwrap_or_default().to_owned();
+                    let body = serde_json::from_slice(&received[boundary + 4..][..length]).ok();
+                    return (method, path, body);
+                }
+            }
+            let read = std::io::Read::read(stream, &mut chunk).expect("request read");
+            assert!(read > 0, "the request ended early");
+            received.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    /// A [`Daemon`] the lane talks to as it does to the shipped one, over its Unix socket, with
+    /// `ledger` answering.
+    fn lane_daemon(directory: &Path, ledger: &std::sync::Arc<std::sync::Mutex<Ledger>>) -> Daemon {
+        let socket = directory.join("d.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let ledger = std::sync::Arc::clone(ledger);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let (method, path, body) = read_request(&mut stream);
+                let (status, answer) =
+                    ledger
+                        .lock()
+                        .expect("ledger")
+                        .answer(&method, &path, body.as_ref());
+                let payload = answer.to_string();
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{payload}",
+                        payload.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        Daemon {
+            child: None,
+            socket,
+            log: directory.join("daemon.log"),
+            sequence: 0,
+        }
+    }
+
+    /// story:namespace-lane-same-named-case-creates-its-workspace: step 6's create answered 500
+    /// `operation.outcome-unknown` once and its operation then read `succeeded`. Design 01 § 6:
+    /// the lane reads the operation to its end, never resends the create, continues with the
+    /// workspace the operation made, and the case's own destroy then removes it, so step 7 finds
+    /// nothing.
+    #[tokio::test]
+    async fn step_six_settles_an_outcome_unknown_create_and_leaves_nothing_for_step_seven() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let ledger = std::sync::Arc::new(std::sync::Mutex::new(Ledger::ending(
+            "terminal",
+            json!({"kind": "success", "result": {"id": "ws_settled", "state": "ready"}}),
+        )));
+        let mut daemon = lane_daemon(directory.path(), &ledger);
+
+        let workspace = daemon
+            .create_workspace_settled(Duration::from_secs(5), Duration::ZERO)
+            .await
+            .expect("an outcome-unknown create whose operation succeeded settles");
+        assert_eq!(workspace, "ws_settled");
+        let refused = daemon.destroy(&workspace).await.expect("answered");
+        assert!(
+            refused.is_err(),
+            "the fake leaves the destroy to reconciliation"
+        );
+        daemon
+            .destroy_completes(&workspace, Duration::from_secs(5), Duration::ZERO)
+            .await
+            .expect("the case's destroy completes");
+
+        let ledger = ledger.lock().expect("ledger");
+        assert_eq!(
+            ledger.creates, 1,
+            "the create is never resent under a fresh id"
+        );
+        assert!(ledger.reads >= 2, "the operation is read until it ends");
+        assert!(
+            ledger.workspaces.is_empty(),
+            "step 6 left {:?} for step 7",
+            ledger.workspaces.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The counterpart: an outcome-unknown create whose operation ends failed, or refused, fails
+    /// the case, and the failure names the operation's answer.
+    #[tokio::test]
+    async fn step_six_fails_naming_the_operations_answer_when_the_create_ended_otherwise() {
+        for state in ["terminal", "refused"] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let ledger = std::sync::Arc::new(std::sync::Mutex::new(Ledger::ending(
+                state,
+                json!({"kind": "error", "error": Ledger::error(
+                    "failed", "kubernetes.api-failed", false,
+                )}),
+            )));
+            let mut daemon = lane_daemon(directory.path(), &ledger);
+
+            let error = format!(
+                "{:#}",
+                daemon
+                    .create_workspace_settled(Duration::from_secs(5), Duration::ZERO)
+                    .await
+                    .expect_err("a create whose operation failed fails the case")
+            );
+            let operation = ledger
+                .lock()
+                .expect("ledger")
+                .operation
+                .clone()
+                .expect("a create came");
+            assert!(
+                error.contains("kubernetes.api-failed")
+                    && error.contains(&operation)
+                    && error.contains(state),
+                "{state}: {error}"
+            );
+            assert_eq!(ledger.lock().expect("ledger").creates, 1);
+            assert!(
+                ledger.lock().expect("ledger").reads >= 2,
+                "{state}: the failure is the operation's answer, read from it"
+            );
+        }
     }
 
     /// D342: a failed case keeps the daemon logs written while it ran, outside the run's
