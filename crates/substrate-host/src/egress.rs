@@ -929,13 +929,19 @@ fn abandon_forwarder(pid: libc::pid_t) {
     #[cfg(not(test))]
     let killed_by_case = false;
     // SAFETY: `pid` is a child this process forked and has not reaped; killing one that has
-    // already exited is harmless, and the wait reaps it either way.
+    // already exited is harmless, and the wait reaps it either way. A wait a handled signal
+    // interrupts (`EINTR`, from a handler installed without `SA_RESTART`) is waited again, or the
+    // forwarder would be left a zombie; any other error ends it.
     unsafe {
         if !killed_by_case {
             libc::kill(pid, libc::SIGKILL);
         }
         let mut status = 0;
-        libc::waitpid(pid, &raw mut status, 0);
+        while libc::waitpid(pid, &raw mut status, 0) < 0 {
+            if *libc::__errno_location() != libc::EINTR {
+                break;
+            }
+        }
     }
 }
 
