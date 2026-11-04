@@ -7,6 +7,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.19.2] — 2026-11-04
+
+Fixes only; the wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are
+unchanged. A bare exec refusal from the Kubernetes namespace driver keeps a denied `create` named
+when the following access review fails, a refused egress aperture install reaps its forwarder
+through an interrupted wait, and the namespace lane settles a workspace create whose outcome is
+unknown.
+
+### Fixed
+
+- When the Kubernetes namespace driver's `SelfSubjectAccessReview` denies `pods/exec` `create` and
+  the following `get` review is refused, fails, answers no `allowed` or does not answer within the
+  5 s bound, the bare exec refusal names the `create` denial before it says the refused verb is
+  unknown, and keeps the API's answer (design 34 § 7.1).
+- A refused egress aperture install reaps its abandoned forwarder even when a signal handler
+  installed without `SA_RESTART` interrupts the wait, so no refused install leaves a zombie.
+- `cargo xtask namespace-lane observe` settles a workspace create answered 500
+  `operation.outcome-unknown` in its same-named-object and foreign-uid cases by reading the
+  operation to its end, as design 01 § 6 asks, instead of failing the case and leaving the
+  workspace's keeper Pod and claim behind.
+
 ## [0.19.1] — 2026-11-02
 
 Fixes only; the wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are

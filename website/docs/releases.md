@@ -15,34 +15,23 @@ What 0.16.1 first publishes is listed under 0.16.0 in the full changelog and sum
 
 <!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->
 
-## 0.19.1 (2026-11-02)
+## 0.19.2 (2026-11-04)
 
 Fixes only; the wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are
-unchanged. The Kubernetes namespace driver no longer reads an undecided access review as a denial or
-publishes an older probe over a newer one, the `pod` adapter sweeps a written `NetworkPolicy` once a
-replay shows its run stopped, and an egress aperture install sees its forwarder die at once.
+unchanged. A bare exec refusal from the Kubernetes namespace driver keeps a denied `create` named
+when the following access review fails, a refused egress aperture install reaps its forwarder
+through an interrupted wait, and the namespace lane settles a workspace create whose outcome is
+unknown.
 
-### Changed in 0.19.1
+### Fixed in 0.19.2
 
-- The ESS pin moves from 0.80.0 to 0.81.0.
-
-### Fixed in 0.19.1
-
-- The Kubernetes namespace driver no longer reads a `SelfSubjectAccessReview` that answers
-  `allowed: false` with a `status.evaluationError`, and no `denied: true`, as a denial. A bare exec
-  refusal names any verb an earlier review denied, then says that this review does not decide the
-  refused verb and quotes the API's evaluation error, bearer token cleared and bounded to 300
-  characters (design 34 § 7.1).
-- Two snapshot calls that overlap in the Kubernetes namespace driver no longer publish an older
-  probe's snapshot, generation and node over a newer one; the snapshot is computed and published
-  under one lock.
-- The `pod` adapter's sweep again removes a `NetworkPolicy` written after its create once a watch
-  replay from the policy's own `resourceVersion` shows its run's container terminated; a replay
-  that ends in a `BOOKMARK` alone still keeps it (design 28).
-- A `NetworkPolicy` the `pod` adapter keeps because it was written after its create logs one
-  `warn` that names the write, and the `info` line every open sweep logged for every written policy
-  is gone.
-- An egress aperture install whose forwarder dies before its report is refused at once, even when
-  a child that another thread forked during the install still holds the report socket: the
-  installer waits on the forwarder's pidfd beside the socket. A pidfd that cannot be opened refuses
-  the install with `exec.aperture-install-failed`.
+- When the Kubernetes namespace driver's `SelfSubjectAccessReview` denies `pods/exec` `create` and
+  the following `get` review is refused, fails, answers no `allowed` or does not answer within the
+  5 s bound, the bare exec refusal names the `create` denial before it says the refused verb is
+  unknown, and keeps the API's answer (design 34 § 7.1).
+- A refused egress aperture install reaps its abandoned forwarder even when a signal handler
+  installed without `SA_RESTART` interrupts the wait, so no refused install leaves a zombie.
+- `cargo xtask namespace-lane observe` settles a workspace create answered 500
+  `operation.outcome-unknown` in its same-named-object and foreign-uid cases by reading the
+  operation to its end, as design 01 § 6 asks, instead of failing the case and leaving the
+  workspace's keeper Pod and claim behind.
