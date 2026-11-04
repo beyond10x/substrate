@@ -1707,6 +1707,29 @@ mod tests {
     };
     use crate::{DriverError, DriverErrorClass, HostConfig};
 
+    /// The reap of an abandoned forwarder retries only `EINTR`: a wait that fails otherwise, here
+    /// `ECHILD` for a child already reaped, ends at once instead of waiting again forever. The
+    /// case's hook stands in for the `SIGKILL`, so no signal reaches a recycled pid.
+    #[test]
+    fn a_reap_that_fails_other_than_eintr_ends_at_once() {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = libc::pid_t::try_from(child.id()).expect("pid");
+        child.wait().expect("reap true here");
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            super::KILL_ON_ABANDON.set(Some(Box::new(|_| {})));
+            super::abandon_forwarder(pid);
+            let _ = done.send(());
+        });
+        assert!(
+            ended
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "story:abandoned-forwarder-reaped-through-eintr: a reap that failed with ECHILD did \
+             not end within 5 s"
+        );
+    }
+
     const BUBBLEWRAP: &str = "/usr/bin/bwrap";
     /// What the model-free fake app-server answers with. Not a model, not a protocol: bytes.
     const APP_SERVER_BODY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
