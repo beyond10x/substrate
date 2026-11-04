@@ -315,8 +315,10 @@ the refused verb. A review that answers `allowed: false` with a `status.evaluati
 `denied: true` is no decision either: the driver asks no further review and says, after any verb
 an earlier review denied, that this review does not decide the refused verb, with the API's
 evaluation error quoted as the client quotes an API message (bearer token cleared, then at most
-300 characters). A review that is refused, fails or outlasts the 5 s keeps the API's answer and
-names the verb unknown, with why. The handshake ends at once in every case, and a 401 or a 403 that
+300 characters). A review that is refused, fails, answers no `allowed` or outlasts the 5 s keeps
+the API's answer and names the verb unknown, with why, after any verb an earlier review denied
+within the 5 s (`a SelfSubjectAccessReview denies pods/exec create, and the refused verb is
+unknown: ...`). The handshake ends at once in every case, and a 401 or a 403 that
 gives its reason asks no review. The review needs no Role rule: every authenticated subject may
 create one through `system:basic-user`, which O8 observed on the lane (`DEFAULT_RESOURCE_RULES` in
 `crates/substrate-kubernetes/src/rules.rs`).
@@ -894,3 +896,7 @@ memory, so it does not survive a restart (§ 5, the signal row).
 ## Amendments of 2026-11-02
 
 - § 7.1 (`story:access-review-evaluation-error-is-not-a-denial`): `allowed: false` is a denial only without a non-empty `status.evaluationError`, or with `denied: true`. A review that answers an evaluation error otherwise, as an authorizer that failed or had no opinion does, ends the asking, and the refusal says `a SelfSubjectAccessReview of pods/exec <verb> does not decide the refused verb: its evaluationError is <error>`, the error bounded as every quoted API message is. A verb an earlier review denied is still named before it: `a SelfSubjectAccessReview denies pods/exec create, and a SelfSubjectAccessReview of pods/exec get does not decide the refused verb: its evaluationError is <error>`, which is not the namespace lane's S6 line, because that review leaves `get` undecided. A webhook with no opinion that sets no evaluation error still reads as a denial, because RBAC's own denial answers the same.
+
+## Amendments of 2026-11-04
+
+- § 7.1 (`story:failed-get-review-keeps-the-create-denial`): a `get` review that is refused, fails, answers no `allowed` or outlasts the 5 s after a review that denied `create` no longer drops that denial. The refusal keeps the API's answer and says `a SelfSubjectAccessReview denies pods/exec create, and the refused verb is unknown: ` followed by why, as the evaluation-error branch already did since 2026-11-02. The 5 s bound still holds both reviews together; the denials collected before it pass survive it. This line is not the namespace lane's S6 line either, because `get` stays undecided.
