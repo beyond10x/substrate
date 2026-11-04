@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-04T07:29:57Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-lane-exec-create-case-reads-the-apis-bare-refusal",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "commit 3413131d (tag 0.18.1): xtask the_exec_create_case_reads_the_apis_bare_refusal_and_stays_distinct_from_get; refined by ec461246 and 79b7fb0d (tag 0.19.0)"
+  }
+}

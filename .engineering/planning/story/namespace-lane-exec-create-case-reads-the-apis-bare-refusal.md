@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:namespace-lane-exec-create-case-reads-the-apis-bare-refusal
 kind: story
-status: active
+status: implemented
 title: The pods/exec create case reads the API's bare refusal
 relations:
 - decomposes: epic:confinement-contract-family
@@ -10,10 +10,11 @@ relations:
 scope:
 - confidence: cited
   path: xtask/src/namespace_lane_run.rs
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T10:16:17Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-01T10:16:17Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-04T07:29:57Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":2,"health_observation":2}}}
 ---
 # Story: the pods/exec create case reads the API's bare refusal
 
