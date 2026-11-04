@@ -3624,6 +3624,270 @@ mod tests {
         }
     }
 
+    /// How a scripted lane daemon answers one request: method, path and body in, status and
+    /// envelope out.
+    type Respond = Box<dyn FnMut(&str, &str, Option<&Value>) -> (u16, Value) + Send>;
+
+    /// A [`Daemon`] whose socket answers each request with `respond`, and the `METHOD path` of
+    /// every request it received, in order.
+    fn scripted_daemon(
+        directory: &Path,
+        mut respond: Respond,
+    ) -> (Daemon, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let socket = directory.join("scripted.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requests = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let (method, path, body) = read_request(&mut stream);
+                requests
+                    .lock()
+                    .expect("requests")
+                    .push(format!("{method} {path}"));
+                let (status, answer) = respond(&method, &path, body.as_ref());
+                let payload = answer.to_string();
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{payload}",
+                        payload.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        let daemon = Daemon {
+            child: None,
+            socket,
+            log: directory.join("daemon.log"),
+            sequence: 0,
+        };
+        (daemon, seen)
+    }
+
+    /// The operation id of the first `GET /v1/ops/{op}` among `requests`.
+    fn operation_read(requests: &[String]) -> String {
+        requests
+            .iter()
+            .find_map(|request| request.strip_prefix("GET /v1/ops/"))
+            .expect("the operation was read")
+            .to_owned()
+    }
+
+    /// story:namespace-lane-same-named-case-creates-its-workspace: step 6's ordinary create, a
+    /// 201, goes on with the workspace it names and reads no operation.
+    #[tokio::test]
+    async fn step_six_goes_on_with_a_created_workspace_and_reads_no_operation() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (mut daemon, requests) = scripted_daemon(
+            directory.path(),
+            Box::new(|method, path, _| match (method, path) {
+                ("POST", "/v1/workspaces") => (
+                    201,
+                    json!({"result": {"id": "ws_direct", "state": "ready"}}),
+                ),
+                _ => (
+                    404,
+                    json!({"error": Ledger::error("refused", "resource.not-found", false)}),
+                ),
+            }),
+        );
+
+        let workspace = daemon
+            .create_workspace_settled(Duration::from_secs(5), Duration::ZERO)
+            .await
+            .expect("a 201 create is the case's workspace");
+
+        assert_eq!(workspace, "ws_direct");
+        assert_eq!(
+            *requests.lock().expect("requests"),
+            vec!["POST /v1/workspaces".to_owned()]
+        );
+    }
+
+    /// story:namespace-lane-same-named-case-creates-its-workspace: an answered refusal, and an
+    /// outcome-unknown the daemon does not call retriable, are not settled: the case fails naming
+    /// the create's answer and reads no operation.
+    #[tokio::test]
+    async fn step_six_settles_only_a_retriable_outcome_unknown() {
+        for (status, code, retriable) in [
+            (429_u16, "workspace.capacity", false),
+            (500, OUTCOME_UNKNOWN, false),
+        ] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let (mut daemon, requests) = scripted_daemon(
+                directory.path(),
+                Box::new(move |method, path, _| match (method, path) {
+                    ("POST", "/v1/workspaces") => (
+                        status,
+                        json!({"error": Ledger::error("failed", code, retriable)}),
+                    ),
+                    _ => (
+                        404,
+                        json!({"error": Ledger::error("refused", "resource.not-found", false)}),
+                    ),
+                }),
+            );
+
+            let error = format!(
+                "{:#}",
+                daemon
+                    .create_workspace_settled(Duration::from_secs(5), Duration::ZERO)
+                    .await
+                    .expect_err("the create is refused")
+            );
+
+            assert_eq!(
+                error,
+                format!("creating the workspace answered {status} {code}")
+            );
+            assert_eq!(
+                *requests.lock().expect("requests"),
+                vec!["POST /v1/workspaces".to_owned()],
+                "{status} {code}: no operation is read"
+            );
+        }
+    }
+
+    /// story:namespace-lane-same-named-case-creates-its-workspace: an outcome-unknown create
+    /// whose operation never ends fails the case at the bound, naming the operation, and the
+    /// create is not resent while it waits. Bounded itself, so a settle that never gives up
+    /// fails here instead of hanging the suite.
+    #[tokio::test]
+    async fn step_six_gives_up_at_the_bound_when_the_operation_never_ends() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (mut daemon, requests) = scripted_daemon(
+            directory.path(),
+            Box::new(
+                |method, path, _| match (method, path.strip_prefix("/v1/ops/")) {
+                    ("POST", _) => (
+                        500,
+                        json!({"error": Ledger::error("failed", OUTCOME_UNKNOWN, true)}),
+                    ),
+                    ("GET", Some(operation)) => {
+                        (200, Ledger::record(operation, "unknown", &Value::Null))
+                    }
+                    _ => (
+                        404,
+                        json!({"error": Ledger::error("refused", "resource.not-found", false)}),
+                    ),
+                },
+            ),
+        );
+
+        let settled = tokio::time::timeout(
+            Duration::from_secs(10),
+            daemon.create_workspace_settled(Duration::from_millis(300), Duration::from_millis(20)),
+        )
+        .await
+        .expect("the settle gives up at its bound");
+        let error = format!("{:#}", settled.expect_err("an operation that never ends"));
+
+        let requests = requests.lock().expect("requests").clone();
+        let operation = operation_read(&requests);
+        assert!(
+            error.contains(&format!("operation {operation} did not end within")),
+            "{error}"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST"))
+                .count(),
+            1,
+            "the create is not resent: {requests:?}"
+        );
+        assert!(
+            requests.len() >= 3,
+            "the operation is read again: {requests:?}"
+        );
+    }
+
+    /// story:namespace-lane-same-named-case-creates-its-workspace: an operation read the daemon
+    /// itself refuses (404) or fails (500) ends the settle at once, naming that answer; it is not
+    /// read again until the bound.
+    #[tokio::test]
+    async fn step_six_fails_at_once_when_the_operation_read_is_not_answered() {
+        for (status, code) in [(404_u16, "resource.not-found"), (500, "store.unavailable")] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let (mut daemon, requests) = scripted_daemon(
+                directory.path(),
+                Box::new(move |method, _, _| match method {
+                    "POST" => (
+                        500,
+                        json!({"error": Ledger::error("failed", OUTCOME_UNKNOWN, true)}),
+                    ),
+                    _ => (
+                        status,
+                        json!({"error": Ledger::error("failed", code, status == 500)}),
+                    ),
+                }),
+            );
+
+            let error = format!(
+                "{:#}",
+                daemon
+                    .create_workspace_settled(Duration::from_secs(5), Duration::ZERO)
+                    .await
+                    .expect_err("an unreadable operation fails the case")
+            );
+
+            let requests = requests.lock().expect("requests").clone();
+            let operation = operation_read(&requests);
+            assert!(
+                error.contains(&format!(
+                    "reading operation {operation} answered {status} {code}"
+                )),
+                "{status}: {error}"
+            );
+            assert_eq!(requests.len(), 2, "{status}: read once: {requests:?}");
+        }
+    }
+
+    /// story:namespace-lane-same-named-case-creates-its-workspace: an operation that succeeded
+    /// naming no workspace fails the case, naming the operation; it never yields an empty id the
+    /// case's destroy would then miss.
+    #[tokio::test]
+    async fn step_six_fails_when_the_settled_create_names_no_workspace() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (mut daemon, requests) = scripted_daemon(
+            directory.path(),
+            Box::new(
+                |method, path, _| match (method, path.strip_prefix("/v1/ops/")) {
+                    ("GET", Some(operation)) => (
+                        200,
+                        Ledger::record(
+                            operation,
+                            "terminal",
+                            &json!({"kind": "success", "result": {"state": "ready"}}),
+                        ),
+                    ),
+                    _ => (
+                        500,
+                        json!({"error": Ledger::error("failed", OUTCOME_UNKNOWN, true)}),
+                    ),
+                },
+            ),
+        );
+
+        let error = format!(
+            "{:#}",
+            daemon
+                .create_workspace_settled(Duration::from_secs(5), Duration::ZERO)
+                .await
+                .expect_err("a success naming no workspace")
+        );
+
+        let operation = operation_read(&requests.lock().expect("requests"));
+        assert!(
+            error.contains(&format!(
+                "the create's operation {operation} succeeded naming no workspace"
+            )),
+            "{error}"
+        );
+    }
+
     /// D342: a failed case keeps the daemon logs written while it ran, outside the run's
     /// temporary directory, and its failure names where; a log no daemon wrote during the case,
     /// and a file that is no daemon log, are not kept.
