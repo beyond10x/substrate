@@ -2,16 +2,17 @@
 format: aep.planning-md/3
 id: story:namespace-lane-same-named-case-creates-its-workspace
 kind: story
-status: active
+status: implemented
 title: The namespace lane's same-named-object case creates its workspace on every run
 relations:
 - informed_by: review-result:wave-2026-10-31-d337-adversary-pass-1
 - informed_by: approval-record:d338-review-findings-decided-in-session
 - informed_by: approval-record:wave-2026-11-04-substrate
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-01T00:28:53Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-04T07:33:32Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-05T02:30:25Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 # Story: the namespace lane's same-named-object case creates its workspace on every run
 

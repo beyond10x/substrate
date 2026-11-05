@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T02:30:24Z",
+  "actor": "human:timo",
+  "artifact": "story:abandoned-forwarder-reaped-through-eintr",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local full gate (A at f58c3d1d; B at f58c3d1d: 2613 passed, 1 failed = the netns floor host gap of approval-record:wave-2026-11-04-substrate-gate-host-gap; C at 6a48c956; D at 041c1a3e) and PR 212 CI run 41952401568 at b96584d6: all 15 checks green, the netns floor test included",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/41952401568"
+  }
+}
