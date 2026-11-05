@@ -2,16 +2,17 @@
 format: aep.planning-md/3
 id: story:systemd-netns-floor-tolerates-down-fallback-tunnels
 kind: story
-status: active
+status: implemented
 title: The systemd run's netns floor holds on a host with a tunnel module loaded
 tags:
 - from-finding
 relations:
 - informed_by: approval-record:wave-2026-11-04-substrate-gate-host-gap
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-05T02:30:25Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-05T02:30:25Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-05T06:18:55Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 # Story: the systemd run's netns floor holds on a host with a tunnel module loaded
 
