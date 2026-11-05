@@ -35,3 +35,11 @@ unknown.
   `operation.outcome-unknown` in its same-named-object and foreign-uid cases by reading the
   operation to its end, as design 01 § 6 asks, instead of failing the case and leaving the
   workspace's keeper Pod and claim behind.
+
+### Security in 0.19.2
+
+- `pulldown-cmark` is 0.13.6, taking the fix for
+  [RUSTSEC-2026-0433](https://rustsec.org/advisories/RUSTSEC-2026-0433.html), quadratic parsing of
+  nested image wikilinks. Only `xtask` depends on it, and `check-links` parses the repository's own
+  Markdown with `Options::all()`, which turns on `ENABLE_WIKILINKS`. No shipped crate is affected.
+  `THIRD_PARTY_LICENSES.html` names the new version.
