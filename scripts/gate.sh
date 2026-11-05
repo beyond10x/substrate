@@ -43,6 +43,15 @@ step static cargo xtask check-docs
 step tests cargo test --workspace --release --locked
 step static cargo fmt --all --check
 step tests cargo clippy --workspace --all-targets --release --locked -- -D warnings
+# A confinement-only consumer takes the host driver with `default-features = false`, without `git`
+# and `kubernetes`: that build lints clean, and the confinement cases that need neither run in it,
+# each target named so a renamed one fails instead of shrinking the lane. The variable makes
+# `host_features` fail if that build has either feature after all.
+step tests cargo clippy -p b10x-substrate-host --no-default-features --all-targets --release --locked \
+  -- -D warnings
+step tests env SUBSTRATE_HOST_NO_DEFAULT_FEATURES=1 \
+  cargo test -p b10x-substrate-host --no-default-features --release --locked \
+  --test host_features --test ess_confinement_local --test consumer_surface
 step static cargo xtask check-links
 step static cargo xtask check-adrs
 step static cargo xtask check-secrets

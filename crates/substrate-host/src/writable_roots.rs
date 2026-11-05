@@ -571,6 +571,8 @@ mod tests {
         assert!(error.message.contains("ws_checkout"), "{}", error.message);
     }
 
+    // A build without `git` reads no baseline, so it pins no Git root at all.
+    #[cfg(feature = "git")]
     #[test]
     fn a_git_workspace_is_pinned_beneath_the_root_and_bound_writable_with_its_git_directory() {
         let workspaces = Workspaces::new();

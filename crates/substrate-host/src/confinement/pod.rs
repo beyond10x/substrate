@@ -18,6 +18,11 @@
 //! client, `b10x-substrate-kubernetes-client`, which holds design 28's kubeconfig loader and its
 //! refusals and the rule for a gone Pod; it admits no Kubernetes client crate and runs no
 //! `kubectl`.
+//!
+//! A build without the `kubernetes` feature has no client: the adapter's public items are the same,
+//! and every open is refused `confinement.adapter-unserved` naming the feature (`pod_unserved.rs`).
+//! What only a cluster reaches is not compiled there, and what the rest still names is unused.
+#![cfg_attr(not(feature = "kubernetes"), allow(dead_code))]
 
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
@@ -26,18 +31,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-#[cfg(test)]
+#[cfg(all(test, feature = "kubernetes"))]
 use base64::Engine as _;
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
-#[cfg(test)]
+#[cfg(all(test, feature = "kubernetes"))]
 use substrate_kubernetes_client::JSON;
+#[cfg(feature = "kubernetes")]
 use substrate_kubernetes_client::{
     self as kubernetes, Method, Pacing, PodEnd, PodHistory, PodTrace, continuation, is_dns_label,
     kubeconfig, list_items, pod_end,
 };
 use substrate_wire::Signal;
 use tokio::sync::watch;
+
+#[cfg(not(feature = "kubernetes"))]
+use self::unserved::{kubernetes, open_cluster, read_log, request_stop};
 
 use super::local::LOCAL_POLICY_ENV;
 use super::{
@@ -85,6 +94,7 @@ const DEFAULT_BOUNDS: ProcessBounds = ProcessBounds {
     memory_bytes: 1 << 30,
     cpu_millis: 600_000,
 };
+#[cfg(feature = "kubernetes")]
 const MAX_API_BODY_BYTES: usize = kubernetes::MAX_API_BODY_BYTES;
 const MAX_ARGV_BYTES: usize = 262_144;
 const API_TIMEOUT: Duration = Duration::from_secs(30);
@@ -118,6 +128,7 @@ const REMOVE_ATTEMPTS: u32 = 60;
 const NOTICE: Duration = Duration::from_secs(2);
 /// How the adapter paces a removal: [`POLL`], [`REMOVE_ATTEMPTS`] and [`NOTICE`], which a unit
 /// case shortens.
+#[cfg(feature = "kubernetes")]
 const PACING: Pacing = Pacing {
     poll: POLL,
     remove_attempts: REMOVE_ATTEMPTS,
@@ -206,7 +217,8 @@ pub(crate) fn open(request: PodRequest) -> Result<Arc<dyn ConfinementAdapter>, C
 ///
 /// `confinement.adapter-unserved` when there is no cluster configuration, it is unusable
 /// (design 28 names each refused member), the cluster does not answer the probe, the credential
-/// may not read `pods/log`, or the sweep of orphaned `NetworkPolicy` objects fails.
+/// may not read `pods/log`, or the sweep of orphaned `NetworkPolicy` objects fails, and
+/// always in a build without the `kubernetes` feature.
 pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError> {
     open_pod_timed(request, PodTiming::default())
 }
@@ -217,6 +229,15 @@ pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError
 ///
 /// Those of [`open_pod`].
 pub fn open_pod_timed(
+    request: PodRequest,
+    timing: PodTiming,
+) -> Result<Arc<PodAdapter>, ConfinementError> {
+    open_cluster(request, timing)
+}
+
+/// [`open_pod_timed`] with the client; `pod_unserved.rs` holds the refusal of a build without it.
+#[cfg(feature = "kubernetes")]
+fn open_cluster(
     request: PodRequest,
     timing: PodTiming,
 ) -> Result<Arc<PodAdapter>, ConfinementError> {
@@ -273,6 +294,7 @@ impl DerefMut for Api {
     }
 }
 
+#[cfg(feature = "kubernetes")]
 impl Api {
     fn set_timing(&mut self, timing: PodTiming) {
         self.client.timeout = timing.api_timeout;
@@ -281,6 +303,7 @@ impl Api {
 }
 
 /// Design 28's loader, with the adapter's own settings read from the current context.
+#[cfg(feature = "kubernetes")]
 fn parse_cluster(bytes: &[u8]) -> Result<(Api, PodSettings), String> {
     let (mut client, settings) = kubeconfig::parse(bytes, settings)?;
     client.user_agent = "b10x-substrate-pod";
@@ -347,6 +370,7 @@ fn api_failed(detail: &str) -> ConfinementError {
 /// named, which the API answers 404 only to a credential that may read `pods/log` and 403 to one
 /// that may not. Without that access every run's output would be unreadable. Then [`sweep`], whose
 /// kept policies it returns.
+#[cfg(feature = "kubernetes")]
 fn probe(api: &Arc<Api>) -> Result<Vec<Deferred>, String> {
     let api = Arc::clone(api);
     std::thread::scope(|scope| {
@@ -436,6 +460,7 @@ fn owner_selector() -> String {
 /// Returns the owned policies it kept, younger than the floor, with their Pod present, or whose
 /// watch went unanswered, each marked with whether the API showed its Pod; [`defer_sweep`] checks
 /// them again. A policy whose container the API cannot show stopped stays, unchecked.
+#[cfg(feature = "kubernetes")]
 async fn sweep(api: &Api) -> Result<Vec<Deferred>, String> {
     let first = format!(
         "{}?labelSelector={}&limit={SWEEP_PAGE_ITEMS}",
@@ -517,6 +542,7 @@ async fn sweep(api: &Api) -> Result<Vec<Deferred>, String> {
 /// read showed a Pod object of the run (`pod_seen`, or a `uid` in `trace`), and while none did,
 /// the replay from the policy's `resourceVersion`, which may also show that the Pod was never
 /// created ([`kubernetes::Api::pod_history`], `story:pod-orphaned-policy-is-swept`).
+#[cfg(feature = "kubernetes")]
 async fn gone_pod(api: &Api, run: &str, trace: &PodTrace, pod_seen: bool) -> PodHistory {
     if pod_seen || trace.uid().is_some() {
         return PodHistory::End(pod_end(api, run, trace).await);
@@ -526,6 +552,7 @@ async fn gone_pod(api: &Api, run: &str, trace: &PodTrace, pod_seen: bool) -> Pod
 
 /// An owned policy the open sweep listed: its run, its creation time, whether it is old enough to
 /// be an orphan, and a trace starting at its `resourceVersion`.
+#[cfg(feature = "kubernetes")]
 type Candidate = (
     String,
     chrono::DateTime<chrono::FixedOffset>,
@@ -535,6 +562,7 @@ type Candidate = (
 
 /// Reads one page of the sweep's list at `path` and adds its owned policies to `candidates`; the
 /// `continue` token of the next page, or `None` on the last.
+#[cfg(feature = "kubernetes")]
 async fn sweep_page(
     api: &Api,
     path: &str,
@@ -598,6 +626,7 @@ fn written_after_create(policy: &Value, created: chrono::DateTime<chrono::FixedO
 
 /// [`pod_end`] for the run's task, asked again every `notice` while the API does not answer:
 /// whether the run's policy may go.
+#[cfg(feature = "kubernetes")]
 async fn settle(api: &Api, run: &str, trace: &PodTrace) -> bool {
     loop {
         match pod_end(api, run, trace).await {
@@ -626,6 +655,7 @@ async fn settle(api: &Api, run: &str, trace: &PodTrace) -> bool {
 /// An owned policy the open sweep kept: younger than [`SWEEP_AGE_FLOOR`], or its run's Pod exists,
 /// or whether its Pod's container stopped went unanswered.
 #[derive(Debug, Clone)]
+#[cfg(feature = "kubernetes")]
 struct Deferred {
     run: String,
     created: chrono::DateTime<chrono::FixedOffset>,
@@ -643,6 +673,7 @@ struct Deferred {
 /// ([`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`]) kept. A failed round is tried again at the
 /// next. Returns once the thread has its runtime, or why it has none. The runtime is built on the
 /// thread, never on the caller's, which may be inside a runtime that must not drop another.
+#[cfg(feature = "kubernetes")]
 fn defer_sweep(
     api: &Arc<Api>,
     mut deferred: Vec<Deferred>,
@@ -696,6 +727,7 @@ fn defer_sweep(
 /// list that fails fails the round before anything is deleted; a read, a watch or a deletion that
 /// fails keeps its policy for the next round. A policy whose container the API cannot show stopped
 /// stays, and is checked no more.
+#[cfg(feature = "kubernetes")]
 async fn resweep(api: &Api, deferred: &mut Vec<Deferred>) -> Result<(), String> {
     let (now, present) = owned_pods(api).await?;
     let mut index = 0;
@@ -776,6 +808,7 @@ async fn resweep(api: &Api, deferred: &mut Vec<Deferred>) -> Result<(), String> 
 /// `resourceVersion` for [`PodTrace::note`], read whole in at most [`SWEEP_MAX_PAGES`] pages of
 /// [`SWEEP_PAGE_ITEMS`], each Pod's metadata alone ([`kubernetes::METADATA_LIST`]), and the API
 /// server's clock on the first page.
+#[cfg(feature = "kubernetes")]
 async fn owned_pods(
     api: &Api,
 ) -> Result<
@@ -834,6 +867,7 @@ async fn owned_pods(
 /// objects of a run for it) and whose creation time the sweep can read. Any other policy is never a
 /// candidate: the sweep reads the Pod the label names and deletes the policy the name names, so the
 /// two must be one.
+#[cfg(feature = "kubernetes")]
 fn owned(policy: &Value) -> Option<(&str, chrono::DateTime<chrono::FixedOffset>)> {
     let metadata = &policy["metadata"];
     if metadata["labels"][MANAGED_BY_LABEL] != MANAGED_BY {
@@ -1264,6 +1298,7 @@ impl PodAdapter {
     }
 
     /// Every refusal and failure of a start, before the run exists.
+    #[cfg(feature = "kubernetes")]
     async fn start_run(
         &self,
         admitted: &AdmittedProfile,
@@ -1361,6 +1396,7 @@ impl PodAdapter {
     /// once the Pod is confirmed gone and the API shows its container stopped ([`pod_end`], from
     /// `trace`: the policy's `resourceVersion`, and the Pod its create stored when the answer came).
     /// The failure says when the policy stays.
+    #[cfg(feature = "kubernetes")]
     async fn abandon(&self, name: &str, error: &str, mut trace: PodTrace) -> ConfinementError {
         let pod_path = format!("{}/{name}", self.api.pods());
         if !self
@@ -1390,6 +1426,7 @@ impl PodAdapter {
 
 /// Reads the container's log, retried. A log that cannot be read is an error, never an empty
 /// output; only a container the API has not shown started has printed nothing yet.
+#[cfg(feature = "kubernetes")]
 async fn read_log(api: &Api, run: &PodRun) -> Result<(Vec<u8>, bool), String> {
     let mut failure = String::new();
     for attempt in 0..LOG_ATTEMPTS {
@@ -1461,6 +1498,7 @@ fn seal(run: &PodRun) {
 /// Asks the API to delete the run's Pod with `grace_seconds`, at least one: the kubelet stops the
 /// container and only then does the Pod go. The stop is recorded first, so a Pod seen gone
 /// afterwards is read as this deletion's.
+#[cfg(feature = "kubernetes")]
 async fn request_stop(
     api: &Api,
     run: &PodRun,
@@ -1488,10 +1526,12 @@ async fn request_stop(
     }
 }
 
+#[cfg(feature = "kubernetes")]
 fn container(pod: &Value) -> &Value {
     kubernetes::container_state(pod, CONTAINER)
 }
 
+#[cfg(feature = "kubernetes")]
 fn terminal(pod: &Value) -> bool {
     matches!(
         pod["status"]["phase"].as_str(),
@@ -1501,6 +1541,7 @@ fn terminal(pod: &Value) -> bool {
 
 /// How the run's container ended, once the API shows it terminated: the exit and its OOM kills.
 /// With `force`, a Pod in a terminal phase that never reports its container ends without either.
+#[cfg(feature = "kubernetes")]
 fn ended(pod: &Value, force: bool) -> Option<(RunExit, Option<u64>)> {
     let terminated = &container(pod)["terminated"];
     if !terminated.is_object() {
@@ -1530,6 +1571,7 @@ fn ended(pod: &Value, force: bool) -> Option<(RunExit, Option<u64>)> {
 /// ([`pod_end`]), its policy.
 /// `trace` holds what `start` read: the policy's `resourceVersion` and the Pod its create stored,
 /// so a Pod gone before the task's first read is still watched.
+#[cfg(feature = "kubernetes")]
 async fn monitor(
     api: Arc<Api>,
     run: Arc<PodRun>,
@@ -1638,6 +1680,7 @@ async fn monitor(
 /// once the API shows its container stopped ([`settle`]) and its policy is removed, or `Unknown`
 /// when the container is not shown stopped by then. A container shown stopped later still releases
 /// the policy; one the API cannot show stopped keeps it.
+#[cfg(feature = "kubernetes")]
 async fn release(
     api: &Api,
     run: &PodRun,
@@ -1962,5 +2005,10 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg(feature = "kubernetes")]
 #[path = "pod_cleanup_tests.rs"]
 mod cleanup_tests;
+
+#[cfg(not(feature = "kubernetes"))]
+#[path = "pod_unserved.rs"]
+mod unserved;

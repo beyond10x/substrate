@@ -34,7 +34,7 @@ pub fn check(root: &Path) -> Result<Report> {
 
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature",
+            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; the host driver declares exactly the features git and kubernetes, both default; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature",
             packages.len()
         )))
     } else {
@@ -214,6 +214,56 @@ fn check_conformance_edges(
                     "{member}/Cargo.toml: {kind}.{alias} sets features on the SDK edge; {CONFORMANCE_FENCE}"
                 ));
             }
+        }
+    }
+}
+
+/// The host driver, whose features [`HOST_FEATURES`] fixes.
+const HOST: &str = "b10x-substrate-host";
+
+/// Every feature the host driver declares and what each enables
+/// (`story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes`): `git` the
+/// Git stack and `kubernetes` the cluster client, both on by default, so every consumer keeps them
+/// and a confinement-only one drops both with `default-features = false`.
+const HOST_FEATURES: [(&str, &[&str]); 3] = [
+    ("default", &["git", "kubernetes"]),
+    ("git", &["dep:curl", "dep:git2", "dep:gix"]),
+    ("kubernetes", &["dep:substrate-kubernetes-client"]),
+];
+
+/// Why the host driver's features are fixed.
+const HOST_FEATURE_FENCE: &str = "b10x-substrate-host declares exactly the features git and kubernetes, both default, so a confinement-only consumer drops both with default-features = false";
+
+/// Refuses a host feature that is not in [`HOST_FEATURES`], and each of those that is absent or
+/// enables anything else; the order of an entry's list is free.
+fn check_host_features(member: &str, manifest: &toml::Value, failures: &mut Vec<String>) {
+    let declared = manifest.get("features").and_then(toml::Value::as_table);
+    for (feature, expected) in HOST_FEATURES {
+        let mut observed: Option<Vec<&str>> = declared
+            .and_then(|features| features.get(feature))
+            .and_then(toml::Value::as_array)
+            .map(|entries| entries.iter().filter_map(toml::Value::as_str).collect());
+        if let Some(observed) = observed.as_mut() {
+            observed.sort_unstable();
+        }
+        let mut wanted = expected.to_vec();
+        wanted.sort_unstable();
+        if observed.as_ref() != Some(&wanted) {
+            let entries = expected
+                .iter()
+                .map(|entry| format!("\"{entry}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            failures.push(format!(
+                "{member}/Cargo.toml: features.{feature} must be [{entries}]; {HOST_FEATURE_FENCE}"
+            ));
+        }
+    }
+    for feature in declared.into_iter().flat_map(toml::map::Map::keys) {
+        if !HOST_FEATURES.iter().any(|(name, _)| name == feature) {
+            failures.push(format!(
+                "{member}/Cargo.toml: features.{feature} is not a host feature; {HOST_FEATURE_FENCE}"
+            ));
         }
     }
 }
@@ -784,6 +834,9 @@ fn check_manifests(root: &Path, failures: &mut Vec<String>) -> Result<BTreeMap<S
                 if name == CONFORMANCE {
                     check_conformance_edges(member, &manifest, &root_manifest, failures);
                 }
+                if name == HOST {
+                    check_host_features(member, &manifest, failures);
+                }
                 observed.insert(member.to_owned(), name.to_owned());
             }
             None if publish != Some(false) => failures.push(format!(
@@ -837,8 +890,13 @@ mod tests {
 
     use super::{SOURCE_PACKAGES, check};
 
+    /// The `[features]` table the host driver must declare, as the fixture writes it.
+    const HOST_FEATURES: &str = "\n[features]\ndefault = [\"git\", \"kubernetes\"]\ngit = [\"dep:curl\", \"dep:git2\", \"dep:gix\"]\nkubernetes = [\"dep:substrate-kubernetes-client\"]\n";
+
     /// A workspace this check accepts: every approved member, non-publishable, with its README and
-    /// metadata. `extra` is appended to `member`'s manifest so one test violates exactly one thing.
+    /// metadata, and the host driver with [`HOST_FEATURES`]. `extra` is appended to `member`'s
+    /// manifest so one test violates exactly one thing; a `[features]` table it gives the host is
+    /// merged into the host's own.
     fn fixture(root: &Path, member: &str, extra: &str) {
         let members = SOURCE_PACKAGES
             .iter()
@@ -861,8 +919,14 @@ mod tests {
             let mut manifest = format!(
                 "[package]\nname = \"{name}\"\nversion = \"0.4.2\"\nreadme = \"README.md\"\nlicense.workspace = true\ndocumentation = \"https://beyond10x.github.io/substrate/\"\npublish = false\n"
             );
-            if name_member == member {
+            let extra = if name_member == member { extra } else { "" };
+            if name_member != "crates/substrate-host" {
                 manifest.push_str(extra);
+            } else if extra.contains("\n[features]\n") {
+                manifest.push_str(&extra.replacen("\n[features]\n", HOST_FEATURES, 1));
+            } else {
+                manifest.push_str(extra);
+                manifest.push_str(HOST_FEATURES);
             }
             std::fs::write(package_directory.join("Cargo.toml"), manifest)
                 .expect("package manifest");
@@ -928,6 +992,7 @@ mod tests {
     fn the_fake_feature_is_refused_on_every_edge_but_a_dev_dependency() {
         const EDGE: &str = "substrate-kubernetes-client = { package = \"b10x-substrate-kubernetes-client\", path = \"../substrate-kubernetes-client\", version = \"=0.4.2\", features = [\"fake\"] }";
         const FENCE: &str = "the fake feature of b10x-substrate-kubernetes-client is legal only under [dev-dependencies] (design 34 § 10.1)";
+        const HOST_FENCE: &str = "b10x-substrate-host declares exactly the features git and kubernetes, both default, so a confinement-only consumer drops both with default-features = false";
         let cases = [
             (
                 "crates/substrate-host",
@@ -956,8 +1021,10 @@ mod tests {
                     "\n[dependencies]\n{}\n\n[features]\ntesting = [\"substrate-kubernetes-client?/fake\"]\n",
                     EDGE.replace(", features = [\"fake\"]", "")
                 ),
+                // story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes: the
+                // host admits no feature but `git` and `kubernetes`, so `testing` is refused as that too.
                 format!(
-                    "crates/substrate-host/Cargo.toml: features.testing enables substrate-kubernetes-client?/fake; {FENCE}"
+                    "crates/substrate-host/Cargo.toml: features.testing is not a host feature; {HOST_FENCE}\ncrates/substrate-host/Cargo.toml: features.testing enables substrate-kubernetes-client?/fake; {FENCE}"
                 ),
             ),
             (
@@ -1250,6 +1317,7 @@ mod tests {
             );
             if member == "crates/substrate-host" {
                 writeln!(manifest, "publish = true").expect("manifest text");
+                manifest.push_str(HOST_FEATURES);
             } else {
                 writeln!(manifest, "publish = false").expect("manifest text");
             }
@@ -1262,5 +1330,56 @@ mod tests {
             report.failure_text(),
             "crates/substrate-host/Cargo.toml: source-distributed package must set publish = false"
         );
+    }
+
+    /// `story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes`: the host
+    /// driver declares exactly `git` and `kubernetes`, both default, each enabling only its own
+    /// optional dependencies, so `default-features = false` is all a confinement-only consumer
+    /// sets. Another feature, a narrower default, a feature that enables more and a host with no
+    /// features are each refused by the feature's name; the order of an entry's list is not.
+    #[test]
+    fn the_host_declares_exactly_git_and_kubernetes_both_default() {
+        const FENCE: &str = "b10x-substrate-host declares exactly the features git and kubernetes, both default, so a confinement-only consumer drops both with default-features = false";
+        const HOST: &str = "crates/substrate-host/Cargo.toml";
+        let must = |feature: &str, entries: &str| {
+            format!("{HOST}: features.{feature} must be [{entries}]; {FENCE}")
+        };
+        let cases = [
+            (
+                HOST_FEATURES.replace("kubernetes\"]\n", "kubernetes\"]\nfake = []\n"),
+                format!("{HOST}: features.fake is not a host feature; {FENCE}"),
+            ),
+            (
+                HOST_FEATURES.replace("[\"git\", \"kubernetes\"]", "[\"git\"]"),
+                must("default", "\"git\", \"kubernetes\""),
+            ),
+            (
+                HOST_FEATURES.replace("\"dep:gix\"]", "\"dep:gix\", \"tokio/fs\"]"),
+                must("git", "\"dep:curl\", \"dep:git2\", \"dep:gix\""),
+            ),
+            (
+                String::new(),
+                [
+                    must("default", "\"git\", \"kubernetes\""),
+                    must("git", "\"dep:curl\", \"dep:git2\", \"dep:gix\""),
+                    must("kubernetes", "\"dep:substrate-kubernetes-client\""),
+                ]
+                .join("\n"),
+            ),
+            (
+                HOST_FEATURES.replace("[\"git\", \"kubernetes\"]", "[\"kubernetes\", \"git\"]"),
+                String::new(),
+            ),
+        ];
+        for (features, refused) in cases {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            fixture(directory.path(), "crates/substrate-host", "");
+            let path = directory.path().join(HOST);
+            let manifest = std::fs::read_to_string(&path).expect("host manifest");
+            std::fs::write(&path, manifest.replace(HOST_FEATURES, &features))
+                .expect("host manifest");
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(report.failure_text(), refused, "{features}");
+        }
     }
 }
