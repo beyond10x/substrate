@@ -5249,6 +5249,166 @@ mod tests {
                     );
                     println!("EINTR-PROBE not reached");
                 }
+
+                /// Adversary pass 1 against `story:every-egress-reap-retries-through-eintr`: the
+                /// probe answers from the status it read, so a child that really reached reads as
+                /// reached through an interrupted reap, and a child a signal ended never does.
+                mod adversary_pass_1 {
+                    use std::sync::atomic::Ordering;
+                    use std::sync::mpsc;
+                    use std::time::{Duration, Instant};
+
+                    use super::super::{HELPER_ENV, children_of, run_alone};
+                    use super::{HANDLED, handle_without_restart, interrupt_reap, stopped};
+                    use crate::egress::tests::{
+                        APP_SERVER_BODY, AppServer, BUBBLEWRAP, Sandbox, aperture, install, reaped,
+                    };
+
+                    const REACHED_HELPER: &str = "egress::tests::observed_inside::d354_adv::\
+                                                  drop_and_probe_reaps::adversary_pass_1::\
+                                                  interrupted_reached_probe_helper";
+
+                    /// A probe child that a signal ends has a wait status with no exit code, and
+                    /// `WEXITSTATUS` of `SIGKILL`'s status is 0: only `WIFEXITED` keeps it from
+                    /// reading as reached. The child stops itself before it exits; another thread
+                    /// then kills it while the probing thread waits in the reap.
+                    #[test]
+                    fn a_probe_child_ended_by_a_signal_never_reads_as_reached() {
+                        let (done, ended) = mpsc::channel();
+                        std::thread::spawn(move || {
+                            let (killer_sender, killer) = mpsc::channel();
+                            crate::egress::STOP_PROBE_CHILD.set(true);
+                            crate::egress::BEFORE_PROBE_REAP.set(Some(Box::new(move |child| {
+                                let handle = std::thread::spawn(move || {
+                                    let started = Instant::now();
+                                    while !stopped(child)
+                                        && started.elapsed() < Duration::from_secs(10)
+                                    {
+                                        std::thread::sleep(Duration::from_millis(1));
+                                    }
+                                    let was_stopped = stopped(child);
+                                    // SAFETY: the probing thread's unreaped child.
+                                    unsafe {
+                                        libc::kill(child, libc::SIGKILL);
+                                    }
+                                    (child, was_stopped)
+                                });
+                                let _ = killer_sender.send(handle);
+                            })));
+                            let reached =
+                                crate::egress::reaches_from_inside(std::process::id(), 9, b"x");
+                            crate::egress::STOP_PROBE_CHILD.set(false);
+                            crate::egress::BEFORE_PROBE_REAP.set(None);
+                            let outcome = killer.try_recv().ok().and_then(|h| h.join().ok());
+                            let _ = done.send((reached, outcome));
+                        });
+                        let (reached, outcome) = ended
+                            .recv_timeout(Duration::from_secs(20))
+                            .expect("story:every-egress-reap-retries-through-eintr: the probe did not end");
+                        let (child, was_stopped) =
+                            outcome.expect("the probe never forked its child");
+                        assert!(
+                            was_stopped,
+                            "the probe's child never stopped itself before its exit"
+                        );
+                        assert!(reaped(child), "the probe left its child {child} unreaped");
+                        assert!(
+                            !reached,
+                            "story:every-egress-reap-retries-through-eintr: a probe child killed by \
+                             SIGKILL, whose wait status carries no exit code, read as reached"
+                        );
+                    }
+
+                    /// A probe whose reap a handled signal interrupts answers from its child's
+                    /// real status in both directions: a child that reached the aperture and
+                    /// exits 0 reads as reached.
+                    #[test]
+                    fn an_interrupted_probe_reap_of_a_child_that_reached_reads_as_reached() {
+                        if !std::path::Path::new(BUBBLEWRAP).is_file() {
+                            return;
+                        }
+                        let stdout = run_alone(REACHED_HELPER);
+                        assert!(
+                            stdout.contains("EINTR-REACHED reached"),
+                            "the helper ran without reaching its assertion: {stdout}"
+                        );
+                    }
+
+                    /// Run only by the case above, in a process of its own: an aperture installed
+                    /// into a throwaway sandbox serves the app-server's body; the probe's child
+                    /// reads it from inside, then stops itself before it exits 0. While it is
+                    /// stopped the probing thread waits in the reap; another thread interrupts
+                    /// that wait with a handled signal and only then lets the child exit.
+                    #[test]
+                    #[ignore = "child process entry point: run by an_interrupted_probe_reap_of_a_child_that_reached_reads_as_reached"]
+                    fn interrupted_reached_probe_helper() {
+                        if std::env::var_os(HELPER_ENV).is_none() {
+                            return;
+                        }
+                        let sandbox = Sandbox::open().expect("bubblewrap is present");
+                        let server = AppServer::start();
+                        let declared = aperture("model", server.address);
+                        let installed =
+                            install(&declared, sandbox.pid, None).expect("install the aperture");
+                        handle_without_restart();
+                        // SAFETY: neither call has preconditions.
+                        let (me, tid) = unsafe { (libc::getpid(), libc::gettid()) };
+                        let (signaller_sender, signaller) = mpsc::channel();
+                        crate::egress::STOP_PROBE_CHILD.set(true);
+                        crate::egress::BEFORE_PROBE_REAP.set(Some(Box::new(move |child| {
+                            let handle = std::thread::spawn(move || {
+                                let started = Instant::now();
+                                while !stopped(child) && started.elapsed() < Duration::from_secs(10)
+                                {
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
+                                let in_reap = stopped(child) && interrupt_reap(me, tid);
+                                let resume = if in_reap {
+                                    libc::SIGCONT
+                                } else {
+                                    libc::SIGKILL
+                                };
+                                // SAFETY: the probing thread's unreaped child.
+                                unsafe {
+                                    libc::kill(child, resume);
+                                }
+                                (child, in_reap)
+                            });
+                            let _ = signaller_sender.send(handle);
+                        })));
+                        let reached = crate::egress::reaches_from_inside(
+                            sandbox.pid,
+                            declared.port,
+                            APP_SERVER_BODY,
+                        );
+                        crate::egress::STOP_PROBE_CHILD.set(false);
+                        crate::egress::BEFORE_PROBE_REAP.set(None);
+                        let (child, in_reap) = signaller
+                            .try_recv()
+                            .expect("the probe never forked its child")
+                            .join()
+                            .expect("the signaller");
+                        let handled = HANDLED.load(Ordering::Acquire);
+                        assert!(
+                            in_reap && handled == 1,
+                            "the signal did not land in the reap of a stopped child: in the reap \
+                             {in_reap}, handled {handled}"
+                        );
+                        assert!(reaped(child), "the probe left its child {child} unreaped");
+                        assert!(
+                            !children_of(tid).contains(&child),
+                            "the probe's child was left a child of the probing thread"
+                        );
+                        assert!(
+                            reached,
+                            "story:every-egress-reap-retries-through-eintr: a probe whose reap a \
+                             handled signal interrupted read a child that reached the aperture \
+                             and exited 0 as not reached"
+                        );
+                        drop(installed);
+                        println!("EINTR-REACHED reached");
+                    }
+                }
             }
 
             /// Security cases of wave D364 against
