@@ -31,6 +31,12 @@ unknown.
   `adversary_dispatch_counts_one_admission_and_no_replay` with `Connection reset by peer (os error
   104)`. The test's readiness wait now retries a connect the starting daemon resets, as it already
   did for a refused connect, within the same readiness deadline.
+- `security_review_systemd_linux_run_reaches_no_user_manager_and_keeps_the_floor` passes on a host
+  that has a tunnel module such as `ipip` loaded. That module puts a down, unaddressed fallback
+  device (`tunl0`) in every new network namespace. The case now reads each interface's state and
+  tolerates such a device only while it is down and not up. Any other interface, or a fallback
+  tunnel that is up, still fails it. `scripts/delegated-lane.sh` runs this case, so the
+  `Confinement-lane:` record a release needs can be made on such a host.
 
 ### Security
 
