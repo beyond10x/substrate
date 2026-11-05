@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T07:37:08Z",
+  "actor": "human:timo",
+  "artifact": "story:every-egress-reap-retries-through-eintr",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local gate A-D at 152221b8: check-ess (ESS 0.86.0), check-docs, fmt; workspace tests --release 2680 passed 0 failed 31 ignored with the no-default host lane; clippy both builds; xtask checks",
+    "reference": "152221b8"
+  }
+}

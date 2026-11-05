@@ -421,14 +421,39 @@ impl InstalledAperture {
 
 impl Drop for InstalledAperture {
     fn drop(&mut self) {
-        // SAFETY: `forwarder` is a pid this process forked and has not yet reaped, so the number
-        // cannot have been recycled behind our back.
-        unsafe {
-            libc::kill(self.forwarder, libc::SIGKILL);
-            let mut status = 0;
-            libc::waitpid(self.forwarder, &raw mut status, 0);
+        #[cfg(test)]
+        let killed_by_case = KILL_ON_DROP
+            .take()
+            .map(|kill| kill(self.forwarder))
+            .is_some();
+        #[cfg(not(test))]
+        let killed_by_case = false;
+        if !killed_by_case {
+            // SAFETY: `forwarder` is a pid this process forked and has not yet reaped, so the
+            // number cannot have been recycled behind our back.
+            unsafe {
+                libc::kill(self.forwarder, libc::SIGKILL);
+            }
+        }
+        let _ = reap(self.forwarder);
+    }
+}
+
+/// Waits for this process's child `pid` to end and returns its wait status, or `None` when the
+/// wait fails other than by `EINTR`.
+///
+/// A wait a handled signal interrupts (`EINTR`, from a handler installed without `SA_RESTART`) is
+/// waited again, or the child would be left a zombie and its status unread; any other error ends
+/// it, and no status is invented for a wait that read none.
+fn reap(pid: libc::pid_t) -> Option<libc::c_int> {
+    let mut status = 0;
+    // SAFETY: a wait on one pid into a status word owned here.
+    while unsafe { libc::waitpid(pid, &raw mut status, 0) } < 0 {
+        if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return None;
         }
     }
+    Some(status)
 }
 
 /// Every aperture of one run, installed together and alive exactly as long as the run.
@@ -710,15 +735,23 @@ fn reaches_from_inside(sandbox_pid: u32, port: u16, sentinel: &[u8]) -> bool {
             } else {
                 1
             };
+            #[cfg(test)]
+            {
+                if STOP_PROBE_CHILD.get() {
+                    libc::raise(libc::SIGSTOP);
+                }
+            }
             libc::_exit(reached);
         }
     }
-    let mut status = 0;
-    // SAFETY: reaping a child this process forked.
-    unsafe {
-        libc::waitpid(pid, &raw mut status, 0);
+    #[cfg(test)]
+    {
+        if let Some(hook) = BEFORE_PROBE_REAP.take() {
+            hook(pid);
+        }
     }
-    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    // A reap that read no status is no answer, and is never read as "reached".
+    reap(pid).is_some_and(|status| libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0)
 }
 
 /// The connect-and-read half of [`reaches_from_inside`], already inside the namespace.
@@ -807,6 +840,29 @@ thread_local! {
     /// kills it from another thread only once this one waits in the reap can interrupt that wait.
     static KILL_ON_ABANDON: std::cell::RefCell<Option<AbandonKillHook>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// What [`KILL_ON_DROP`] and [`BEFORE_PROBE_REAP`] hold.
+#[cfg(test)]
+type ReapHook = Box<dyn FnOnce(libc::pid_t)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Called once, on the dropping thread, in place of the `SIGKILL` with which dropping an
+    /// [`InstalledAperture`] kills its forwarder, with that forwarder's pid: a case that kills it
+    /// from another thread only once this one waits in the reap can interrupt that wait.
+    static KILL_ON_DROP: std::cell::RefCell<Option<ReapHook>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// Called once, on the probing thread, after [`reaches_from_inside`] forks its child and before
+    /// it reaps it, with the child's pid.
+    static BEFORE_PROBE_REAP: std::cell::RefCell<Option<ReapHook>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// Read by the probe's forked child: when set, the child stops itself just before it exits
+    /// with its real status, so a case can interrupt the parent's reap while the child still
+    /// lives and then let it exit.
+    static STOP_PROBE_CHILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Forks the long-lived forwarder, which makes its own listener inside the sandbox: host netns, run
@@ -928,21 +984,14 @@ fn abandon_forwarder(pid: libc::pid_t) {
     let killed_by_case = KILL_ON_ABANDON.take().map(|kill| kill(pid)).is_some();
     #[cfg(not(test))]
     let killed_by_case = false;
-    // SAFETY: `pid` is a child this process forked and has not reaped; killing one that has
-    // already exited is harmless, and the wait reaps it either way. A wait a handled signal
-    // interrupts (`EINTR`, from a handler installed without `SA_RESTART`) is waited again, or the
-    // forwarder would be left a zombie; any other error ends it.
-    unsafe {
-        if !killed_by_case {
+    if !killed_by_case {
+        // SAFETY: `pid` is a child this process forked and has not reaped; killing one that has
+        // already exited is harmless, and the wait reaps it either way.
+        unsafe {
             libc::kill(pid, libc::SIGKILL);
         }
-        let mut status = 0;
-        while libc::waitpid(pid, &raw mut status, 0) < 0 {
-            if *libc::__errno_location() != libc::EINTR {
-                break;
-            }
-        }
     }
+    let _ = reap(pid);
 }
 
 /// Reads the forwarder's report: one byte when it is accepting, else `[stage, errno]`, with a
@@ -1727,6 +1776,45 @@ mod tests {
                 .is_ok(),
             "story:abandoned-forwarder-reaped-through-eintr: a reap that failed with ECHILD did \
              not end within 5 s"
+        );
+    }
+
+    /// The startup probe answers only from a status it read: a reap that fails other than by
+    /// `EINTR`, here `ECHILD` for a child the case reaped first, ends at once and reads as not
+    /// reached. Pointed at this process's own network namespace, the probe's child fails to
+    /// `setns` into the user namespace it is already in, so it exits 1.
+    #[test]
+    fn a_probe_reap_that_fails_other_than_eintr_reads_as_not_reached() {
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (reaped_sender, reaped_first) = std::sync::mpsc::channel();
+            super::BEFORE_PROBE_REAP.set(Some(Box::new(move |child| {
+                let mut status = 0;
+                // SAFETY: the probe's own unreaped child, reaped here before the probe reaps it.
+                let waited = unsafe { libc::waitpid(child, &raw mut status, 0) };
+                let _ = reaped_sender.send(
+                    waited == child && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 1,
+                );
+            })));
+            let reached = super::reaches_from_inside(std::process::id(), 9, b"x");
+            super::BEFORE_PROBE_REAP.set(None);
+            let _ = done.send((reached, reaped_first.try_recv().ok()));
+        });
+        let (reached, reaped_first) = ended
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect(
+                "story:every-egress-reap-retries-through-eintr: a probe reap that failed with \
+                 ECHILD did not end within 5 s",
+            );
+        assert_eq!(
+            reaped_first,
+            Some(true),
+            "the case did not reap the probe's child, exited 1, before the probe reaped it"
+        );
+        assert!(
+            !reached,
+            "story:every-egress-reap-retries-through-eintr: a probe whose reap failed with ECHILD \
+             read a child that exited 1 as reached"
         );
     }
 
@@ -4776,7 +4864,7 @@ mod tests {
 
                 /// Whether thread `tid` of this process is blocked in `wait4`, the call `waitpid`
                 /// makes, as its `/proc` `syscall` file reports it.
-                fn waiting_in_wait4(tid: libc::pid_t) -> bool {
+                pub(super) fn waiting_in_wait4(tid: libc::pid_t) -> bool {
                     std::fs::read_to_string(format!("/proc/self/task/{tid}/syscall"))
                         .ok()
                         .and_then(|line| {
@@ -4913,6 +5001,413 @@ mod tests {
                          left a child of the installer"
                     );
                     println!("EINTR-REAP reaped");
+                }
+            }
+
+            /// Cases against `story:every-egress-reap-retries-through-eintr`: dropping an
+            /// installed aperture and the startup probe each reap through a handled signal (a
+            /// handler installed without `SA_RESTART`, so `waitpid` returns `EINTR`). Neither
+            /// needs bubblewrap; each runs in a process of its own because it installs a signal
+            /// handler for the whole process.
+            mod drop_and_probe_reaps {
+                use std::net::{Ipv4Addr, SocketAddrV4};
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                use std::sync::mpsc;
+                use std::time::{Duration, Instant};
+
+                use super::super::super::reaped;
+                use super::abandoned_reap::waiting_in_wait4;
+                use super::{HELPER_ENV, children_of, run_alone};
+                use crate::egress::{InstalledAperture, SharedCounters};
+
+                const DROP_HELPER: &str = "egress::tests::observed_inside::d354_adv::\
+                                           drop_and_probe_reaps::interrupted_drop_reap_helper";
+                const PROBE_HELPER: &str = "egress::tests::observed_inside::d354_adv::\
+                                            drop_and_probe_reaps::interrupted_probe_reap_helper";
+
+                static HANDLED: AtomicUsize = AtomicUsize::new(0);
+
+                extern "C" fn count_handled(_signal: libc::c_int) {
+                    HANDLED.fetch_add(1, Ordering::Relaxed);
+                }
+
+                /// Handles `SIGUSR1` in this process with [`count_handled`], without
+                /// `SA_RESTART`.
+                fn handle_without_restart() {
+                    // SAFETY: a zeroed `sigaction` is a valid initial value; the handler only
+                    // increments an atomic, which is async-signal-safe.
+                    unsafe {
+                        let mut action: libc::sigaction = std::mem::zeroed();
+                        action.sa_sigaction = count_handled as *const () as libc::sighandler_t;
+                        action.sa_flags = 0;
+                        libc::sigemptyset(&raw mut action.sa_mask);
+                        assert_eq!(
+                            libc::sigaction(libc::SIGUSR1, &raw const action, std::ptr::null_mut()),
+                            0,
+                            "sigaction"
+                        );
+                    }
+                }
+
+                /// Once thread `tid` of process `me` waits in `wait4`, sends it `SIGUSR1` and
+                /// waits for the handler to have run; whether the signal landed in that wait.
+                fn interrupt_reap(me: libc::pid_t, tid: libc::pid_t) -> bool {
+                    let started = Instant::now();
+                    while !waiting_in_wait4(tid) {
+                        if started.elapsed() > Duration::from_secs(10) {
+                            return false;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    // SAFETY: a signal this process handles, to one of its own threads.
+                    unsafe {
+                        libc::syscall(libc::SYS_tgkill, me, tid, libc::SIGUSR1);
+                    }
+                    let started = Instant::now();
+                    while HANDLED.load(Ordering::Acquire) == 0
+                        && started.elapsed() < Duration::from_secs(10)
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    HANDLED.load(Ordering::Acquire) > 0
+                }
+
+                /// Whether `pid` is stopped by a signal, as its `/proc` `stat` reports it.
+                fn stopped(pid: libc::pid_t) -> bool {
+                    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                        .ok()
+                        .and_then(|stat| {
+                            stat.rsplit_once(')')
+                                .map(|(_, rest)| rest.trim_start().starts_with('T'))
+                        })
+                        == Some(true)
+                }
+
+                /// Dropping an installed aperture whose reap a handled signal interrupts still
+                /// reaps its forwarder and leaves the dropping thread no child.
+                #[test]
+                fn a_drop_reap_interrupted_by_a_handled_signal_still_reaps_the_forwarder() {
+                    let stdout = run_alone(DROP_HELPER);
+                    assert!(
+                        stdout.contains("EINTR-DROP reaped"),
+                        "the helper ran without reaching its assertion: {stdout}"
+                    );
+                }
+
+                /// Run only by the case above, in a process of its own: the aperture's forwarder
+                /// is a stand-in child that waits for a signal, killed from another thread only
+                /// once the dropping thread waits in the reap and a signal has interrupted it
+                /// there.
+                #[test]
+                #[ignore = "child process entry point: run by a_drop_reap_interrupted_by_a_handled_signal_still_reaps_the_forwarder"]
+                fn interrupted_drop_reap_helper() {
+                    if std::env::var_os(HELPER_ENV).is_none() {
+                        return;
+                    }
+                    handle_without_restart();
+                    // SAFETY: neither call has preconditions.
+                    let (me, tid) = unsafe { (libc::getpid(), libc::gettid()) };
+                    // SAFETY: the child only waits for signals until one kills it.
+                    let forwarder = unsafe { libc::fork() };
+                    assert!(forwarder >= 0, "fork the stand-in forwarder");
+                    if forwarder == 0 {
+                        // SAFETY: post-fork child; `pause` is async-signal-safe.
+                        unsafe {
+                            loop {
+                                libc::pause();
+                            }
+                        }
+                    }
+                    let aperture = InstalledAperture {
+                        forwarder,
+                        counters: SharedCounters::new().expect("the aperture's counters"),
+                        name: "model".to_owned(),
+                        destination: "model.example.invalid".to_owned(),
+                        max_bytes: None,
+                        listen: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9),
+                    };
+                    let (killer_sender, killer) = mpsc::channel();
+                    crate::egress::KILL_ON_DROP.set(Some(Box::new(move |forwarder| {
+                        let handle = std::thread::spawn(move || {
+                            let in_reap = interrupt_reap(me, tid);
+                            // SAFETY: the dropping thread's unreaped child.
+                            unsafe {
+                                libc::kill(forwarder, libc::SIGKILL);
+                            }
+                            in_reap
+                        });
+                        let _ = killer_sender.send(handle);
+                    })));
+                    drop(aperture);
+                    crate::egress::KILL_ON_DROP.set(None);
+                    let in_reap = killer
+                        .try_recv()
+                        .expect("the drop never killed its forwarder")
+                        .join()
+                        .expect("the killer");
+                    let handled = HANDLED.load(Ordering::Acquire);
+                    let children = children_of(tid);
+                    assert!(
+                        in_reap && handled == 1,
+                        "the signal did not land in the reap: in the reap {in_reap}, handled \
+                         {handled}"
+                    );
+                    assert!(
+                        reaped(forwarder),
+                        "story:every-egress-reap-retries-through-eintr: a drop whose reap a \
+                         handled signal interrupted left the forwarder {forwarder} unreaped"
+                    );
+                    assert_eq!(
+                        children,
+                        Vec::<libc::pid_t>::new(),
+                        "story:every-egress-reap-retries-through-eintr: a dropped aperture's \
+                         forwarder was left a child of the dropping thread"
+                    );
+                    println!("EINTR-DROP reaped");
+                }
+
+                /// A startup probe whose reap a handled signal interrupts answers from its
+                /// child's real exit status: a child that exits 1 never reads as reached.
+                #[test]
+                fn an_interrupted_probe_reap_answers_from_the_childs_real_status() {
+                    let stdout = run_alone(PROBE_HELPER);
+                    assert!(
+                        stdout.contains("EINTR-PROBE not reached"),
+                        "the helper ran without reaching its assertion: {stdout}"
+                    );
+                }
+
+                /// Run only by the case above, in a process of its own: pointed at this
+                /// process's own network namespace, the probe's child fails to `setns` into the
+                /// user namespace it is already in and so exits 1, but first stops itself. While
+                /// it is stopped the probing thread waits in the reap; another thread interrupts
+                /// that wait with a handled signal and only then lets the child exit.
+                #[test]
+                #[ignore = "child process entry point: run by an_interrupted_probe_reap_answers_from_the_childs_real_status"]
+                fn interrupted_probe_reap_helper() {
+                    if std::env::var_os(HELPER_ENV).is_none() {
+                        return;
+                    }
+                    handle_without_restart();
+                    // SAFETY: neither call has preconditions.
+                    let (me, tid) = unsafe { (libc::getpid(), libc::gettid()) };
+                    let (signaller_sender, signaller) = mpsc::channel();
+                    crate::egress::STOP_PROBE_CHILD.set(true);
+                    crate::egress::BEFORE_PROBE_REAP.set(Some(Box::new(move |child| {
+                        let handle = std::thread::spawn(move || {
+                            let started = Instant::now();
+                            while !stopped(child) && started.elapsed() < Duration::from_secs(10) {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            let in_reap = stopped(child) && interrupt_reap(me, tid);
+                            let resume = if in_reap {
+                                libc::SIGCONT
+                            } else {
+                                libc::SIGKILL
+                            };
+                            // SAFETY: the probing thread's unreaped child.
+                            unsafe {
+                                libc::kill(child, resume);
+                            }
+                            (child, in_reap)
+                        });
+                        let _ = signaller_sender.send(handle);
+                    })));
+                    let reached = crate::egress::reaches_from_inside(
+                        u32::try_from(me).expect("pid"),
+                        9,
+                        b"x",
+                    );
+                    crate::egress::STOP_PROBE_CHILD.set(false);
+                    crate::egress::BEFORE_PROBE_REAP.set(None);
+                    let (child, in_reap) = signaller
+                        .try_recv()
+                        .expect("the probe never forked its child")
+                        .join()
+                        .expect("the signaller");
+                    let handled = HANDLED.load(Ordering::Acquire);
+                    assert!(
+                        in_reap && handled == 1,
+                        "the signal did not land in the reap of a stopped child: in the reap \
+                         {in_reap}, handled {handled}"
+                    );
+                    assert!(
+                        !reached,
+                        "story:every-egress-reap-retries-through-eintr: a probe whose reap a \
+                         handled signal interrupted read a child that exits 1 as reached"
+                    );
+                    assert!(
+                        reaped(child),
+                        "story:every-egress-reap-retries-through-eintr: the probe left its child \
+                         {child} unreaped"
+                    );
+                    assert_eq!(
+                        children_of(tid),
+                        Vec::<libc::pid_t>::new(),
+                        "story:every-egress-reap-retries-through-eintr: the probe's child was left \
+                         a child of the probing thread"
+                    );
+                    println!("EINTR-PROBE not reached");
+                }
+
+                /// Adversary pass 1 against `story:every-egress-reap-retries-through-eintr`: the
+                /// probe answers from the status it read, so a child that really reached reads as
+                /// reached through an interrupted reap, and a child a signal ended never does.
+                mod adversary_pass_1 {
+                    use std::sync::atomic::Ordering;
+                    use std::sync::mpsc;
+                    use std::time::{Duration, Instant};
+
+                    use super::super::{HELPER_ENV, children_of, run_alone};
+                    use super::{HANDLED, handle_without_restart, interrupt_reap, stopped};
+                    use crate::egress::tests::{
+                        APP_SERVER_BODY, AppServer, BUBBLEWRAP, Sandbox, aperture, install, reaped,
+                    };
+
+                    const REACHED_HELPER: &str = "egress::tests::observed_inside::d354_adv::\
+                                                  drop_and_probe_reaps::adversary_pass_1::\
+                                                  interrupted_reached_probe_helper";
+
+                    /// A probe child that a signal ends has a wait status with no exit code, and
+                    /// `WEXITSTATUS` of `SIGKILL`'s status is 0: only `WIFEXITED` keeps it from
+                    /// reading as reached. The child stops itself before it exits; another thread
+                    /// then kills it while the probing thread waits in the reap.
+                    #[test]
+                    fn a_probe_child_ended_by_a_signal_never_reads_as_reached() {
+                        let (done, ended) = mpsc::channel();
+                        std::thread::spawn(move || {
+                            let (killer_sender, killer) = mpsc::channel();
+                            crate::egress::STOP_PROBE_CHILD.set(true);
+                            crate::egress::BEFORE_PROBE_REAP.set(Some(Box::new(move |child| {
+                                let handle = std::thread::spawn(move || {
+                                    let started = Instant::now();
+                                    while !stopped(child)
+                                        && started.elapsed() < Duration::from_secs(10)
+                                    {
+                                        std::thread::sleep(Duration::from_millis(1));
+                                    }
+                                    let was_stopped = stopped(child);
+                                    // SAFETY: the probing thread's unreaped child.
+                                    unsafe {
+                                        libc::kill(child, libc::SIGKILL);
+                                    }
+                                    (child, was_stopped)
+                                });
+                                let _ = killer_sender.send(handle);
+                            })));
+                            let reached =
+                                crate::egress::reaches_from_inside(std::process::id(), 9, b"x");
+                            crate::egress::STOP_PROBE_CHILD.set(false);
+                            crate::egress::BEFORE_PROBE_REAP.set(None);
+                            let outcome = killer.try_recv().ok().and_then(|h| h.join().ok());
+                            let _ = done.send((reached, outcome));
+                        });
+                        let (reached, outcome) = ended
+                            .recv_timeout(Duration::from_secs(20))
+                            .expect("story:every-egress-reap-retries-through-eintr: the probe did not end");
+                        let (child, was_stopped) =
+                            outcome.expect("the probe never forked its child");
+                        assert!(
+                            was_stopped,
+                            "the probe's child never stopped itself before its exit"
+                        );
+                        assert!(reaped(child), "the probe left its child {child} unreaped");
+                        assert!(
+                            !reached,
+                            "story:every-egress-reap-retries-through-eintr: a probe child killed by \
+                             SIGKILL, whose wait status carries no exit code, read as reached"
+                        );
+                    }
+
+                    /// A probe whose reap a handled signal interrupts answers from its child's
+                    /// real status in both directions: a child that reached the aperture and
+                    /// exits 0 reads as reached.
+                    #[test]
+                    fn an_interrupted_probe_reap_of_a_child_that_reached_reads_as_reached() {
+                        if !std::path::Path::new(BUBBLEWRAP).is_file() {
+                            return;
+                        }
+                        let stdout = run_alone(REACHED_HELPER);
+                        assert!(
+                            stdout.contains("EINTR-REACHED reached"),
+                            "the helper ran without reaching its assertion: {stdout}"
+                        );
+                    }
+
+                    /// Run only by the case above, in a process of its own: an aperture installed
+                    /// into a throwaway sandbox serves the app-server's body; the probe's child
+                    /// reads it from inside, then stops itself before it exits 0. While it is
+                    /// stopped the probing thread waits in the reap; another thread interrupts
+                    /// that wait with a handled signal and only then lets the child exit.
+                    #[test]
+                    #[ignore = "child process entry point: run by an_interrupted_probe_reap_of_a_child_that_reached_reads_as_reached"]
+                    fn interrupted_reached_probe_helper() {
+                        if std::env::var_os(HELPER_ENV).is_none() {
+                            return;
+                        }
+                        let sandbox = Sandbox::open().expect("bubblewrap is present");
+                        let server = AppServer::start();
+                        let declared = aperture("model", server.address);
+                        let installed =
+                            install(&declared, sandbox.pid, None).expect("install the aperture");
+                        handle_without_restart();
+                        // SAFETY: neither call has preconditions.
+                        let (me, tid) = unsafe { (libc::getpid(), libc::gettid()) };
+                        let (signaller_sender, signaller) = mpsc::channel();
+                        crate::egress::STOP_PROBE_CHILD.set(true);
+                        crate::egress::BEFORE_PROBE_REAP.set(Some(Box::new(move |child| {
+                            let handle = std::thread::spawn(move || {
+                                let started = Instant::now();
+                                while !stopped(child) && started.elapsed() < Duration::from_secs(10)
+                                {
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
+                                let in_reap = stopped(child) && interrupt_reap(me, tid);
+                                let resume = if in_reap {
+                                    libc::SIGCONT
+                                } else {
+                                    libc::SIGKILL
+                                };
+                                // SAFETY: the probing thread's unreaped child.
+                                unsafe {
+                                    libc::kill(child, resume);
+                                }
+                                (child, in_reap)
+                            });
+                            let _ = signaller_sender.send(handle);
+                        })));
+                        let reached = crate::egress::reaches_from_inside(
+                            sandbox.pid,
+                            declared.port,
+                            APP_SERVER_BODY,
+                        );
+                        crate::egress::STOP_PROBE_CHILD.set(false);
+                        crate::egress::BEFORE_PROBE_REAP.set(None);
+                        let (child, in_reap) = signaller
+                            .try_recv()
+                            .expect("the probe never forked its child")
+                            .join()
+                            .expect("the signaller");
+                        let handled = HANDLED.load(Ordering::Acquire);
+                        assert!(
+                            in_reap && handled == 1,
+                            "the signal did not land in the reap of a stopped child: in the reap \
+                             {in_reap}, handled {handled}"
+                        );
+                        assert!(reaped(child), "the probe left its child {child} unreaped");
+                        assert!(
+                            !children_of(tid).contains(&child),
+                            "the probe's child was left a child of the probing thread"
+                        );
+                        assert!(
+                            reached,
+                            "story:every-egress-reap-retries-through-eintr: a probe whose reap a \
+                             handled signal interrupted read a child that reached the aperture \
+                             and exited 0 as not reached"
+                        );
+                        drop(installed);
+                        println!("EINTR-REACHED reached");
+                    }
                 }
             }
 

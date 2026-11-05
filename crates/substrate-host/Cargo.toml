@@ -16,25 +16,30 @@ categories = ["os::linux-apis"]
 [lib]
 name = "substrate_host"
 
+[features]
+default = ["git", "kubernetes"]
+git = ["dep:curl", "dep:git2", "dep:gix"]
+kubernetes = ["dep:substrate-kubernetes-client"]
+
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 # Pin and statically include gix's curl backend; runtime images need no system libcurl.
-curl.workspace = true
+curl = { workspace = true, optional = true }
 hex.workspace = true
-git2.workspace = true
-gix.workspace = true
+git2 = { workspace = true, optional = true }
+gix = { workspace = true, optional = true }
 libc.workspace = true
 nix.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-substrate-guarded = { package = "b10x-substrate-guarded", path = "../substrate-guarded", version = "=0.19.2" }
-substrate-kubernetes-client = { package = "b10x-substrate-kubernetes-client", path = "../substrate-kubernetes-client", version = "=0.19.2" }
-substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.19.2" }
+substrate-guarded = { package = "b10x-substrate-guarded", path = "../substrate-guarded", version = "=0.20.0" }
+substrate-kubernetes-client = { package = "b10x-substrate-kubernetes-client", path = "../substrate-kubernetes-client", version = "=0.20.0", optional = true }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.20.0" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -44,7 +49,7 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-b10x-substrate-cli = { path = "../b10x-substrate-cli", version = "=0.19.2" }
+b10x-substrate-cli = { path = "../b10x-substrate-cli", version = "=0.20.0" }
 rcgen = "0.14"
 rustls.workspace = true
 

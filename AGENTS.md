@@ -219,8 +219,11 @@ bash scripts/gate.sh
 
 In order: `cargo xtask check-ess`, `cargo xtask check-docs`,
 `cargo test --workspace --release --locked`, `cargo fmt --all --check`,
-`cargo clippy --workspace --all-targets --release --locked -- -D warnings`, then `cargo xtask check-links`,
-`cargo xtask check-adrs`, `cargo xtask check-secrets`, `cargo xtask check-advisories`,
+`cargo clippy --workspace --all-targets --release --locked -- -D warnings`, the host driver without
+its default features (`cargo clippy -p b10x-substrate-host --no-default-features --all-targets`,
+then `cargo test -p b10x-substrate-host --no-default-features` over `host_features`,
+`ess_confinement_local` and `consumer_surface`, both `--release --locked`, § *Releases*), then
+`cargo xtask check-links`, `cargo xtask check-adrs`, `cargo xtask check-secrets`, `cargo xtask check-advisories`,
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, one bounded
@@ -252,7 +255,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-secrets` | a reachable Git object carrying a credential, or an incomplete history scan | yes |
 | `check-advisories` | a RustSec vulnerability or forbidden HTTP/2 dependency | yes |
 | `check-licenses` | non-Apache workspace metadata, an unreviewed dependency licence or third-party notice drift | yes |
-| `check-packages` | a publishable workspace package, a loose internal version edge, a source runtime package without inherited SPDX metadata, its README and a public documentation target, or — invariants 1 and 2 — a Flux dependency or a `beyond10x` Git dependency in any dependency table, `[workspace.dependencies]` and `[patch.*]` included | yes |
+| `check-packages` | a publishable workspace package, a loose internal version edge, a source runtime package without inherited SPDX metadata, its README and a public documentation target, a host driver feature other than `git` and `kubernetes` or a default other than both, a host normal tree without default features (every target) that names gix, git2, libgit2-sys, curl, curl-sys, openssl-sys or the Kubernetes client, or — invariants 1 and 2 — a Flux dependency or a `beyond10x` Git dependency in any dependency table, `[workspace.dependencies]` and `[patch.*]` included | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
@@ -494,6 +497,21 @@ if any member becomes publishable and retains the runtime source boundary: fixed
 exact internal versions, inherited SPDX metadata, checked-in READMEs and public documentation
 targets. Tagged releases publish GitHub and GHCR artifacts only. Reintroducing a registry is a new
 distribution decision, not a release convenience (ADR 0030).
+
+**`b10x-substrate-host` has exactly two features, `git` and `kubernetes`, both default**
+([its README](crates/substrate-host/README.md)). A consumer that needs only
+`substrate_host::confinement` sets `default-features = false` and links no Git stack, no
+`openssl-sys` and no Kubernetes client. Without `git` no `workspace.git` fact is published and a Git
+source is refused `workspace.git-source-unserved`; without `kubernetes` every open of `pod` is
+`confinement.adapter-unserved` naming the feature. The public items are the same in every build, so
+the features are additive. The daemon and `b10x-substrate-kubernetes` take the defaults;
+`b10x-substrate-cli` takes neither and must keep it that way: the host crate dev-depends on the
+CLI, so a CLI edge with the defaults turns both features back on in every host test build. The
+gate's no-default lane sets `SUBSTRATE_HOST_NO_DEFAULT_FEATURES`, so `host_features` then fails
+instead of running on the defaults. `cargo xtask check-packages` refuses any other host feature
+and any default but both, and reads the host's normal tree without default features for every
+target: a dependency that brings gix, git2, libgit2-sys, curl, curl-sys, openssl-sys or the
+Kubernetes client back into that tree is refused by name.
 
 **Pushing that tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml)**, which
 builds the distinct `daemon` and `mcp` runtime targets from one shared pinned builder in `Dockerfile`

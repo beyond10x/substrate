@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T06:18:55Z",
+  "actor": "human:timo",
+  "artifact": "story:systemd-netns-floor-tolerates-down-fallback-tunnels",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p b10x-substrate-host --test security_review_systemd with ipip loaded at 68dca695: 8 passed, the floor case executed and saw NET lo tunl0 with tunl0 state DOWN",
+    "reference": "68dca695"
+  }
+}

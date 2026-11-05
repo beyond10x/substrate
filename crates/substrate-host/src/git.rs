@@ -21,6 +21,19 @@ use crate::{DriverError, GitSourceBinding};
 mod materialization_tests;
 mod network;
 
+/// Whether this build serves a Git source at all; `git_unserved.rs`, the module of a build
+/// without the `git` feature, holds `false`.
+pub(super) const SERVED: bool = true;
+
+/// The refusal of a Git source this build does not serve: one the configuration does not bind.
+pub(super) fn source_unserved() -> DriverError {
+    DriverError::unserved(
+        "workspace.git-source-unserved",
+        "The requested Git source is not configured.",
+        "workspace.git",
+    )
+}
+
 pub(super) struct Cancellation(Arc<AtomicBool>);
 
 impl Cancellation {

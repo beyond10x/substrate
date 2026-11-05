@@ -34,7 +34,7 @@ pub fn check(root: &Path) -> Result<Report> {
 
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature",
+            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; the host driver declares exactly the features git and kubernetes, both default; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature",
             packages.len()
         )))
     } else {
@@ -50,11 +50,13 @@ pub fn check_with_executor_tree(root: &Path) -> Result<Report> {
     failures.extend(check_executor_tree(root)?);
     failures.extend(check_fake_graph(root)?);
     failures.extend(check_conformance_tree(root)?);
+    failures.extend(check_host_no_default_tree(root)?);
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{summary}; the executor's normal dependency tree names none of {}; the resolved graph enables the client's fake feature on no normal or build edge and in no member with a binary target; the conformance runner's normal and dev tree names none of {}",
+            "{summary}; the executor's normal dependency tree names none of {}; the resolved graph enables the client's fake feature on no normal or build edge and in no member with a binary target; the conformance runner's normal and dev tree names none of {}; the host driver's normal tree without its default features names none of {}",
             EXECUTOR_REFUSED.join(", "),
-            CONFORMANCE_REFUSED.join(", ")
+            CONFORMANCE_REFUSED.join(", "),
+            HOST_NO_DEFAULT_REFUSED.join(", ")
         )))
     } else {
         Ok(Report::failed(failures))
@@ -218,6 +220,56 @@ fn check_conformance_edges(
     }
 }
 
+/// The host driver, whose features [`HOST_FEATURES`] fixes.
+const HOST: &str = "b10x-substrate-host";
+
+/// Every feature the host driver declares and what each enables
+/// (`story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes`): `git` the
+/// Git stack and `kubernetes` the cluster client, both on by default, so every consumer keeps them
+/// and a confinement-only one drops both with `default-features = false`.
+const HOST_FEATURES: [(&str, &[&str]); 3] = [
+    ("default", &["git", "kubernetes"]),
+    ("git", &["dep:curl", "dep:git2", "dep:gix"]),
+    ("kubernetes", &["dep:substrate-kubernetes-client"]),
+];
+
+/// Why the host driver's features are fixed.
+const HOST_FEATURE_FENCE: &str = "b10x-substrate-host declares exactly the features git and kubernetes, both default, so a confinement-only consumer drops both with default-features = false";
+
+/// Refuses a host feature that is not in [`HOST_FEATURES`], and each of those that is absent or
+/// enables anything else; the order of an entry's list is free.
+fn check_host_features(member: &str, manifest: &toml::Value, failures: &mut Vec<String>) {
+    let declared = manifest.get("features").and_then(toml::Value::as_table);
+    for (feature, expected) in HOST_FEATURES {
+        let mut observed: Option<Vec<&str>> = declared
+            .and_then(|features| features.get(feature))
+            .and_then(toml::Value::as_array)
+            .map(|entries| entries.iter().filter_map(toml::Value::as_str).collect());
+        if let Some(observed) = observed.as_mut() {
+            observed.sort_unstable();
+        }
+        let mut wanted = expected.to_vec();
+        wanted.sort_unstable();
+        if observed.as_ref() != Some(&wanted) {
+            let entries = expected
+                .iter()
+                .map(|entry| format!("\"{entry}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            failures.push(format!(
+                "{member}/Cargo.toml: features.{feature} must be [{entries}]; {HOST_FEATURE_FENCE}"
+            ));
+        }
+    }
+    for feature in declared.into_iter().flat_map(toml::map::Map::keys) {
+        if !HOST_FEATURES.iter().any(|(name, _)| name == feature) {
+            failures.push(format!(
+                "{member}/Cargo.toml: features.{feature} is not a host feature; {HOST_FEATURE_FENCE}"
+            ));
+        }
+    }
+}
+
 /// Runs `cargo tree --locked -p b10x-substrate-conformance -e normal,dev --prefix none` in `root`,
 /// which resolves features for the runner alone, and refuses each line naming a fenced package.
 fn check_conformance_tree(root: &Path) -> Result<Vec<String>> {
@@ -264,6 +316,79 @@ fn refused_conformance_tree_lines(tree: &str) -> Vec<String> {
         .map(|line| {
             format!(
                 "{CONFORMANCE}: dependency tree names {}; {CONFORMANCE_FENCE}",
+                line.trim()
+            )
+        })
+        .collect()
+}
+
+/// What the host driver's normal tree without its default features may not name
+/// (`story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes`): the Git
+/// stack, its TLS and the cluster client. [`check_host_features`] holds the host's own table; this
+/// holds every edge beneath it, so a hard dependency that gains one of these is refused too.
+const HOST_NO_DEFAULT_REFUSED: [&str; 7] = [
+    "gix",
+    "git2",
+    "libgit2-sys",
+    "curl",
+    "curl-sys",
+    "openssl-sys",
+    "b10x-substrate-kubernetes-client",
+];
+
+/// Why the host driver's no-default tree is fenced.
+const HOST_NO_DEFAULT_FENCE: &str = "a confinement-only consumer takes b10x-substrate-host with default-features = false and links no Git stack, no openssl-sys and no Kubernetes client";
+
+/// Runs `cargo tree --locked -p b10x-substrate-host --no-default-features -e normal --target all
+/// --prefix none` in `root` and refuses each line naming a package of [`HOST_NO_DEFAULT_REFUSED`].
+/// Every target, so an edge only one platform takes is read too.
+fn check_host_no_default_tree(root: &Path) -> Result<Vec<String>> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let output = std::process::Command::new(cargo)
+        .current_dir(root)
+        .env("CARGO_TERM_COLOR", "never")
+        .args([
+            "tree",
+            "--locked",
+            "-p",
+            HOST,
+            "--no-default-features",
+            "-e",
+            "normal",
+            "--target",
+            "all",
+            "--prefix",
+            "none",
+        ])
+        .output()
+        .context("running cargo tree for the host driver without its default features")?;
+    if !output.status.success() {
+        return Ok(vec![format!(
+            "{HOST}: cargo tree --locked --no-default-features failed, so the rule checked nothing: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )]);
+    }
+    let tree = String::from_utf8(output.stdout).context("cargo tree wrote non-UTF-8")?;
+    Ok(refused_host_no_default_tree_lines(&tree))
+}
+
+/// The refusals for one `cargo tree --prefix none` text of the host. A tree whose first line is
+/// not the host selected nothing, and is refused rather than read as clean.
+fn refused_host_no_default_tree_lines(tree: &str) -> Vec<String> {
+    let name_of = |line: &str| line.split_whitespace().next().map(str::to_owned);
+    let mut lines = tree.lines();
+    if lines.next().and_then(name_of).as_deref() != Some(HOST) {
+        return vec![format!(
+            "{HOST}: cargo tree did not start at the host driver, so the rule checked nothing"
+        )];
+    }
+    lines
+        .filter(|line| {
+            name_of(line).is_some_and(|name| HOST_NO_DEFAULT_REFUSED.contains(&name.as_str()))
+        })
+        .map(|line| {
+            format!(
+                "{HOST}: the tree without default features names {}; {HOST_NO_DEFAULT_FENCE}",
                 line.trim()
             )
         })
@@ -784,6 +909,9 @@ fn check_manifests(root: &Path, failures: &mut Vec<String>) -> Result<BTreeMap<S
                 if name == CONFORMANCE {
                     check_conformance_edges(member, &manifest, &root_manifest, failures);
                 }
+                if name == HOST {
+                    check_host_features(member, &manifest, failures);
+                }
                 observed.insert(member.to_owned(), name.to_owned());
             }
             None if publish != Some(false) => failures.push(format!(
@@ -837,8 +965,13 @@ mod tests {
 
     use super::{SOURCE_PACKAGES, check};
 
+    /// The `[features]` table the host driver must declare, as the fixture writes it.
+    const HOST_FEATURES: &str = "\n[features]\ndefault = [\"git\", \"kubernetes\"]\ngit = [\"dep:curl\", \"dep:git2\", \"dep:gix\"]\nkubernetes = [\"dep:substrate-kubernetes-client\"]\n";
+
     /// A workspace this check accepts: every approved member, non-publishable, with its README and
-    /// metadata. `extra` is appended to `member`'s manifest so one test violates exactly one thing.
+    /// metadata, and the host driver with [`HOST_FEATURES`]. `extra` is appended to `member`'s
+    /// manifest so one test violates exactly one thing; a `[features]` table it gives the host is
+    /// merged into the host's own.
     fn fixture(root: &Path, member: &str, extra: &str) {
         let members = SOURCE_PACKAGES
             .iter()
@@ -861,8 +994,14 @@ mod tests {
             let mut manifest = format!(
                 "[package]\nname = \"{name}\"\nversion = \"0.4.2\"\nreadme = \"README.md\"\nlicense.workspace = true\ndocumentation = \"https://beyond10x.github.io/substrate/\"\npublish = false\n"
             );
-            if name_member == member {
+            let extra = if name_member == member { extra } else { "" };
+            if name_member != "crates/substrate-host" {
                 manifest.push_str(extra);
+            } else if extra.contains("\n[features]\n") {
+                manifest.push_str(&extra.replacen("\n[features]\n", HOST_FEATURES, 1));
+            } else {
+                manifest.push_str(extra);
+                manifest.push_str(HOST_FEATURES);
             }
             std::fs::write(package_directory.join("Cargo.toml"), manifest)
                 .expect("package manifest");
@@ -928,6 +1067,7 @@ mod tests {
     fn the_fake_feature_is_refused_on_every_edge_but_a_dev_dependency() {
         const EDGE: &str = "substrate-kubernetes-client = { package = \"b10x-substrate-kubernetes-client\", path = \"../substrate-kubernetes-client\", version = \"=0.4.2\", features = [\"fake\"] }";
         const FENCE: &str = "the fake feature of b10x-substrate-kubernetes-client is legal only under [dev-dependencies] (design 34 § 10.1)";
+        const HOST_FENCE: &str = "b10x-substrate-host declares exactly the features git and kubernetes, both default, so a confinement-only consumer drops both with default-features = false";
         let cases = [
             (
                 "crates/substrate-host",
@@ -956,8 +1096,10 @@ mod tests {
                     "\n[dependencies]\n{}\n\n[features]\ntesting = [\"substrate-kubernetes-client?/fake\"]\n",
                     EDGE.replace(", features = [\"fake\"]", "")
                 ),
+                // story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes: the
+                // host admits no feature but `git` and `kubernetes`, so `testing` is refused as that too.
                 format!(
-                    "crates/substrate-host/Cargo.toml: features.testing enables substrate-kubernetes-client?/fake; {FENCE}"
+                    "crates/substrate-host/Cargo.toml: features.testing is not a host feature; {HOST_FENCE}\ncrates/substrate-host/Cargo.toml: features.testing enables substrate-kubernetes-client?/fake; {FENCE}"
                 ),
             ),
             (
@@ -1171,6 +1313,47 @@ mod tests {
     /// The tree half of the runner's fence reads `cargo tree --prefix none` output: it refuses each
     /// line naming the daemon, the host driver or the store, and nothing of a similar name.
     #[test]
+    fn the_host_no_default_tree_refuses_the_git_tls_and_cluster_stacks_and_only_those() {
+        const CLEAN: &str = "b10x-substrate-host v0.4.2 (/w/crates/substrate-host)\nb10x-substrate-guarded v0.4.2 (/w/crates/substrate-guarded)\nlibc v0.2.177\ntokio v1.47.1 (*)\n";
+        assert_eq!(
+            super::refused_host_no_default_tree_lines(CLEAN),
+            Vec::<String>::new()
+        );
+        for mutant in [
+            "gix v0.87.1",
+            "git2 v0.20.4",
+            "libgit2-sys v0.18.2+1.9.1",
+            "curl v0.4.50 (*)",
+            "curl-sys v0.4.84+curl-8.17.0",
+            "openssl-sys v0.9.117",
+            "b10x-substrate-kubernetes-client v0.4.2 (/w/crates/substrate-kubernetes-client)",
+        ] {
+            let refused = super::refused_host_no_default_tree_lines(&format!("{CLEAN}{mutant}\n"));
+            assert_eq!(refused.len(), 1, "{mutant}");
+            assert!(
+                refused[0].starts_with(&format!(
+                    "b10x-substrate-host: the tree without default features names {mutant}; "
+                )),
+                "{refused:?}"
+            );
+        }
+        for innocent in ["gixel v0.1.0", "curlew v0.1.0", "openssl-probe v0.1.6"] {
+            assert_eq!(
+                super::refused_host_no_default_tree_lines(&format!("{CLEAN}{innocent}\n")),
+                Vec::<String>::new(),
+                "{innocent}"
+            );
+        }
+        assert_eq!(
+            super::refused_host_no_default_tree_lines("b10x-substrate-guarded v0.4.2 (/w)\n"),
+            vec![
+                "b10x-substrate-host: cargo tree did not start at the host driver, so the rule checked nothing"
+                    .to_owned()
+            ]
+        );
+    }
+
+    #[test]
     fn the_conformance_tree_refuses_the_daemon_host_and_store_and_only_those() {
         const CLEAN: &str = "b10x-substrate-conformance v0.4.2 (/w/crates/b10x-substrate-conformance)\nb10x-substrate-sdk v0.4.2 (/w/crates/b10x-substrate-sdk)\nb10x-substrate-wire v0.4.2 (/w/crates/substrate-wire)\nb10x-substrate-wire v0.4.2 (/w/crates/substrate-wire) (*)\nrustls v0.23.31\n";
         assert_eq!(
@@ -1250,6 +1433,7 @@ mod tests {
             );
             if member == "crates/substrate-host" {
                 writeln!(manifest, "publish = true").expect("manifest text");
+                manifest.push_str(HOST_FEATURES);
             } else {
                 writeln!(manifest, "publish = false").expect("manifest text");
             }
@@ -1262,5 +1446,56 @@ mod tests {
             report.failure_text(),
             "crates/substrate-host/Cargo.toml: source-distributed package must set publish = false"
         );
+    }
+
+    /// `story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes`: the host
+    /// driver declares exactly `git` and `kubernetes`, both default, each enabling only its own
+    /// optional dependencies, so `default-features = false` is all a confinement-only consumer
+    /// sets. Another feature, a narrower default, a feature that enables more and a host with no
+    /// features are each refused by the feature's name; the order of an entry's list is not.
+    #[test]
+    fn the_host_declares_exactly_git_and_kubernetes_both_default() {
+        const FENCE: &str = "b10x-substrate-host declares exactly the features git and kubernetes, both default, so a confinement-only consumer drops both with default-features = false";
+        const HOST: &str = "crates/substrate-host/Cargo.toml";
+        let must = |feature: &str, entries: &str| {
+            format!("{HOST}: features.{feature} must be [{entries}]; {FENCE}")
+        };
+        let cases = [
+            (
+                HOST_FEATURES.replace("kubernetes\"]\n", "kubernetes\"]\nfake = []\n"),
+                format!("{HOST}: features.fake is not a host feature; {FENCE}"),
+            ),
+            (
+                HOST_FEATURES.replace("[\"git\", \"kubernetes\"]", "[\"git\"]"),
+                must("default", "\"git\", \"kubernetes\""),
+            ),
+            (
+                HOST_FEATURES.replace("\"dep:gix\"]", "\"dep:gix\", \"tokio/fs\"]"),
+                must("git", "\"dep:curl\", \"dep:git2\", \"dep:gix\""),
+            ),
+            (
+                String::new(),
+                [
+                    must("default", "\"git\", \"kubernetes\""),
+                    must("git", "\"dep:curl\", \"dep:git2\", \"dep:gix\""),
+                    must("kubernetes", "\"dep:substrate-kubernetes-client\""),
+                ]
+                .join("\n"),
+            ),
+            (
+                HOST_FEATURES.replace("[\"git\", \"kubernetes\"]", "[\"kubernetes\", \"git\"]"),
+                String::new(),
+            ),
+        ];
+        for (features, refused) in cases {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            fixture(directory.path(), "crates/substrate-host", "");
+            let path = directory.path().join(HOST);
+            let manifest = std::fs::read_to_string(&path).expect("host manifest");
+            std::fs::write(&path, manifest.replace(HOST_FEATURES, &features))
+                .expect("host manifest");
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(report.failure_text(), refused, "{features}");
+        }
     }
 }

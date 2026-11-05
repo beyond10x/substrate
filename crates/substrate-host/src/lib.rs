@@ -19,7 +19,11 @@ pub mod confinement;
 mod confinement_types;
 #[cfg(target_os = "linux")]
 mod egress;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "git"))]
+mod git;
+// Without the `git` feature: the same entry points, refusing every Git source by name.
+#[cfg(all(target_os = "linux", not(feature = "git")))]
+#[path = "git_unserved.rs"]
 mod git;
 pub mod host_process;
 mod observation;
@@ -1394,18 +1398,15 @@ impl Driver for HostDriver {
         let substrate_wire::WorkspaceSource::Git(source) = &input.source else {
             return self.create_workspace(id, root_name, input).await;
         };
+        // A build without the `git` feature serves no source, whatever the configuration binds.
         let Some(binding) = self
             .config
             .git_sources
             .iter()
-            .find(|candidate| candidate.name == source.git.source)
+            .find(|candidate| git::SERVED && candidate.name == source.git.source)
             .cloned()
         else {
-            return DispatchOutcome::NotDispatched(DriverError::unserved(
-                "workspace.git-source-unserved",
-                "The requested Git source is not configured.",
-                "workspace.git",
-            ));
+            return DispatchOutcome::NotDispatched(git::source_unserved());
         };
         let locator = match url::Url::parse(&source.git.locator) {
             Ok(locator) if binding.admits(&locator, &source.git.locator) => locator,

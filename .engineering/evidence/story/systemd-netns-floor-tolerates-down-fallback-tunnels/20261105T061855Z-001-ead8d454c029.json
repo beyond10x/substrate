@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T06:18:55Z",
+  "actor": "human:timo",
+  "artifact": "story:systemd-netns-floor-tolerates-down-fallback-tunnels",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "PR 213 CI at bc2a3054: all 14 checks green; delegated lane at aeab475f (scripts/delegated-lane.sh, every host test with ipip loaded): 189 delegated cases passed",
+    "reference": "https://github.com/beyond10x/substrate/pull/213"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-05T07:16:34Z",
+  "actor": "human:timo",
+  "artifact": "story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "fixed by cd22e190, merged at 79243f9a",
+    "review": "review-result:wave-2026-11-05-substrate-u1-adversary-pass-1",
+    "outcome": "fixed"
+  }
+}

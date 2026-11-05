@@ -4781,6 +4781,9 @@
           }
         },
         {
+          "step": "expect_no_error"
+        },
+        {
           "step": "expect_event",
           "event": "substrate.workspaces.WorkspaceAdopted",
           "payload": {
@@ -4942,6 +4945,9 @@
             "command": "substrate.workspaces.Adopt",
             "outcome": "adopted"
           }
+        },
+        {
+          "step": "expect_no_error"
         },
         {
           "step": "capture_instance",
@@ -5134,6 +5140,9 @@
             "command": "substrate.workspaces.Adopt",
             "outcome": "adopted"
           }
+        },
+        {
+          "step": "expect_no_error"
         },
         {
           "step": "capture_instance",
@@ -5331,6 +5340,9 @@
           }
         },
         {
+          "step": "expect_no_error"
+        },
+        {
           "step": "capture_instance",
           "instance": "repo",
           "entity": "substrate.workspaces.Workspace",
@@ -5357,6 +5369,9 @@
             "command": "substrate.workspaces.Destroy",
             "outcome": "forgotten"
           }
+        },
+        {
+          "step": "expect_no_error"
         },
         {
           "step": "expect_event_values",
