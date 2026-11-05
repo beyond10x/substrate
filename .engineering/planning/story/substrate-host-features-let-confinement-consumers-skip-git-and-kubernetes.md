@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes
 kind: story
-status: active
+status: implemented
 title: substrate-host features let confinement-only consumers skip Git and Kubernetes
 tags:
 - host
 - packaging
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-05T06:18:55Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-05T06:18:55Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-05T07:37:08Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: substrate-host features let confinement-only consumers skip Git and Kubernetes
 
