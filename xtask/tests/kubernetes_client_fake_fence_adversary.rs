@@ -160,10 +160,17 @@ fn a_feature_forwarding_fake_through_an_inherited_renamed_edge_is_refused() {
     let scratch = copy_manifests();
     rename_in_workspace(scratch.path());
     replace_host_edge(scratch.path(), "k8s = { workspace = true }");
+    // The host already declares `[features]`
+    // (`story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes`), so
+    // `testing` joins that table: a second one is a TOML error, not the fence's refusal.
     edit(scratch.path(), HOST, |text| {
+        assert!(
+            text.contains("\n[features]\n"),
+            "the host declares its features"
+        );
         text.replacen(
-            "[dev-dependencies]\n",
-            "[features]\ntesting = [\"k8s/fake\"]\n\n[dev-dependencies]\n",
+            "\n[features]\n",
+            "\n[features]\ntesting = [\"k8s/fake\"]\n",
             1,
         )
     });

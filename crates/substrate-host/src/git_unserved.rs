@@ -23,8 +23,9 @@ use crate::{DriverError, GitSourceBinding};
 /// Whether this build serves a Git source at all; `git.rs` holds `true`.
 pub(super) const SERVED: bool = false;
 
-/// The refusal of every Git source in this build: the code a host without the source answers.
-fn unserved() -> DriverError {
+/// The refusal of every Git source in this build: the code a host without the source answers,
+/// with a message that names the missing feature. The driver answers it before dispatch too.
+pub(super) fn source_unserved() -> DriverError {
     DriverError::unserved(
         "workspace.git-source-unserved",
         "This build of the host driver has no `git` feature, so it serves no Git source.",
@@ -53,7 +54,7 @@ pub(super) fn materialize(
     _limit: StorageLimit,
     _interrupt: &Arc<AtomicBool>,
 ) -> Result<StorageUsage, DriverError> {
-    Err(unserved())
+    Err(source_unserved())
 }
 
 pub(super) fn mechanism_is_provable(_workspace_root: &Path) -> bool {
@@ -70,7 +71,7 @@ pub(super) fn write_baseline(
     _root_name: &str,
     _commit: &str,
 ) -> Result<(), DriverError> {
-    Err(unserved())
+    Err(source_unserved())
 }
 
 /// Removes a baseline a build with `git` wrote, as `git.rs` does: forgetting or destroying a
@@ -101,7 +102,7 @@ pub(super) fn baseline_file(
     _path: &str,
     _max_bytes: u64,
 ) -> Result<GitBaselineFileResult, DriverError> {
-    Err(unserved())
+    Err(source_unserved())
 }
 
 pub(super) fn changes(
@@ -111,7 +112,7 @@ pub(super) fn changes(
     _root_name: &str,
     _query: GitChangesQuery,
 ) -> Result<GitChangeSet, DriverError> {
-    Err(unserved())
+    Err(source_unserved())
 }
 
 /// No workspace of this build was materialized from Git, so none holds a baseline.
@@ -121,5 +122,5 @@ pub(crate) fn has_baseline(_baseline_root: &Path, _root_name: &str) -> Result<bo
 }
 
 pub(super) fn sync_workspace_root(_root: &Path) -> Result<(), DriverError> {
-    Err(unserved())
+    Err(source_unserved())
 }
