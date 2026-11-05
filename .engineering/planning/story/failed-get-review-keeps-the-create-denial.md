@@ -2,13 +2,15 @@
 format: aep.planning-md/3
 id: story:failed-get-review-keeps-the-create-denial
 kind: story
-status: proposed
+status: active
 title: A failed get review keeps a create denial named
 relations:
 - informed_by: review-result:wave-2026-11-02-d364-u2-adversary-pass-2
-revision: 2
+- informed_by: approval-record:wave-2026-11-04-substrate
+revision: 3
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-02T01:25:02Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-04T07:33:32Z", actor: "human:timo", revision: 3}
 ---
 # Story: a failed get review keeps a create denial named
 

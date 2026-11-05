@@ -339,7 +339,8 @@ mod d354_adv {
 
     /// Acceptance 2: the 5 s bound holds the two reviews together, not each one: two reviews
     /// that each answer within 5 s but together outlast it leave the verb unknown, and the
-    /// handshake ends at the shared bound.
+    /// handshake ends at the shared bound. Since `story:failed-get-review-keeps-the-create-denial`
+    /// the `create` the first review denied within the bound is named before it.
     #[tokio::test]
     async fn two_reviews_that_together_outlast_five_seconds_leave_the_verb_unknown() {
         let (fake, driver) = refusing(&["get"], 403, &bare_message());
@@ -360,15 +361,18 @@ mod d354_adv {
         assert_eq!(
             error.message,
             format!(
-                "{BARE} (the refused verb is unknown: the SelfSubjectAccessReview did not answer \
-                 within 5 s)"
+                "{BARE} (a SelfSubjectAccessReview denies pods/exec create, and the refused verb \
+                 is unknown: the SelfSubjectAccessReview did not answer within 5 s)"
             ),
-            "story:driver-names-a-bare-exec-refusals-verb"
+            "story:driver-names-a-bare-exec-refusals-verb, amended by \
+             story:failed-get-review-keeps-the-create-denial"
         );
     }
 
     /// Acceptance 2: the second review failing after the first answered keeps the API's refusal
-    /// and names the verb unknown, with the failed review's verb and why.
+    /// and names the verb unknown, with the failed review's verb and why; since
+    /// `story:failed-get-review-keeps-the-create-denial` it names the `create` the first review
+    /// denied before it.
     #[tokio::test]
     async fn a_second_review_that_fails_keeps_the_refusal_and_names_the_verb_unknown() {
         let (fake, driver) = refusing(&["get"], 403, &bare_message());
@@ -385,14 +389,15 @@ mod d354_adv {
         });
         let error = handshake_error(&fake, &driver).await;
         let unknown = format!(
-            "{BARE} (the refused verb is unknown: the SelfSubjectAccessReview of pods/exec get \
-             failed: "
+            "{BARE} (a SelfSubjectAccessReview denies pods/exec create, and the refused verb is \
+             unknown: the SelfSubjectAccessReview of pods/exec get failed: "
         );
         assert!(
             error.message.starts_with(&unknown)
                 && error.message.contains("etcd is unavailable")
                 && error.message.ends_with(')'),
-            "story:driver-names-a-bare-exec-refusals-verb: {}",
+            "story:driver-names-a-bare-exec-refusals-verb, amended by \
+             story:failed-get-review-keeps-the-create-denial: {}",
             error.message
         );
         assert_eq!(reviews(&fake), 2, "{:#?}", fake.requests());
@@ -725,5 +730,239 @@ mod d364_adv2 {
             format!("{BARE} (a SelfSubjectAccessReview denies pods/exec create)"),
             "story:access-review-evaluation-error-is-not-a-denial: not the S6 line"
         );
+    }
+}
+
+/// `story:failed-get-review-keeps-the-create-denial`: a `create` the first review denies stays
+/// named when the `get` review after it is refused, fails, answers no `allowed` or outlasts the
+/// 5 s bound. The refusal keeps the API's answer, names the `create` denial, then says the
+/// refused verb is unknown and why; the handshake still ends at once.
+mod failed_get_review {
+    use super::*;
+
+    /// What the refusal says, after the API's answer, before why the `get` review left the verb
+    /// unknown.
+    const DENIED_THEN_UNKNOWN: &str = "a SelfSubjectAccessReview denies pods/exec create, and the \
+         refused verb is unknown: ";
+
+    fn bare_message() -> String {
+        format!("pods \"{KEEPER}\" is forbidden: ")
+    }
+
+    /// The first review left to the fake's rules, which deny `create`, so a fault planned after
+    /// it reaches the `get` review.
+    fn create_denied_by_the_rules(fake: &FakeCluster) {
+        fake.fault(Fault::Delay {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            by: Duration::ZERO,
+        });
+    }
+
+    /// A `get` review the API refuses, answers a server error to or whose answer is lost.
+    #[tokio::test]
+    async fn a_refused_or_failing_get_review_keeps_the_create_denial_named() {
+        let refused = json!({
+            "kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
+            "message": "selfsubjectaccessreviews.authorization.k8s.io is forbidden: User \
+                        \"system:serviceaccount:substrate:substrate-driver\" cannot create \
+                        resource \"selfsubjectaccessreviews\" in API group \
+                        \"authorization.k8s.io\" at the cluster scope",
+            "reason": "Forbidden", "code": 403,
+        });
+        for (fault, why) in [
+            (
+                Fault::Answer {
+                    method: Method::POST,
+                    path: ACCESS_REVIEWS.to_owned(),
+                    status: 403,
+                    body: refused,
+                },
+                "access review answered 403: selfsubjectaccessreviews.authorization.k8s.io is \
+                 forbidden",
+            ),
+            (
+                Fault::Answer {
+                    method: Method::POST,
+                    path: ACCESS_REVIEWS.to_owned(),
+                    status: 500,
+                    body: json!({"kind": "Status", "message": "etcd is unavailable", "code": 500}),
+                },
+                "access review answered 500: etcd is unavailable",
+            ),
+            (
+                Fault::DropAnswer {
+                    method: Method::POST,
+                    path: ACCESS_REVIEWS.to_owned(),
+                },
+                "HTTP",
+            ),
+        ] {
+            let (fake, driver) = refusing(&["get"], 403, &bare_message());
+            create_denied_by_the_rules(&fake);
+            fake.fault(fault);
+            let error = handshake_error(&fake, &driver).await;
+            let head = format!(
+                "{BARE} ({DENIED_THEN_UNKNOWN}the SelfSubjectAccessReview of pods/exec get \
+                 failed: "
+            );
+            assert!(
+                error.message.starts_with(&head)
+                    && error.message.contains(why)
+                    && error.message.ends_with(')'),
+                "story:failed-get-review-keeps-the-create-denial: {why}: {}",
+                error.message
+            );
+            assert_eq!(reviews(&fake), 2, "{:#?}", fake.requests());
+        }
+    }
+
+    /// A `get` review answered without `status.allowed`.
+    #[tokio::test]
+    async fn a_get_review_without_allowed_keeps_the_create_denial_named() {
+        let (fake, driver) = refusing(&["get"], 403, &bare_message());
+        create_denied_by_the_rules(&fake);
+        fake.fault(Fault::Answer {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            status: 201,
+            body: json!({"kind": "SelfSubjectAccessReview", "status": {}}),
+        });
+        let error = handshake_error(&fake, &driver).await;
+        let head = format!(
+            "{BARE} ({DENIED_THEN_UNKNOWN}the SelfSubjectAccessReview of pods/exec get failed: "
+        );
+        assert!(
+            error.message.starts_with(&head)
+                && error.message.contains("no status.allowed")
+                && error.message.ends_with(')'),
+            "story:failed-get-review-keeps-the-create-denial: {}",
+            error.message
+        );
+        assert_eq!(reviews(&fake), 2, "{:#?}", fake.requests());
+    }
+
+    /// A `get` review the API does not answer within the 5 s the reviews share: the denial the
+    /// `create` review answered before the bound survives it, and the handshake ends at the bound.
+    #[tokio::test]
+    async fn a_get_review_past_the_bound_keeps_the_create_denial_named() {
+        let (fake, driver) = refusing(&["get"], 403, &bare_message());
+        create_denied_by_the_rules(&fake);
+        fake.fault(Fault::Delay {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            by: Duration::from_mins(1),
+        });
+        let started = Instant::now();
+        let error = handshake_error(&fake, &driver).await;
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_millis(5_900),
+            "story:failed-get-review-keeps-the-create-denial: the reviews held the handshake \
+             {took:?}"
+        );
+        assert_eq!(
+            error.message,
+            format!(
+                "{BARE} ({DENIED_THEN_UNKNOWN}the SelfSubjectAccessReview did not answer within \
+                 5 s)"
+            ),
+            "story:failed-get-review-keeps-the-create-denial"
+        );
+        assert_eq!(reviews(&fake), 2, "{:#?}", fake.requests());
+    }
+}
+
+/// Adversary cases of the 2026-11-04 wave (`story:failed-get-review-keeps-the-create-denial`).
+mod failed_get_review_adv {
+    use super::*;
+
+    /// The bearer token of [`passing_fake`]'s driver (`TOKEN` in `driver_tests`).
+    const FAKE_TOKEN: &str = "fake-token-never-quoted";
+
+    fn bare_message() -> String {
+        format!("pods \"{KEEPER}\" is forbidden: ")
+    }
+
+    fn first_review_by_the_rules() -> Fault {
+        Fault::Delay {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            by: Duration::ZERO,
+        }
+    }
+
+    /// "Keeps the API's answer" on the new path: a failing `get` review whose message echoes the
+    /// driver's bearer token and runs long reaches the refusal after the `create` denial cleared
+    /// of the token and at most 300 characters, word for word.
+    #[tokio::test]
+    async fn a_failing_get_review_after_a_denied_create_is_cleared_and_bounded() {
+        let (fake, driver) = refusing(&["get"], 403, &bare_message());
+        fake.fault(first_review_by_the_rules());
+        let long = format!("{} {FAKE_TOKEN} {}", "w".repeat(10), "e".repeat(1_000));
+        fake.fault(Fault::Answer {
+            method: Method::POST,
+            path: ACCESS_REVIEWS.to_owned(),
+            status: 500,
+            body: json!({"kind": "Status", "message": long, "code": 500}),
+        });
+        let error = handshake_error(&fake, &driver).await;
+        assert_eq!(
+            error.message,
+            format!(
+                "{BARE} (a SelfSubjectAccessReview denies pods/exec create, and the refused verb \
+                 is unknown: the SelfSubjectAccessReview of pods/exec get failed: access review \
+                 answered 500: {} [redacted] {})",
+                "w".repeat(10),
+                "e".repeat(278)
+            ),
+            "story:failed-get-review-keeps-the-create-denial"
+        );
+        assert_eq!(reviews(&fake), 2, "{:#?}", fake.requests());
+    }
+
+    /// No denial behaves as before: a `create` the review admits, then a `get` review that fails
+    /// or outlasts the bound, names no denial, only the unknown verb and why.
+    #[tokio::test]
+    async fn an_admitted_create_before_a_failing_or_late_get_names_no_denial() {
+        for (late, expected) in [
+            (
+                false,
+                format!(
+                    "{BARE} (the refused verb is unknown: the SelfSubjectAccessReview of \
+                     pods/exec get failed: access review answered 500: etcd is unavailable)"
+                ),
+            ),
+            (
+                true,
+                format!(
+                    "{BARE} (the refused verb is unknown: the SelfSubjectAccessReview did not \
+                     answer within 5 s)"
+                ),
+            ),
+        ] {
+            let (fake, driver) = refusing(&["create"], 403, &bare_message());
+            fake.fault(first_review_by_the_rules());
+            fake.fault(if late {
+                Fault::Delay {
+                    method: Method::POST,
+                    path: ACCESS_REVIEWS.to_owned(),
+                    by: Duration::from_mins(1),
+                }
+            } else {
+                Fault::Answer {
+                    method: Method::POST,
+                    path: ACCESS_REVIEWS.to_owned(),
+                    status: 500,
+                    body: json!({"kind": "Status", "message": "etcd is unavailable", "code": 500}),
+                }
+            });
+            let error = handshake_error(&fake, &driver).await;
+            assert_eq!(
+                error.message, expected,
+                "story:failed-get-review-keeps-the-create-denial: late {late}"
+            );
+            assert_eq!(reviews(&fake), 2, "{:#?}", fake.requests());
+        }
     }
 }

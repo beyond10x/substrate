@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-04T07:29:57Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-lane-exec-create-case-reads-the-apis-bare-refusal",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "health_observation",
+    "source": "namespace lane, S6 pods/exec create not in ABSENT (xtask/src/namespace_lane_run.rs:115): tag 0.19.0 Namespace-lane 036f13de 8 2026-11-01T22:23:30Z; tag 0.19.1 Namespace-lane a692acb7 8 2026-11-02T06:29:54Z"
+  }
+}

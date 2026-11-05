@@ -593,56 +593,65 @@ impl NamespaceDriver {
     /// of each of [`EXEC_VERBS`] on the keeper's `pods/exec` found: the verbs it denies, that it
     /// admits both and so does not decide the refused verb, that a review answered the API's
     /// evaluation error and so does not decide it, or, when a review is refused, fails or
-    /// outlasts [`ACCESS_REVIEW_BOUND`], that the verb is unknown. The API's answer stays the
-    /// refusal either way.
+    /// outlasts [`ACCESS_REVIEW_BOUND`], that the verb is unknown. A verb an earlier review
+    /// denied is named before a review that leaves the verb open, whichever way it does
+    /// (`story:failed-get-review-keeps-the-create-denial`). The API's answer stays the refusal
+    /// either way.
     async fn refused_handshake(&self, keeper: &str, error: &ApiError) -> DriverError {
         let refused = api_failed(error);
         if !is_bare_refusal(error) {
             return refused;
         }
-        let review =
-            match tokio::time::timeout(ACCESS_REVIEW_BOUND, self.denied_exec_verbs(keeper)).await {
-                Ok(Ok(denied)) if denied.is_empty() => format!(
-                    "a SelfSubjectAccessReview admits pods/exec {}: it {REVIEW_UNDECIDED}",
-                    EXEC_VERBS.join(" and ")
-                ),
-                Ok(Ok(denied)) => format!("{ACCESS_REVIEW_DENIES}{}", denied.join(" and ")),
-                Ok(Err(found)) => found,
-                Err(_) => format!(
-                    "the refused verb is unknown: the SelfSubjectAccessReview did not answer \
-                     within {} s",
-                    ACCESS_REVIEW_BOUND.as_secs()
-                ),
-            };
+        let mut denied = Vec::new();
+        let open = match tokio::time::timeout(
+            ACCESS_REVIEW_BOUND,
+            self.denied_exec_verbs(keeper, &mut denied),
+        )
+        .await
+        {
+            Ok(Ok(())) => None,
+            Ok(Err(open)) => Some(open),
+            Err(_) => Some(format!(
+                "the refused verb is unknown: the SelfSubjectAccessReview did not answer within \
+                 {} s",
+                ACCESS_REVIEW_BOUND.as_secs()
+            )),
+        };
+        let denials = format!("{ACCESS_REVIEW_DENIES}{}", denied.join(" and "));
+        let review = match (denied.is_empty(), open) {
+            (true, None) => format!(
+                "a SelfSubjectAccessReview admits pods/exec {}: it {REVIEW_UNDECIDED}",
+                EXEC_VERBS.join(" and ")
+            ),
+            (false, None) => denials,
+            (true, Some(open)) => open,
+            (false, Some(open)) => format!("{denials}, and {open}"),
+        };
         DriverError::failed(
             API_FAILED,
             format!("{} ({review})", refused.message.trim_end()),
         )
     }
 
-    /// The verbs of [`EXEC_VERBS`] a `SelfSubjectAccessReview` of the keeper's `pods/exec` in the
-    /// namespace denies, asked one after the other. The first review that does not decide, its
-    /// API evaluation error kept after the verbs already denied, or that fails ends the asking
-    /// with what the refusal says.
-    async fn denied_exec_verbs(&self, keeper: &str) -> Result<Vec<&'static str>, String> {
-        let mut denied = Vec::new();
+    /// Collects into `denied` the verbs of [`EXEC_VERBS`] a `SelfSubjectAccessReview` of the
+    /// keeper's `pods/exec` in the namespace denies, asked one after the other. The first review
+    /// that does not decide, with its API evaluation error, or that fails ends the asking with
+    /// what the refusal says of it; the verbs already denied stay in `denied`, also when the
+    /// caller's bound drops this future.
+    async fn denied_exec_verbs(
+        &self,
+        keeper: &str,
+        denied: &mut Vec<&'static str>,
+    ) -> Result<(), String> {
         for verb in EXEC_VERBS {
             match self.api.access_review("", "pods/exec", verb, keeper).await {
                 Ok(Ok(true)) => {}
                 Ok(Ok(false)) => denied.push(verb),
                 Ok(Err(evaluation_error)) => {
-                    let undecided = format!(
+                    return Err(format!(
                         "a SelfSubjectAccessReview of pods/exec {verb} {REVIEW_UNDECIDED}: its \
                          evaluationError is {evaluation_error}"
-                    );
-                    return Err(if denied.is_empty() {
-                        undecided
-                    } else {
-                        format!(
-                            "{ACCESS_REVIEW_DENIES}{}, and {undecided}",
-                            denied.join(" and ")
-                        )
-                    });
+                    ));
                 }
                 Err(error) => {
                     return Err(format!(
@@ -652,7 +661,7 @@ impl NamespaceDriver {
                 }
             }
         }
-        Ok(denied)
+        Ok(())
     }
 
     fn claims_path(&self) -> String {

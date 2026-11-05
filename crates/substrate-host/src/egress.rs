@@ -796,6 +796,19 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// What [`KILL_ON_ABANDON`] holds.
+#[cfg(test)]
+type AbandonKillHook = Box<dyn FnOnce(libc::pid_t)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Called once, on the installing thread, in place of the `SIGKILL` with which
+    /// [`abandon_forwarder`] kills a refused forwarder, with that forwarder's pid: a case that
+    /// kills it from another thread only once this one waits in the reap can interrupt that wait.
+    static KILL_ON_ABANDON: std::cell::RefCell<Option<AbandonKillHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Forks the long-lived forwarder, which makes its own listener inside the sandbox: host netns, run
 /// cgroup, one relay per connection.
 ///
@@ -911,12 +924,24 @@ fn spawn_forwarder(
 
 /// Kills and reaps a forwarder whose install is refused.
 fn abandon_forwarder(pid: libc::pid_t) {
+    #[cfg(test)]
+    let killed_by_case = KILL_ON_ABANDON.take().map(|kill| kill(pid)).is_some();
+    #[cfg(not(test))]
+    let killed_by_case = false;
     // SAFETY: `pid` is a child this process forked and has not reaped; killing one that has
-    // already exited is harmless, and the wait reaps it either way.
+    // already exited is harmless, and the wait reaps it either way. A wait a handled signal
+    // interrupts (`EINTR`, from a handler installed without `SA_RESTART`) is waited again, or the
+    // forwarder would be left a zombie; any other error ends it.
     unsafe {
-        libc::kill(pid, libc::SIGKILL);
+        if !killed_by_case {
+            libc::kill(pid, libc::SIGKILL);
+        }
         let mut status = 0;
-        libc::waitpid(pid, &raw mut status, 0);
+        while libc::waitpid(pid, &raw mut status, 0) < 0 {
+            if *libc::__errno_location() != libc::EINTR {
+                break;
+            }
+        }
     }
 }
 
@@ -1681,6 +1706,29 @@ mod tests {
         read_sandbox_pid, receive_descriptor, sandbox_pid_from,
     };
     use crate::{DriverError, DriverErrorClass, HostConfig};
+
+    /// The reap of an abandoned forwarder retries only `EINTR`: a wait that fails otherwise, here
+    /// `ECHILD` for a child already reaped, ends at once instead of waiting again forever. The
+    /// case's hook stands in for the `SIGKILL`, so no signal reaches a recycled pid.
+    #[test]
+    fn a_reap_that_fails_other_than_eintr_ends_at_once() {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = libc::pid_t::try_from(child.id()).expect("pid");
+        child.wait().expect("reap true here");
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            super::KILL_ON_ABANDON.set(Some(Box::new(|_| {})));
+            super::abandon_forwarder(pid);
+            let _ = done.send(());
+        });
+        assert!(
+            ended
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "story:abandoned-forwarder-reaped-through-eintr: a reap that failed with ECHILD did \
+             not end within 5 s"
+        );
+    }
 
     const BUBBLEWRAP: &str = "/usr/bin/bwrap";
     /// What the model-free fake app-server answers with. Not a model, not a protocol: bytes.
@@ -4701,6 +4749,170 @@ mod tests {
                         "the refused install left the installer other descriptors than it had"
                     );
                     println!("D364-ADV descriptor-refused {messages:?}");
+                }
+            }
+
+            /// Cases against `story:abandoned-forwarder-reaped-through-eintr`: the reap of a
+            /// forwarder whose install is refused is not ended by a handled signal.
+            mod abandoned_reap {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                use std::sync::mpsc;
+                use std::time::{Duration, Instant};
+
+                use super::super::super::reaped;
+                use super::super::aperture;
+                use super::{DownNamespace, HELPER_ENV, children_of, pinned, run_alone};
+                use crate::egress::install_all;
+
+                const INTERRUPTED_REAP_HELPER: &str = "egress::tests::observed_inside::\
+                                                       d354_adv::abandoned_reap::\
+                                                       interrupted_reap_helper";
+
+                static HANDLED: AtomicUsize = AtomicUsize::new(0);
+
+                extern "C" fn count_handled(_signal: libc::c_int) {
+                    HANDLED.fetch_add(1, Ordering::Relaxed);
+                }
+
+                /// Whether thread `tid` of this process is blocked in `wait4`, the call `waitpid`
+                /// makes, as its `/proc` `syscall` file reports it.
+                fn waiting_in_wait4(tid: libc::pid_t) -> bool {
+                    std::fs::read_to_string(format!("/proc/self/task/{tid}/syscall"))
+                        .ok()
+                        .and_then(|line| {
+                            line.split_whitespace().next()?.parse::<libc::c_long>().ok()
+                        })
+                        == Some(libc::SYS_wait4)
+                }
+
+                /// A refused install whose reap a handled signal interrupts (a handler installed
+                /// without `SA_RESTART`, so `waitpid` returns `EINTR`) still reaps the forwarder
+                /// and leaves the installer no child.
+                #[test]
+                fn a_reap_interrupted_by_a_handled_signal_still_reaps_the_refused_forwarder() {
+                    let stdout = run_alone(INTERRUPTED_REAP_HELPER);
+                    if stdout.contains("EINTR-REAP absent") {
+                        return;
+                    }
+                    assert!(
+                        stdout.contains("EINTR-REAP reaped"),
+                        "the helper ran without reaching its assertion: {stdout}"
+                    );
+                }
+
+                /// Run only by the case above, in a process of its own: the report end is shut in
+                /// the report window, so the install is refused while the forwarder still waits on
+                /// its helper's bind, and the forwarder is killed from another thread only once
+                /// the installing thread waits in the reap and a signal has interrupted it there.
+                #[test]
+                #[ignore = "child process entry point: run by a_reap_interrupted_by_a_handled_signal_still_reaps_the_refused_forwarder"]
+                fn interrupted_reap_helper() {
+                    if std::env::var_os(HELPER_ENV).is_none() {
+                        return;
+                    }
+                    let Some(namespace) = DownNamespace::open() else {
+                        println!("EINTR-REAP absent");
+                        return;
+                    };
+                    let namespace_pid = libc::pid_t::try_from(namespace.pid()).expect("pid");
+                    // SAFETY: a zeroed `sigaction` is a valid initial value; the handler only
+                    // increments an atomic, which is async-signal-safe. No `SA_RESTART`.
+                    unsafe {
+                        let mut action: libc::sigaction = std::mem::zeroed();
+                        action.sa_sigaction = count_handled as *const () as libc::sighandler_t;
+                        action.sa_flags = 0;
+                        libc::sigemptyset(&raw mut action.sa_mask);
+                        assert_eq!(
+                            libc::sigaction(libc::SIGUSR1, &raw const action, std::ptr::null_mut()),
+                            0,
+                            "sigaction"
+                        );
+                    }
+                    // SAFETY: neither call has preconditions.
+                    let (me, tid) = unsafe { (libc::getpid(), libc::gettid()) };
+                    crate::egress::IN_REPORT_WINDOW.set(Some(Box::new(
+                        |_forwarder, report_end| {
+                            // SAFETY: the installer's own end of the report socket, open for the
+                            // duration of this call; shutting its write side gives the end the
+                            // installer reads an EOF.
+                            unsafe {
+                                libc::shutdown(report_end, libc::SHUT_WR);
+                            }
+                        },
+                    )));
+                    let (killer_sender, killer) = mpsc::channel();
+                    crate::egress::KILL_ON_ABANDON.set(Some(Box::new(move |forwarder| {
+                        let handle = std::thread::spawn(move || {
+                            let started = Instant::now();
+                            let mut in_reap = false;
+                            while started.elapsed() < Duration::from_secs(10) {
+                                if waiting_in_wait4(tid) {
+                                    in_reap = true;
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            if in_reap {
+                                // SAFETY: a signal this process handles, to one of its own
+                                // threads.
+                                unsafe {
+                                    libc::syscall(libc::SYS_tgkill, me, tid, libc::SIGUSR1);
+                                }
+                                let started = Instant::now();
+                                while HANDLED.load(Ordering::Acquire) == 0
+                                    && started.elapsed() < Duration::from_secs(10)
+                                {
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
+                            }
+                            // SAFETY: the installer's unreaped child; killing it once it exited
+                            // is harmless.
+                            unsafe {
+                                libc::kill(forwarder, libc::SIGKILL);
+                            }
+                            (forwarder, in_reap)
+                        });
+                        let _ = killer_sender.send(handle);
+                    })));
+                    let declared = [aperture("model", "model.example.invalid", pinned(), None)];
+                    let result = install_all(&declared, namespace.pid(), None);
+                    crate::egress::IN_REPORT_WINDOW.set(None);
+                    crate::egress::KILL_ON_ABANDON.set(None);
+                    let (forwarder, in_reap) = killer
+                        .try_recv()
+                        .expect("the refused install never abandoned its forwarder")
+                        .join()
+                        .expect("the killer");
+                    let handled = HANDLED.load(Ordering::Acquire);
+                    let children: Vec<libc::pid_t> = children_of(tid)
+                        .into_iter()
+                        .filter(|pid| *pid != namespace_pid)
+                        .collect();
+                    let Err(refusal) = result else {
+                        panic!("an aperture whose report end was shut was installed");
+                    };
+                    assert!(
+                        refusal.message.contains("stage 11"),
+                        "the shut report end was not what refused the install: {}",
+                        refusal.message
+                    );
+                    assert!(
+                        in_reap && handled == 1,
+                        "the signal did not land in the reap: in the reap {in_reap}, handled \
+                         {handled}"
+                    );
+                    assert!(
+                        reaped(forwarder),
+                        "story:abandoned-forwarder-reaped-through-eintr: a reap interrupted by a \
+                         handled signal left the refused forwarder {forwarder} unreaped"
+                    );
+                    assert_eq!(
+                        children,
+                        Vec::<libc::pid_t>::new(),
+                        "story:abandoned-forwarder-reaped-through-eintr: a refused forwarder was \
+                         left a child of the installer"
+                    );
+                    println!("EINTR-REAP reaped");
                 }
             }
 

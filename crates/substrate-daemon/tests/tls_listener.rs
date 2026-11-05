@@ -1623,7 +1623,8 @@ async fn ops_connect_from(source: [u8; 4], address: SocketAddr) -> TcpStream {
 }
 
 /// Asks `/readyz` until it is `200`, one connection per attempt. A refused connect means the
-/// listener is not bound yet. A reset or an unanswered close is retried: the daemon binds this
+/// listener is not bound yet. A reset, on connect or on the answer, or an unanswered close is
+/// retried, because the daemon binds this
 /// listener before its control listener, so a daemon that then fails to start closes it with the
 /// probe still queued, and the next attempt's exit check names the daemon's own error instead of
 /// the reset. Any other failure fails the test, and so does a reset that lasts to the deadline.
@@ -1661,7 +1662,12 @@ async fn ops_when_ready(child: &mut Child, address: SocketAddr) -> OpsAnswer {
                     Err(error) => panic!("operational readiness answer: {error}"),
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
                 last = error.to_string();
             }
             Err(error) => panic!("operational listener connection: {error}"),

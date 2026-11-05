@@ -2,13 +2,15 @@
 format: aep.planning-md/3
 id: story:abandoned-forwarder-reaped-through-eintr
 kind: story
-status: proposed
+status: active
 title: An abandoned aperture forwarder is reaped through EINTR
 relations:
 - informed_by: review-result:wave-2026-11-02-d364-u3-security-pass-1
-revision: 2
+- informed_by: approval-record:wave-2026-11-04-substrate
+revision: 3
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-02T01:25:02Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-04T07:33:32Z", actor: "human:timo", revision: 3}
 ---
 # Story: an abandoned aperture forwarder is reaped through EINTR
 
