@@ -50,11 +50,13 @@ pub fn check_with_executor_tree(root: &Path) -> Result<Report> {
     failures.extend(check_executor_tree(root)?);
     failures.extend(check_fake_graph(root)?);
     failures.extend(check_conformance_tree(root)?);
+    failures.extend(check_host_no_default_tree(root)?);
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{summary}; the executor's normal dependency tree names none of {}; the resolved graph enables the client's fake feature on no normal or build edge and in no member with a binary target; the conformance runner's normal and dev tree names none of {}",
+            "{summary}; the executor's normal dependency tree names none of {}; the resolved graph enables the client's fake feature on no normal or build edge and in no member with a binary target; the conformance runner's normal and dev tree names none of {}; the host driver's normal tree without its default features names none of {}",
             EXECUTOR_REFUSED.join(", "),
-            CONFORMANCE_REFUSED.join(", ")
+            CONFORMANCE_REFUSED.join(", "),
+            HOST_NO_DEFAULT_REFUSED.join(", ")
         )))
     } else {
         Ok(Report::failed(failures))
@@ -314,6 +316,79 @@ fn refused_conformance_tree_lines(tree: &str) -> Vec<String> {
         .map(|line| {
             format!(
                 "{CONFORMANCE}: dependency tree names {}; {CONFORMANCE_FENCE}",
+                line.trim()
+            )
+        })
+        .collect()
+}
+
+/// What the host driver's normal tree without its default features may not name
+/// (`story:substrate-host-features-let-confinement-consumers-skip-git-and-kubernetes`): the Git
+/// stack, its TLS and the cluster client. [`check_host_features`] holds the host's own table; this
+/// holds every edge beneath it, so a hard dependency that gains one of these is refused too.
+const HOST_NO_DEFAULT_REFUSED: [&str; 7] = [
+    "gix",
+    "git2",
+    "libgit2-sys",
+    "curl",
+    "curl-sys",
+    "openssl-sys",
+    "b10x-substrate-kubernetes-client",
+];
+
+/// Why the host driver's no-default tree is fenced.
+const HOST_NO_DEFAULT_FENCE: &str = "a confinement-only consumer takes b10x-substrate-host with default-features = false and links no Git stack, no openssl-sys and no Kubernetes client";
+
+/// Runs `cargo tree --locked -p b10x-substrate-host --no-default-features -e normal --target all
+/// --prefix none` in `root` and refuses each line naming a package of [`HOST_NO_DEFAULT_REFUSED`].
+/// Every target, so an edge only one platform takes is read too.
+fn check_host_no_default_tree(root: &Path) -> Result<Vec<String>> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let output = std::process::Command::new(cargo)
+        .current_dir(root)
+        .env("CARGO_TERM_COLOR", "never")
+        .args([
+            "tree",
+            "--locked",
+            "-p",
+            HOST,
+            "--no-default-features",
+            "-e",
+            "normal",
+            "--target",
+            "all",
+            "--prefix",
+            "none",
+        ])
+        .output()
+        .context("running cargo tree for the host driver without its default features")?;
+    if !output.status.success() {
+        return Ok(vec![format!(
+            "{HOST}: cargo tree --locked --no-default-features failed, so the rule checked nothing: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )]);
+    }
+    let tree = String::from_utf8(output.stdout).context("cargo tree wrote non-UTF-8")?;
+    Ok(refused_host_no_default_tree_lines(&tree))
+}
+
+/// The refusals for one `cargo tree --prefix none` text of the host. A tree whose first line is
+/// not the host selected nothing, and is refused rather than read as clean.
+fn refused_host_no_default_tree_lines(tree: &str) -> Vec<String> {
+    let name_of = |line: &str| line.split_whitespace().next().map(str::to_owned);
+    let mut lines = tree.lines();
+    if lines.next().and_then(name_of).as_deref() != Some(HOST) {
+        return vec![format!(
+            "{HOST}: cargo tree did not start at the host driver, so the rule checked nothing"
+        )];
+    }
+    lines
+        .filter(|line| {
+            name_of(line).is_some_and(|name| HOST_NO_DEFAULT_REFUSED.contains(&name.as_str()))
+        })
+        .map(|line| {
+            format!(
+                "{HOST}: the tree without default features names {}; {HOST_NO_DEFAULT_FENCE}",
                 line.trim()
             )
         })
@@ -1237,6 +1312,47 @@ mod tests {
 
     /// The tree half of the runner's fence reads `cargo tree --prefix none` output: it refuses each
     /// line naming the daemon, the host driver or the store, and nothing of a similar name.
+    #[test]
+    fn the_host_no_default_tree_refuses_the_git_tls_and_cluster_stacks_and_only_those() {
+        const CLEAN: &str = "b10x-substrate-host v0.4.2 (/w/crates/substrate-host)\nb10x-substrate-guarded v0.4.2 (/w/crates/substrate-guarded)\nlibc v0.2.177\ntokio v1.47.1 (*)\n";
+        assert_eq!(
+            super::refused_host_no_default_tree_lines(CLEAN),
+            Vec::<String>::new()
+        );
+        for mutant in [
+            "gix v0.87.1",
+            "git2 v0.20.4",
+            "libgit2-sys v0.18.2+1.9.1",
+            "curl v0.4.50 (*)",
+            "curl-sys v0.4.84+curl-8.17.0",
+            "openssl-sys v0.9.117",
+            "b10x-substrate-kubernetes-client v0.4.2 (/w/crates/substrate-kubernetes-client)",
+        ] {
+            let refused = super::refused_host_no_default_tree_lines(&format!("{CLEAN}{mutant}\n"));
+            assert_eq!(refused.len(), 1, "{mutant}");
+            assert!(
+                refused[0].starts_with(&format!(
+                    "b10x-substrate-host: the tree without default features names {mutant}; "
+                )),
+                "{refused:?}"
+            );
+        }
+        for innocent in ["gixel v0.1.0", "curlew v0.1.0", "openssl-probe v0.1.6"] {
+            assert_eq!(
+                super::refused_host_no_default_tree_lines(&format!("{CLEAN}{innocent}\n")),
+                Vec::<String>::new(),
+                "{innocent}"
+            );
+        }
+        assert_eq!(
+            super::refused_host_no_default_tree_lines("b10x-substrate-guarded v0.4.2 (/w)\n"),
+            vec![
+                "b10x-substrate-host: cargo tree did not start at the host driver, so the rule checked nothing"
+                    .to_owned()
+            ]
+        );
+    }
+
     #[test]
     fn the_conformance_tree_refuses_the_daemon_host_and_store_and_only_those() {
         const CLEAN: &str = "b10x-substrate-conformance v0.4.2 (/w/crates/b10x-substrate-conformance)\nb10x-substrate-sdk v0.4.2 (/w/crates/b10x-substrate-sdk)\nb10x-substrate-wire v0.4.2 (/w/crates/substrate-wire)\nb10x-substrate-wire v0.4.2 (/w/crates/substrate-wire) (*)\nrustls v0.23.31\n";

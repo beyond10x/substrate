@@ -1406,11 +1406,7 @@ impl Driver for HostDriver {
             .find(|candidate| git::SERVED && candidate.name == source.git.source)
             .cloned()
         else {
-            return DispatchOutcome::NotDispatched(DriverError::unserved(
-                "workspace.git-source-unserved",
-                "The requested Git source is not configured.",
-                "workspace.git",
-            ));
+            return DispatchOutcome::NotDispatched(git::source_unserved());
         };
         let locator = match url::Url::parse(&source.git.locator) {
             Ok(locator) if binding.admits(&locator, &source.git.locator) => locator,

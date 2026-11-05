@@ -255,7 +255,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-secrets` | a reachable Git object carrying a credential, or an incomplete history scan | yes |
 | `check-advisories` | a RustSec vulnerability or forbidden HTTP/2 dependency | yes |
 | `check-licenses` | non-Apache workspace metadata, an unreviewed dependency licence or third-party notice drift | yes |
-| `check-packages` | a publishable workspace package, a loose internal version edge, a source runtime package without inherited SPDX metadata, its README and a public documentation target, a host driver feature other than `git` and `kubernetes` or a default other than both, or — invariants 1 and 2 — a Flux dependency or a `beyond10x` Git dependency in any dependency table, `[workspace.dependencies]` and `[patch.*]` included | yes |
+| `check-packages` | a publishable workspace package, a loose internal version edge, a source runtime package without inherited SPDX metadata, its README and a public documentation target, a host driver feature other than `git` and `kubernetes` or a default other than both, a host normal tree without default features (every target) that names gix, git2, libgit2-sys, curl, curl-sys, openssl-sys or the Kubernetes client, or — invariants 1 and 2 — a Flux dependency or a `beyond10x` Git dependency in any dependency table, `[workspace.dependencies]` and `[patch.*]` included | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
@@ -509,7 +509,9 @@ the features are additive. The daemon and `b10x-substrate-kubernetes` take the d
 CLI, so a CLI edge with the defaults turns both features back on in every host test build. The
 gate's no-default lane sets `SUBSTRATE_HOST_NO_DEFAULT_FEATURES`, so `host_features` then fails
 instead of running on the defaults. `cargo xtask check-packages` refuses any other host feature
-and any default but both.
+and any default but both, and reads the host's normal tree without default features for every
+target: a dependency that brings gix, git2, libgit2-sys, curl, curl-sys, openssl-sys or the
+Kubernetes client back into that tree is refused by name.
 
 **Pushing that tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml)**, which
 builds the distinct `daemon` and `mcp` runtime targets from one shared pinned builder in `Dockerfile`

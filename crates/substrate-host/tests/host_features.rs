@@ -30,6 +30,10 @@ use tempfile::TempDir;
 /// The words every refusal of the `pod` adapter in a build without `kubernetes` carries.
 const KUBERNETES_ABSENT: &str = "`kubernetes` feature";
 
+/// The words the refusal of a configured Git source carries in a build without `git`.
+#[cfg(not(feature = "git"))]
+const GIT_ABSENT: &str = "no `git` feature";
+
 /// A host with one Git source, on a loopback port nothing listens on, and no sandbox binary: the
 /// probe needs neither a reachable provider nor confinement to decide `workspace.git`.
 fn git_host() -> (TempDir, Arc<HostDriver>) {
@@ -117,6 +121,11 @@ async fn without_git_no_workspace_git_fact_and_a_git_source_is_unserved() {
         error.class,
         substrate_host::DriverErrorClass::Unserved,
         "{error}"
+    );
+    // The source is configured, so the refusal names what is missing: the feature, not the source.
+    assert!(
+        error.message.contains(GIT_ABSENT),
+        "a configured source is refused naming the `git` feature: {error}"
     );
     assert!(
         !directory.path().join("workspaces/ws_git").exists(),
