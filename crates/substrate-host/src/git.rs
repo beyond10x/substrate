@@ -21,6 +21,10 @@ use crate::{DriverError, GitSourceBinding};
 mod materialization_tests;
 mod network;
 
+/// Whether this build serves a Git source at all; `git_unserved.rs`, the module of a build
+/// without the `git` feature, holds `false`.
+pub(super) const SERVED: bool = true;
+
 pub(super) struct Cancellation(Arc<AtomicBool>);
 
 impl Cancellation {

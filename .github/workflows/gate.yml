@@ -96,6 +96,7 @@ jobs:
           echo "== lanes this job will run =="
           echo "portable lane:  RUNS   — cargo test runs tests/runtime_vectors.rs with no SUBSTRATE_VECTORS_CGROUP_ROOT"
           echo "delegated lane: ABSENT — no delegated cgroup root is passed; the lane is not executed and is not claimed to pass"
+          echo "no-default lane: RUNS  — b10x-substrate-host without its git and kubernetes features: Clippy, and the host_features, ess_confinement_local and consumer_surface cases"
           if command -v docker >/dev/null 2>&1 && docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
             echo "oci lane:       RUNS   — SUBSTRATE_OCI_LANE=1 against Docker $(docker info --format '{{.ServerVersion}}'); an unusable runtime fails the oci cases"
           else
