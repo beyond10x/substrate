@@ -27,6 +27,10 @@ unknown.
   `operation.outcome-unknown` in its same-named-object and foreign-uid cases by reading the
   operation to its end, as design 01 § 6 asks, instead of failing the case and leaving the
   workspace's keeper Pod and claim behind.
+- `cargo test -p b10x-substrate-daemon --test tls_listener` no longer fails
+  `adversary_dispatch_counts_one_admission_and_no_replay` with `Connection reset by peer (os error
+  104)`. The test's readiness wait now retries a connect the starting daemon resets, as it already
+  did for a refused connect, within the same readiness deadline.
 
 ### Security
 
