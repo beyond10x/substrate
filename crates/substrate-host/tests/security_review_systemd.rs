@@ -8,6 +8,8 @@
 //! and that the bus address is only ever an address.
 //!
 //! Every case needs a reachable user manager; without one it prints `ABSENT` and executes nothing.
+//! The two `network_floor` cases are the exception: they check the floor's reading of a probe's
+//! output and need no host.
 //! Cases that must observe a fresh process re-run this binary as a child, selected by `--exact`.
 
 #![cfg(target_os = "linux")]
@@ -293,7 +295,8 @@ async fn security_review_systemd_linux_run_reaches_no_user_manager_and_keeps_the
            then echo SCOPE_CREATED; else echo scope-refused; fi; \
         if /usr/bin/unshare -U /bin/true 2>/dev/null; then echo NESTED_USERNS; \
            else echo nested-userns-refused; fi; \
-        echo NET $(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\\n' ' ')";
+        echo NET $(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\\n' ' '); \
+        if [ -x /usr/bin/ip ]; then /usr/bin/ip -o link show 2>/dev/null | sed 's/^/LINK /'; fi";
     let bus_text = bus.to_string_lossy().into_owned();
     // A client that passes its own session's bus and runtime directory, and one that passes none.
     for env in [
@@ -324,11 +327,16 @@ async fn security_review_systemd_linux_run_reaches_no_user_manager_and_keeps_the
             "user-bus-unreached",
             "scope-refused",
             "nested-userns-refused",
-            "NET lo",
         ] {
             assert!(
                 stdout.lines().any(|have| have == line),
                 "a confined linux run inside the systemd scope did not report {line:?}: {stdout}"
+            );
+        }
+        if let Some(breach) = network_floor_breach(&stdout) {
+            panic!(
+                "a confined linux run inside the systemd scope broke the network floor: {breach}: \
+                 {stdout}"
             );
         }
         let environment = stdout
@@ -381,6 +389,109 @@ impl Drop for StopUnit {
             .env_clear()
             .env("DBUS_SESSION_BUS_ADDRESS", &self.bus)
             .output();
+    }
+}
+
+/// The fallback devices a loaded tunnel module (`ipip`, `ip_gre`, `ip_vti`, `ip6_tunnel`, `sit`,
+/// `ip6_gre`, `ip6_vti`) creates by itself in every new network namespace, down and unaddressed.
+const FALLBACK_TUNNELS: [&str; 9] = [
+    "tunl0", "gre0", "gretap0", "erspan0", "ip_vti0", "ip6tnl0", "sit0", "ip6gre0", "ip6_vti0",
+];
+
+/// The network floor of a confined run, read from the probe's `NET` and `LINK` lines: the run sees
+/// `lo`, and besides it only kernel fallback tunnels whose operstate is down and which are not
+/// administratively up. Any other interface, a fallback tunnel that is up or not down, or one the
+/// probe could not describe breaks it. `None` when the floor holds, else what broke it.
+fn network_floor_breach(stdout: &str) -> Option<String> {
+    let Some(net) = stdout.lines().find_map(|line| line.strip_prefix("NET ")) else {
+        return Some("the probe printed no NET line".to_owned());
+    };
+    let names: Vec<&str> = net.split_whitespace().collect();
+    if !names.contains(&"lo") {
+        return Some(format!("no lo among {names:?}"));
+    }
+    for name in names.into_iter().filter(|name| *name != "lo") {
+        if !FALLBACK_TUNNELS.contains(&name) {
+            return Some(format!("interface {name} is not a kernel fallback tunnel"));
+        }
+        let Some(link) = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("LINK "))
+            .find(|link| {
+                link.split_whitespace().nth(1).is_some_and(|field| {
+                    field.trim_end_matches(':').split('@').next() == Some(name)
+                })
+            })
+        else {
+            return Some(format!(
+                "fallback tunnel {name} has no LINK line to show its state"
+            ));
+        };
+        let flags = link
+            .split_once('<')
+            .and_then(|(_, rest)| rest.split_once('>'))
+            .map_or("", |(flags, _)| flags);
+        if flags.split(',').any(|flag| flag == "UP") {
+            return Some(format!("fallback tunnel {name} is up: {link}"));
+        }
+        let words: Vec<&str> = link.split_whitespace().collect();
+        if !words.windows(2).any(|pair| pair == ["state", "DOWN"]) {
+            return Some(format!(
+                "fallback tunnel {name}'s operstate is not down: {link}"
+            ));
+        }
+    }
+    None
+}
+
+const LO: &str = "LINK 1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN mode DEFAULT group default \
+                  qlen 1000\\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00";
+const TUNL0_DOWN: &str = "LINK 2: tunl0@NONE: <NOARP> mtu 1480 qdisc noop state DOWN mode DEFAULT \
+                          group default qlen 1000\\    link/ipip 0.0.0.0 brd 0.0.0.0";
+
+#[test]
+fn security_review_systemd_network_floor_is_lo_alone_or_with_down_fallback_tunnels() {
+    assert_eq!(network_floor_breach(&format!("NET lo\n{LO}")), None);
+    assert_eq!(network_floor_breach("NET lo"), None);
+    assert_eq!(
+        network_floor_breach(&format!("NET lo tunl0\n{LO}\n{TUNL0_DOWN}")),
+        None
+    );
+    let sit0 = "LINK 3: sit0@NONE: <NOARP> mtu 1480 qdisc noop state DOWN mode DEFAULT";
+    assert_eq!(
+        network_floor_breach(&format!("NET lo tunl0 sit0\n{LO}\n{TUNL0_DOWN}\n{sit0}")),
+        None
+    );
+}
+
+#[test]
+fn security_review_systemd_network_floor_refuses_anything_else() {
+    let up =
+        "LINK 2: tunl0@NONE: <NOARP,UP,LOWER_UP> mtu 1480 qdisc noqueue state UNKNOWN mode DEFAULT";
+    let unknown = "LINK 2: tunl0@NONE: <NOARP> mtu 1480 qdisc noqueue state UNKNOWN mode DEFAULT";
+    let veth =
+        "LINK 3: eth0@if9: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN mode DEFAULT";
+    for (stdout, says) in [
+        (format!("NET lo tunl0\n{LO}\n{up}"), "is up"),
+        (
+            format!("NET lo tunl0\n{LO}\n{unknown}"),
+            "operstate is not down",
+        ),
+        (format!("NET lo tunl0\n{LO}"), "has no LINK line"),
+        (
+            format!("NET lo eth0\n{LO}\n{veth}"),
+            "is not a kernel fallback tunnel",
+        ),
+        (format!("NET tunl0\n{TUNL0_DOWN}"), "no lo"),
+        (LO.to_owned(), "no NET line"),
+    ] {
+        let breach = network_floor_breach(&stdout);
+        assert!(
+            breach
+                .as_deref()
+                .is_some_and(|breach| breach.contains(says)),
+            "expected a breach saying {says:?} for {stdout:?}, got {breach:?}"
+        );
     }
 }
 

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T02:30:24Z",
+  "actor": "human:timo",
+  "artifact": "story:abandoned-forwarder-reaped-through-eintr",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p b10x-substrate-host --lib egress:: (red at the unit base: 42 passed, 1 failed; green at de299a56: 43 passed, 8 ignored); guard a_reap_that_fails_other_than_eintr_ends_at_once green at a0ab2518, red against the retry-on-any-error mutant",
+    "reference": "unit commit de299a56 merged at e4c42955; guard a0ab2518"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T02:30:23Z",
+  "actor": "human:timo",
+  "artifact": "story:failed-get-review-keeps-the-create-denial",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p b10x-substrate-kubernetes --lib verb_review_tests (red at the unit base: 18 passed, 5 failed; green at caf551f8: 176 passed)",
+    "reference": "unit commit caf551f8, merged at 2c2e5c49"
+  }
+}

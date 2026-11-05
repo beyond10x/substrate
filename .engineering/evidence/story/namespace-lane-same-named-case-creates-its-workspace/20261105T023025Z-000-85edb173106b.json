@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T02:30:25Z",
+  "actor": "human:timo",
+  "artifact": "story:namespace-lane-same-named-case-creates-its-workspace",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p xtask --bin xtask namespace_lane_run (red at the unit base: 27 passed, 2 failed; green at 0a9af044: 29 passed; with the adversary cases 8848602f: 34 passed)",
+    "reference": "unit commit 0a9af044 merged at 18d18203; cases merged at 10f04a62"
+  }
+}
