@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-05T07:16:34Z",
+  "actor": "human:timo",
+  "artifact": "story:every-egress-reap-retries-through-eintr",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "fixed by b7b08150, merged at 63ce2ccc",
+    "review": "review-result:wave-2026-11-05-substrate-u2-adversary-pass-1",
+    "outcome": "fixed"
+  }
+}
