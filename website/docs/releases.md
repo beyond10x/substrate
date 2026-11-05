@@ -36,7 +36,8 @@ the ESS pin moves to 0.86.0.
     naming the feature.
   - Every public item is the same under every feature set.
   - `cargo xtask check-packages` admits exactly these two host features, with both as the
-    default.
+    default, and refuses a no-default host tree that names gix, git2, curl, openssl-sys or the
+    Kubernetes client.
   - The gate lints the host crate with no default features and runs its `host_features`,
     `ess_confinement_local` and `consumer_surface` cases in that build.
   - The CLI's dependency on the host crate takes no default features; the CLI uses neither.
