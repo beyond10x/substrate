@@ -169,8 +169,8 @@ jobs:
 
       - name: Install the specification's pinned ESS release
         env:
-          ESS_VERSION: 0.81.0
-          ESS_SHA256: 479778b7b244ca75a505be19e1075171e93275d8cb6213073cb042d72aa10511
+          ESS_VERSION: 0.86.0
+          ESS_SHA256: 9a77aabd82bf447d698313503daf2eff4ad3db6a1341e5423131c3b85b5d0fd5
         run: |
           archive="ess-$ESS_VERSION-x86_64-unknown-linux-gnu.tar.gz"
           curl --fail --location --retry 3 "https://github.com/beyond10x/ess/releases/download/$ESS_VERSION/$archive" --output "$RUNNER_TEMP/$archive"

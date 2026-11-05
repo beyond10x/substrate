@@ -109,8 +109,14 @@
           }
         },
         {
-          "step": "expect_event",
+          "step": "expect_event_values",
           "event": "substrate.host_processes.ProcessEnded",
+          "payload": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
           "shape": {
             "ended_by": {
               "holds": "enum",
@@ -311,8 +317,14 @@
           }
         },
         {
-          "step": "expect_event",
+          "step": "expect_event_values",
           "event": "substrate.host_processes.ProcessEnded",
+          "payload": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
           "shape": {
             "ended_by": {
               "holds": "enum",
@@ -573,8 +585,14 @@
           "step": "expect_no_error"
         },
         {
-          "step": "expect_event",
+          "step": "expect_event_values",
           "event": "substrate.host_processes.StopRequested",
+          "payload": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
           "shape": {
             "ended_by": {
               "holds": "enum",
@@ -769,8 +787,14 @@
           "step": "expect_no_error"
         },
         {
-          "step": "expect_event",
+          "step": "expect_event_values",
           "event": "substrate.host_processes.StopRequested",
+          "payload": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
           "shape": {
             "ended_by": {
               "holds": "enum",
@@ -989,8 +1013,14 @@
           "step": "expect_no_error"
         },
         {
-          "step": "expect_event",
+          "step": "expect_event_values",
           "event": "substrate.host_processes.LeaseRenewed",
+          "payload": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
           "shape": {
             "lease_ttl_ms": {
               "holds": "primitive",
@@ -1165,8 +1195,14 @@
           }
         },
         {
-          "step": "expect_event",
+          "step": "expect_event_values",
           "event": "substrate.host_processes.ProcessRunning",
+          "payload": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
           "shape": {
             "process": {
               "holds": "primitive",
@@ -1361,8 +1397,14 @@
           "step": "expect_no_error"
         },
         {
-          "step": "expect_event",
+          "step": "expect_event_values",
           "event": "substrate.host_processes.StopRequested",
+          "payload": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
           "shape": {
             "ended_by": {
               "holds": "enum",
@@ -1579,8 +1621,14 @@
           "step": "expect_no_error"
         },
         {
-          "step": "expect_event",
+          "step": "expect_event_values",
           "event": "substrate.host_processes.StopRequested",
+          "payload": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
           "shape": {
             "ended_by": {
               "holds": "enum",
@@ -1799,8 +1847,14 @@
           }
         },
         {
-          "step": "expect_event",
+          "step": "expect_event_values",
           "event": "substrate.host_processes.ProcessEnded",
+          "payload": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
           "shape": {
             "ended_by": {
               "holds": "enum",
@@ -1993,8 +2047,14 @@
           }
         },
         {
-          "step": "expect_event",
+          "step": "expect_event_values",
           "event": "substrate.host_processes.ProcessEnded",
+          "payload": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
           "shape": {
             "ended_by": {
               "holds": "enum",
