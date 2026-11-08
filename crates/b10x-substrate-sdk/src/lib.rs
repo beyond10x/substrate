@@ -1309,6 +1309,9 @@ impl PipeSessionBuilder {
         self
     }
 
+    /// Mounts one host directory read-only (ADR 0010). Repeatable. More than
+    /// [`substrate_wire::MAX_READ_ONLY_ROOTS`] are refused with [`SdkError::Protocol`] before
+    /// anything is sent.
     pub fn read_only_root(mut self, root: ReadOnlyRoot) -> Self {
         self.read_only_roots.push(root);
         self
@@ -1375,6 +1378,7 @@ impl PipeSessionBuilder {
         }
         substrate_wire::validate_session_window(self.mode, self.window.as_ref())
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        validate_read_only_root_bound(&self.read_only_roots)?;
         validate_execution_storage(&self.workspace_access, self.scratch)?;
         validate_writable_root_bound(&self.writable_roots)?;
         let policy = self.policy.ok_or(SdkError::Builder { field: "policy" })?;
@@ -1787,6 +1791,9 @@ impl CommandBuilder {
         self
     }
 
+    /// Mounts one host directory read-only (ADR 0010). Repeatable. More than
+    /// [`substrate_wire::MAX_READ_ONLY_ROOTS`] are refused with [`SdkError::Protocol`] before
+    /// anything is sent.
     pub fn read_only_root(mut self, root: ReadOnlyRoot) -> Self {
         self.read_only_roots.push(root);
         self
@@ -1853,6 +1860,7 @@ impl CommandBuilder {
         if self.argv.first().is_none_or(String::is_empty) {
             return Err(SdkError::Builder { field: "program" });
         }
+        validate_read_only_root_bound(&self.read_only_roots)?;
         validate_execution_storage(&self.workspace_access, self.scratch)?;
         validate_writable_root_bound(&self.writable_roots)?;
         let policy = self.policy.ok_or(SdkError::Builder { field: "policy" })?;
@@ -2124,6 +2132,17 @@ fn validate_file_mutation(path: &str, bytes: &[u8]) -> Result<(), SdkError> {
     Ok(())
 }
 
+/// Refuses more read-only roots than [`substrate_wire::MAX_READ_ONLY_ROOTS`] before a request is
+/// sent (ADR 0010). Every other rule on a root is the daemon's, answered with its named refusal.
+fn validate_read_only_root_bound(roots: &[ReadOnlyRoot]) -> Result<(), SdkError> {
+    if roots.len() > substrate_wire::MAX_READ_ONLY_ROOTS as usize {
+        return Err(SdkError::Protocol(
+            substrate_wire::WireValidationError::InvalidReadOnlyRootBounds.to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_execution_storage(
     access: &WorkspaceAccess,
     scratch: Option<StorageLimit>,
@@ -2242,6 +2261,155 @@ mod tests {
             .expect("request boundary")
             + 4;
         &request[boundary..]
+    }
+
+    /// `story:sdk-read-only-root-bound`: more read-only roots than `MAX_READ_ONLY_ROOTS` are
+    /// refused by the exec and session builders before any request is sent: the fake daemon's next
+    /// request after both over-bound builds is the sentinel lookup.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One fake daemon answers the whole journey, in order.
+    async fn read_only_roots_over_the_wire_bound_are_refused_before_sending() {
+        const SENTINEL: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAY";
+        async fn answer(listener: &UnixListener, head: &str, status: &str, body: &[u8]) {
+            let (mut stream, _) = listener.accept().await.expect("accept SDK request");
+            let request = read_request(&mut stream).await;
+            assert!(
+                request.starts_with(head.as_bytes()),
+                "expected {head:?}, got {:?}",
+                String::from_utf8_lossy(&request[..request.len().min(80)])
+            );
+            stream
+                .write_all(&response(status, body))
+                .await
+                .expect("write fake response");
+        }
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../contracts/substrate-wire/0.26.0/vectors/http/machine-probe.json"
+        ))
+        .expect("machine vector");
+        let machine = serde_json::to_vec(
+            vector
+                .pointer("/expected/response/body")
+                .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let server = tokio::spawn(async move {
+            answer(
+                &listener,
+                "GET /v1/machine HTTP/1.1\r\n",
+                "200 OK",
+                &machine,
+            )
+            .await;
+            let workspace = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_workspace",
+                "operation": "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+                "result": {
+                    "id": "ws_example",
+                    "kind": "workspace",
+                    "labels": {},
+                    "observed_at": "2026-11-08T00:00:00Z",
+                    "state": "ready",
+                    "origin": "created",
+                    "root_name": "ws_example"
+                }
+            }))
+            .expect("workspace response JSON");
+            answer(
+                &listener,
+                "POST /v1/workspaces HTTP/1.1\r\n",
+                "201 Created",
+                &workspace,
+            )
+            .await;
+            let missing = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_sentinel",
+                "error": {
+                    "class": "refused",
+                    "code": "resource.not-found",
+                    "message": "The operation does not exist.",
+                    "retriable": false
+                }
+            }))
+            .expect("missing operation JSON");
+            answer(
+                &listener,
+                &format!("GET /v1/ops/{SENTINEL} HTTP/1.1\r\n"),
+                "404 Not Found",
+                &missing,
+            )
+            .await;
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let workspace = client
+            .workspace()
+            .empty()
+            .create()
+            .await
+            .expect("workspace create");
+        let policy = || {
+            ExecutionPolicy::builder()
+                .timeout(Duration::from_secs(5))
+                .cpu_time(Duration::from_secs(1))
+                .memory_bytes(64 * 1024 * 1024)
+                .processes(16)
+                .output_bytes(64 * 1024)
+                .build()
+                .expect("complete execution policy")
+        };
+        let too_many = || {
+            (0..=substrate_wire::MAX_READ_ONLY_ROOTS).map(|index| ReadOnlyRoot {
+                host_path: format!("/srv/r{index}"),
+                mount: format!("/mnt/r{index}"),
+            })
+        };
+        let expected = substrate_wire::WireValidationError::InvalidReadOnlyRootBounds.to_string();
+
+        let mut command = workspace.command("/usr/bin/true").policy(policy());
+        for root in too_many() {
+            command = command.read_only_root(root);
+        }
+        let Err(SdkError::Protocol(message)) = command.start().await else {
+            panic!("an exec over the read-only-root bound is refused by the SDK")
+        };
+        assert_eq!(message, expected);
+
+        let mut session = workspace
+            .pty_session(
+                "/usr/bin/true",
+                PtyWindow {
+                    columns: 80,
+                    rows: 24,
+                },
+            )
+            .policy(policy())
+            .lease(Duration::from_secs(5))
+            .input_limit_bytes(1024)
+            .frame_limit_bytes(1024)
+            .queued_frames(4);
+        for root in too_many() {
+            session = session.read_only_root(root);
+        }
+        let Err(SdkError::Protocol(message)) = session.start().await else {
+            panic!("a session over the read-only-root bound is refused by the SDK")
+        };
+        assert_eq!(message, expected);
+
+        let Err(SdkError::Refusal(refusal)) = client.operation(SENTINEL).await else {
+            panic!("the sentinel operation is absent")
+        };
+        assert_eq!(refusal.code, "resource.not-found");
+        server.await.expect("fake daemon task");
     }
 
     #[test]
