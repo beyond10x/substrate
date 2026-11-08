@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The Rust SDK's command, `pipe_session` and `pty_session` builders gain `writable_root`, repeatable
+  like `read_only_root`, and send the roots in the order given; the SDK re-exports `WritableRoot`,
+  `WritableHostRoot`, `WritableGitRoot`, `AppliedWritableRoot` and `MAX_WRITABLE_ROOTS`. More than
+  `MAX_WRITABLE_ROOTS` roots are refused before the request is sent. The wire, the bundle and the
+  daemon are unchanged.
+
 ## [0.20.0] — 2026-11-05
 
 The wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are unchanged.

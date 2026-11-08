@@ -220,8 +220,9 @@ if [[ -z "${daemon_bin}" || "${daemon_bin}" == *$'\n'* || ! -x "${daemon_bin}" ]
 fi
 echo "delegated-lane: shipped daemon ${daemon_bin}"
 
-SUBSTRATE_TEST_DAEMON="${daemon_bin}" \
-  cargo test -p b10x-substrate-sdk --test managed --locked -- --nocapture --test-threads=1
+# Required by its line: a writable-root case that reported itself absent would exit 0 too.
+SUBSTRATE_TEST_DAEMON="${daemon_bin}" require_executed -p b10x-substrate-sdk managed \
+  'sdk writable root delegated: executed'
 
 SUBSTRATE_TEST_DAEMON="${daemon_bin}" \
   cargo test -p b10x-substrate-sdk --test unrecorded --locked -- --nocapture --test-threads=1

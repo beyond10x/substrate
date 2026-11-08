@@ -1,10 +1,12 @@
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use b10x_substrate_sdk::{
-    ExecMeasurement, ExecutionPolicy, ExpectedFileState, FileEditInput, FilePatchInput,
-    LinePatchEdit, ManagedDaemon, MetricsObservation, MetricsResourceKind, PipeFrame, PtyWindow,
-    RefusalClass, SdkError, TextMatchPolicy,
+    AppliedWritableRoot, Client, ExecMeasurement, ExecutionPolicy, ExpectedFileState,
+    FileEditInput, FilePatchInput, LinePatchEdit, MAX_WRITABLE_ROOTS, ManagedDaemon,
+    MetricsObservation, MetricsResourceKind, PipeFrame, PtyWindow, RefusalClass, SdkError,
+    TextMatchPolicy, WritableHostRoot, WritableRoot,
 };
 
 #[path = "../../../test-support/readiness.rs"]
@@ -511,4 +513,342 @@ async fn linked_mode_reexecutes_a_separate_process() {
         .await
         .expect("run linked fixture");
     assert!(status.success(), "linked fixture failed: {status}");
+}
+
+/// The name the writable-root cases declare their one host root under.
+const WRITABLE_ROOT_NAME: &str = "shared";
+/// Where those cases mount it inside the run.
+const WRITABLE_ROOT_MOUNT: &str = "/srv/substrate-shared";
+
+/// A shipped daemon started with `--writable-root shared=<root>` beside the flags
+/// `ManagedDaemon` passes; `ManagedDaemon` declares no writable root, so the case starts the binary
+/// itself and talks to it through the public `Client` only. The declared root is a canonical
+/// directory under `CARGO_TARGET_TMPDIR`, apart from the daemon's state and workspaces.
+struct DeclaredRootDaemon {
+    child: tokio::process::Child,
+    client: Client,
+    root: PathBuf,
+    _data: tempfile::TempDir,
+    _fixture: tempfile::TempDir,
+}
+
+impl DeclaredRootDaemon {
+    async fn start(deployment: &str, cgroup_root: Option<&std::ffi::OsStr>) -> Self {
+        let data = unix_socket::tempdir("declared/substrate.sock");
+        let owned = data.path().join("declared");
+        std::fs::create_dir_all(&owned).expect("daemon data directory");
+        std::fs::set_permissions(&owned, std::fs::Permissions::from_mode(0o700))
+            .expect("owner-private data directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("sdk-writable-")
+            .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+            .expect("fixture under CARGO_TARGET_TMPDIR");
+        let root = std::fs::canonicalize(fixture.path())
+            .expect("canonical fixture")
+            .join(WRITABLE_ROOT_NAME);
+        std::fs::create_dir(&root).expect("declared root directory");
+        let socket = owned.join("substrate.sock");
+        let log = owned.join("daemon.log");
+        let mut command = tokio::process::Command::new(daemon_binary());
+        command
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--state")
+            .arg(owned.join("state.db"))
+            .arg("--workspaces")
+            .arg(owned.join("workspaces"))
+            .arg("--deployment")
+            .arg(deployment)
+            .arg("--allow-uid")
+            .arg(nix::unistd::geteuid().as_raw().to_string())
+            .arg("--bubblewrap")
+            .arg("/usr/bin/bwrap")
+            .arg("--exit-on-stdin-close")
+            .arg("--writable-root")
+            .arg(format!("{WRITABLE_ROOT_NAME}={}", root.display()))
+            .env_remove("SUBSTRATE_WRITABLE_ROOT")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&log).expect("daemon log"))
+            .kill_on_drop(true);
+        if let Some(cgroup_root) = cgroup_root {
+            command.arg("--cgroup-root").arg(cgroup_root);
+        }
+        let mut child = command.spawn().expect("spawn the shipped daemon");
+        let deadline = tokio::time::Instant::now() + readiness::DAEMON_READINESS;
+        let client = loop {
+            if let Some(status) = child.try_wait().expect("daemon status") {
+                panic!(
+                    "daemon exited with {status}: {}",
+                    std::fs::read_to_string(&log).unwrap_or_default()
+                );
+            }
+            match Client::builder().unix_socket(&socket).connect().await {
+                Ok(client) => break client,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => panic!(
+                    "daemon not ready ({error}): {}",
+                    std::fs::read_to_string(&log).unwrap_or_default()
+                ),
+            }
+        };
+        Self {
+            child,
+            client,
+            root,
+            _data: data,
+            _fixture: fixture,
+        }
+    }
+
+    /// Closes the daemon's stdin, which `--exit-on-stdin-close` answers with an orderly stop, and
+    /// waits for it.
+    async fn stop(mut self) {
+        drop(self.child.stdin.take());
+        let status = tokio::time::timeout(Duration::from_secs(30), self.child.wait())
+            .await
+            .expect("daemon stops after stdin closes")
+            .expect("daemon exit status");
+        assert!(status.success(), "daemon exited with {status}");
+    }
+}
+
+fn shared_root() -> WritableRoot {
+    WritableRoot::Host(WritableHostRoot {
+        host: WRITABLE_ROOT_NAME.to_owned(),
+        mount: WRITABLE_ROOT_MOUNT.to_owned(),
+    })
+}
+
+fn undeclared_root() -> WritableRoot {
+    WritableRoot::Host(WritableHostRoot {
+        host: "undeclared".to_owned(),
+        mount: WRITABLE_ROOT_MOUNT.to_owned(),
+    })
+}
+
+fn writable_policy() -> ExecutionPolicy {
+    ExecutionPolicy::builder()
+        .timeout(Duration::from_secs(30))
+        .cpu_time(Duration::from_secs(5))
+        .memory_bytes(64 * 1024 * 1024)
+        .processes(16)
+        .output_bytes(64 * 1024)
+        .build()
+        .expect("complete execution policy")
+}
+
+/// `story:sdk-writable-roots`, portable lane: a root the daemon does not declare, and portable the
+/// declared root too (no probe proved the bind), is refused with the daemon's own
+/// `exec.writable-roots-host-unserved`, naming it; a session start reaches the daemon and keeps its
+/// named refusal; and more than `MAX_WRITABLE_ROOTS` are refused by the SDK, so the daemon never
+/// records the operation.
+#[tokio::test]
+async fn writable_roots_are_refused_by_the_daemon_by_name_and_bounded_by_the_sdk() {
+    let daemon = DeclaredRootDaemon::start("sdk_writable_refused", None).await;
+    assert!(
+        daemon
+            .client
+            .machine()
+            .facts
+            .exec_writable_roots_host
+            .is_none(),
+        "without confinement no probe proves the bind"
+    );
+    let workspace = daemon
+        .client
+        .workspace()
+        .empty()
+        .create()
+        .await
+        .expect("workspace create");
+    for (root, name) in [
+        (undeclared_root(), "undeclared"),
+        (shared_root(), WRITABLE_ROOT_NAME),
+    ] {
+        let Err(SdkError::Refusal(refusal)) = workspace
+            .command("/bin/true")
+            .policy(writable_policy())
+            .writable_root(root.clone())
+            .start()
+            .await
+        else {
+            panic!("an unserved writable root is refused by the daemon")
+        };
+        assert_eq!(refusal.code, "exec.writable-roots-host-unserved");
+        assert_eq!(
+            refusal.message,
+            format!("Writable host root {name} is not served by this host.")
+        );
+        let Err(SdkError::Refusal(refusal)) = workspace
+            .pipe_session("/bin/true")
+            .policy(writable_policy())
+            .lease(Duration::from_secs(20))
+            .input_limit_bytes(1024)
+            .frame_limit_bytes(1024)
+            .queued_frames(4)
+            .writable_root(root)
+            .start()
+            .await
+        else {
+            panic!("a session start keeps the daemon's named refusal")
+        };
+        // Without confinement the session route refuses before it reads the roots; the delegated
+        // case observes a session's refusal of an undeclared root.
+        assert_eq!(refusal.code, "session.confinement-unavailable");
+    }
+
+    let operation_id = ulid::Ulid::generate().to_string();
+    let mut command = workspace
+        .command("/bin/true")
+        .policy(writable_policy())
+        .operation_id(&operation_id);
+    for index in 0..=MAX_WRITABLE_ROOTS {
+        command = command.writable_root(WritableRoot::Host(WritableHostRoot {
+            host: WRITABLE_ROOT_NAME.to_owned(),
+            mount: format!("/srv/root-{index}"),
+        }));
+    }
+    let Err(SdkError::Protocol(message)) = command.start().await else {
+        panic!("more than MAX_WRITABLE_ROOTS are refused by the SDK")
+    };
+    assert!(message.contains("writable roots"), "{message}");
+    let Err(SdkError::Refusal(refusal)) = daemon.client.operation(&operation_id).await else {
+        panic!("the over-bound start never reached the daemon")
+    };
+    assert_eq!(refusal.code, "resource.not-found");
+    assert_eq!(
+        std::fs::read_dir(&daemon.root)
+            .expect("declared root")
+            .count(),
+        0,
+        "nothing was written to the declared root"
+    );
+    daemon.stop().await;
+}
+
+/// `story:sdk-writable-roots`, delegated lane: an exec and a pipe session each name the declared
+/// root, write a file through its mount, and the host reads both files; the exec's applied record
+/// names what was bound, and an undeclared root is `exec.writable-roots-host-unserved` from both.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One confined journey: exec, session, and the refusal beside them.
+async fn delegated_writable_root_is_written_by_an_exec_and_a_session_and_read_on_the_host() {
+    let Some(cgroup_root) = std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT") else {
+        eprintln!(
+            "delegated SDK writable-root lane absent: SUBSTRATE_VECTORS_CGROUP_ROOT is not set"
+        );
+        return;
+    };
+    let daemon = DeclaredRootDaemon::start("sdk_writable_delegated", Some(&cgroup_root)).await;
+    assert_eq!(
+        daemon.client.machine().facts.exec_writable_roots_host,
+        Some(vec![WRITABLE_ROOT_NAME.to_owned()]),
+        "the probe proved the declared bind"
+    );
+    let workspace = daemon
+        .client
+        .workspace()
+        .empty()
+        .create()
+        .await
+        .expect("workspace create");
+
+    let output = workspace
+        .command("/bin/sh")
+        .args(["-c", "echo from-exec >/srv/substrate-shared/exec.txt"])
+        .policy(writable_policy())
+        .writable_root(shared_root())
+        .run()
+        .await
+        .expect("exec with a writable root runs");
+    assert_eq!(
+        output.exec.exit.as_ref().and_then(|exit| exit.code),
+        Some(0),
+        "{:?}",
+        output.exec
+    );
+    assert_eq!(
+        std::fs::read_to_string(daemon.root.join("exec.txt")).expect("exec write on the host"),
+        "from-exec\n"
+    );
+    let applied = output.exec.applied.as_ref().expect("applied confinement");
+    assert_eq!(
+        applied.writable_roots,
+        vec![AppliedWritableRoot::Host {
+            name: WRITABLE_ROOT_NAME.to_owned(),
+            host_path: daemon.root.display().to_string(),
+            mount: WRITABLE_ROOT_MOUNT.to_owned(),
+        }]
+    );
+
+    let session = workspace
+        .pipe_session("/bin/sh")
+        // It waits for its line, so it is still running when the attachment opens.
+        .args([
+            "-c",
+            "read line; echo \"$line\" >/srv/substrate-shared/session.txt",
+        ])
+        .policy(writable_policy())
+        .lease(Duration::from_secs(20))
+        .input_limit_bytes(1024)
+        .frame_limit_bytes(1024)
+        .queued_frames(4)
+        .writable_root(shared_root())
+        .start()
+        .await
+        .expect("session with a writable root starts");
+    let mut channel = session.attach().await.expect("session attachment");
+    channel
+        .write(b"from-session\n")
+        .await
+        .expect("session input");
+    let exit = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(frame) = channel.next_frame().await.expect("session frame") {
+            if let PipeFrame::Exit { exit, .. } = frame {
+                return exit;
+            }
+        }
+        None
+    })
+    .await
+    .expect("session ends");
+    assert_eq!(exit.and_then(|exit| exit.code), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(daemon.root.join("session.txt"))
+            .expect("session write on the host"),
+        "from-session\n"
+    );
+
+    let Err(SdkError::Refusal(refusal)) = workspace
+        .command("/bin/true")
+        .policy(writable_policy())
+        .writable_root(undeclared_root())
+        .start()
+        .await
+    else {
+        panic!("an undeclared writable root is refused by the daemon")
+    };
+    assert_eq!(refusal.code, "exec.writable-roots-host-unserved");
+    assert_eq!(
+        refusal.message,
+        "Writable host root undeclared is not served by this host."
+    );
+    let Err(SdkError::Refusal(refusal)) = workspace
+        .pipe_session("/bin/true")
+        .policy(writable_policy())
+        .lease(Duration::from_secs(20))
+        .input_limit_bytes(1024)
+        .frame_limit_bytes(1024)
+        .queued_frames(4)
+        .writable_root(undeclared_root())
+        .start()
+        .await
+    else {
+        panic!("an undeclared writable root is refused for a session")
+    };
+    assert_eq!(refusal.code, "exec.writable-roots-host-unserved");
+    eprintln!("sdk writable root delegated: executed");
+    daemon.stop().await;
 }

@@ -41,17 +41,18 @@ pub use model::{
     WorkspaceState,
 };
 pub use substrate_wire::{
-    AppliedConfinement, ConfinementFamily, ConfinementProperty, ConfinementRequires,
-    DigestedFileSlice, DirectoryEntry, DirectoryEntryKind, DirectoryPage, ExecMeasurement,
-    ExecUsage, ExecutionCapsuleInput, ExpectedFileState, FileEditInput, FileMutationResult,
-    FilePatchInput, GitBaselineFile, GitChange, GitChangeSet, GitChangeSide, GitChangeStatus,
-    GitChangesQuery, GitSource, GitSourceEnvelope, LinePatchEdit, MAX_EVENT_PAGE_ITEMS,
-    MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS, MAX_PTY_WINDOW_COLUMNS, MAX_PTY_WINDOW_ROWS,
-    MAX_SNAPSHOT_PAGE_ITEMS, MetricsResourceKind, PipeSessionCapabilities, ProcessStreamEnd,
-    ProcessStreamGap, ProcessStreamItem, ProcessStreamItemKind, PtyWindow,
-    RESOURCE_USAGE_SAMPLE_INTERVAL_MS, ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest,
-    SessionAttachmentState, SessionMode, SnapshotMetadata, SnapshotPage, StorageLimit,
-    TextMatchPolicy, UnifiedDiff, WorkspaceAccess, WorkspaceTree, WorkspaceTreeEntry,
+    AppliedConfinement, AppliedWritableRoot, ConfinementFamily, ConfinementProperty,
+    ConfinementRequires, DigestedFileSlice, DirectoryEntry, DirectoryEntryKind, DirectoryPage,
+    ExecMeasurement, ExecUsage, ExecutionCapsuleInput, ExpectedFileState, FileEditInput,
+    FileMutationResult, FilePatchInput, GitBaselineFile, GitChange, GitChangeSet, GitChangeSide,
+    GitChangeStatus, GitChangesQuery, GitSource, GitSourceEnvelope, LinePatchEdit,
+    MAX_EVENT_PAGE_ITEMS, MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS, MAX_PTY_WINDOW_COLUMNS,
+    MAX_PTY_WINDOW_ROWS, MAX_SNAPSHOT_PAGE_ITEMS, MAX_WRITABLE_ROOTS, MetricsResourceKind,
+    PipeSessionCapabilities, ProcessStreamEnd, ProcessStreamGap, ProcessStreamItem,
+    ProcessStreamItemKind, PtyWindow, RESOURCE_USAGE_SAMPLE_INTERVAL_MS, ReadOnlyFile,
+    ReadOnlyRoot, SecretSlotRequest, SessionAttachmentState, SessionMode, SnapshotMetadata,
+    SnapshotPage, StorageLimit, TextMatchPolicy, UnifiedDiff, WorkspaceAccess, WorkspaceTree,
+    WorkspaceTreeEntry, WritableGitRoot, WritableHostRoot, WritableRoot,
 };
 pub use transport::{EventStream, MetricsStream, ProcessEventStream, RemoteEndpoint};
 
@@ -758,6 +759,7 @@ impl Workspace {
             scratch: None,
             measurements: BTreeSet::new(),
             read_only_roots: Vec::new(),
+            writable_roots: Vec::new(),
             read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,
@@ -780,6 +782,7 @@ impl Workspace {
             scratch: None,
             measurements: BTreeSet::new(),
             read_only_roots: Vec::new(),
+            writable_roots: Vec::new(),
             read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,
@@ -1217,6 +1220,7 @@ pub struct CommandBuilder {
     scratch: Option<StorageLimit>,
     measurements: BTreeSet<ExecMeasurement>,
     read_only_roots: Vec<ReadOnlyRoot>,
+    writable_roots: Vec<WritableRoot>,
     read_only_files: Vec<ReadOnlyFile>,
     secret_slots: Vec<SecretSlotRequest>,
     capsule: Option<ExecutionCapsuleInput>,
@@ -1238,6 +1242,7 @@ pub struct PipeSessionBuilder {
     scratch: Option<StorageLimit>,
     measurements: BTreeSet<ExecMeasurement>,
     read_only_roots: Vec<ReadOnlyRoot>,
+    writable_roots: Vec<WritableRoot>,
     read_only_files: Vec<ReadOnlyFile>,
     secret_slots: Vec<SecretSlotRequest>,
     capsule: Option<ExecutionCapsuleInput>,
@@ -1312,6 +1317,15 @@ impl PipeSessionBuilder {
         self
     }
 
+    /// Mounts one writable root (ADR 0038): a host directory the daemon operator declared with
+    /// `--writable-root`, by name, or a Git checkout workspace the caller holds. Repeatable; the
+    /// roots reach the start request in the order given. More than [`MAX_WRITABLE_ROOTS`] are
+    /// refused with [`SdkError::Protocol`] before anything is sent.
+    pub fn writable_root(mut self, root: WritableRoot) -> Self {
+        self.writable_roots.push(root);
+        self
+    }
+
     /// Declares one host file read-only at a mount (ADR 0033).
     pub fn read_only_file(mut self, file: ReadOnlyFile) -> Self {
         self.read_only_files.push(file);
@@ -1366,6 +1380,7 @@ impl PipeSessionBuilder {
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
         validate_read_only_root_bound(&self.read_only_roots)?;
         validate_execution_storage(&self.workspace_access, self.scratch)?;
+        validate_writable_root_bound(&self.writable_roots)?;
         let policy = self.policy.ok_or(SdkError::Builder { field: "policy" })?;
         let lease_ttl = self.lease_ttl.ok_or(SdkError::Builder { field: "lease" })?;
         let input_limit_bytes = self.input_limit_bytes.ok_or(SdkError::Builder {
@@ -1393,7 +1408,7 @@ impl PipeSessionBuilder {
             ));
         }
         let exec = substrate_wire::ExecStartInput {
-            writable_roots: Vec::new(),
+            writable_roots: self.writable_roots,
             workspace: self.workspace.observed.id.clone(),
             argv: self.argv,
             env: substrate_wire::ExecEnvironment {
@@ -1784,6 +1799,15 @@ impl CommandBuilder {
         self
     }
 
+    /// Mounts one writable root (ADR 0038): a host directory the daemon operator declared with
+    /// `--writable-root`, by name, or a Git checkout workspace the caller holds. Repeatable; the
+    /// roots reach the start request in the order given. More than [`MAX_WRITABLE_ROOTS`] are
+    /// refused with [`SdkError::Protocol`] before anything is sent.
+    pub fn writable_root(mut self, root: WritableRoot) -> Self {
+        self.writable_roots.push(root);
+        self
+    }
+
     /// Declares one host file read-only at a mount (ADR 0033).
     pub fn read_only_file(mut self, file: ReadOnlyFile) -> Self {
         self.read_only_files.push(file);
@@ -1838,10 +1862,11 @@ impl CommandBuilder {
         }
         validate_read_only_root_bound(&self.read_only_roots)?;
         validate_execution_storage(&self.workspace_access, self.scratch)?;
+        validate_writable_root_bound(&self.writable_roots)?;
         let policy = self.policy.ok_or(SdkError::Builder { field: "policy" })?;
         let capability_snapshot = self.workspace.client.machine().capability_snapshot;
         let input = substrate_wire::ExecStartInput {
-            writable_roots: Vec::new(),
+            writable_roots: self.writable_roots,
             workspace: self.workspace.observed.id.clone(),
             argv: self.argv,
             env: substrate_wire::ExecEnvironment {
@@ -2127,6 +2152,17 @@ fn validate_execution_storage(
     if scratch.is_some_and(|limit| !limit.within_contract_bounds()) {
         return Err(SdkError::Protocol(
             "scratch storage quota is outside the contract bound".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses more writable roots than [`MAX_WRITABLE_ROOTS`] before a request is sent (ADR 0038).
+/// Every other rule on a root is the daemon's, answered with its named refusal.
+fn validate_writable_root_bound(roots: &[WritableRoot]) -> Result<(), SdkError> {
+    if roots.len() > MAX_WRITABLE_ROOTS as usize {
+        return Err(SdkError::Protocol(
+            substrate_wire::WireValidationError::WritableRootsExceeded.to_string(),
         ));
     }
     Ok(())
@@ -2546,6 +2582,227 @@ mod tests {
             .await
             .expect("recover lost mutation response");
         assert_eq!(workspace.id(), "ws_recovered");
+        server.await.expect("fake daemon task");
+    }
+
+    /// Accepts one connection, checks its request line starts with `head`, answers `status` with
+    /// `body`, and returns the request.
+    async fn answer_one(listener: &UnixListener, head: &str, status: &str, body: &[u8]) -> Vec<u8> {
+        let (mut stream, _) = listener.accept().await.expect("accept SDK request");
+        let request = read_request(&mut stream).await;
+        assert!(
+            request.starts_with(head.as_bytes()),
+            "expected {head:?}, got {:?}",
+            String::from_utf8_lossy(&request[..request.len().min(80)])
+        );
+        stream
+            .write_all(&response(status, body))
+            .await
+            .expect("write fake response");
+        request
+    }
+
+    fn host_root(name: &str, mount: &str) -> WritableRoot {
+        WritableRoot::Host(WritableHostRoot {
+            host: name.to_owned(),
+            mount: mount.to_owned(),
+        })
+    }
+
+    /// `story:sdk-writable-roots`: the exec and session builders send their writable roots in the
+    /// order given, and more than `MAX_WRITABLE_ROOTS` are refused before any request is sent: the
+    /// fake daemon's next request after both over-bound builds is the sentinel lookup.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One fake daemon answers the whole journey, in order.
+    async fn writable_roots_reach_the_start_request_in_order_and_are_bounded_before_sending() {
+        const SENTINEL: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../contracts/substrate-wire/0.26.0/vectors/http/machine-probe.json"
+        ))
+        .expect("machine vector");
+        let machine = serde_json::to_vec(
+            vector
+                .pointer("/expected/response/body")
+                .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let ordered = serde_json::json!([
+            {"host": "logs", "mount": "/srv/logs"},
+            {"workspace": "ws_second", "mount": "/srv/checkout"},
+            {"host": "envelopes", "mount": "/srv/envelopes"},
+        ]);
+        let expected = ordered.clone();
+        let server = tokio::spawn(async move {
+            answer_one(
+                &listener,
+                "GET /v1/machine HTTP/1.1\r\n",
+                "200 OK",
+                &machine,
+            )
+            .await;
+            let workspace = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_workspace",
+                "operation": "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+                "result": {
+                    "id": "ws_example",
+                    "kind": "workspace",
+                    "labels": {},
+                    "observed_at": "2026-11-08T00:00:00Z",
+                    "state": "ready",
+                    "origin": "created",
+                    "root_name": "ws_example"
+                }
+            }))
+            .expect("workspace response JSON");
+            answer_one(
+                &listener,
+                "POST /v1/workspaces HTTP/1.1\r\n",
+                "201 Created",
+                &workspace,
+            )
+            .await;
+            let unserved = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_unserved",
+                "error": {
+                    "class": "unserved",
+                    "code": "exec.sandbox-unavailable",
+                    "message": "The host cannot confine this run.",
+                    "retriable": false
+                }
+            }))
+            .expect("refusal JSON");
+            let exec = answer_one(
+                &listener,
+                "POST /v1/execs HTTP/1.1\r\n",
+                "501 Not Implemented",
+                &unserved,
+            )
+            .await;
+            let exec: Value = serde_json::from_slice(request_body(&exec)).expect("exec JSON");
+            assert_eq!(exec["input"]["writable_roots"], expected, "{exec}");
+            let session = answer_one(
+                &listener,
+                "POST /v1/sessions HTTP/1.1\r\n",
+                "501 Not Implemented",
+                &unserved,
+            )
+            .await;
+            let session: Value =
+                serde_json::from_slice(request_body(&session)).expect("session JSON");
+            assert_eq!(
+                session["input"]["exec"]["writable_roots"], expected,
+                "{session}"
+            );
+            let missing = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_sentinel",
+                "error": {
+                    "class": "refused",
+                    "code": "resource.not-found",
+                    "message": "The operation does not exist.",
+                    "retriable": false
+                }
+            }))
+            .expect("missing operation JSON");
+            answer_one(
+                &listener,
+                &format!("GET /v1/ops/{SENTINEL} HTTP/1.1\r\n"),
+                "404 Not Found",
+                &missing,
+            )
+            .await;
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let workspace = client
+            .workspace()
+            .empty()
+            .create()
+            .await
+            .expect("workspace create");
+        let policy = || {
+            ExecutionPolicy::builder()
+                .timeout(Duration::from_secs(5))
+                .cpu_time(Duration::from_secs(1))
+                .memory_bytes(64 * 1024 * 1024)
+                .processes(16)
+                .output_bytes(64 * 1024)
+                .build()
+                .expect("complete execution policy")
+        };
+        let roots: Vec<WritableRoot> =
+            serde_json::from_value(ordered).expect("three writable roots");
+
+        let mut command = workspace.command("/usr/bin/true").policy(policy());
+        for root in roots.clone() {
+            command = command.writable_root(root);
+        }
+        let Err(SdkError::Refusal(refusal)) = command.start().await else {
+            panic!("the fake daemon refuses the exec")
+        };
+        assert_eq!(refusal.code, "exec.sandbox-unavailable");
+
+        let mut session = workspace
+            .pipe_session("/usr/bin/true")
+            .policy(policy())
+            .lease(Duration::from_secs(5))
+            .input_limit_bytes(1024)
+            .frame_limit_bytes(1024)
+            .queued_frames(4);
+        for root in roots {
+            session = session.writable_root(root);
+        }
+        let Err(SdkError::Refusal(refusal)) = session.start().await else {
+            panic!("the fake daemon refuses the session")
+        };
+        assert_eq!(refusal.code, "exec.sandbox-unavailable");
+
+        let too_many = || {
+            (0..=MAX_WRITABLE_ROOTS)
+                .map(|index| host_root(&format!("r{index}"), &format!("/srv/r{index}")))
+        };
+        let mut command = workspace.command("/usr/bin/true").policy(policy());
+        for root in too_many() {
+            command = command.writable_root(root);
+        }
+        let Err(SdkError::Protocol(message)) = command.start().await else {
+            panic!("an exec over the writable-root bound is refused by the SDK")
+        };
+        assert!(message.contains("writable roots"), "{message}");
+        let mut session = workspace
+            .pty_session(
+                "/usr/bin/true",
+                PtyWindow {
+                    columns: 80,
+                    rows: 24,
+                },
+            )
+            .policy(policy())
+            .lease(Duration::from_secs(5))
+            .input_limit_bytes(1024)
+            .frame_limit_bytes(1024)
+            .queued_frames(4);
+        for root in too_many() {
+            session = session.writable_root(root);
+        }
+        let Err(SdkError::Protocol(message)) = session.start().await else {
+            panic!("a session over the writable-root bound is refused by the SDK")
+        };
+        assert!(message.contains("writable roots"), "{message}");
+
+        let Err(SdkError::Refusal(refusal)) = client.operation(SENTINEL).await else {
+            panic!("the sentinel operation is absent")
+        };
+        assert_eq!(refusal.code, "resource.not-found");
         server.await.expect("fake daemon task");
     }
 }
