@@ -278,6 +278,25 @@ The parent holds a liveness pipe to the child. Dropping the owner initiates boun
 credentials, socket permissions, independent failure, and the same wire behavior as an external
 daemon.
 
+## Share a host directory with a run
+
+A command, `pipe_session` or `pty_session` builder takes `.writable_root(..)` once per root, as it
+takes `.read_only_root(..)`, and sends the roots in the order given.
+`WritableRoot::Host(WritableHostRoot { host, mount })` names a directory the daemon operator
+declared with `--writable-root name=path`. The run writes through `mount`, and the host reads the
+same directory.
+
+`WritableRoot::Git(WritableGitRoot { workspace, mount })` mounts a Git checkout workspace you hold,
+where the host publishes `exec.writable-roots.git`.
+
+The `exec.writable-roots.host` fact lists the names a confined host serves. The daemon refuses any
+other name with `exec.writable-roots-host-unserved`, naming it. Without confinement it publishes no
+names, so an exec naming any host root is refused that way, and a session start is refused
+`session.confinement-unavailable` before its roots are read.
+
+More than `MAX_WRITABLE_ROOTS` roots are refused by the SDK with `SdkError::Protocol` before any
+request is sent.
+
 ## Recover and observe
 
 Mutation builders mint one operation id unless you provide one. If a response is lost, the SDK
