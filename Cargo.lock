@@ -423,6 +423,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "nix",
  "rcgen",
  "rustls",
  "rustls-pemfile",

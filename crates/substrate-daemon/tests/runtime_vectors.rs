@@ -3248,11 +3248,8 @@ async fn check_omitted_entries(daemon: &Daemon, workspace: &str) -> usize {
     std::fs::create_dir(&listing).expect("listing directory");
     std::fs::write(listing.join("b.txt"), b"b").expect("listed file");
     let fifo = listing.join("a-fifo");
-    let made = std::process::Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .expect("run mkfifo");
-    assert!(made.success(), "mkfifo {}", fifo.display());
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o644))
+        .unwrap_or_else(|error| panic!("mkfifo {}: {error}", fifo.display()));
     let page_path =
         format!("/v1/workspaces/{workspace}/files/listing?mode=directory&limit_items=10");
     let tree_path = |limit: u32| format!("/v2/workspaces/{workspace}/tree?limit_items={limit}");
