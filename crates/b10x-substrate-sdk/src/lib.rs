@@ -755,7 +755,7 @@ impl Workspace {
             environment: BTreeMap::new(),
             workspace_access: WorkspaceAccess::default(),
             network: substrate_wire::NetworkMode::None,
-            aperture: None,
+            apertures: Vec::new(),
             scratch: None,
             measurements: BTreeSet::new(),
             read_only_roots: Vec::new(),
@@ -778,7 +778,7 @@ impl Workspace {
             environment: BTreeMap::new(),
             workspace_access: WorkspaceAccess::default(),
             network: substrate_wire::NetworkMode::None,
-            aperture: None,
+            apertures: Vec::new(),
             scratch: None,
             measurements: BTreeSet::new(),
             read_only_roots: Vec::new(),
@@ -1216,7 +1216,7 @@ pub struct CommandBuilder {
     environment: BTreeMap<String, String>,
     workspace_access: WorkspaceAccess,
     network: substrate_wire::NetworkMode,
-    aperture: Option<String>,
+    apertures: Vec<String>,
     scratch: Option<StorageLimit>,
     measurements: BTreeSet<ExecMeasurement>,
     read_only_roots: Vec<ReadOnlyRoot>,
@@ -1238,7 +1238,7 @@ pub struct PipeSessionBuilder {
     environment: BTreeMap<String, String>,
     workspace_access: WorkspaceAccess,
     network: substrate_wire::NetworkMode,
-    aperture: Option<String>,
+    apertures: Vec<String>,
     scratch: Option<StorageLimit>,
     measurements: BTreeSet<ExecMeasurement>,
     read_only_roots: Vec<ReadOnlyRoot>,
@@ -1293,9 +1293,28 @@ impl PipeSessionBuilder {
         self
     }
 
+    /// Selects one operator-declared egress aperture by name (ADR 0013), replacing any earlier
+    /// selection.
     pub fn aperture(mut self, name: impl Into<String>) -> Self {
         self.network = substrate_wire::NetworkMode::Aperture;
-        self.aperture = Some(name.into());
+        self.apertures = vec![name.into()];
+        self
+    }
+
+    /// Selects several operator-declared egress apertures by name, in order (design 26 § 2),
+    /// replacing any earlier selection.
+    ///
+    /// The n-th name is reached in the run at `127.0.0.n`. One name is sent as `aperture`, as
+    /// [`Self::aperture`] sends it; two to [`substrate_wire::MAX_EGRESS_APERTURES`] are sent as
+    /// `apertures`. The list is sent as given: an empty, over-long or repeated list is the
+    /// daemon's named refusal, never adjusted here.
+    pub fn apertures<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.network = substrate_wire::NetworkMode::Aperture;
+        self.apertures = names.into_iter().map(Into::into).collect();
         self
     }
 
@@ -1407,6 +1426,7 @@ impl PipeSessionBuilder {
                 "session queue limit is outside its contract bound".to_owned(),
             ));
         }
+        let (aperture, apertures) = aperture_selection(self.apertures);
         let exec = substrate_wire::ExecStartInput {
             writable_roots: self.writable_roots,
             workspace: self.workspace.observed.id.clone(),
@@ -1423,8 +1443,8 @@ impl PipeSessionBuilder {
                 requires: None,
                 capability_snapshot: self.workspace.client.machine().capability_snapshot,
                 network: self.network,
-                aperture: self.aperture,
-                apertures: Vec::new(),
+                aperture,
+                apertures,
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
             },
@@ -1775,9 +1795,28 @@ impl CommandBuilder {
         self
     }
 
+    /// Selects one operator-declared egress aperture by name (ADR 0013), replacing any earlier
+    /// selection.
     pub fn aperture(mut self, name: impl Into<String>) -> Self {
         self.network = substrate_wire::NetworkMode::Aperture;
-        self.aperture = Some(name.into());
+        self.apertures = vec![name.into()];
+        self
+    }
+
+    /// Selects several operator-declared egress apertures by name, in order (design 26 § 2),
+    /// replacing any earlier selection.
+    ///
+    /// The n-th name is reached in the run at `127.0.0.n`. One name is sent as `aperture`, as
+    /// [`Self::aperture`] sends it; two to [`substrate_wire::MAX_EGRESS_APERTURES`] are sent as
+    /// `apertures`. The list is sent as given: an empty, over-long or repeated list is the
+    /// daemon's named refusal, never adjusted here.
+    pub fn apertures<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.network = substrate_wire::NetworkMode::Aperture;
+        self.apertures = names.into_iter().map(Into::into).collect();
         self
     }
 
@@ -1865,6 +1904,7 @@ impl CommandBuilder {
         validate_writable_root_bound(&self.writable_roots)?;
         let policy = self.policy.ok_or(SdkError::Builder { field: "policy" })?;
         let capability_snapshot = self.workspace.client.machine().capability_snapshot;
+        let (aperture, apertures) = aperture_selection(self.apertures);
         let input = substrate_wire::ExecStartInput {
             writable_roots: self.writable_roots,
             workspace: self.workspace.observed.id.clone(),
@@ -1881,8 +1921,8 @@ impl CommandBuilder {
                 requires: None,
                 capability_snapshot,
                 network: self.network,
-                aperture: self.aperture,
-                apertures: Vec::new(),
+                aperture,
+                apertures,
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
             },
@@ -2166,6 +2206,16 @@ fn validate_writable_root_bound(roots: &[WritableRoot]) -> Result<(), SdkError> 
         ));
     }
     Ok(())
+}
+
+/// Writes a builder's aperture selection in the wire's two forms (design 26 § 2): one name as
+/// `aperture`, any other count as `apertures`.
+fn aperture_selection(mut names: Vec<String>) -> (Option<String>, Vec<String>) {
+    if names.len() == 1 {
+        (names.pop(), Vec::new())
+    } else {
+        (None, names)
+    }
 }
 
 #[cfg(test)]
@@ -2600,6 +2650,173 @@ mod tests {
             .await
             .expect("write fake response");
         request
+    }
+
+    /// `story:sdk-aperture-list`: the exec and session builders send several apertures as the
+    /// wire's `apertures` list in the order given, and one aperture as `aperture`, whether it was
+    /// named by `aperture` or as a one-name list.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One fake daemon answers the whole journey, in order.
+    async fn an_aperture_list_reaches_the_start_request_in_the_wires_two_forms() {
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../contracts/substrate-wire/0.26.0/vectors/http/machine-probe.json"
+        ))
+        .expect("machine vector");
+        let machine = serde_json::to_vec(
+            vector
+                .pointer("/expected/response/body")
+                .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let server = tokio::spawn(async move {
+            answer_one(
+                &listener,
+                "GET /v1/machine HTTP/1.1\r\n",
+                "200 OK",
+                &machine,
+            )
+            .await;
+            let workspace = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_workspace",
+                "operation": "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+                "result": {
+                    "id": "ws_example",
+                    "kind": "workspace",
+                    "labels": {},
+                    "observed_at": "2026-11-08T00:00:00Z",
+                    "state": "ready",
+                    "origin": "created",
+                    "root_name": "ws_example"
+                }
+            }))
+            .expect("workspace response JSON");
+            answer_one(
+                &listener,
+                "POST /v1/workspaces HTTP/1.1\r\n",
+                "201 Created",
+                &workspace,
+            )
+            .await;
+            let unserved = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_unserved",
+                "error": {
+                    "class": "unserved",
+                    "code": "exec.egress-apertures-unserved",
+                    "message": "The host declares no aperture.",
+                    "retriable": false
+                }
+            }))
+            .expect("refusal JSON");
+            let mut sandboxes = Vec::new();
+            for (head, pointer) in [
+                ("POST /v1/execs HTTP/1.1\r\n", "/input/sandbox"),
+                ("POST /v1/sessions HTTP/1.1\r\n", "/input/exec/sandbox"),
+                ("POST /v1/execs HTTP/1.1\r\n", "/input/sandbox"),
+                ("POST /v1/execs HTTP/1.1\r\n", "/input/sandbox"),
+                ("POST /v1/sessions HTTP/1.1\r\n", "/input/exec/sandbox"),
+            ] {
+                let request = answer_one(&listener, head, "501 Not Implemented", &unserved).await;
+                let body: Value = serde_json::from_slice(request_body(&request)).expect("JSON");
+                sandboxes.push(body.pointer(pointer).expect("sandbox").clone());
+            }
+            sandboxes
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let workspace = client
+            .workspace()
+            .empty()
+            .create()
+            .await
+            .expect("workspace create");
+        let policy = || {
+            ExecutionPolicy::builder()
+                .timeout(Duration::from_secs(5))
+                .cpu_time(Duration::from_secs(1))
+                .memory_bytes(64 * 1024 * 1024)
+                .processes(16)
+                .output_bytes(64 * 1024)
+                .build()
+                .expect("complete execution policy")
+        };
+        let session = || {
+            workspace
+                .pipe_session("/usr/bin/true")
+                .policy(policy())
+                .lease(Duration::from_secs(5))
+                .input_limit_bytes(1024)
+                .frame_limit_bytes(1024)
+                .queued_frames(4)
+        };
+        let refused = |result: Result<(), SdkError>| {
+            let Err(SdkError::Refusal(refusal)) = result else {
+                panic!("the fake daemon refuses the start")
+            };
+            assert_eq!(refusal.code, "exec.egress-apertures-unserved");
+        };
+        refused(
+            workspace
+                .command("/usr/bin/true")
+                .policy(policy())
+                .apertures(["dial", "model"])
+                .start()
+                .await
+                .map(drop),
+        );
+        refused(
+            session()
+                .apertures(vec!["dial".to_owned(), "model".to_owned()])
+                .start()
+                .await
+                .map(drop),
+        );
+        refused(
+            workspace
+                .command("/usr/bin/true")
+                .policy(policy())
+                .aperture("model")
+                .start()
+                .await
+                .map(drop),
+        );
+        refused(
+            workspace
+                .command("/usr/bin/true")
+                .policy(policy())
+                .apertures(["model"])
+                .start()
+                .await
+                .map(drop),
+        );
+        refused(
+            session()
+                .apertures(["dial", "model"])
+                .aperture("model")
+                .start()
+                .await
+                .map(drop),
+        );
+
+        let sandboxes = server.await.expect("fake daemon task");
+        for listed in &sandboxes[..2] {
+            assert_eq!(listed["network"], "aperture", "{listed}");
+            assert_eq!(listed["apertures"], serde_json::json!(["dial", "model"]));
+            assert!(listed.get("aperture").is_none(), "{listed}");
+        }
+        for single in &sandboxes[2..] {
+            assert_eq!(single["network"], "aperture", "{single}");
+            assert_eq!(single["aperture"], "model", "{single}");
+            assert!(single.get("apertures").is_none(), "{single}");
+        }
     }
 
     fn host_root(name: &str, mount: &str) -> WritableRoot {

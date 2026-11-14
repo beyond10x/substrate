@@ -14,6 +14,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `WritableHostRoot`, `WritableGitRoot`, `AppliedWritableRoot` and `MAX_WRITABLE_ROOTS`. More than
   `MAX_WRITABLE_ROOTS` roots are refused before the request is sent. The wire, the bundle and the
   daemon are unchanged.
+- The Rust SDK's command, `pipe_session` and `pty_session` builders gain `apertures`, which selects
+  several declared egress apertures in order (design 26 § 2); the n-th is reached in the run at
+  `127.0.0.n`. One name is still sent as `aperture`, so an existing start serializes as before.
+  The wire, the bundle and the daemon are unchanged.
 
 ### Security
 
