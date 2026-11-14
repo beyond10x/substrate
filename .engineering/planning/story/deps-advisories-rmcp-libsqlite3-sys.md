@@ -2,13 +2,16 @@
 format: aep.planning-md/3
 id: story:deps-advisories-rmcp-libsqlite3-sys
 kind: story
-status: draft
+status: active
 title: 'check-advisories passes again: rmcp 3.9.0 and rusqlite 0.41 for four November RustSec advisories'
 summary: rmcp moves from 3.2.0 to 3.9.0 and rusqlite from 0.40 to 0.41 (libsqlite3-sys 0.38.2 to 0.39.1), the smallest versions that clear RUSTSEC-2026-0457, -0459, -0461 and -0462.
 owner: substrate
 tags:
 - dependencies
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-14T20:14:06Z", actor: "human:agent", revision: 3, executor: "human:timo"}
+- {from: "proposed", to: "active", at: "2026-11-14T20:14:06Z", actor: "human:agent", revision: 4, executor: "human:timo"}
 ---
 # Story: check-advisories passes again: rmcp 3.9.0 and rusqlite 0.41
 

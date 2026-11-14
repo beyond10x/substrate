@@ -2,11 +2,14 @@
 format: aep.planning-md/3
 id: story:sdk-aperture-list
 kind: story
-status: draft
+status: active
 title: The Rust SDK's session and exec builders select several apertures
 relations:
 - decomposes: epic:rust-sdk
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-14T20:14:07Z", actor: "human:agent", revision: 3, executor: "human:timo"}
+- {from: "proposed", to: "active", at: "2026-11-14T20:14:07Z", actor: "human:agent", revision: 4, executor: "human:timo"}
 ---
 # Story: The Rust SDK's session and exec builders select several apertures
 
