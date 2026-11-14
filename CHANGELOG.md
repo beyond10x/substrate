@@ -14,6 +14,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `WritableHostRoot`, `WritableGitRoot`, `AppliedWritableRoot` and `MAX_WRITABLE_ROOTS`. More than
   `MAX_WRITABLE_ROOTS` roots are refused before the request is sent. The wire, the bundle and the
   daemon are unchanged.
+- The Rust SDK's command, `pipe_session` and `pty_session` builders gain `apertures`, which selects
+  several declared egress apertures in order (design 26 § 2); the n-th is reached in the run at
+  `127.0.0.n`. One name is still sent as `aperture`, so an existing start serializes as before.
+  The wire, the bundle and the daemon are unchanged.
+
+### Security
+
+- `rusqlite` is 0.41.1 and the bundled `libsqlite3-sys` 0.39.1, taking SQLite's fix for
+  [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459.html), uninitialised memory
+  read through the WAL. The daemon's ledger and the SDK's store link this SQLite.
+- `rmcp` is pinned at 3.9.0, taking the fixes for
+  [RUSTSEC-2026-0461](https://rustsec.org/advisories/RUSTSEC-2026-0461.html),
+  [RUSTSEC-2026-0457](https://rustsec.org/advisories/RUSTSEC-2026-0457.html) and
+  [RUSTSEC-2026-0462](https://rustsec.org/advisories/RUSTSEC-2026-0462.html). All three are in the
+  Streamable HTTP transports and the OAuth client, which the model-only pin of `substrate-mcp`
+  does not compile, so no shipped binary was reachable through them.
+- `THIRD_PARTY_LICENSES.html` names the new versions.
+
+### Fixed
+
+- Tests make their FIFOs with `nix::unistd::mkfifo` instead of running `mkfifo`, which on the CI
+  runner now refuses a non-UTF-8 path ("invalid UTF-8 was detected in one or more arguments") and
+  failed the omitted-entries suite before the daemon was reached. Test-only change.
 
 ## [0.20.0] — 2026-11-05
 
