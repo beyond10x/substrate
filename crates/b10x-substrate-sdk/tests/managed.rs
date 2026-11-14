@@ -450,11 +450,8 @@ async fn managed_listings_answer_the_omitted_entry_count() {
         .join("workspaces")
         .join(workspace.id())
         .join("listing/a-fifo");
-    let made = std::process::Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .expect("run mkfifo");
-    assert!(made.success(), "mkfifo {}", fifo.display());
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o644))
+        .unwrap_or_else(|error| panic!("mkfifo {}: {error}", fifo.display()));
 
     let page = workspace
         .read_directory_with_omissions("listing", None, 32)

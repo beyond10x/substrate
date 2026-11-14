@@ -675,11 +675,11 @@ async fn special_entries_are_omitted_from_both_listing_routes_rather_than_refuse
         std::fs::read(mixed.join("visible.txt")).expect("the API-written file"),
         b"hello\n"
     );
-    let fifo = std::process::Command::new("mkfifo")
-        .arg(mixed.join("a-fifo"))
-        .status()
-        .expect("run mkfifo");
-    assert!(fifo.success(), "mkfifo");
+    nix::unistd::mkfifo(
+        &mixed.join("a-fifo"),
+        nix::sys::stat::Mode::from_bits_truncate(0o644),
+    )
+    .expect("mkfifo");
     drop(unix_socket::bind_in(&mixed, "b-socket"));
     std::fs::write(
         mixed.join(std::ffi::OsString::from_vec(b"c\xff".to_vec())),
