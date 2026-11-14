@@ -15,6 +15,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `MAX_WRITABLE_ROOTS` roots are refused before the request is sent. The wire, the bundle and the
   daemon are unchanged.
 
+### Fixed
+
+- Tests make their FIFOs with `nix::unistd::mkfifo` instead of running `mkfifo`, which on the CI
+  runner now refuses a non-UTF-8 path ("invalid UTF-8 was detected in one or more arguments") and
+  failed the omitted-entries suite before the daemon was reached. Test-only change.
+
 ## [0.20.0] — 2026-11-05
 
 The wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are unchanged.

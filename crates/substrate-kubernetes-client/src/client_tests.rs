@@ -1199,11 +1199,8 @@ fn a_kubeconfig_path_naming_a_fifo_is_refused_without_blocking() {
     let directory = std::env::temp_dir().join(format!("client-fifo-{}", std::process::id()));
     std::fs::create_dir_all(&directory).expect("a scratch directory");
     let fifo = directory.join("kubeconfig");
-    let made = std::process::Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .expect("mkfifo runs");
-    assert!(made.success(), "mkfifo made the FIFO");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o644))
+        .expect("mkfifo made the FIFO");
     let (sender, receiver) = std::sync::mpsc::channel();
     let path = fifo.clone();
     std::thread::spawn(move || {

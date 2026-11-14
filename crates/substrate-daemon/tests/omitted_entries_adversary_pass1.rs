@@ -103,11 +103,8 @@ impl Harness {
 }
 
 fn mkfifo(path: &std::path::Path) {
-    let status = std::process::Command::new("mkfifo")
-        .arg(path)
-        .status()
-        .expect("run mkfifo");
-    assert!(status.success(), "mkfifo {}", path.display());
+    nix::unistd::mkfifo(path, nix::sys::stat::Mode::from_bits_truncate(0o644))
+        .unwrap_or_else(|error| panic!("mkfifo {}: {error}", path.display()));
 }
 
 fn socket(path: &std::path::Path) {
