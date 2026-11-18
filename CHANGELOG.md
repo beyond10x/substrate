@@ -21,6 +21,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Security
 
+- `libz-sys` is 1.1.33, taking zlib's fix for
+  [RUSTSEC-2026-0544](https://rustsec.org/advisories/RUSTSEC-2026-0544.html), a heap buffer
+  overflow in `gzwrite` after a write stall. The host driver's Git stack links it through
+  `curl-sys`.
 - `rusqlite` is 0.41.1 and the bundled `libsqlite3-sys` 0.39.1, taking SQLite's fix for
   [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459.html), uninitialised memory
   read through the WAL. The daemon's ledger and the SDK's store link this SQLite.
