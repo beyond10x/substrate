@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- A deployment may declare up to six egress apertures (`MAX_DEPLOYMENT_EGRESS_APERTURES` in the
+  daemon, ADR 0013 amendment); one run still selects at most four (`MAX_EGRESS_APERTURES`, wire and
+  bundles unchanged). A host serving GitLab and GitHub instances declared five and the daemon
+  refused to start (#225).
+
 ### Added
 
 - The Rust SDK's command, `pipe_session` and `pty_session` builders gain `writable_root`, repeatable
