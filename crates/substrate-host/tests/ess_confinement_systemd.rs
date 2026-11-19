@@ -244,12 +244,17 @@ async fn a_systemd_local_run_is_bounded_and_a_kill_leaves_no_process_of_its_tree
         })
         .expect("admitted");
     assert!(admitted.declared_insecure());
+    // The forks run in a subshell, and the leader waits on a sleep started before them: a fork
+    // refused at `pids.max` is fatal to a non-interactive dash, so forking in the leader ended
+    // the run, and the adapter removed its cgroup before `pids.max` was read (#230). Now the
+    // refusal ends only the subshell, under any POSIX `sh`.
     let run = adapter
         .start(
             &admitted,
             &shell(
-                "cat /proc/self/cgroup; i=0; while [ $i -lt 32 ]; do sleep 60 & i=$((i+1)); done; \
-                 wait",
+                "cat /proc/self/cgroup; sleep 600 & held=$!; \
+                 (i=0; while [ $i -lt 32 ]; do sleep 60 & i=$((i+1)); done; wait) 2>/dev/null; \
+                 wait $held",
             ),
         )
         .await
