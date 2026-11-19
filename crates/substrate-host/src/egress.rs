@@ -200,7 +200,8 @@ fn listen_addresses(count: usize) -> Result<Vec<Ipv4Addr>, DriverError> {
     }
 }
 
-/// What a run with apertures gets bound into a sandbox that otherwise has no `/etc` at all.
+/// What a run with apertures gets bound into a sandbox whose only other `/etc` is
+/// `/etc/alternatives` (ADR 0049).
 ///
 /// Two files, generated per run and read-only. `hosts` maps each declared name to the address its
 /// own aperture listens on ([`listen_address`]), so a child uses the URL the operator declared and

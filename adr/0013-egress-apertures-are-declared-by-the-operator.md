@@ -45,3 +45,15 @@ name-referenced, exactly matched, probed and observed. A hosted runner cannot pr
 half: reachability of a declared destination and unreachability of an undeclared one need a
 delegated lane on a self-hosted runner. CI proves the typed refusals and the schema shape and
 reports the rest absent rather than passed.
+
+## Amendment, 2026-11-18: the deployment bound and the run bound differ
+
+A host that serves boxes for instances on two forges declares the model host, the control-plane
+dial-in and two hosts per forge (git and API): five apertures, while each run selects at most four
+of them. The daemon refused that deployment at start, and every box on the host went down with it
+(substrate#225).
+
+The bound on one run stays `MAX_EGRESS_APERTURES` (four), in the wire and its bundles. The bound on
+one deployment's declarations becomes six, `MAX_DEPLOYMENT_EGRESS_APERTURES` in the daemon. Every
+aperture is still operator-declared, named and reviewed; six keeps that list short enough to read.
+(Timo, 2026-11-18: "raise the limit to 6".)

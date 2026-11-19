@@ -256,6 +256,7 @@ struct Arguments {
             "bubblewrap",
             "project_quota_ids",
             "exec_cpu_cores",
+            "tmp_bytes",
             "git_sources",
             "secret_slots",
             "egress_apertures",
@@ -305,6 +306,13 @@ struct Arguments {
         default_value_t = 1
     )]
     exec_cpu_cores: u32,
+
+    /// The size of every confined run's `/tmp`, in bytes (ADR 0049).
+    ///
+    /// Absent keeps the kernel's tmpfs default, half the RAM. Under one MiB, or with a bubblewrap
+    /// that does not take `--size`, refuses startup.
+    #[arg(long, env = "SUBSTRATE_TMP_BYTES", value_name = "BYTES")]
+    tmp_bytes: Option<u64>,
 
     /// Declare a read-only Git source as `name=https://origin/path-prefix/` (repeatable).
     #[arg(
@@ -374,9 +382,9 @@ struct Arguments {
 
     /// A certificate bundle a run with an aperture gets a private read-only snapshot of.
     ///
-    /// Without it a sandbox has no trust anchor — it has no `/etc` at all — so TLS crosses the
-    /// aperture intact and fails verification inside. Absent and unverifiable, never present and
-    /// unverified.
+    /// Without it a sandbox has no trust anchor — its only `/etc` is `/etc/alternatives` — so
+    /// TLS crosses the aperture intact and fails verification inside. Absent and unverifiable,
+    /// never present and unverified.
     #[arg(long, env = "SUBSTRATE_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<PathBuf>,
 
@@ -568,6 +576,7 @@ impl From<Arguments> for DaemonConfig {
             cgroup_root: arguments.cgroup_root,
             project_quota_ids: arguments.project_quota_ids,
             exec_cpu_cores: arguments.exec_cpu_cores,
+            tmp_bytes: arguments.tmp_bytes,
             git_sources: arguments.git_sources,
             bubblewrap: arguments.bubblewrap,
             event_retention: arguments.event_retention,
@@ -638,6 +647,22 @@ mod tests {
         "--deployment",
         "test",
     ];
+
+    /// ADR 0049 decision 2: no `--tmp-bytes` keeps the kernel default; a given size reaches the
+    /// host configuration unchanged, and a negative one is not a size.
+    #[test]
+    fn tmp_bytes_is_absent_by_default_and_reaches_the_host_configuration() {
+        let default = Arguments::try_parse_from(REQUIRED).expect("default arguments");
+        assert_eq!(super::DaemonConfig::from(default).tmp_bytes, None);
+        let sized =
+            Arguments::try_parse_from(REQUIRED.into_iter().chain(["--tmp-bytes", "67108864"]))
+                .expect("a size");
+        assert_eq!(super::DaemonConfig::from(sized).tmp_bytes, Some(67_108_864));
+        assert!(
+            Arguments::try_parse_from(REQUIRED.into_iter().chain(["--tmp-bytes", "-1"])).is_err(),
+            "a negative size is not a size"
+        );
+    }
 
     #[test]
     fn exec_cpu_cores_defaults_to_one_core_and_takes_an_explicit_count() {

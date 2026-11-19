@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-11-19
+
+The wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are unchanged.
+A deployment declares up to six egress apertures; a confined run on a Debian-family host finds
+its `/etc/alternatives` tools; the daemon's `--tmp-bytes` sizes every run's `/tmp`. Four RustSec
+advisories are taken.
+
+### Changed
+
+- A deployment may declare up to six egress apertures (`MAX_DEPLOYMENT_EGRESS_APERTURES` in the
+  daemon, ADR 0013 amendment); one run still selects at most four (`MAX_EGRESS_APERTURES`, wire and
+  bundles unchanged). A host serving GitLab and GitHub instances declared five and the daemon
+  refused to start (#225).
+
 ### Added
 
 - The Rust SDK's command, `pipe_session` and `pty_session` builders gain `writable_root`, repeatable
@@ -18,6 +32,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   several declared egress apertures in order (design 26 § 2); the n-th is reached in the run at
   `127.0.0.n`. One name is still sent as `aperture`, so an existing start serializes as before.
   The wire, the bundle and the daemon are unchanged.
+- The daemon's `--tmp-bytes BYTES` (`SUBSTRATE_TMP_BYTES`) sizes every confined run's `/tmp`
+  (#224, ADR 0049); absent keeps the kernel default, half the RAM. Startup refuses a size under one
+  MiB as `config.tmp-bytes-invalid`, and a size with a bubblewrap that does not take `--size` as
+  `config.tmp-bytes-unserved`. The wire and the bundle are unchanged.
+
+### Fixed
+
+- A confined run on a Debian-family host finds `cc`, `awk`, `which` and every other `/usr/bin`
+  name that links through `/etc/alternatives`: the Linux base view now binds the host's
+  `/etc/alternatives` read-only when it has one (#223, ADR 0049). Nothing else of `/etc` joins it.
+
+- Tests make their FIFOs with `nix::unistd::mkfifo` instead of running `mkfifo`, which on the CI
+  runner now refuses a non-UTF-8 path ("invalid UTF-8 was detected in one or more arguments") and
+  failed the omitted-entries suite before the daemon was reached. Test-only change.
 
 ### Security
 
@@ -35,12 +63,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   Streamable HTTP transports and the OAuth client, which the model-only pin of `substrate-mcp`
   does not compile, so no shipped binary was reachable through them.
 - `THIRD_PARTY_LICENSES.html` names the new versions.
-
-### Fixed
-
-- Tests make their FIFOs with `nix::unistd::mkfifo` instead of running `mkfifo`, which on the CI
-  runner now refuses a non-UTF-8 path ("invalid UTF-8 was detected in one or more arguments") and
-  failed the omitted-entries suite before the daemon was reached. Test-only change.
 
 ## [0.20.0] — 2026-11-05
 

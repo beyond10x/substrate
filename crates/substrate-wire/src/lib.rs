@@ -386,8 +386,9 @@ pub const MAX_EGRESS_APERTURES: u32 = 4;
 pub const APERTURE_LOOPBACK_ADDRESS: &str = "127.0.0.1";
 /// Where a generated per-run host mapping is bound, so a declared name resolves to the forwarder.
 ///
-/// The sandbox has no `/etc` (`docs/design/10-destination-bound-egress.md` § 2). This is the whole
-/// resolver a run gets: exactly the declared name, exactly loopback, and no `resolv.conf`.
+/// The sandbox has no `/etc` but `/etc/alternatives` (ADR 0049;
+/// `docs/design/10-destination-bound-egress.md` § 2). This is the whole resolver a run gets:
+/// exactly the declared name, exactly loopback, and no `resolv.conf`.
 pub const APERTURE_HOSTS_PATH: &str = "/etc/hosts";
 /// Where a generated per-run certificate authority bundle is bound.
 ///

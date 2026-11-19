@@ -538,6 +538,13 @@ Each exec's CPU bandwidth is derived from its declared CPU time over its timeout
 more cores than the daemon process may run on, as `config.exec-cpu-cores-invalid`; it never clamps
 the value. The ceiling is not published on any capability fact.
 
+Each confined run's `/tmp` is a private tmpfs at the kernel default, half the RAM, unless
+`--tmp-bytes BYTES` (`SUBSTRATE_TMP_BYTES`) sizes it. Startup refuses a size under one MiB as
+`config.tmp-bytes-invalid`, and a size with a bubblewrap that does not take `--size` (before 0.8)
+as `config.tmp-bytes-unserved`. Its pages count against the run's memory bound; a run sees the
+size with `df /tmp`, and it is not published on any capability fact (ADR 0049). The base view
+also carries the host's `/etc/alternatives` read-only, so a Debian-family `/usr/bin/cc` resolves.
+
 The runtime probe enables and tests the controllers, bubblewrap namespaces, cgroup kill and the
 swap-inclusive memory bound **before** it advertises exec.
 

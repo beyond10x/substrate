@@ -2741,13 +2741,23 @@ impl ProcessRuntime {
             "--ro-bind-try",
             "/lib64",
             "/lib64",
+            // Links into the system paths above, which a Debian-family host's `/usr/bin` names
+            // point through (`/usr/bin/cc -> /etc/alternatives/cc`); without it they dangle. The
+            // only part of `/etc` the base view carries (ADR 0049 decision 1).
+            "--ro-bind-try",
+            "/etc/alternatives",
+            "/etc/alternatives",
             "--proc",
             "/proc",
             "--dev",
             "/dev",
-            "--tmpfs",
-            "/tmp",
         ]);
+        // The operator's size, else the kernel default (ADR 0049 decision 2). `HostDriver::open`
+        // refused a bubblewrap that does not take `--size`, so it is applied or nothing starts.
+        if let Some(bytes) = self.config.tmp_bytes {
+            command.arg("--size").arg(bytes.to_string());
+        }
+        command.args(["--tmpfs", "/tmp"]);
         command.arg("--seccomp").arg(seccomp_fd.to_string());
         if let Some(capsule) = capsule {
             command
@@ -7985,6 +7995,102 @@ mod tests {
             .expect("an OOM is named on the observation with no measurements requested");
         assert_eq!(refusal.code, "exec.memory-limit");
         assert_eq!(refusal.class, substrate_wire::ErrorClass::Exhausted);
+    }
+
+    /// The argv `ProcessRuntime::command` builds under `config`, for a read-write workspace.
+    fn base_view_argv(mut config: HostConfig, root: &std::path::Path) -> Vec<String> {
+        let workspace = root.join("ws_test");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let cgroup_root = root.join("cgroups");
+        std::fs::create_dir_all(&cgroup_root).expect("cgroup root");
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        config.cgroup_root = Some(cgroup_root);
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts::default(),
+        };
+        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+        let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
+        let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
+        let pinned = crate::fs::pin_workspace_directory(&workspace).expect("pinned workspace");
+        let access = ProcessRuntime::prepare_workspace_access(
+            &pinned,
+            &substrate_wire::WorkspaceAccess::ReadWrite,
+        )
+        .expect("read-write access");
+        let (command, _seccomp) = runtime
+            .command(
+                &pty_exec_input(&snapshot),
+                sync.as_raw_fd(),
+                ChildChannel::Quiet,
+                None,
+                &slots,
+                None,
+                None,
+                None,
+                &access,
+                &[],
+                &[],
+                &[],
+            )
+            .expect("the exec argv builds");
+        command
+            .as_std()
+            .get_args()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// **The base view carries `/etc/alternatives`** (issue #223, ADR 0049 decision 1): on a
+    /// Debian-family host `/usr/bin/cc` is a link into it, so without it `cc`, `awk` and every
+    /// other alternatives link dangle and no Rust build links. Read-only and only when the host
+    /// has one, as `/bin`, `/lib` and `/lib64`; nothing else of `/etc` joins the view.
+    ///
+    /// Portable: `command` builds an argv and spawns nothing.
+    #[test]
+    fn the_exec_argv_binds_etc_alternatives_read_only() {
+        let root = tempfile::tempdir().expect("root");
+        let argv = base_view_argv(HostConfig::minimum(root.path()), root.path());
+        assert!(
+            argv.windows(3).any(|window| window
+                == ["--ro-bind-try", "/etc/alternatives", "/etc/alternatives"]),
+            "the exec argv does not bind /etc/alternatives read-only: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|part| part == "/etc"),
+            "the exec argv binds the whole of /etc: {argv:?}"
+        );
+    }
+
+    /// **`/tmp` takes the operator's size** (issue #224, ADR 0049 decision 2): `--size N` right
+    /// before `--tmpfs /tmp` when `tmp_bytes` is set, and no `--size` at all when it is absent, so
+    /// an unset size keeps the kernel default it always had.
+    #[test]
+    fn the_exec_argv_sizes_tmp_only_when_the_operator_set_a_size() {
+        let root = tempfile::tempdir().expect("root");
+        let mut config = HostConfig::minimum(root.path());
+        config.tmp_bytes = Some(64 * 1_048_576);
+        let argv = base_view_argv(config, root.path());
+        assert!(
+            argv.windows(4)
+                .any(|window| window == ["--size", "67108864", "--tmpfs", "/tmp"]),
+            "the exec argv does not size /tmp: {argv:?}"
+        );
+        let bare = tempfile::tempdir().expect("root");
+        let argv = base_view_argv(HostConfig::minimum(bare.path()), bare.path());
+        assert!(
+            argv.windows(2).any(|window| window == ["--tmpfs", "/tmp"]),
+            "the exec argv has no /tmp: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|part| part == "--size"),
+            "an unset size reaches the argv: {argv:?}"
+        );
     }
 
     /// **The exec argv carries the posture** — asserted on the argv the driver builds.
