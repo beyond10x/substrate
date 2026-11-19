@@ -368,6 +368,62 @@ pub struct HostConfig {
     /// `exec.writable-roots.host` is absent and every start naming a host root is
     /// `exec.writable-roots-host-unserved`. [`HostConfig::minimum`] declares none.
     pub writable_roots: Vec<DeclaredWritableRoot>,
+    /// The size of every confined run's `/tmp`, in bytes (ADR 0049 decision 2). `None` keeps the
+    /// kernel's tmpfs default, half the RAM. [`HostConfig::minimum`] sets `None`.
+    /// `HostDriver::open` refuses a size under [`MIN_TMP_BYTES`] as `config.tmp-bytes-invalid`,
+    /// and a bubblewrap that does not take `--size` as `config.tmp-bytes-unserved`.
+    pub tmp_bytes: Option<u64>,
+}
+
+/// The smallest `/tmp` an operator may set: one MiB (ADR 0049 decision 2).
+pub const MIN_TMP_BYTES: u64 = 1_048_576;
+
+/// Refuses an operator `/tmp` size under [`MIN_TMP_BYTES`], naming it; `None` is the default.
+fn validate_tmp_bytes(tmp_bytes: Option<u64>) -> Result<(), DriverError> {
+    match tmp_bytes {
+        Some(bytes) if bytes < MIN_TMP_BYTES => Err(DriverError::refused(
+            "config.tmp-bytes-invalid",
+            format!("The /tmp size {bytes} is under the one-MiB floor of {MIN_TMP_BYTES} bytes."),
+            "config.tmp_bytes",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Refuses an operator `/tmp` size a bubblewrap cannot apply: one whose `--help` does not name
+/// `--size` (bubblewrap before 0.8). Never drops the size and starts runs without it.
+#[cfg(target_os = "linux")]
+fn check_tmp_size_served(bubblewrap: &Path, tmp_bytes: Option<u64>) -> Result<(), DriverError> {
+    if tmp_bytes.is_none() {
+        return Ok(());
+    }
+    let help = std::process::Command::new(bubblewrap)
+        .arg("--help")
+        .env_clear()
+        .output()
+        .map(|output| [output.stdout, output.stderr].concat())
+        .unwrap_or_default();
+    tmp_size_served_by(bubblewrap, &help)
+}
+
+/// Whether a bubblewrap whose `--help` printed `help` takes `--size`; refuses, naming it, if not.
+///
+/// Split from the probe so a test decides on help text without executing a freshly written
+/// script, which a concurrently forked test can hold open for writing (`ETXTBSY`).
+#[cfg(target_os = "linux")]
+fn tmp_size_served_by(bubblewrap: &Path, help: &[u8]) -> Result<(), DriverError> {
+    if String::from_utf8_lossy(help).contains("--size") {
+        Ok(())
+    } else {
+        Err(DriverError::unserved(
+            "config.tmp-bytes-unserved",
+            format!(
+                "A /tmp size was set, and the bubblewrap at {} does not take --size.",
+                bubblewrap.display()
+            ),
+            "config.tmp_bytes",
+        ))
+    }
 }
 
 /// Refuses an exec CPU ceiling the host cannot honour, before the host opens.
@@ -484,6 +540,7 @@ impl HostConfig {
             exec_cpu_cores: 1,
             host_processes: false,
             writable_roots: Vec::new(),
+            tmp_bytes: None,
         }
     }
 
@@ -1058,6 +1115,8 @@ impl HostDriver {
             std::thread::available_parallelism().ok(),
         )?;
         validate_writable_roots(&config.writable_roots)?;
+        validate_tmp_bytes(config.tmp_bytes)?;
+        check_tmp_size_served(&config.bubblewrap, config.tmp_bytes)?;
         std::fs::create_dir_all(&config.workspace_root).map_err(|error| {
             DriverError::failed("workspace.root-failed", format!("workspace root: {error}"))
         })?;
@@ -1962,7 +2021,8 @@ mod tests {
 
     use super::{
         Driver as _, GitSourceBinding, HostConfig, HostDriver, WorkspaceDestroyOwnership,
-        WorkspaceDestroyProgress, fs, validate_exec_cpu_cores,
+        WorkspaceDestroyProgress, check_tmp_size_served, fs, tmp_size_served_by,
+        validate_exec_cpu_cores, validate_tmp_bytes,
     };
 
     #[test]
@@ -1988,6 +2048,43 @@ mod tests {
         assert!(
             validate_exec_cpu_cores(1, None).is_ok(),
             "one core is admitted even when the usable CPU count is unknown"
+        );
+    }
+
+    /// ADR 0049 decision 2: an unset `/tmp` size and one of at least one MiB are admitted; 0 and
+    /// anything under one MiB refuse startup by name.
+    #[test]
+    fn a_tmp_size_under_one_mib_refuses_startup() {
+        assert!(validate_tmp_bytes(None).is_ok());
+        assert!(validate_tmp_bytes(Some(crate::MIN_TMP_BYTES)).is_ok());
+        for bytes in [0, 1, crate::MIN_TMP_BYTES - 1] {
+            let error = validate_tmp_bytes(Some(bytes)).expect_err("under one MiB");
+            assert_eq!(error.code, "config.tmp-bytes-invalid");
+        }
+    }
+
+    /// ADR 0049 decision 2: a set size and a bubblewrap whose `--help` does not name `--size`
+    /// refuse startup `config.tmp-bytes-unserved`; never a run started without the size.
+    #[test]
+    fn a_tmp_size_a_bubblewrap_cannot_apply_refuses_startup() {
+        let backend = std::path::Path::new("/usr/bin/bwrap");
+        let error = tmp_size_served_by(backend, b"--tmpfs DEST  Mount new tmpfs on DEST")
+            .expect_err("an old bubblewrap cannot size /tmp");
+        assert_eq!(error.code, "config.tmp-bytes-unserved");
+        assert!(
+            tmp_size_served_by(
+                backend,
+                b"--size BYTES  Set size in bytes for next action argument"
+            )
+            .is_ok()
+        );
+        let absent = tempfile::tempdir().expect("directory");
+        let error = check_tmp_size_served(&absent.path().join("bwrap"), Some(crate::MIN_TMP_BYTES))
+            .expect_err("a bubblewrap that does not start cannot size /tmp");
+        assert_eq!(error.code, "config.tmp-bytes-unserved");
+        assert!(
+            check_tmp_size_served(&absent.path().join("bwrap"), None).is_ok(),
+            "no size asks nothing of bubblewrap"
         );
     }
 

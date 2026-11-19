@@ -1485,18 +1485,18 @@ fn a_reexported_type_is_held_by_its_definition_in_its_own_crate() {
     );
     assert!(removed.is_empty(), "{removed:?}");
 
-    let last_field = "    pub writable_roots: Vec<DeclaredWritableRoot>,\n}";
+    let last_field = "    pub tmp_bytes: Option<u64>,\n}";
     let (added, removed) = edited(&[(
         "lib.rs",
         last_field,
-        "    pub writable_roots: Vec<DeclaredWritableRoot>,\n    reserved: u64,\n}",
+        "    pub tmp_bytes: Option<u64>,\n    reserved: u64,\n}",
     )]);
     assert_eq!(added, ["lib.rs: struct HostConfig > (private fields)"]);
     assert!(removed.is_empty(), "{removed:?}");
     let (added, removed) = edited(&[(
         "lib.rs",
         last_field,
-        "    pub writable_roots: Vec<DeclaredWritableRoot>,\n    reserved: u64,\n    more: u64,\n}",
+        "    pub tmp_bytes: Option<u64>,\n    reserved: u64,\n    more: u64,\n}",
     )]);
     assert_eq!(added, ["lib.rs: struct HostConfig > (private fields)"]);
     assert!(removed.is_empty(), "{removed:?}");

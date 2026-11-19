@@ -396,6 +396,7 @@ lib.rs: struct HostConfig > pub git_sources: Vec<GitSourceBinding>,
 lib.rs: struct HostConfig > pub exec_cpu_cores: u32,
 lib.rs: struct HostConfig > pub host_processes: bool,
 lib.rs: struct HostConfig > pub writable_roots: Vec<DeclaredWritableRoot>,
+lib.rs: struct HostConfig > pub tmp_bytes: Option<u64>,
 lib.rs: impl HostConfig > pub fn minimum(workspace_root: impl Into<PathBuf>) -> Self
 observation.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum PipeStream
 observation.rs: enum PipeStream > Stdout,

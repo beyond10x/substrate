@@ -465,6 +465,11 @@ pub struct DaemonConfig {
     ///
     /// Default 1. Opening the daemon refuses 0 or more cores than this process may use.
     pub exec_cpu_cores: u32,
+    /// The size of every confined run's `/tmp`, in bytes (`HostConfig::tmp_bytes`, ADR 0049).
+    ///
+    /// `None` keeps the kernel default. Opening the daemon refuses a size under one MiB, and any
+    /// size when its bubblewrap does not take `--size`.
+    pub tmp_bytes: Option<u64>,
     /// Operator-declared Git source URL prefixes. Credentials are never configuration.
     pub git_sources: Vec<GitSourceConfig>,
     pub bubblewrap: PathBuf,
@@ -627,6 +632,7 @@ impl DaemonConfig {
             cgroup_root: None,
             project_quota_ids: None,
             exec_cpu_cores: 1,
+            tmp_bytes: None,
             git_sources: Vec::new(),
             bubblewrap: PathBuf::from("/usr/bin/bwrap"),
             event_retention: 10_000,
@@ -966,6 +972,7 @@ fn open_host_driver(
     host_config.cgroup_root.clone_from(&config.cgroup_root);
     host_config.project_quota_ids = config.project_quota_ids;
     host_config.exec_cpu_cores = config.exec_cpu_cores;
+    host_config.tmp_bytes = config.tmp_bytes;
     host_config.git_sources = declared.git_sources;
     host_config.bubblewrap.clone_from(&config.bubblewrap);
     host_config.event_retention = config.event_retention;

@@ -25,6 +25,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   several declared egress apertures in order (design 26 § 2); the n-th is reached in the run at
   `127.0.0.n`. One name is still sent as `aperture`, so an existing start serializes as before.
   The wire, the bundle and the daemon are unchanged.
+- The daemon's `--tmp-bytes BYTES` (`SUBSTRATE_TMP_BYTES`) sizes every confined run's `/tmp`
+  (#224, ADR 0049); absent keeps the kernel default, half the RAM. Startup refuses a size under one
+  MiB as `config.tmp-bytes-invalid`, and a size with a bubblewrap that does not take `--size` as
+  `config.tmp-bytes-unserved`. The wire and the bundle are unchanged.
+
+### Fixed
+
+- A confined run on a Debian-family host finds `cc`, `awk`, `which` and every other `/usr/bin`
+  name that links through `/etc/alternatives`: the Linux base view now binds the host's
+  `/etc/alternatives` read-only when it has one (#223, ADR 0049). Nothing else of `/etc` joins it.
 
 ### Security
 
