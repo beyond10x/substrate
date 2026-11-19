@@ -40,6 +40,9 @@ step() {
 
 step static cargo xtask check-ess
 step static cargo xtask check-docs
+# `cargo fetch` without `--target` downloads every target's dependencies: the package-rule cases
+# run `cargo tree --target all` offline, and a cold cache holds only what the host build fetched.
+step tests cargo fetch --locked
 step tests cargo test --workspace --release --locked
 step static cargo fmt --all --check
 step tests cargo clippy --workspace --all-targets --release --locked -- -D warnings

@@ -91,6 +91,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 
 | step | command |
 |---|---|
+| fetch | `cargo fetch --locked` — every target's dependencies, for the offline `cargo tree --target all` cases |
 | tests | `cargo test --workspace --release --locked` |
 | format | `cargo fmt --all --check` |
 | lint | `cargo clippy --workspace --all-targets --release --locked -- -D warnings` |

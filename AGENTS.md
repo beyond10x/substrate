@@ -217,7 +217,8 @@ on Flux.
 bash scripts/gate.sh
 ```
 
-In order: `cargo xtask check-ess`, `cargo xtask check-docs`,
+In order: `cargo xtask check-ess`, `cargo xtask check-docs`, `cargo fetch --locked` (every
+target's dependencies, which the offline `cargo tree --target all` cases need),
 `cargo test --workspace --release --locked`, `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --release --locked -- -D warnings`, the host driver without
 its default features (`cargo clippy -p b10x-substrate-host --no-default-features --all-targets`,

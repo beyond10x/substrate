@@ -353,6 +353,18 @@ fn the_two_gate_phases_partition_every_gate_step() {
     every.sort();
     assert_eq!(union, every, "the phases are not a partition of the gate");
     assert!(phases[0].contains(&"gate: cargo test --workspace --release --locked".to_owned()));
+    // The `tests` phase fetches every target's dependencies before it tests: the package-rule
+    // cases run `cargo tree --target all` offline, and a cold runner cache holds only what the
+    // host build downloaded, so they failed on `android_system_properties` (#231).
+    let fetch = phases[0]
+        .iter()
+        .position(|line| line == "gate: cargo fetch --locked")
+        .expect("the tests phase fetches every target's dependencies");
+    let test = phases[0]
+        .iter()
+        .position(|line| line == "gate: cargo test --workspace --release --locked")
+        .expect("the tests phase tests the workspace");
+    assert!(fetch < test, "the tests phase fetches after it tests");
     assert!(phases[1].contains(&"gate: cargo xtask check-secrets".to_owned()));
     for refused in [&["unit"][..], &["tests", "static"][..]] {
         let (status, lines) = gate_steps(refused);
