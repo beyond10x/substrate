@@ -488,7 +488,7 @@ A wave that ends in a release carries its release-prepare commit on the wave's i
 before the full gate: every workspace version and exact internal edge moved, `Cargo.lock`
 (`cargo update --workspace --offline`), `THIRD_PARTY_LICENSES.html` (cargo-about 0.9.1), the
 `CHANGELOG.md` version section and `website/docs/releases.md` (`cargo xtask docs-releases`).
-`release.yml` refuses a tag whose version is not the workspace version, and the four lane trailers
+`release.yml` refuses a tag whose version is not the workspace version, and the four lane records
 name the tagged commit, so the lanes can run only once that commit is on `main`; a separate
 release-prepare pull request costs a second CI round and a second lane slot.
 
@@ -595,8 +595,9 @@ consumer to justify it.
 
 **A release also requires a recorded delegated confinement-lane run for the tagged commit.** A green
 `gate.yml` is the portable lane only: the delegated lane needs bubblewrap and an exclusive delegated
-cgroup v2 subtree, which a hosted runner does not have, so that lane is reported **absent — not
-executed, not passed** (§ *The gate*). Before tagging, run `bash scripts/delegated-lane.sh` at the
+cgroup v2 subtree, which `gate.yml` does not set up, so that lane is reported **absent — not
+executed, not passed** (§ *The gate*). `release-lanes.yml` runs it on a hosted runner and records
+it (*The hosted lane records* below). Without that run, run `bash scripts/delegated-lane.sh` at the
 commit you are about to tag and put one line in the **annotated tag's own message**:
 
 ```
@@ -612,16 +613,16 @@ and refuses a timestamp that is not an RFC 3339 UTC instant, by shape and by cal
 must read it back unchanged, so `2026-02-30T10:00:00Z` is refused). The record is one line of
 exactly three fields: a tag carrying two `Confinement-lane:` lines, a value with a line break or
 carriage return, or a fourth field is refused. The recorded line is written into the
-GitHub release under *Confinement lane* and into both job summaries. A protected-`main` recovery
-dispatch may pass the same value as the workflow's `confinement_evidence` input instead, which is
-the only way to release a tag that was annotated before this condition existed. This records a local
-run; it does not run the lane in CI, and neither the workflow nor the release notes describe it as if
-it had. Giving the lane a self-hosted runner with both prerequisites would replace this record with a
-required check, and is a separate decision.
+GitHub release under *Confinement lane*, with its carrier, and into both job summaries. A
+protected-`main` recovery dispatch may pass the same value as the workflow's `confinement_evidence`
+input instead, which is the only way to release a tag that was annotated before this condition
+existed and has no hosted run. `release.yml` itself never runs the lane, and its release notes name
+the carrier, so an operator's record is never described as if CI had run it.
 
 **A release also requires a recorded project-quota-lane run for the tagged commit**, in the same
-shape. Before tagging, run `cargo xtask quota-fixture run` at that commit with a clean checkout
-(§ *The real project-quota lane*) and put the line it prints in the annotated tag's message:
+shape. `release-lanes.yml` runs it on a hosted runner; without that run, run
+`cargo xtask quota-fixture run` at that commit with a clean checkout (§ *The real project-quota
+lane*) and put the line it prints in the annotated tag's message:
 
 ```
 Quota-lane: <source-sha> <case-count> <RFC 3339 UTC>
@@ -638,9 +639,10 @@ recovery dispatch may pass it as the `quota_evidence` input instead. The step's 
 offline against throwaway tagged repositories by `xtask/tests/release_workflow.rs`.
 
 **A release that publishes the chart also requires a recorded local chart-lane run for the tagged
-commit** (ADR 0046, K9 C), in the same shape. The hosted chart lane reports the four
-execution-enabled scenarios absent, because a hosted node loads no Localhost seccomp or AppArmor
-profile. Before tagging, build the daemon image from that commit with
+commit** (ADR 0046, K9 C), in the same shape. `chart-lane.yml` reports the four
+execution-enabled scenarios absent, because its kind nodes load no Localhost seccomp or AppArmor
+profile; `release-lanes.yml` runs `--node-profiles` on a hosted runner, whose kernel enables
+AppArmor. Without that run, build the daemon image from that commit with
 `--build-arg SOURCE_SHA=<sha>` (the lane refuses an image whose `org.opencontainers.image.revision`
 is not `HEAD`), run `cargo xtask chart-lane cluster --node-profiles --image <ref> --node-image <ref>`
 with a clean checkout on a host whose kernel enables AppArmor, and put the line it prints in the
@@ -684,10 +686,10 @@ source without `deploy/helm/substrate` needs no record. The step's refusals are 
 `xtask/tests/release_workflow.rs`.
 
 **A release also requires a recorded namespace-lane run for the tagged commit**
-(`decision-blocker:namespace-lane-runs-on-a-workstation`, D182), in the same shape: the kind cluster
-design 34 § 10.3's observations need does not fit the CI budget, so `namespace-lane.yml` runs only
-the static checks. Before tagging, run `cargo xtask namespace-lane observe` at that commit with a
-clean checkout and put the line it prints in the annotated tag's message:
+(`decision-blocker:namespace-lane-runs-on-a-workstation`, D182), in the same shape:
+`namespace-lane.yml` runs only the static checks, and `release-lanes.yml` runs the kind
+observations on a hosted runner. Without that run, run `cargo xtask namespace-lane observe` at that
+commit with a clean checkout and put the line it prints in the annotated tag's message:
 
 ```
 Namespace-lane: <source-sha> <observation-count> <RFC 3339 UTC>
@@ -706,6 +708,20 @@ commit, as it does for `gate.yml` and counting the same runs, and refuses a tag 
 push whose source has no `namespace-lane.yml` is refused, and only a recovery of such a tag needs
 no run, which its notes say. Both steps' refusals are executed offline by
 `xtask/tests/release_workflow.rs`.
+
+**The hosted lane records.** `.github/workflows/release-lanes.yml` runs the four lanes, each in its
+own job on a GitHub-hosted `ubuntu-24.04` runner, on every push to `main`, on `workflow_dispatch`,
+and on pull requests that change what they build. Each job runs the lane's own command unchanged
+after root setup steps give the VM what a workstation has (the workflow's header says which and
+why: bubblewrap, socat, an AppArmor `userns` grant for `/usr/bin/bwrap` only and a lingering user
+manager for the confinement lane; `quota_v2` for the quota lane), and records the lane's line as a
+notice annotation titled with its trailer. The preflight step *Read the hosted lane records for this
+commit* waits for that workflow's own recorded `success` for the exact tagged commit, counting only a
+`push` to `main` or a `workflow_dispatch` of this repository, and hands each annotation to its
+record step, which applies every refusal above to it. Per lane, a recovery input comes first, then
+the tag's trailer, then the hosted annotation; when the tag or the dispatch records all four, no run
+is read, and a tagged source without the workflow has only those carriers. A failed hosted run, or
+two annotations of one lane, is refused. No self-hosted runner is involved (Timo, 2026-11-19).
 
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own

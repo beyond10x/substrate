@@ -114,6 +114,7 @@ env:
   GATE_WORKFLOW: gate.yml
   CHART_WORKFLOW: chart-lane.yml
   NAMESPACE_WORKFLOW: namespace-lane.yml
+  LANES_WORKFLOW: release-lanes.yml
   CHART_REPOSITORY: ghcr.io/beyond10x/charts
   CHART_IMAGE: ghcr.io/beyond10x/charts/b10x-substrate
   HELM_VERSION: v3.22.1
@@ -123,7 +124,7 @@ jobs:
   preflight:
     name: Preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 240
     permissions:
       contents: read
       # Reading `gate.yml`'s conclusion for a SHA is an Actions API read. It is a read-only scope
@@ -139,7 +140,12 @@ jobs:
       chart-lane-absent: ${{ steps.chart-lane.outputs.absent }}
       namespace-lane-workflow: ${{ steps.namespace-workflow.outputs.workflow }}
       namespace-lane-run-url: ${{ steps.namespace-workflow.outputs.run-url }}
+      lanes-run-url: ${{ steps.hosted-lanes.outputs.run-url }}
       confinement-evidence: ${{ steps.confinement.outputs.evidence }}
+      confinement-carrier: ${{ steps.confinement.outputs.carrier }}
+      quota-carrier: ${{ steps.quota.outputs.carrier }}
+      chart-carrier: ${{ steps.chart-record.outputs.carrier }}
+      namespace-carrier: ${{ steps.namespace.outputs.carrier }}
       quota-evidence: ${{ steps.quota.outputs.evidence }}
       chart-evidence: ${{ steps.chart-record.outputs.evidence }}
       namespace-lane: ${{ steps.namespace.outputs.lane }}
@@ -413,6 +419,111 @@ jobs:
             sleep 30
           done
 
+      # The four lane records below have a hosted carrier: `release-lanes.yml` runs each lane on a
+      # GitHub-hosted runner and records its line as a notice annotation titled with the lane's
+      # trailer (AGENTS.md § "Releases"). This step reads them from that workflow's own recorded
+      # `success` for this exact commit, counting only a push to `main` or a dispatch of this
+      # repository, as the gate step does: a pull-request run tested a merge, not the tagged tree.
+      # It checks nothing about a record; each record step checks the value it hands on exactly as
+      # it checks a trailer. A lane the tag or the recovery dispatch already records needs no run,
+      # and when all four are recorded this step reads nothing; a tagged source without the
+      # workflow has only those carriers.
+      - name: Read the hosted lane records for this commit
+        id: hosted-lanes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+          CONFINEMENT_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.confinement_evidence || '' }}
+          QUOTA_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_evidence || '' }}
+          CHART_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.chart_evidence || '' }}
+          NAMESPACE_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.namespace_evidence || '' }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${SOURCE_SHA}:.github/workflows/${LANES_WORKFLOW}" 2>/dev/null; then
+            echo "the tagged source ${SOURCE_SHA} predates ${LANES_WORKFLOW}; each lane record must come from the tag or the dispatch"
+            exit 0
+          fi
+          message=$(git tag -l --format='%(contents)' "${TAG}")
+          needed=()
+          for lane in Confinement:CONFINEMENT Quota:QUOTA Chart:CHART Namespace:NAMESPACE; do
+            trailer="${lane%%:*}-lane"
+            input_name="${lane#*:}_INPUT"
+            input="${!input_name:-}"
+            if [ -z "${input//[[:space:]]/}" ] && ! printf '%s\n' "$message" | grep -q "^${trailer}:"; then
+              needed+=("$trailer")
+            fi
+          done
+          if [ "${#needed[@]}" -eq 0 ]; then
+            echo "the tag or the dispatch records every lane; no ${LANES_WORKFLOW} run is read"
+            exit 0
+          fi
+          echo "lanes recorded by neither the tag nor the dispatch: ${needed[*]}"
+
+          # The lanes build the daemon and run for up to two hours after the commit lands on main.
+          deadline=$(( $(date +%s) + 180 * 60 ))
+          admitted=".workflow_runs[] | select((.event == \"push\" and .head_branch == \"main\") or .event == \"workflow_dispatch\") | select(.head_repository.full_name == \"${GITHUB_REPOSITORY}\")"
+          api_root="${GITHUB_API_URL:-https://api.github.com}/"
+
+          while :; do
+            runs=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${LANES_WORKFLOW}/runs?head_sha=${SOURCE_SHA}&per_page=100" \
+              --jq "${admitted} | [.status, (.conclusion // \"-\"), .html_url, .id] | @tsv")
+
+            success=$(printf '%s\n' "$runs" \
+              | awk -F'\t' '$1 == "completed" && $2 == "success" { print $3 "\t" $4; exit }')
+            if [ -n "$success" ]; then
+              break
+            fi
+
+            pending=$(printf '%s\n' "$runs" | awk -F'\t' 'NF && $1 != "completed" { c++ } END { print c + 0 }')
+            if [ "$pending" -eq 0 ]; then
+              if [ -n "${runs//[[:space:]]/}" ]; then
+                echo "refused: every ${LANES_WORKFLOW} run for ${SOURCE_SHA} is completed and none concluded success:" >&2
+                printf '%s\n' "$runs" >&2
+                echo "Record ${needed[*]} in the annotated tag's message, or dispatch ${LANES_WORKFLOW} on main and recover." >&2
+                exit 1
+              fi
+              echo "no ${LANES_WORKFLOW} run recorded for ${SOURCE_SHA} yet; waiting"
+            else
+              echo "${pending} ${LANES_WORKFLOW} run(s) for ${SOURCE_SHA} still running; waiting"
+            fi
+
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "refused: no successful ${LANES_WORKFLOW} run for ${SOURCE_SHA} within the wait window." >&2
+              echo "Record ${needed[*]} in the annotated tag's message, or let ${LANES_WORKFLOW} finish and recover." >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
+          success_url=${success%%$'\t'*}
+          run_id=${success##*$'\t'}
+          records=""
+          check_runs=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
+            --jq '(.jobs // [])[] | .check_run_url // empty')
+          while IFS= read -r check_run; do
+            [ -n "$check_run" ] || continue
+            notes=$(gh api --paginate "${check_run#"$api_root"}/annotations?per_page=100" \
+              --jq '.[] | select(.annotation_level == "notice" and (.title | test("^(Confinement|Quota|Chart|Namespace)-lane$"))) | [.title, (.message | gsub("[\r\n\t]"; "\\n"))] | @tsv')
+            records="${records}${notes:+${notes}$'\n'}"
+          done <<< "$check_runs"
+
+          echo "${LANES_WORKFLOW} green for ${SOURCE_SHA}: ${success_url}"
+          echo "run-url=${success_url}" >> "$GITHUB_OUTPUT"
+          for lane in Confinement:confinement Quota:quota Chart:chart Namespace:namespace; do
+            trailer="${lane%%:*}-lane"
+            key="${lane#*:}"
+            count=$(printf '%s' "$records" | awk -F'\t' -v t="$trailer" '$1 == t { c++ } END { print c + 0 }')
+            if [ "$count" -gt 1 ]; then
+              echo "refused: ${success_url} records ${count} ${trailer} annotations; a release records exactly one." >&2
+              exit 1
+            fi
+            value=$(printf '%s' "$records" | awk -F'\t' -v t="$trailer" '$1 == t { print $2 }')
+            echo "${trailer} from ${success_url}: ${value:-none}"
+            echo "${key}=${value}" >> "$GITHUB_OUTPUT"
+          done
+
       # `gate.yml` green is the portable lane only. The delegated confinement lane needs bubblewrap
       # and an exclusive delegated cgroup v2 subtree carrying `cpu`, `memory` and `pids`; a hosted
       # runner has neither, so `gate.yml` reports that lane **absent — not executed, not passed**
@@ -422,14 +533,16 @@ jobs:
       #
       # This step does not run the lane. It requires a *recorded* run naming this exact commit, and
       # carries that record into the release notes, so the claim is attributable and re-checkable
-      # instead of absent. Running the lane here is a self-hosted-runner decision, not this one.
+      # instead of absent. `release-lanes.yml` runs the lane on a hosted runner.
       #
-      # Two carriers, one value, because a tag push cannot supply a workflow input:
-      #   * the ordinary path records it in the annotated tag's own message, as a line
-      #     `Confinement-lane: <source-sha> <delegated-case-count> <RFC 3339 UTC>`. The tag object is
-      #     immutable and is written by the same workstation that ran the lane.
-      #   * a recovery dispatch may pass `confinement_evidence` instead, which is also the only way
-      #     to release a tag annotated before this condition existed.
+      # Three carriers, one value, in this order, because a tag push cannot supply a workflow input:
+      #   * a recovery dispatch may pass `confinement_evidence`, which is also the only way to
+      #     release a tag annotated before this condition existed and without that workflow.
+      #   * the annotated tag's own message may carry a line
+      #     `Confinement-lane: <source-sha> <delegated-case-count> <RFC 3339 UTC>`, written by the
+      #     operator who ran the lane by hand. The tag object is immutable.
+      #   * otherwise the `Confinement-lane` annotation of `release-lanes.yml`'s own recorded
+      #     `success` for this commit, read by the step above.
       #
       # Three checks, each a refusal: the recorded commit is this commit (evidence from another
       # commit proves nothing about these bytes), the recorded case count is the count the tagged
@@ -439,6 +552,8 @@ jobs:
       - name: Require a recorded confinement-lane run for this commit
         id: confinement
         env:
+          HOSTED_EVIDENCE: ${{ steps.hosted-lanes.outputs.confinement }}
+          HOSTED_RUN_URL: ${{ steps.hosted-lanes.outputs.run-url }}
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
           INPUT_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.confinement_evidence || '' }}
           SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
@@ -456,12 +571,17 @@ jobs:
               exit 1
             fi
           fi
+          if [ -z "${evidence//[[:space:]]/}" ] && [ -n "${HOSTED_EVIDENCE:-}" ]; then
+            evidence="${HOSTED_EVIDENCE}"
+            carrier="the Confinement-lane annotation of ${HOSTED_RUN_URL:-the ${LANES_WORKFLOW} run}"
+          fi
 
           if [ -z "${evidence//[[:space:]]/}" ]; then
             echo "refused: no recorded confinement lane run for ${SOURCE_SHA}." >&2
-            echo "The delegated lane is absent on hosted runners and is a release condition." >&2
-            echo "Run 'bash scripts/delegated-lane.sh' at ${SOURCE_SHA} on a host that has" >&2
-            echo "bubblewrap and a delegated cgroup v2 subtree, then record the run either as" >&2
+            echo "The delegated lane is absent from gate.yml and is a release condition. The ordinary" >&2
+            echo "carrier is ${LANES_WORKFLOW}'s successful run for ${SOURCE_SHA}. Otherwise run" >&2
+            echo "'bash scripts/delegated-lane.sh' at ${SOURCE_SHA} on a host that has bubblewrap and a" >&2
+            echo "delegated cgroup v2 subtree, then record the run either as" >&2
             echo "  Confinement-lane: ${SOURCE_SHA} <delegated-case-count> <RFC 3339 UTC>" >&2
             echo "in the annotated tag's message, or as the confinement_evidence input of a" >&2
             echo "protected-main recovery dispatch. AGENTS.md, section \"Releases\"." >&2
@@ -524,6 +644,7 @@ jobs:
 
           echo "confinement lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
           echo "evidence=${evidence}" >> "$GITHUB_OUTPUT"
+          echo "carrier=${carrier}" >> "$GITHUB_OUTPUT"
 
       # The real project-quota lane, in the confinement step's shape. Its seven `real_quota_*` cases
       # need a filesystem mounted with project quotas and `SYS_ADMIN` for `quotactl`; neither
@@ -534,6 +655,8 @@ jobs:
       - name: Require a recorded quota-lane run for this commit
         id: quota
         env:
+          HOSTED_EVIDENCE: ${{ steps.hosted-lanes.outputs.quota }}
+          HOSTED_RUN_URL: ${{ steps.hosted-lanes.outputs.run-url }}
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
           INPUT_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_evidence || '' }}
           SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
@@ -551,11 +674,16 @@ jobs:
               exit 1
             fi
           fi
+          if [ -z "${evidence//[[:space:]]/}" ] && [ -n "${HOSTED_EVIDENCE:-}" ]; then
+            evidence="${HOSTED_EVIDENCE}"
+            carrier="the Quota-lane annotation of ${HOSTED_RUN_URL:-the ${LANES_WORKFLOW} run}"
+          fi
 
           if [ -z "${evidence//[[:space:]]/}" ]; then
             echo "refused: no recorded quota lane run for ${SOURCE_SHA}." >&2
-            echo "The real project-quota cases run on no hosted runner and are a release condition." >&2
-            echo "Run 'cargo xtask quota-fixture run' at ${SOURCE_SHA} with a clean checkout on a host" >&2
+            echo "The real project-quota cases are absent from gate.yml and are a release condition. The" >&2
+            echo "ordinary carrier is ${LANES_WORKFLOW}'s successful run for ${SOURCE_SHA}. Otherwise run" >&2
+            echo "'cargo xtask quota-fixture run' at ${SOURCE_SHA} with a clean checkout on a host" >&2
             echo "where Docker works without sudo, then record the line it prints either as" >&2
             echo "  Quota-lane: ${SOURCE_SHA} <case-count> <RFC 3339 UTC>" >&2
             echo "in the annotated tag's message, or as the quota_evidence input of a" >&2
@@ -633,10 +761,13 @@ jobs:
 
           echo "quota lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
           echo "evidence=${evidence}" >> "$GITHUB_OUTPUT"
+          echo "carrier=${carrier}" >> "$GITHUB_OUTPUT"
 
       - name: Require a recorded chart-lane run for this commit
         id: chart-record
         env:
+          HOSTED_EVIDENCE: ${{ steps.hosted-lanes.outputs.chart }}
+          HOSTED_RUN_URL: ${{ steps.hosted-lanes.outputs.run-url }}
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
           INPUT_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.chart_evidence || '' }}
           SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
@@ -658,12 +789,17 @@ jobs:
               exit 1
             fi
           fi
+          if [ -z "${evidence//[[:space:]]/}" ] && [ -n "${HOSTED_EVIDENCE:-}" ]; then
+            evidence="${HOSTED_EVIDENCE}"
+            carrier="the Chart-lane annotation of ${HOSTED_RUN_URL:-the ${LANES_WORKFLOW} run}"
+          fi
 
           if [ -z "${evidence//[[:space:]]/}" ]; then
             echo "refused: no recorded chart lane run for ${SOURCE_SHA}." >&2
             echo "The execution-enabled chart scenarios need Localhost seccomp and AppArmor profiles on the" >&2
-            echo "nodes, which no hosted runner has, so they are a release condition (ADR 0046, K9 C)." >&2
-            echo "Build the daemon image from ${SOURCE_SHA} with --build-arg SOURCE_SHA=${SOURCE_SHA}, run" >&2
+            echo "nodes, which chart-lane.yml's nodes do not load, so they are a release condition (ADR 0046," >&2
+            echo "K9 C). The ordinary carrier is ${LANES_WORKFLOW}'s successful run for ${SOURCE_SHA}. Otherwise" >&2
+            echo "build the daemon image from ${SOURCE_SHA} with --build-arg SOURCE_SHA=${SOURCE_SHA}, run" >&2
             echo "'cargo xtask chart-lane cluster --node-profiles' at that commit with a clean checkout, then" >&2
             echo "record the line it prints either as" >&2
             echo "  Chart-lane: ${SOURCE_SHA} <scenario-count> <RFC 3339 UTC>" >&2
@@ -741,10 +877,13 @@ jobs:
 
           echo "chart lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
           echo "evidence=${evidence}" >> "$GITHUB_OUTPUT"
+          echo "carrier=${carrier}" >> "$GITHUB_OUTPUT"
 
       - name: Require a recorded namespace-lane run for this commit
         id: namespace
         env:
+          HOSTED_EVIDENCE: ${{ steps.hosted-lanes.outputs.namespace }}
+          HOSTED_RUN_URL: ${{ steps.hosted-lanes.outputs.run-url }}
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
           INPUT_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.namespace_evidence || '' }}
           SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
@@ -773,11 +912,16 @@ jobs:
               exit 1
             fi
           fi
+          if [ -z "${evidence//[[:space:]]/}" ] && [ -n "${HOSTED_EVIDENCE:-}" ]; then
+            evidence="${HOSTED_EVIDENCE}"
+            carrier="the Namespace-lane annotation of ${HOSTED_RUN_URL:-the ${LANES_WORKFLOW} run}"
+          fi
 
           if [ -z "${evidence//[[:space:]]/}" ]; then
             echo "refused: no recorded namespace lane run for ${SOURCE_SHA}." >&2
-            echo "The namespace kind lane runs on a workstation, not a hosted runner, and is a release" >&2
-            echo "condition (D182). Run 'cargo xtask namespace-lane observe' at ${SOURCE_SHA} with a clean" >&2
+            echo "The namespace kind lane is a release condition (D182). The ordinary carrier is" >&2
+            echo "${LANES_WORKFLOW}'s successful run for ${SOURCE_SHA}. Otherwise run" >&2
+            echo "'cargo xtask namespace-lane observe' at ${SOURCE_SHA} with a clean" >&2
             echo "checkout on a host where kind and Docker work, then record the line it prints either as" >&2
             echo "  Namespace-lane: ${SOURCE_SHA} <observation-count> <RFC 3339 UTC>" >&2
             echo "in the annotated tag's message, or as the namespace_evidence input of a" >&2
@@ -861,6 +1005,7 @@ jobs:
           {
             echo "lane=present"
             echo "evidence=${evidence}"
+            echo "carrier=${carrier}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Preflight summary
@@ -875,6 +1020,10 @@ jobs:
           QUOTA_EVIDENCE: ${{ steps.quota.outputs.evidence }}
           CHART_EVIDENCE: ${{ steps.chart-record.outputs.evidence }}
           NAMESPACE_EVIDENCE: ${{ steps.namespace.outputs.evidence }}
+          CONFINEMENT_CARRIER: ${{ steps.confinement.outputs.carrier }}
+          QUOTA_CARRIER: ${{ steps.quota.outputs.carrier }}
+          CHART_CARRIER: ${{ steps.chart-record.outputs.carrier }}
+          NAMESPACE_CARRIER: ${{ steps.namespace.outputs.carrier }}
         run: |
           {
             echo "### Release preflight"
@@ -891,6 +1040,7 @@ jobs:
             echo "| quota lane | \`${QUOTA_EVIDENCE}\` |"
             echo "| chart lane record | \`${CHART_EVIDENCE:-no chart in the tagged source}\` |"
             echo "| namespace lane | \`${NAMESPACE_EVIDENCE:-no namespace lane in the tagged source}\` |"
+            echo "| lane record carriers | confinement: ${CONFINEMENT_CARRIER}; quota: ${QUOTA_CARRIER}; chart: ${CHART_CARRIER:-none}; namespace: ${NAMESPACE_CARRIER:-none} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
@@ -921,6 +1071,10 @@ jobs:
       CHART_EVIDENCE: ${{ needs.preflight.outputs.chart-evidence }}
       NAMESPACE_LANE: ${{ needs.preflight.outputs.namespace-lane }}
       NAMESPACE_EVIDENCE: ${{ needs.preflight.outputs.namespace-evidence }}
+      CONFINEMENT_CARRIER: ${{ needs.preflight.outputs.confinement-carrier }}
+      QUOTA_CARRIER: ${{ needs.preflight.outputs.quota-carrier }}
+      CHART_CARRIER: ${{ needs.preflight.outputs.chart-carrier }}
+      NAMESPACE_CARRIER: ${{ needs.preflight.outputs.namespace-carrier }}
       NAMESPACE_LANE_WORKFLOW: ${{ needs.preflight.outputs.namespace-lane-workflow }}
       NAMESPACE_LANE_RUN_URL: ${{ needs.preflight.outputs.namespace-lane-run-url }}
 
@@ -2105,13 +2259,15 @@ jobs:
           | --- | --- |
           | recorded run | \`${CONFINEMENT_EVIDENCE}\` |
           | command | \`bash scripts/delegated-lane.sh\` |
-          | where | a workstation with bubblewrap and a delegated cgroup v2 subtree, not this runner |
+          | carrier | ${CONFINEMENT_CARRIER} |
 
           The fields are the commit, the delegated case count and when the run finished. The
-          delegated lane needs an exclusive delegated cgroup subtree that a hosted runner does not
-          have, so \`gate.yml\` reports it **absent — not executed, not passed**. This workflow does
-          not run it either: it refuses to publish without the recorded line above, and that line
-          must name this exact commit and the delegated case count this source declares.
+          delegated lane needs bubblewrap and an exclusive delegated cgroup subtree, which
+          \`gate.yml\` does not set up, so it reports that lane **absent — not executed, not
+          passed**. \`release-lanes.yml\` sets both up on a hosted runner and runs the lane; an
+          operator may instead record a run in the tag. This workflow does not run it: it refuses
+          to publish without the recorded line above, and that line must name this exact commit and
+          the delegated case count this source declares.
 
           ## Quota lane
 
@@ -2119,13 +2275,14 @@ jobs:
           | --- | --- |
           | recorded run | \`${QUOTA_EVIDENCE}\` |
           | command | \`cargo xtask quota-fixture run\` |
-          | where | a workstation whose Docker runs the checked-in \`fixtures/quota-lab\` recipe, not this runner |
+          | carrier | ${QUOTA_CARRIER} |
 
           The fields are the commit, the number of \`real_quota_*\` cases and when the run finished.
           Those cases need a filesystem mounted with project quotas, which neither \`gate.yml\` nor
-          the delegated lane has. This workflow does not run them: it refuses to publish without
-          the recorded line above, and that line must name this exact commit and the real-quota
-          case count this source declares.
+          the delegated lane has; the command provisions one in the checked-in
+          \`fixtures/quota-lab\` recipe. This workflow does not run them: it refuses to publish
+          without the recorded line above, and that line must name this exact commit and the
+          real-quota case count this source declares.
 
           NOTES
           if [ "$CHART" = present ]; then
@@ -2134,13 +2291,13 @@ jobs:
 
           | | |
           | --- | --- |
-          | local record | \`${CHART_EVIDENCE}\` |
+          | recorded run | \`${CHART_EVIDENCE}\` |
           | command | \`cargo xtask chart-lane cluster --node-profiles\` |
-          | where | a workstation kind cluster whose nodes load the Localhost seccomp and AppArmor profiles, not this runner |
+          | carrier | ${CHART_CARRIER} |
 
           The fields are the commit, the number of chart-lane scenarios and when the run finished.
-          The hosted chart lane (see *Kubernetes chart* above) cannot start the execution-enabled
-          pod, so it reports those scenarios absent. The local run installs the node profiles,
+          The chart lane workflow (see *Kubernetes chart* above) cannot start the execution-enabled
+          pod, so it reports those scenarios absent. The node-profiles run installs the node profiles,
           starts that pod, runs a confined exec through it and passes every scenario the source
           declares; this workflow refuses to publish a chart without the recorded line above, and
           that line must name this exact commit and that scenario count.
@@ -2156,13 +2313,12 @@ jobs:
           | --- | --- |
           | recorded run | \`${NAMESPACE_EVIDENCE}\` |
           | command | \`cargo xtask namespace-lane observe\` |
-          | where | a workstation kind cluster the lane creates and deletes, not this runner |
+          | carrier | ${NAMESPACE_CARRIER} |
 
           The fields are the commit, the number of namespace-lane observations and when the run
-          finished. The kind cluster those observations need outlasts what a hosted check may
-          take, so this workflow does not run them: it refuses to publish without the recorded
-          line above, and that line must name this exact commit and the observation count this
-          source declares.
+          finished, on a kind cluster the lane creates and deletes. This workflow does not run
+          them: it refuses to publish without the recorded line above, and that line must name
+          this exact commit and the observation count this source declares.
 
           NOTES
           ;;
@@ -2242,14 +2398,15 @@ jobs:
           - **The daemon archive is not a confined host by itself.** Running a confined command
             still needs bubblewrap and a delegated cgroup v2 subtree on the host; without them the
             daemon answers \`exec.sandbox-unavailable\`. No arm64 or macOS binary is published.
-          - **The delegated execution lane is not exercised by CI.** A host without a delegated
-            cgroup v2 subtree answers \`exec.sandbox-unavailable\` rather than running unconfined.
-            This release records a local run of that lane (see *Confinement lane* above); recording
-            an operator's run is weaker evidence than a runner executing it, and is not described as
-            if CI had run it.
-          - **Kernel project-quota enforcement is not exercised by CI.** This release records a
-            local run of the real project-quota lane (see *Quota lane* above), with the same
-            limits as the confinement record.
+          - **The delegated execution lane is not exercised by the gate.** A host without a
+            delegated cgroup v2 subtree answers \`exec.sandbox-unavailable\` rather than running
+            unconfined. This release records one run of that lane (see *Confinement lane* above),
+            whose carrier says whether \`release-lanes.yml\` ran it on a hosted runner or an
+            operator recorded it in the tag; an operator's record is weaker evidence than a runner
+            executing it, and is not described as if CI had run it.
+          - **Kernel project-quota enforcement is not exercised by the gate.** This release records
+            one run of the real project-quota lane (see *Quota lane* above), with the same carriers
+            and limits as the confinement record.
           NOTES
           echo '--- release notes ---'
           cat release-notes.md
@@ -2374,6 +2531,7 @@ jobs:
             echo "| quota lane | \`${QUOTA_EVIDENCE:-<none recorded>}\` |"
             echo "| chart lane record | \`${CHART_EVIDENCE:-<none recorded>}\` |"
             echo "| namespace lane | \`${NAMESPACE_EVIDENCE:-<none recorded>}\` |"
+            echo "| lane record carriers | confinement: ${CONFINEMENT_CARRIER:-<none>}; quota: ${QUOTA_CARRIER:-<none>}; chart: ${CHART_CARRIER:-<none>}; namespace: ${NAMESPACE_CARRIER:-<none>} |"
             echo "| daemon signature step | ${{ steps.verify.outcome }} |"
             echo "| bundle signature step | ${{ steps.bundle-verify.outcome }} |"
             echo "| MCP signature step | ${{ steps.mcp-verify.outcome }} |"

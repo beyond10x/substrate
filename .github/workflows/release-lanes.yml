@@ -14,7 +14,9 @@
 #     binary; and a systemd user manager for the runner user (linger), because
 #     `scripts/delegated-lane.sh` asks that manager for its delegated scope. The runner's own
 #     process is in a root-owned system cgroup the user manager cannot move it out of, so the
-#     script runs in a transient user service and asks for its scope from there.
+#     script runs in a transient user service and asks for its scope from there. That service
+#     gets the runner shell's open-file limit: under systemd's default soft limit of 1024 the
+#     daemon cannot accept the 513th of the process event streams a host-process case holds open.
 #   * quota: the `quota_v2` module, without which an ext4 `prjquota` mount fails with `ESRCH`.
 #   * chart: nothing beyond the hosted chart lane's tools; the runner kernel enables AppArmor and
 #     the lane mounts its securityfs into its kind worker.
@@ -113,7 +115,7 @@ jobs:
         run: |
           set -euo pipefail
           log="$RUNNER_TEMP/delegated-lane.log"
-          systemd-run --user --wait --pipe --collect --quiet --same-dir \
+          systemd-run --user --wait --pipe --collect --quiet --same-dir -p LimitNOFILE=65536 \
             -E PATH="$PATH" -E HOME="$HOME" -E CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
             -E RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" -E CARGO_TERM_COLOR -E RUST_BACKTRACE \
             -E XDG_RUNTIME_DIR -E DBUS_SESSION_BUS_ADDRESS \

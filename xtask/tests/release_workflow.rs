@@ -637,7 +637,10 @@ fn the_quota_lane_record_naming_the_tagged_commit_and_its_case_count_is_accepted
     assert!(success, "{stderr}");
     assert_eq!(
         output.trim(),
-        format!("evidence={} 7 2026-10-23T10:00:00Z", source.sha)
+        format!(
+            "evidence={} 7 2026-10-23T10:00:00Z\ncarrier=the annotated tag's Quota-lane trailer",
+            source.sha
+        )
     );
 
     // A recovery dispatch carries the same record as an input, for a tag annotated without it.
@@ -856,7 +859,8 @@ fn a_release_refuses_without_a_recorded_chart_lane_run() {
     assert!(WORKFLOW.contains("CHART_EVIDENCE: ${{ steps.chart-record.outputs.evidence }}"));
     assert!(WORKFLOW.contains("CHART_EVIDENCE: ${{ needs.preflight.outputs.chart-evidence }}"));
     assert_eq!(occurrences("| chart lane record |"), 2);
-    assert_eq!(occurrences("| local record |"), 1);
+    assert_eq!(occurrences("| local record |"), 0);
+    assert_eq!(occurrences("| carrier | ${CHART_CARRIER} |"), 1);
 }
 
 #[test]
@@ -867,7 +871,13 @@ fn the_chart_lane_record_naming_the_tagged_commit_and_its_scenario_count_is_acce
     );
     let (success, stderr, output) = source.run_step(CHART_RECORD_STEP, "");
     assert!(success, "{stderr}");
-    assert_eq!(output.trim(), format!("evidence={} 10 {AT}", source.sha));
+    assert_eq!(
+        output.trim(),
+        format!(
+            "evidence={} 10 {AT}\ncarrier=the annotated tag's Chart-lane trailer",
+            source.sha
+        )
+    );
 
     let untrailed = chart_record_source(&chart_scenarios(10), "release\n");
     let (success, stderr, output) =
@@ -1056,7 +1066,10 @@ fn the_namespace_lane_record_naming_the_tagged_commit_and_its_observation_count_
     assert!(success, "{stderr}");
     assert_eq!(
         output.trim(),
-        format!("lane=present\nevidence={} 8 {AT}", source.sha)
+        format!(
+            "lane=present\nevidence={} 8 {AT}\ncarrier=the annotated tag's Namespace-lane trailer",
+            source.sha
+        )
     );
 
     // A recovery dispatch carries the same record as an input, for a tag annotated without it.
@@ -1231,7 +1244,13 @@ fn the_confinement_lane_record_naming_the_tagged_commit_and_its_case_count_is_ac
     let source = confinement_source(&format!("release\n\nConfinement-lane: {{sha}} 167 {AT}\n"));
     let (success, stderr, output) = source.run_step(CONFINEMENT_STEP, "");
     assert!(success, "{stderr}");
-    assert_eq!(output.trim(), format!("evidence={} 167 {AT}", source.sha));
+    assert_eq!(
+        output.trim(),
+        format!(
+            "evidence={} 167 {AT}\ncarrier=the annotated tag's Confinement-lane trailer",
+            source.sha
+        )
+    );
 }
 
 #[test]
@@ -3207,7 +3226,10 @@ fn security_review_the_namespace_lane_record_resists_carrier_and_shape_substitut
     assert!(success, "{stderr}");
     assert_eq!(
         output.trim(),
-        format!("lane=present\nevidence={} 8 {AT}", padded.sha)
+        format!(
+            "lane=present\nevidence={} 8 {AT}\ncarrier=the annotated tag's Namespace-lane trailer",
+            padded.sha
+        )
     );
 
     // A commented-out entry or a commented-out second declaration does not move the count.
@@ -3408,4 +3430,357 @@ fn the_header_comment_enumerates_no_images_or_refusals_that_can_go_stale() {
     let header = &WORKFLOW[..position("\nname: Release\n")];
     assert!(!header.contains("ghcr.io/"), "{header}");
     assert!(!header.contains("What this workflow refuses"), "{header}");
+}
+
+// The hosted lane records (`release-lanes.yml`): the four lanes run on GitHub-hosted runners and
+// each records its line as a notice annotation titled with its trailer; the preflight reads them
+// from that workflow's recorded `success` for the tagged commit and every record step checks the
+// value exactly as it checks a trailer.
+
+const LANES_WORKFLOW: &str = include_str!("../../.github/workflows/release-lanes.yml");
+const HOSTED_LANES_STEP: &str = "Read the hosted lane records for this commit";
+const LANES_SOURCE: &str = ".github/workflows/release-lanes.yml";
+const HOSTED_RUN: &str = "https://example.invalid/runs/0";
+
+/// As [`TaggedSource::run_step_on`], with the hosted step's output for this lane set.
+fn run_with_hosted(
+    step: &str,
+    source: &TaggedSource,
+    input: &str,
+    hosted: &str,
+) -> (bool, String, String) {
+    run_release_step(
+        step,
+        source.directory.path(),
+        &[
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("EVENT_NAME", "push"),
+            ("TAG", TAG),
+            ("INPUT_EVIDENCE", input),
+            ("SOURCE_SHA", &source.sha),
+            ("HOSTED_EVIDENCE", hosted),
+            ("HOSTED_RUN_URL", HOSTED_RUN),
+            ("LANES_WORKFLOW", "release-lanes.yml"),
+        ],
+        None,
+    )
+}
+
+#[test]
+fn every_lane_step_accepts_the_hosted_record_and_names_its_run() {
+    for (step, trailer, count, make) in lane_steps() {
+        let source = make("release\n");
+        let hosted = format!("{} {count} {AT}", source.sha);
+        let (success, log, output) = run_with_hosted(step, &source, "", &hosted);
+        assert!(success, "{step}: {log}");
+        assert!(
+            output.contains(&format!("evidence={hosted}\n")),
+            "{step}: {output}"
+        );
+        assert!(
+            output.contains(&format!(
+                "carrier=the {trailer} annotation of {HOSTED_RUN}\n"
+            )),
+            "{step}: {output}"
+        );
+    }
+}
+
+#[test]
+fn a_tag_trailer_or_a_recovery_input_takes_precedence_over_the_hosted_record() {
+    for (step, trailer, count, make) in lane_steps() {
+        let hosted_elsewhere = format!("0123456789abcdef0123456789abcdef01234567 {count} {AT}");
+        let source = make(&format!("release\n\n{trailer}: {{sha}} {count} {AT}\n"));
+        let (success, log, output) = run_with_hosted(step, &source, "", &hosted_elsewhere);
+        assert!(success, "{step}: {log}");
+        assert!(
+            output.contains(&format!("carrier=the annotated tag's {trailer} trailer\n")),
+            "{step}: {output}"
+        );
+        let untrailed = make("release\n");
+        let input = format!("{} {count} {AT}", untrailed.sha);
+        let (success, log, output) = run_with_hosted(step, &untrailed, &input, &hosted_elsewhere);
+        assert!(success, "{step}: {log}");
+        assert!(output.contains("workflow input\n"), "{step}: {output}");
+    }
+}
+
+#[test]
+fn the_hosted_record_is_refused_as_a_trailer_is() {
+    for (step, _, count, make) in lane_steps() {
+        let source = make("release\n");
+        let sha = source.sha.clone();
+        for (hosted, reason) in [
+            (
+                format!("0123456789abcdef0123456789abcdef01234567 {count} {AT}"),
+                "records commit '0123456789abcdef0123456789abcdef01234567'".to_owned(),
+            ),
+            (format!("{sha} 1{count} {AT}"), format!("records 1{count} ")),
+            (
+                format!("{sha} {count} yesterday"),
+                "where an RFC 3339 UTC instant belongs".to_owned(),
+            ),
+            (
+                format!("{sha} {count} {AT} extra"),
+                "has 4 fields".to_owned(),
+            ),
+            (
+                format!("{sha} {count}\n{AT}"),
+                "spans more than one line".to_owned(),
+            ),
+        ] {
+            let (success, log, output) = run_with_hosted(step, &source, "", &hosted);
+            assert!(!success, "{step} accepted {hosted:?}: {log}");
+            assert!(
+                log.contains(&reason),
+                "{step}: refusal does not name {reason:?}: {log}"
+            );
+            assert!(
+                log.contains("annotation of"),
+                "{step}: the carrier is not named: {log}"
+            );
+            assert!(!output.contains("evidence="), "{step}: {output}");
+        }
+        let (success, log, _) = run_with_hosted(step, &source, "", "");
+        assert!(!success, "{step}: {log}");
+        assert!(
+            log.contains("release-lanes.yml's successful run for"),
+            "{step}: {log}"
+        );
+    }
+}
+
+/// Runs the hosted step offline against the routing `gh` stub. Returns success, log, output and
+/// the API paths it read.
+fn hosted_lanes(
+    with_workflow: bool,
+    message: &str,
+    inputs: &[(&str, &str)],
+    runs: &str,
+    annotations: &str,
+) -> (bool, String, String, String) {
+    let files: &[(&str, &str)] = if with_workflow {
+        &[(LANES_SOURCE, "name: Release lanes\n")]
+    } else {
+        &[("README.md", "a source before the hosted lanes\n")]
+    };
+    let source = TaggedSource::with_files(files, message);
+    let tools = routing_stub_tools();
+    let gh_log = tools.path().join("gh.log");
+    fs::write(&gh_log, "").expect("gh log");
+    let gh_log_path = gh_log.display().to_string();
+    let mut env = vec![
+        ("SOURCE_SHA", source.sha.as_str()),
+        ("TAG", TAG),
+        ("STUB_JSON", runs),
+        (
+            "STUB_JOBS",
+            "{\"jobs\":[{\"id\":41,\"check_run_url\":\"https://api.github.com/repos/example/substrate/check-runs/41\"}]}",
+        ),
+        ("STUB_ANNOTATIONS", annotations),
+        ("GH_LOG", gh_log_path.as_str()),
+        ("LANES_WORKFLOW", "release-lanes.yml"),
+        ("GITHUB_REPOSITORY", "example/substrate"),
+        ("GITHUB_API_URL", "https://api.github.com"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+    ];
+    env.extend_from_slice(inputs);
+    let (success, log, output) = run_release_step(
+        HOSTED_LANES_STEP,
+        source.directory.path(),
+        &env,
+        Some(tools.path()),
+    );
+    (
+        success,
+        log,
+        output,
+        fs::read_to_string(&gh_log).expect("gh log"),
+    )
+}
+
+fn lane_annotations(records: &[(&str, &str, &str)]) -> String {
+    let records: Vec<String> = records
+        .iter()
+        .map(|(level, title, message)| {
+            format!(
+                "{{\"annotation_level\":\"{level}\",\"title\":\"{title}\",\"message\":\"{message}\"}}"
+            )
+        })
+        .collect();
+    format!("[{}]", records.join(","))
+}
+
+#[test]
+fn the_hosted_step_reads_each_lane_record_from_the_successful_main_run() {
+    let annotations = lane_annotations(&[
+        ("notice", "Confinement-lane", "c 189 t"),
+        ("notice", "Quota-lane", "q 7 t"),
+        ("warning", "Chart-lane", "a warning is not a record"),
+        ("notice", "Chart-lane", "h 4 t"),
+        ("notice", "Namespace-lane", "n 8 t"),
+        ("notice", "something else", "another notice"),
+    ]);
+    let (success, log, output, paths) = hosted_lanes(
+        true,
+        "release",
+        &[],
+        &main_runs(&[("completed", "failure"), ("completed", "success")]),
+        &annotations,
+    );
+    assert!(success, "{log}");
+    assert_eq!(
+        output,
+        "run-url=https://example.invalid/runs/1\nconfinement=c 189 t\nquota=q 7 t\nchart=h 4 t\nnamespace=n 8 t\n"
+    );
+    assert!(
+        paths.starts_with(
+            "repos/example/substrate/actions/workflows/release-lanes.yml/runs?head_sha="
+        ),
+        "{paths}"
+    );
+    assert!(
+        paths.contains("repos/example/substrate/actions/runs/1/jobs?per_page=100\n"),
+        "{paths}"
+    );
+    assert!(position(&format!("- name: {HOSTED_LANES_STEP}\n")) < position(CONFINEMENT_STEP));
+    assert!(WORKFLOW.contains("  LANES_WORKFLOW: release-lanes.yml\n"));
+    for key in ["confinement", "quota", "chart", "namespace"] {
+        assert!(
+            WORKFLOW.contains(&format!(
+                "HOSTED_EVIDENCE: ${{{{ steps.hosted-lanes.outputs.{key} }}}}\n"
+            )),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn the_hosted_step_reads_nothing_when_the_tag_records_every_lane_or_predates_the_workflow() {
+    let all = format!(
+        "release\n\nConfinement-lane: x 1 {AT}\nQuota-lane: x 1 {AT}\nChart-lane: x 1 {AT}\nNamespace-lane: x 1 {AT}\n"
+    );
+    let (success, log, output, paths) = hosted_lanes(true, &all, &[], &main_runs(&[]), "[]");
+    assert!(success, "{log}");
+    assert_eq!(output, "");
+    assert_eq!(paths, "");
+
+    // A recovery input stands for its lane as a trailer does.
+    let three = format!(
+        "release\n\nConfinement-lane: x 1 {AT}\nQuota-lane: x 1 {AT}\nChart-lane: x 1 {AT}\n"
+    );
+    let (success, log, _, paths) = hosted_lanes(
+        true,
+        &three,
+        &[("NAMESPACE_INPUT", "x 1 t")],
+        &main_runs(&[]),
+        "[]",
+    );
+    assert!(success, "{log}");
+    assert_eq!(paths, "");
+
+    let (success, log, output, paths) = hosted_lanes(false, "release", &[], &main_runs(&[]), "[]");
+    assert!(success, "{log}");
+    assert!(log.contains("predates release-lanes.yml"), "{log}");
+    assert_eq!(output, "");
+    assert_eq!(paths, "");
+}
+
+#[test]
+fn the_hosted_step_refuses_failed_runs_two_records_of_a_lane_and_pull_request_runs() {
+    let (success, log, output, _) = hosted_lanes(
+        true,
+        "release",
+        &[],
+        &main_runs(&[("completed", "failure"), ("completed", "cancelled")]),
+        "[]",
+    );
+    assert!(!success, "{log}");
+    assert!(log.contains("none concluded success"), "{log}");
+    assert!(!output.contains("run-url="), "{output}");
+
+    let twice = lane_annotations(&[
+        ("notice", "Quota-lane", "q 7 t"),
+        ("notice", "Quota-lane", "q 7 u"),
+    ]);
+    let (success, log, output, _) = hosted_lanes(
+        true,
+        "release",
+        &[],
+        &main_runs(&[("completed", "success")]),
+        &twice,
+    );
+    assert!(!success, "{log}");
+    assert!(log.contains("records 2 Quota-lane annotations"), "{log}");
+    assert!(!output.contains("quota="), "{output}");
+
+    for fork in [false, true] {
+        let (success, log, output, _) = hosted_lanes(
+            true,
+            "release",
+            &[],
+            &pull_request_runs(fork),
+            &lane_annotations(&[("notice", "Quota-lane", "q 7 t")]),
+        );
+        assert!(
+            !success && !output.contains("quota="),
+            "a pull_request run (fork: {fork}) was taken as the hosted lanes of the tagged commit: {log}{output}"
+        );
+    }
+}
+
+#[test]
+fn the_hosted_lanes_workflow_runs_each_lane_and_records_its_trailer() {
+    assert!(LANES_WORKFLOW.contains("on:\n  push:\n    branches: [main]\n"));
+    assert!(LANES_WORKFLOW.contains("  workflow_dispatch:\n"));
+    assert!(LANES_WORKFLOW.contains("permissions:\n  contents: read\n"));
+    assert!(
+        !LANES_WORKFLOW.contains("secrets."),
+        "the lanes need no secret"
+    );
+    assert!(
+        !LANES_WORKFLOW.contains("self-hosted"),
+        "the lanes run on hosted runners"
+    );
+    assert!(!LANES_WORKFLOW.contains("persist-credentials: true"));
+    for (command, trailer) in [
+        ("bash scripts/delegated-lane.sh", "Confinement-lane"),
+        ("cargo xtask quota-fixture run", "Quota-lane"),
+        (
+            "cargo xtask chart-lane cluster --node-profiles",
+            "Chart-lane",
+        ),
+        ("cargo xtask namespace-lane observe", "Namespace-lane"),
+    ] {
+        assert!(LANES_WORKFLOW.contains(command), "{command}");
+        assert_eq!(
+            LANES_WORKFLOW
+                .matches(&format!("echo \"::notice title={trailer}::${{record}}\""))
+                .count(),
+            1,
+            "{trailer}"
+        );
+    }
+    // The confinement record counts what the source declares only after the runtime vectors
+    // reported their delegated lane, never the portable one.
+    let confinement = &LANES_WORKFLOW[LANES_WORKFLOW
+        .find("bash scripts/delegated-lane.sh")
+        .expect("the delegated lane")..];
+    let ran = confinement
+        .find("passed (delegated lane)")
+        .expect("delegated lane check");
+    let counted = confinement.find("const DELEGATED_CASES").expect("count");
+    assert!(ran < counted);
+    // The kind node image is the one chart-lane.yml pins and the chart lab is built on.
+    let chart_lane = include_str!("../../.github/workflows/chart-lane.yml");
+    let pin = |workflow: &str| {
+        workflow
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("KIND_NODE_IMAGE: "))
+            .map(str::to_owned)
+    };
+    assert_eq!(pin(LANES_WORKFLOW), pin(chart_lane));
+    assert!(pin(LANES_WORKFLOW).is_some());
 }

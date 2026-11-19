@@ -7,9 +7,9 @@
 # which a hosted GitHub runner does not provide — the ubuntu-24.04 image README lists no
 # bubblewrap among its installed apt packages, and the step below probes rather than assumes.
 # This workflow therefore reports the delegated lane **absent**, never passed —
-# invariant 3: a missing isolation guarantee is a named refusal, never silent degradation. Whether
-# it gets a self-hosted runner is the open question on `story:ci-runs-the-full-gate`; the default
-# is that it stays a local pre-release step.
+# invariant 3: a missing isolation guarantee is a named refusal, never silent degradation.
+# `release-lanes.yml` sets the lane's prerequisites up on a hosted runner and runs it there for
+# release.yml (AGENTS.md § "Releases").
 #
 # The lane statement appears twice in the log: the "Report execution lanes" step prints the probed
 # host facts before the gate, and "Lane summary" restates the outcome and writes it to the run's
