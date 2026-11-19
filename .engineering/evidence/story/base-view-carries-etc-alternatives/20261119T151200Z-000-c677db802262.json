@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-19T15:12:00Z",
+  "actor": "human:unknown",
+  "artifact": "story:base-view-carries-etc-alternatives",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "https://github.com/beyond10x/substrate/actions/runs/44544097631 (Full gate on 282373dd: the_exec_argv_binds_etc_alternatives_read_only)"
+  }
+}

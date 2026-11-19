@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-19T15:12:00Z",
+  "actor": "human:unknown",
+  "artifact": "story:tmp-takes-an-operator-size",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "https://github.com/beyond10x/substrate/actions/runs/44544097631 (Full gate on 282373dd: the_exec_argv_sizes_tmp_only_when_the_operator_set_a_size, a_tmp_size_under_one_mib_refuses_startup, a_tmp_size_a_bubblewrap_cannot_apply_refuses_startup)"
+  }
+}

@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:base-view-carries-etc-alternatives
 kind: story
-status: active
+status: implemented
 title: A confined run on a Debian-family host finds cc, awk and every other alternatives link (#223)
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-18T08:23:22Z", actor: "human:unknown", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-18T08:23:22Z", actor: "human:unknown", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-19T15:12:01Z", actor: "human:unknown", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 # A confined run on a Debian-family host finds cc, awk and every other alternatives link (#223)
 
