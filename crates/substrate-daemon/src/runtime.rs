@@ -1074,6 +1074,14 @@ fn check_secret_slots(slots: &[SecretSlot]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How many egress apertures one deployment may declare (ADR 0013, amended 2026-11-18).
+///
+/// Above [`substrate_wire::MAX_EGRESS_APERTURES`], which still bounds one run: a host that serves
+/// boxes for two forges declares the model host, the control-plane dial-in and two hosts per
+/// forge, while each run selects at most four of them. Each declared aperture stays operator-named
+/// and reviewed; the bound keeps the list short enough to review.
+pub(crate) const MAX_DEPLOYMENT_EGRESS_APERTURES: usize = 6;
+
 /// Resolves every declared aperture exactly once, at declaration, and pins what it resolved to.
 ///
 /// DNS is outside the aperture. A run gets no resolver and performs no lookup, so a destination
@@ -1086,11 +1094,8 @@ fn check_secret_slots(slots: &[SecretSlot]) -> anyhow::Result<()> {
 fn resolve_egress_apertures(
     declared: &[EgressAperture],
 ) -> anyhow::Result<Vec<substrate_host::EgressAperture>> {
-    if declared.len() > substrate_wire::MAX_EGRESS_APERTURES as usize {
-        bail!(
-            "at most {} egress apertures may be declared",
-            substrate_wire::MAX_EGRESS_APERTURES
-        );
+    if declared.len() > MAX_DEPLOYMENT_EGRESS_APERTURES {
+        bail!("at most {MAX_DEPLOYMENT_EGRESS_APERTURES} egress apertures may be declared");
     }
     let mut names: BTreeSet<&str> = BTreeSet::new();
     let mut resolved = Vec::with_capacity(declared.len());
@@ -2171,6 +2176,37 @@ impl Drop for MaintenanceTasks {
 
 #[cfg(test)]
 mod tests {
+    fn aperture(name: &str, port: u16) -> EgressAperture {
+        EgressAperture {
+            name: name.to_owned(),
+            host: "127.0.0.1".to_owned(),
+            port,
+            max_bytes: None,
+        }
+    }
+
+    #[test]
+    fn a_deployment_declares_up_to_six_egress_apertures_and_no_more() {
+        let six: Vec<EgressAperture> = (0..6u16)
+            .map(|n| aperture(&format!("a{n}"), 9000 + n))
+            .collect();
+        assert_eq!(
+            super::resolve_egress_apertures(&six)
+                .expect("six are declared")
+                .len(),
+            6
+        );
+        let seven: Vec<EgressAperture> = (0..7u16)
+            .map(|n| aperture(&format!("a{n}"), 9000 + n))
+            .collect();
+        let refused = super::resolve_egress_apertures(&seven).expect_err("seven are refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("at most 6 egress apertures may be declared"),
+            "{refused}"
+        );
+    }
     use std::collections::VecDeque;
     use std::convert::Infallible;
 
