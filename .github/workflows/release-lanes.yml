@@ -1,0 +1,290 @@
+# The four release lanes on hosted runners (AGENTS.md § "Releases"): the delegated confinement lane,
+# the real project-quota lane, the execution-enabled chart lane and the namespace kind lane. Each
+# job runs the lane's own command unchanged on a GitHub-hosted VM, after root setup steps give the
+# VM what a workstation has, and records the lane's line as a notice annotation titled with the
+# lane's trailer (`Confinement-lane`, `Quota-lane`, `Chart-lane`, `Namespace-lane`) whose message
+# is `<source-sha> <count> <RFC 3339 UTC>`. `release.yml` reads those annotations from this
+# workflow's own recorded `success` for the tagged commit and checks them exactly as it checks a
+# tag trailer.
+#
+# Setup the lanes need and a fresh hosted VM lacks, each done as root here and nowhere else:
+#   * confinement: bubblewrap and `/usr/bin/socat`; an AppArmor profile granting `userns` to
+#     `/usr/bin/bwrap` only, because Ubuntu 24.04 restricts unprivileged user namespaces
+#     (`kernel.apparmor_restrict_unprivileged_userns`) and the restriction stays on for every other
+#     binary; and a systemd user manager for the runner user (linger), because
+#     `scripts/delegated-lane.sh` asks that manager for its delegated scope. The runner's own
+#     process is in a root-owned system cgroup the user manager cannot move it out of, so the
+#     script runs in a transient user service and asks for its scope from there.
+#   * quota: the `quota_v2` module, without which an ext4 `prjquota` mount fails with `ESRCH`.
+#   * chart: nothing beyond the hosted chart lane's tools; the runner kernel enables AppArmor and
+#     the lane mounts its securityfs into its kind worker.
+#   * namespace: nothing beyond kind.
+name: Release lanes
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - crates/**
+      - deploy/**
+      - fixtures/**
+      - vendor/**
+      - xtask/Cargo.toml
+      - xtask/src/**
+      - scripts/delegated-lane.sh
+      - Dockerfile
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/release-lanes.yml
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-lanes-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  HELM_VERSION: v3.22.1
+  HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+  KIND_VERSION: v0.33.0
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+  KIND_NODE_IMAGE: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+
+jobs:
+  confinement:
+    name: Confinement lane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+          cargo --version
+
+      - name: Give the VM bubblewrap, its user-namespace grant and a user manager
+        run: |
+          set -euo pipefail
+          sudo apt-get -o DPkg::Lock::Timeout=600 update -q
+          sudo apt-get -o DPkg::Lock::Timeout=600 install -y -q --no-install-recommends bubblewrap socat
+          sudo tee /etc/apparmor.d/substrate-lane-bwrap >/dev/null <<'EOF'
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile substrate-lane-bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r -W /etc/apparmor.d/substrate-lane-bwrap
+          sudo loginctl enable-linger "$(id -un)"
+          uid=$(id -u)
+          for _ in $(seq 60); do
+            [ -S "/run/user/${uid}/bus" ] && break
+            sleep 1
+          done
+          test -S "/run/user/${uid}/bus"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/${uid}"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus"
+          } >> "$GITHUB_ENV"
+          echo "bwrap $(bwrap --version); restrict_unprivileged_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+          echo "user manager controllers: $(cat "/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/cgroup.controllers")"
+          echo "own cgroup: $(cat /proc/self/cgroup)"
+          df -h / /mnt || true
+
+      - name: Run the delegated lane
+        id: lane
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/delegated-lane.log"
+          systemd-run --user --wait --pipe --collect --quiet --same-dir \
+            -E PATH="$PATH" -E HOME="$HOME" -E CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+            -E RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" -E CARGO_TERM_COLOR -E RUST_BACKTRACE \
+            -E XDG_RUNTIME_DIR -E DBUS_SESSION_BUS_ADDRESS \
+            -- bash scripts/delegated-lane.sh </dev/null 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "delegated lane exited ${status}" >&2
+            exit "$status"
+          fi
+          grep -q 'passed (delegated lane)' "$log" || { echo "the runtime vectors did not run their delegated lane" >&2; exit 1; }
+          cases=$(sed -n 's/^const DELEGATED_CASES: usize = \([0-9][0-9]*\);$/\1/p' crates/substrate-daemon/tests/runtime_vectors.rs | head -n 1)
+          test -n "$cases"
+          record="$(git rev-parse HEAD) ${cases} $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "Confinement-lane: ${record}"
+          echo "::notice title=Confinement-lane::${record}"
+
+  quota:
+    name: Quota lane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+          cargo --version
+
+      - name: Load the project-quota format module
+        run: |
+          set -euo pipefail
+          if ! sudo modprobe quota_v2; then
+            sudo apt-get -o DPkg::Lock::Timeout=600 update -q
+            sudo apt-get -o DPkg::Lock::Timeout=600 install -y -q --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe quota_v2
+          fi
+          lsmod | grep -E '^quota_(v2|tree)' || true
+          ls -l /dev/loop-control
+          df -h / /mnt || true
+
+      - name: Run the quota lane
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/quota-lane.log"
+          cargo xtask quota-fixture run 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          [ "$status" -eq 0 ] || exit "$status"
+          record=$(sed -n 's/^Quota-lane: //p' "$log" | tail -n 1)
+          test -n "$record"
+          echo "::notice title=Quota-lane::${record}"
+
+  chart:
+    name: Chart lane with node profiles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      CHART_LANE_CLUSTER: substrate-chart-lane
+      CHART_LANE_IMAGE: b10x-substrate-daemon:release-lane
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+          cargo --version
+
+      - name: Install the pinned Helm and kind releases
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/helm-download" "$RUNNER_TEMP/lane-bin"
+          curl --fail --location --retry 3 "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" --output "$RUNNER_TEMP/helm-download/helm.tar.gz"
+          echo "$HELM_SHA256  $RUNNER_TEMP/helm-download/helm.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/helm-download/helm.tar.gz" -C "$RUNNER_TEMP/helm-download" linux-amd64/helm
+          install -m 0755 "$RUNNER_TEMP/helm-download/linux-amd64/helm" "$RUNNER_TEMP/lane-bin/helm"
+          curl --fail --location --retry 3 "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64" --output "$RUNNER_TEMP/lane-bin/kind"
+          echo "$KIND_SHA256  $RUNNER_TEMP/lane-bin/kind" | sha256sum --check --strict
+          chmod 0755 "$RUNNER_TEMP/lane-bin/kind"
+          echo "$RUNNER_TEMP/lane-bin" >> "$GITHUB_PATH"
+          echo "apparmor enabled: $(cat /sys/module/apparmor/parameters/enabled)"
+          df -h / /mnt || true
+
+      - name: Build the daemon image from this commit
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --target daemon \
+            --platform linux/amd64 \
+            --build-arg "SOURCE_SHA=$(git rev-parse HEAD)" \
+            --tag "$CHART_LANE_IMAGE" \
+            --provenance=false \
+            --sbom=false \
+            --load \
+            .
+
+      - name: Run the chart lane with node profiles
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/chart-lane.log"
+          cargo xtask chart-lane cluster --node-profiles \
+            --image "$CHART_LANE_IMAGE" \
+            --node-image "$KIND_NODE_IMAGE" \
+            --cluster "$CHART_LANE_CLUSTER" \
+            --kind "$RUNNER_TEMP/lane-bin/kind" \
+            --helm "$RUNNER_TEMP/lane-bin/helm" 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          [ "$status" -eq 0 ] || exit "$status"
+          record=$(sed -n 's/^Chart-lane: //p' "$log" | tail -n 1)
+          test -n "$record"
+          echo "::notice title=Chart-lane::${record}"
+
+      - name: Delete the lane cluster
+        if: always()
+        run: |
+          if "$RUNNER_TEMP/lane-bin/kind" get clusters | grep -qx "$CHART_LANE_CLUSTER"; then
+            "$RUNNER_TEMP/lane-bin/kind" delete cluster --name "$CHART_LANE_CLUSTER"
+          fi
+
+  namespace:
+    name: Namespace lane on kind
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+          cargo --version
+
+      - name: Install the pinned kind release
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/lane-bin"
+          curl --fail --location --retry 3 "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64" --output "$RUNNER_TEMP/lane-bin/kind"
+          echo "$KIND_SHA256  $RUNNER_TEMP/lane-bin/kind" | sha256sum --check --strict
+          chmod 0755 "$RUNNER_TEMP/lane-bin/kind"
+          echo "$RUNNER_TEMP/lane-bin" >> "$GITHUB_PATH"
+          df -h / /mnt || true
+
+      - name: Run the namespace lane
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/namespace-lane.log"
+          cargo xtask namespace-lane observe --kind "$RUNNER_TEMP/lane-bin/kind" 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          [ "$status" -eq 0 ] || exit "$status"
+          record=$(sed -n 's/^Namespace-lane: //p' "$log" | tail -n 1)
+          test -n "$record"
+          echo "::notice title=Namespace-lane::${record}"
