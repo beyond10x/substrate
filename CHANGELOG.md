@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-11-19
+
+The wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are unchanged.
+A deployment declares up to six egress apertures; a confined run on a Debian-family host finds
+its `/etc/alternatives` tools; the daemon's `--tmp-bytes` sizes every run's `/tmp`. Four RustSec
+advisories are taken.
+
 ### Changed
 
 - A deployment may declare up to six egress apertures (`MAX_DEPLOYMENT_EGRESS_APERTURES` in the
@@ -36,6 +43,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   name that links through `/etc/alternatives`: the Linux base view now binds the host's
   `/etc/alternatives` read-only when it has one (#223, ADR 0049). Nothing else of `/etc` joins it.
 
+- Tests make their FIFOs with `nix::unistd::mkfifo` instead of running `mkfifo`, which on the CI
+  runner now refuses a non-UTF-8 path ("invalid UTF-8 was detected in one or more arguments") and
+  failed the omitted-entries suite before the daemon was reached. Test-only change.
+
 ### Security
 
 - `libz-sys` is 1.1.33, taking zlib's fix for
@@ -52,12 +63,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   Streamable HTTP transports and the OAuth client, which the model-only pin of `substrate-mcp`
   does not compile, so no shipped binary was reachable through them.
 - `THIRD_PARTY_LICENSES.html` names the new versions.
-
-### Fixed
-
-- Tests make their FIFOs with `nix::unistd::mkfifo` instead of running `mkfifo`, which on the CI
-  runner now refuses a non-UTF-8 path ("invalid UTF-8 was detected in one or more arguments") and
-  failed the omitted-entries suite before the daemon was reached. Test-only change.
 
 ## [0.20.0] — 2026-11-05
 

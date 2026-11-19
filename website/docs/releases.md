@@ -15,43 +15,59 @@ What 0.16.1 first publishes is listed under 0.16.0 in the full changelog and sum
 
 <!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->
 
-## 0.20.0 (2026-11-05)
+## 0.21.0 (2026-11-19)
 
 The wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are unchanged.
-`b10x-substrate-host` gains two default features, so a consumer that needs only confinement can
-leave out Git and Kubernetes. The two remaining egress reaps retry through an interrupted wait, and
-the ESS pin moves to 0.86.0.
+A deployment declares up to six egress apertures; a confined run on a Debian-family host finds
+its `/etc/alternatives` tools; the daemon's `--tmp-bytes` sizes every run's `/tmp`. Four RustSec
+advisories are taken.
 
-### Added in 0.20.0
+### Changed in 0.21.0
 
-- `b10x-substrate-host` declares the features `git` (gix, git2 and curl) and `kubernetes`
-  (`b10x-substrate-kubernetes-client`), both on by default, so every existing consumer, the daemon
-  included, builds and behaves as before.
-  - A consumer that needs only `substrate_host::confinement` sets `default-features = false`. Its
-    normal dependency tree then holds 116 packages instead of 315, with none of gix, git2, curl,
-    openssl, rustls, aws-lc or the Kubernetes client.
-  - Without `git`, the probe publishes no `workspace.git`, and a Git source or Git root is refused
-    as unserved.
-  - Without `kubernetes`, opening the `pod` adapter is refused `confinement.adapter-unserved`,
-    naming the feature.
-  - Every public item is the same under every feature set.
-  - `cargo xtask check-packages` admits exactly these two host features, with both as the
-    default, and refuses a no-default host tree that names gix, git2, curl, openssl-sys or the
-    Kubernetes client.
-  - The gate lints the host crate with no default features and runs its `host_features`,
-    `ess_confinement_local` and `consumer_surface` cases in that build.
-  - The CLI's dependency on the host crate takes no default features; the CLI uses neither.
+- A deployment may declare up to six egress apertures (`MAX_DEPLOYMENT_EGRESS_APERTURES` in the
+  daemon, ADR 0013 amendment); one run still selects at most four (`MAX_EGRESS_APERTURES`, wire and
+  bundles unchanged). A host serving GitLab and GitHub instances declared five and the daemon
+  refused to start (#225).
 
-### Fixed in 0.20.0
+### Added in 0.21.0
 
-- Dropping an installed egress aperture reaps its forwarder even when a signal handler installed
-  without `SA_RESTART` interrupts the wait.
-- The startup probe that proves the egress mechanism reads its child's real exit status, so an
-  interrupted reap, or a child ended by a signal, is never read as "reached".
-- All three reaps share one helper that waits again on `EINTR` and ends on any other error.
+- The Rust SDK's command, `pipe_session` and `pty_session` builders gain `writable_root`, repeatable
+  like `read_only_root`, and send the roots in the order given; the SDK re-exports `WritableRoot`,
+  `WritableHostRoot`, `WritableGitRoot`, `AppliedWritableRoot` and `MAX_WRITABLE_ROOTS`. More than
+  `MAX_WRITABLE_ROOTS` roots are refused before the request is sent. The wire, the bundle and the
+  daemon are unchanged.
+- The Rust SDK's command, `pipe_session` and `pty_session` builders gain `apertures`, which selects
+  several declared egress apertures in order (design 26 § 2); the n-th is reached in the run at
+  `127.0.0.n`. One name is still sent as `aperture`, so an existing start serializes as before.
+  The wire, the bundle and the daemon are unchanged.
+- The daemon's `--tmp-bytes BYTES` (`SUBSTRATE_TMP_BYTES`) sizes every confined run's `/tmp`
+  (#224, ADR 0049); absent keeps the kernel default, half the RAM. Startup refuses a size under one
+  MiB as `config.tmp-bytes-invalid`, and a size with a bubblewrap that does not take `--size` as
+  `config.tmp-bytes-unserved`. The wire and the bundle are unchanged.
 
-### Changed in 0.20.0
+### Fixed in 0.21.0
 
-- The ESS pin is 0.86.0 (`spec/*/ess-inputs.yaml`, and `ESS_VERSION` and `ESS_SHA256` in
-  `gate.yml`). The committed suites are regenerated: their refusals are unchanged, and 0.86.0 adds
-  `expect_no_error` steps.
+- A confined run on a Debian-family host finds `cc`, `awk`, `which` and every other `/usr/bin`
+  name that links through `/etc/alternatives`: the Linux base view now binds the host's
+  `/etc/alternatives` read-only when it has one (#223, ADR 0049). Nothing else of `/etc` joins it.
+
+- Tests make their FIFOs with `nix::unistd::mkfifo` instead of running `mkfifo`, which on the CI
+  runner now refuses a non-UTF-8 path ("invalid UTF-8 was detected in one or more arguments") and
+  failed the omitted-entries suite before the daemon was reached. Test-only change.
+
+### Security in 0.21.0
+
+- `libz-sys` is 1.1.33, taking zlib's fix for
+  [RUSTSEC-2026-0544](https://rustsec.org/advisories/RUSTSEC-2026-0544.html), a heap buffer
+  overflow in `gzwrite` after a write stall. The host driver's Git stack links it through
+  `curl-sys`.
+- `rusqlite` is 0.41.1 and the bundled `libsqlite3-sys` 0.39.1, taking SQLite's fix for
+  [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459.html), uninitialised memory
+  read through the WAL. The daemon's ledger and the SDK's store link this SQLite.
+- `rmcp` is pinned at 3.9.0, taking the fixes for
+  [RUSTSEC-2026-0461](https://rustsec.org/advisories/RUSTSEC-2026-0461.html),
+  [RUSTSEC-2026-0457](https://rustsec.org/advisories/RUSTSEC-2026-0457.html) and
+  [RUSTSEC-2026-0462](https://rustsec.org/advisories/RUSTSEC-2026-0462.html). All three are in the
+  Streamable HTTP transports and the OAuth client, which the model-only pin of `substrate-mcp`
+  does not compile, so no shipped binary was reachable through them.
+- `THIRD_PARTY_LICENSES.html` names the new versions.
