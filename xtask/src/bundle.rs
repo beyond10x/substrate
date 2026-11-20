@@ -50,6 +50,7 @@ mod namespace_driver;
 mod omitted_entries;
 mod process_events;
 mod read_only_roots;
+mod run_bounds;
 mod session_exec_fields;
 mod stream_bounds;
 mod workdir_apertures;
@@ -900,6 +901,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     check_standing_additions(version, released, failures);
+    if version == "0.27.0" {
+        run_bounds::check_introduction(released, failures);
+        return;
+    }
     if version == "0.26.0" {
         confinement_facts::check_introduction(released, failures);
         return;
@@ -943,6 +948,11 @@ fn check_standing_additions(version: &str, released: &Tree, failures: &mut Vec<S
     // Design 30 (ADR 0048) binds every bundle from `0.26.0` on.
     if confinement_facts::applies_to(version) {
         confinement_facts::check(version, released, failures);
+    }
+    // The bounds of issue #236 (ADR 0013 and ADR 0010, amended 2026-11-20) bind every bundle from
+    // `0.27.0` on.
+    if run_bounds::applies_to(version) {
+        run_bounds::check(version, released, failures);
     }
 }
 
@@ -1010,7 +1020,7 @@ fn check_earlier_additions(version: &str, released: &Tree, failures: &mut Vec<St
         return;
     }
     if version == "0.6.0" {
-        check_aperture_additions(released, failures);
+        check_aperture_additions(version, released, failures);
         return;
     }
     if version == "0.5.0" {
@@ -3743,7 +3753,7 @@ fn check_pty_refusals(released: &Tree, failures: &mut Vec<String>) {
     }
 }
 
-fn check_aperture_additions(released: &Tree, failures: &mut Vec<String>) {
+fn check_aperture_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     let require = |path: &str, pointer: &str, what: &str, failures: &mut Vec<String>| {
         let Some(document) = json_at(released, path, failures) else {
             return;
@@ -3777,20 +3787,21 @@ fn check_aperture_additions(released: &Tree, failures: &mut Vec<String>) {
         failures,
     );
 
-    // Bound to the wire constant here rather than through a `{"$wire": …}` marker in the authored
-    // source, because binding it there would mean editing `xtask/src/render.rs` — and every
-    // released bundle records the digest of the renderer that produced it, so one edit to that file
-    // stops `0.5.0` being a fixed point of its own source. This check makes the same claim from a
-    // file no bundle hashes: change the constant and the bundle fails, exactly as intended.
+    // Bound here rather than through a `{"$wire": …}` marker in the authored source, because
+    // binding it there would mean editing `xtask/src/render.rs` — and every released bundle records
+    // the digest of the renderer that produced it, so one edit to that file stops `0.5.0` being a
+    // fixed point of its own source. `0.6.0` published the bound `MAX_EGRESS_APERTURES` then held,
+    // four; the wire constant has since moved (ADR 0013, amended 2026-11-20), and
+    // `run_bounds::check` binds the fact list of `0.27.0` and later to its own wire constant.
     if let Some(document) = json_at(released, "schemas/capability.json", failures) {
         let declared = document
             .pointer("/properties/facts/properties/exec.egress-apertures/maxItems")
             .and_then(Value::as_u64);
-        if declared != Some(u64::from(substrate_wire::MAX_EGRESS_APERTURES)) {
+        let bound = run_bounds::Bounds::of(version).fact_apertures;
+        if declared != Some(u64::from(bound)) {
             failures.push(format!(
                 "schemas/capability.json: exec.egress-apertures maxItems is {declared:?}, \
-                 and substrate_wire::MAX_EGRESS_APERTURES is {}",
-                substrate_wire::MAX_EGRESS_APERTURES
+                 and {version} publishes {bound}"
             ));
         }
     }
@@ -5938,7 +5949,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 26, "every released bundle must be checked");
+        assert_eq!(checked, 27, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- One run selects up to eight egress apertures (`MAX_EGRESS_APERTURES`, was four), a deployment
+  declares up to twelve (`MAX_DEPLOYMENT_EGRESS_APERTURES`, was six and now a wire constant), and a
+  start declares up to eight read-only roots (`MAX_READ_ONLY_ROOTS`, was four), by the 2026-11-20
+  amendments of ADR 0013 and ADR 0010 (#236). A GitHub box already selected four apertures and
+  could add no package-registry egress. The daemon, the SDK and the conformance runner advertise
+  the successor bundle `substrate-wire/0.27.0` (inner `bundle.json` sha256
+  `b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7`), which adds no route and
+  publishes the three bounds; its `exec.egress-apertures` fact list is bounded by the deployment
+  bound, where `0.26.0` and earlier bounded it by the run's four and so refused the snapshot of a
+  daemon declaring five or six. A client pinned to `0.26.0` must move with it. Bundles `0.21.0` to
+  `0.26.0` keep their bytes; their sources state the old bound as a literal.
+
 ## [0.21.0] — 2026-11-19
 
 The wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are unchanged.

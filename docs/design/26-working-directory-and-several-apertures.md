@@ -62,7 +62,8 @@ reports `workdir` when the start set one.
 
 - `aperture` keeps its exact meaning, and a start that uses it serializes and hashes as before.
 - `apertures` requires `network: "aperture"` and at least two names; one name is written as
-  `aperture`. At most `MAX_EGRESS_APERTURES` (4) names, each distinct, each passing the same
+  `aperture`. At most `MAX_EGRESS_APERTURES` names (4 through bundle `0.26.0`, 8 from `0.27.0`
+  by ADR 0013's amendment of 2026-11-20), each distinct, each passing the same
   per-name rule `validate_aperture_request` applies today (name syntax, no destination, no ceiling).
 - Naming both `aperture` and `apertures` is refused.
 

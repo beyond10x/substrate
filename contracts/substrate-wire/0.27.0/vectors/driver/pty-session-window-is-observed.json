@@ -1,0 +1,76 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "argv": [
+        "/bin/sh"
+      ],
+      "mode": "pty",
+      "operation": "session.start",
+      "resize": {
+        "columns": 132,
+        "rows": 43
+      },
+      "window": {
+        "columns": 97,
+        "rows": 37
+      }
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "route.session.start",
+    "session.pty-window",
+    "session.pty-resize-observed"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "window_after_resize": {
+        "columns": 132,
+        "rows": 43
+      },
+      "window_observed": {
+        "columns": 97,
+        "rows": 37
+      }
+    }
+  },
+  "id": "the-confined-child-reads-the-declared-window-and-the-applied-resize",
+  "layer": "driver",
+  "phase": 4,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/child_controlling_terminal",
+      "expected": true,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/child_environment_names_a_window",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "session",
+      "name": "durable-pipe",
+      "state": {
+        "exec": "ex_vector",
+        "id": "ses_vector"
+      }
+    }
+  ]
+}

@@ -33,8 +33,8 @@ use sha2::Digest as _;
 
 const RUNNER: &str = env!("CARGO_BIN_EXE_b10x-substrate-conformance");
 const SERVER_NAME: &str = "settling.substrate.test";
-const CONTRACT: &str = "substrate-wire/0.26.0";
-const CONTRACT_SHA256: &str = "f6216ea867d743b8efbfddb86b7097ddcddd261a10dbca3f7a775ba1a6687403";
+const CONTRACT: &str = "substrate-wire/0.27.0";
+const CONTRACT_SHA256: &str = "b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7";
 const ECHO: &str = "/bin/echo";
 /// The credential the token command prints: the bundle's format, a fixed 43-character body.
 const SENTINEL: &str = "identity_access_v1_SENTINELsentinelSENTINELsentinelSENTINELsen";

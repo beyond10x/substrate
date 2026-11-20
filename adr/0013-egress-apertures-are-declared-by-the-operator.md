@@ -57,3 +57,26 @@ The bound on one run stays `MAX_EGRESS_APERTURES` (four), in the wire and its bu
 one deployment's declarations becomes six, `MAX_DEPLOYMENT_EGRESS_APERTURES` in the daemon. Every
 aperture is still operator-declared, named and reviewed; six keeps that list short enough to read.
 (Timo, 2026-11-18: "raise the limit to 6".)
+
+## Amendment, 2026-11-20: eight per run, twelve per deployment, both in the wire
+
+A box serving a GitHub instance already selects four apertures — two forge hosts (git and API), the
+model host and the control-plane dial-in — which is the whole run bound, so it cannot add the
+package-registry egress its build needs (substrate#236). A host serving two forges then declares
+those plus a registry or two per forge: more than six.
+
+- The bound on one run, `MAX_EGRESS_APERTURES`, becomes **eight**. A run's `apertures` list holds
+  two to eight names; the n-th listens on `127.0.0.n`, so eight addresses `127.0.0.1` to
+  `127.0.0.8`, and the `listen` pattern of the applied list admits exactly those.
+- The bound on one deployment's declarations becomes **twelve** and moves from the daemon into the
+  wire as `MAX_DEPLOYMENT_EGRESS_APERTURES`, because the contract states it: the
+  `exec.egress-apertures` fact lists every *declared* aperture. Bundles `0.6.0` to `0.26.0` state
+  that list's `maxItems` as the run bound (four), so a daemon declaring five or six under the
+  2026-11-18 amendment published a fact its own contract refused. From bundle `0.27.0` the fact
+  list is bounded by the deployment bound and the run's list by the run bound.
+- Each aperture is still operator-declared, named, resolved once and reviewed; twelve keeps the
+  declaration short enough to read, and a run still reaches only what it names.
+
+Bundle `0.27.0` publishes both bounds and adds no route. The released bundles keep their bytes and
+their bounds; a client pinned to `0.26.0` reads a list of at most four and must move to `0.27.0`
+to select more. (Decided 2026-11-20, issue #236.)

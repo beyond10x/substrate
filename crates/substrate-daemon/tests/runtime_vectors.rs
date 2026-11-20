@@ -48,9 +48,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.26.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.27.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "f6216ea867d743b8efbfddb86b7097ddcddd261a10dbca3f7a775ba1a6687403";
+    "b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2983,7 +2983,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.26.0/operations.json");
+            .join("contracts/substrate-wire/0.27.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -5488,9 +5488,10 @@ async fn check_read_only_file_host_refusals(
 // Declared read-only roots (ADR 0010, bundle 0.23.0)
 // ---------------------------------------------------------------------------------------------
 
-/// The served bound the 0.23.0 capability schema publishes as `exec.read-only-roots` `max_roots`,
-/// pinned here rather than read from the wire crate: the clean-room runner links no implementation.
-const READ_ONLY_ROOTS_BOUND: usize = 4;
+/// The served bound the 0.27.0 capability schema publishes as `exec.read-only-roots` `max_roots`
+/// (ADR 0010, amended 2026-11-20; four in 0.23.0 to 0.26.0), pinned here rather than read from the
+/// wire crate: the clean-room runner links no implementation.
+const READ_ONLY_ROOTS_BOUND: usize = 8;
 
 /// The portable journey: no confinement floor, so no roots bound is published and a start naming
 /// roots is refused by the floor's own name, never run with the roots missing (invariant 3).
@@ -5748,20 +5749,23 @@ async fn check_workdir_and_aperture_list_shape(
         );
         passed += 1;
     }
-    let five = ["model", "capped", "uncapped", "fourth", "fifth"];
+    // One over the run bound bundle 0.27.0 publishes, eight (ADR 0013, amended 2026-11-20).
+    let nine = [
+        "model", "capped", "uncapped", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+    ];
     for (operation, request, single, names, code) in [
         (
             "01JAPERTURESCLEANSHAPE1",
             "req_clean_apertures_too_few",
             None,
-            &five[..1],
+            &nine[..1],
             "exec.apertures-too-few",
         ),
         (
             "01JAPERTURESCLEANSHAPE2",
             "req_clean_apertures_too_many",
             None,
-            &five[..],
+            &nine[..],
             "exec.apertures-too-many",
         ),
         (
@@ -6505,9 +6509,9 @@ async fn check_confined_workdir_beneath_a_root(
 }
 
 /// The aperture this deployment declares for `localhost`, the one name the generated mapping
-/// already gives the first listen address (design 26 § 2). It is the fourth declaration, and
-/// `MAX_EGRESS_APERTURES` admits no fifth, so two apertures sharing a name other than `localhost`
-/// are held by the host's own tests rather than here.
+/// already gives the first listen address (design 26 § 2). It is the fourth declaration; two
+/// apertures sharing a name other than `localhost` are held by the host's own tests rather than
+/// here.
 const LOCALHOST_APERTURE: &str = "local";
 
 /// One run through two listed apertures: `model` at the first listen address and the uncapped

@@ -5,7 +5,10 @@
 //! the fact name, the mounts substrate owns, and each refusal a root can raise. The schema is held
 //! to the wire crate's own rule by asking both the same questions: a start the wire crate admits is
 //! one the published exec-start schema accepts, and a list over `MAX_READ_ONLY_ROOTS` is one it
-//! rejects. The bundle cannot bind these through a `{"$wire": …}` marker that `render_v2.rs` does
+//! rejects. That bound is the four `0.23.0` published, which the wire constant has since left
+//! (ADR 0010, amended 2026-11-20): [`run_bounds::Bounds::of`](super::run_bounds::Bounds::of)
+//! names it, and the wire crate's rule is asked with that bound in place of its own. The bundle
+//! cannot bind these through a `{"$wire": …}` marker that `render_v2.rs` does
 //! not already know: that file is hashed by every bundle it rendered (AGENTS.md § *The gate*), so
 //! the binding lives here, which no bundle hashes.
 
@@ -14,6 +17,7 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 use substrate_wire as wire;
 
+use super::run_bounds::Bounds;
 use super::{Tree, json_at};
 
 /// The two start inputs that carry an exec start: the exec itself and the session that embeds it.
@@ -50,14 +54,15 @@ const APPLIED_MEMBERS: [&str; 6] = [
 const ADDRESS: &str = "read_only_roots";
 
 pub(super) fn check(version: &str, released: &Tree, failures: &mut Vec<String>) {
-    check_definitions(released, failures);
+    let bounds = Bounds::of(version);
+    check_definitions(bounds, released, failures);
     check_starts(released, failures);
-    check_start_schema_agrees(version, released, failures);
-    check_facts(released, failures);
-    check_applied_record(version, released, failures);
-    check_vectors(version, released, failures);
-    check_refusal_vectors(released, failures);
-    check_client_visible_changes(released, failures);
+    check_start_schema_agrees(version, bounds, released, failures);
+    check_facts(bounds, released, failures);
+    check_applied_record(version, bounds, released, failures);
+    check_vectors(version, bounds, released, failures);
+    check_refusal_vectors(bounds, released, failures);
+    check_client_visible_changes(bounds, released, failures);
 }
 
 /// Every mount substrate owns, which a root may not equal, lie beneath or contain.
@@ -88,7 +93,7 @@ fn declared(annotation: Option<&Value>) -> BTreeSet<(String, u64, String)> {
 
 /// The list's bound, capability and refusals, and each entry's closed `{host_path, mount}` shape
 /// with every owned mount reserved, are the wire crate's.
-fn check_definitions(released: &Tree, failures: &mut Vec<String>) {
+fn check_definitions(bounds: Bounds, released: &Tree, failures: &mut Vec<String>) {
     let path = "schemas/common.json";
     let Some(common) = json_at(released, path, failures) else {
         return;
@@ -97,10 +102,10 @@ fn check_definitions(released: &Tree, failures: &mut Vec<String>) {
         failures.push(format!("{path}: no read-only-roots definition"));
         return;
     };
-    if list.get("maxItems") != Some(&json!(wire::MAX_READ_ONLY_ROOTS)) {
+    if list.get("maxItems") != Some(&json!(bounds.read_only_roots)) {
         failures.push(format!(
             "{path}: read-only-roots maxItems must be the wire bound {}",
-            wire::MAX_READ_ONLY_ROOTS
+            bounds.read_only_roots
         ));
     }
     if list.pointer("/items/$ref") != Some(&json!(format!("#{ENTRY_DEFINITION}"))) {
@@ -243,14 +248,20 @@ fn roots(count: usize) -> Value {
         .collect()
 }
 
-/// Whether the wire crate admits a start naming `roots`, taking its own type and its own rule.
-fn wire_admits(roots: &Value) -> bool {
-    serde_json::from_value::<wire::ExecStartInput>(start_json(Some(roots.clone())))
-        .is_ok_and(|start| wire::validate_read_only_roots(&start.read_only_roots).is_ok())
+/// Whether the wire crate admits a start naming `roots`, taking its own type and its own rule,
+/// with the bundle's bound in place of its own.
+fn wire_admits(bounds: Bounds, roots: &Value) -> bool {
+    serde_json::from_value::<wire::ExecStartInput>(start_json(Some(roots.clone()))).is_ok_and(
+        |start| {
+            bounds
+                .validate_read_only_roots(&start.read_only_roots)
+                .is_ok()
+        },
+    )
 }
 
 /// A validator for one published schema, against the bundle's own registry.
-fn validator(
+pub(super) fn validator(
     version: &str,
     released: &Tree,
     target: &str,
@@ -293,7 +304,12 @@ fn validator(
 /// Only the lexical half is the schema's to answer. A mount that collides with an owned one, or
 /// two that overlap, are rules no JSON Schema keyword states; the annotations name them and the
 /// candidates below keep them out of the comparison.
-fn check_start_schema_agrees(version: &str, released: &Tree, failures: &mut Vec<String>) {
+fn check_start_schema_agrees(
+    version: &str,
+    bounds: Bounds,
+    released: &Tree,
+    failures: &mut Vec<String>,
+) {
     let Some(schema) = validator(version, released, START_INPUT, failures) else {
         return;
     };
@@ -303,11 +319,11 @@ fn check_start_schema_agrees(version: &str, released: &Tree, failures: &mut Vec<
         ));
         return;
     }
-    let bound = usize::try_from(wire::MAX_READ_ONLY_ROOTS).unwrap_or(usize::MAX);
+    let bound = usize::try_from(bounds.read_only_roots).unwrap_or(usize::MAX);
     for count in [0, 1, bound, bound + 1] {
         let list = roots(count);
         let schema_accepts = schema.is_valid(&start_json(Some(list.clone())));
-        let wire_accepts = wire_admits(&list);
+        let wire_accepts = wire_admits(bounds, &list);
         if schema_accepts != wire_accepts {
             failures.push(format!(
                 "{START_INPUT}: a start naming {count} read-only roots is {} by the schema and {} \
@@ -356,7 +372,7 @@ fn check_start_schema_agrees(version: &str, released: &Tree, failures: &mut Vec<
             ),
         ] {
             let schema_accepts = schema.is_valid(&start_json(Some(list.clone())));
-            let wire_accepts = wire_admits(&list);
+            let wire_accepts = wire_admits(bounds, &list);
             if schema_accepts != wire_accepts {
                 failures.push(format!(
                     "{START_INPUT}: read-only-root {member} form {} {:?}, which the wire crate {}",
@@ -370,7 +386,7 @@ fn check_start_schema_agrees(version: &str, released: &Tree, failures: &mut Vec<
 }
 
 /// The fact states the served bound, and says what its absence means.
-fn check_facts(released: &Tree, failures: &mut Vec<String>) {
+fn check_facts(bounds: Bounds, released: &Tree, failures: &mut Vec<String>) {
     let path = "schemas/capability.json";
     let Some(capability) = json_at(released, path, failures) else {
         return;
@@ -379,7 +395,7 @@ fn check_facts(released: &Tree, failures: &mut Vec<String>) {
         .pointer("/properties/facts/properties")
         .and_then(|facts| facts.get(wire::EXEC_READ_ONLY_ROOTS_FACT));
     let published = serde_json::to_value(wire::ReadOnlyRootFacts {
-        max_roots: wire::MAX_READ_ONLY_ROOTS,
+        max_roots: bounds.read_only_roots,
     })
     .unwrap_or(Value::Null);
     if fact.and_then(|fact| fact.pointer("/properties/max_roots/const"))
@@ -390,7 +406,7 @@ fn check_facts(released: &Tree, failures: &mut Vec<String>) {
         failures.push(format!(
             "{path}: {} must be published as the closed {{max_roots: {}}}",
             wire::EXEC_READ_ONLY_ROOTS_FACT,
-            wire::MAX_READ_ONLY_ROOTS
+            bounds.read_only_roots
         ));
     }
     if fact.and_then(|fact| fact.get("x-b10x-absent-means")) != Some(&json!(ABSENT_MEANS)) {
@@ -453,7 +469,7 @@ const EXEC_RESULTS: [&str; 2] = [
 const EXEC_STATES: [&str; 5] = ["running", "exited", "cancelled", "expired", "unknown"];
 
 /// An applied network the wire emits: none, one aperture, or the design-26 list at its bound.
-fn applied_network(kind: &str) -> Value {
+fn applied_network(bounds: Bounds, kind: &str) -> Value {
     let aperture = |index: u32| {
         json!({
             "bytes": { "from_destination": 7, "to_destination": 9 },
@@ -470,7 +486,7 @@ fn applied_network(kind: &str) -> Value {
             one
         }
         "list" => Value::Array(
-            (0..wire::MAX_EGRESS_APERTURES)
+            (0..bounds.run_apertures)
                 .map(|index| {
                     let mut entry = aperture(index);
                     entry["listen"] = json!(format!("127.0.0.{}:443", index + 1));
@@ -484,8 +500,8 @@ fn applied_network(kind: &str) -> Value {
 }
 
 /// An `AppliedConfinement` with every optional member present, each list at its wire bound.
-fn applied_at_bounds(capsule: bool, network: &str) -> Value {
-    let roots: Vec<Value> = (1..=wire::MAX_READ_ONLY_ROOTS)
+fn applied_at_bounds(bounds: Bounds, capsule: bool, network: &str) -> Value {
+    let roots: Vec<Value> = (1..=bounds.read_only_roots)
         .map(|i| json!({ "host_path": format!("/srv/root{i}"), "mount": format!("/opt/root{i}") }))
         .collect();
     let files: Vec<Value> = (1..=wire::MAX_READ_ONLY_FILES)
@@ -524,7 +540,7 @@ fn applied_at_bounds(capsule: bool, network: &str) -> Value {
         } else {
             "workspace-rw-system-ro"
         },
-        "network": applied_network(network),
+        "network": applied_network(bounds, network),
         "profile": "workspace",
         "workspace_access": { "mode": "scoped", "writable_subtrees": ["artifacts"] },
         "read_only_roots": roots,
@@ -548,7 +564,12 @@ fn applied_at_bounds(capsule: bool, network: &str) -> Value {
 /// The exec record the wire crate serializes in `state` around [`applied_at_bounds`]: parsed into
 /// `substrate_wire::Exec` and serialized back, so it is a record the daemon can emit. `Err` names a
 /// fixture the wire type does not reproduce, which would make the comparison prove nothing.
-fn wire_exec_record(state: &str, capsule: bool, network: &str) -> Result<Value, String> {
+fn wire_exec_record(
+    bounds: Bounds,
+    state: &str,
+    capsule: bool,
+    network: &str,
+) -> Result<Value, String> {
     let (exit, refusal) = match state {
         "exited" => (json!({ "code": 0, "signal": null }), None),
         "cancelled" => (
@@ -581,7 +602,7 @@ fn wire_exec_record(state: &str, capsule: bool, network: &str) -> Result<Value, 
             "profile": "workspace",
             "require": true,
         },
-        "applied": applied_at_bounds(capsule, network),
+        "applied": applied_at_bounds(bounds, capsule, network),
         "exit": exit,
     });
     if let Some(refusal) = refusal {
@@ -600,7 +621,12 @@ fn wire_exec_record(state: &str, capsule: bool, network: &str) -> Result<Value, 
 /// What the doc of [`check_applied_record`] promises, asked of the published result schemas: an
 /// exec record carrying every member `AppliedConfinement` serializes, each at its wire bound, in
 /// every state, with and without a capsule and for each network form, validates.
-fn check_wire_exec_records(version: &str, released: &Tree, failures: &mut Vec<String>) {
+fn check_wire_exec_records(
+    version: &str,
+    bounds: Bounds,
+    released: &Tree,
+    failures: &mut Vec<String>,
+) {
     let validators: Vec<(&str, jsonschema::Validator)> = EXEC_RESULTS
         .into_iter()
         .filter_map(|target| {
@@ -611,7 +637,7 @@ fn check_wire_exec_records(version: &str, released: &Tree, failures: &mut Vec<St
         for capsule in [false, true] {
             for network in ["none", "aperture", "list"] {
                 let name = format!("{state}, capsule {capsule}, network {network}");
-                let record = match wire_exec_record(state, capsule, network) {
+                let record = match wire_exec_record(bounds, state, capsule, network) {
                     Ok(record) => record,
                     Err(error) => {
                         failures.push(format!(
@@ -638,8 +664,13 @@ fn check_wire_exec_records(version: &str, released: &Tree, failures: &mut Vec<St
 /// admits every member the wire's `AppliedConfinement` emits, in every exec state. A closed shape
 /// that omits one rejects the record of a start that used it; one that names it with a narrower
 /// shape than the wire's is caught by [`check_wire_exec_records`].
-fn check_applied_record(version: &str, released: &Tree, failures: &mut Vec<String>) {
-    check_wire_exec_records(version, released, failures);
+fn check_applied_record(
+    version: &str,
+    bounds: Bounds,
+    released: &Tree,
+    failures: &mut Vec<String>,
+) {
+    check_wire_exec_records(version, bounds, released, failures);
     let path = "schemas/resource.json";
     let Some(resource) = json_at(released, path, failures) else {
         return;
@@ -677,11 +708,11 @@ fn check_applied_record(version: &str, released: &Tree, failures: &mut Vec<Strin
         if member.and_then(|member| member.pointer("/items/$ref"))
             != Some(&json!(format!("common.json#{ENTRY_DEFINITION}")))
             || member.and_then(|member| member.get("maxItems"))
-                != Some(&json!(wire::MAX_READ_ONLY_ROOTS))
+                != Some(&json!(bounds.read_only_roots))
         {
             failures.push(format!(
                 "{path}: {name} has an applied shape without read_only_roots bounded by {}",
-                wire::MAX_READ_ONLY_ROOTS
+                bounds.read_only_roots
             ));
         }
     }
@@ -689,7 +720,7 @@ fn check_applied_record(version: &str, released: &Tree, failures: &mut Vec<Strin
 
 /// A vector shows the applied record: a start naming roots whose result validates against the
 /// exec result schema and lists exactly the roots the request declared, as the wire's record.
-fn check_vectors(version: &str, released: &Tree, failures: &mut Vec<String>) {
+fn check_vectors(version: &str, bounds: Bounds, released: &Tree, failures: &mut Vec<String>) {
     let validator = super::workdir_apertures::exec_result_validator(version, released, failures);
     let mut with_applied = false;
     for (path, bytes) in released {
@@ -715,7 +746,7 @@ fn check_vectors(version: &str, released: &Tree, failures: &mut Vec<String>) {
                 "{path}: the applied read_only_roots do not parse as the wire record"
             )),
             Ok(bound) => {
-                if declared != Some(applied) || wire::validate_read_only_roots(&bound).is_err() {
+                if declared != Some(applied) || bounds.validate_read_only_roots(&bound).is_err() {
                     failures.push(format!(
                         "{path}: the applied read_only_roots are not exactly the roots declared"
                     ));
@@ -741,7 +772,7 @@ fn check_vectors(version: &str, released: &Tree, failures: &mut Vec<String>) {
 /// a 422 `refused` at `read_only_roots`; the lexical ones between them break each of the three
 /// rules the wire crate states, judged by the wire crate's own validation of the declared list,
 /// and the host ones declare a list the wire crate admits, so only the host can refuse it.
-fn check_refusal_vectors(released: &Tree, failures: &mut Vec<String>) {
+fn check_refusal_vectors(bounds: Bounds, released: &Tree, failures: &mut Vec<String>) {
     let mut answered: BTreeSet<&str> = BTreeSet::new();
     let mut lexical: BTreeSet<&'static str> = BTreeSet::new();
     for (path, bytes) in released {
@@ -786,7 +817,7 @@ fn check_refusal_vectors(released: &Tree, failures: &mut Vec<String>) {
             ));
             continue;
         };
-        let validated = wire::validate_read_only_roots(&declared);
+        let validated = bounds.validate_read_only_roots(&declared);
         let message = match (code, &validated) {
             (wire::READ_ONLY_ROOT_INVALID, Err(error)) => {
                 Some(wire::read_only_root_invalid_message(error))
@@ -842,7 +873,7 @@ fn check_refusal_vectors(released: &Tree, failures: &mut Vec<String>) {
     }
 }
 
-fn check_client_visible_changes(released: &Tree, failures: &mut Vec<String>) {
+fn check_client_visible_changes(bounds: Bounds, released: &Tree, failures: &mut Vec<String>) {
     let path = "compatibility.json";
     let Some(compatibility) = json_at(released, path, failures) else {
         return;
@@ -854,7 +885,7 @@ fn check_client_visible_changes(released: &Tree, failures: &mut Vec<String>) {
         .flatten()
         .filter_map(Value::as_str)
         .collect();
-    let bound = wire::MAX_READ_ONLY_ROOTS.to_string();
+    let bound = bounds.read_only_roots.to_string();
     let named = [
         wire::EXEC_READ_ONLY_ROOTS_FACT,
         "read_only_roots",
