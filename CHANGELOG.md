@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-11-20
+
+The contract bundle moves to `substrate-wire/0.27.0`, which adds no route and raises three
+bounds: one run selects up to eight egress apertures, a deployment declares up to twelve, and a
+start declares up to eight read-only roots. A client pinned to `0.26.0` must move with it.
+
 ### Changed
 
 - One run selects up to eight egress apertures (`MAX_EGRESS_APERTURES`, was four), a deployment
@@ -20,6 +26,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   bound, where `0.26.0` and earlier bounded it by the run's four and so refused the snapshot of a
   daemon declaring five or six. A client pinned to `0.26.0` must move with it. Bundles `0.21.0` to
   `0.26.0` keep their bytes; their sources state the old bound as a literal.
+- The release reads the four lane records (confinement, quota, chart node profiles, namespace) from
+  `release-lanes.yml`'s hosted run for the tagged commit; a recovery input and then a tag trailer
+  still take precedence per lane.
+
+### Fixed
+
+- The systemd local-run case of the delegated lane holds its leader under dash: a fork refused at
+  `pids.max` no longer ends the leader on a Debian-family host (#230). A test defect; the adapter
+  and the host were right.
+- The gate's tests phase fetches every target's dependencies before the workspace tests, so a cold
+  runner cache no longer fails the offline `cargo tree --target all` case.
 
 ## [0.21.0] — 2026-11-19
 
