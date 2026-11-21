@@ -191,6 +191,7 @@ An entry names a directory, which admits every file beneath it, or one file:
 | absent when the run starts | `exec.sandbox-path-unrepresentable` (422) |
 | a symbolic link where a run can write | `exec.sandbox-path-unrepresentable` (422) |
 | a link that resolves into a writable mount | `exec.sandbox-path-unrepresentable` (422) |
+| a link whose target passes through a writable mount | `exec.sandbox-path-unrepresentable` (422) |
 
 - Entries are paths the run sees, not host paths. A toolchain in a home directory is declared as
   a read-only root, and the entry names its mount.
@@ -214,10 +215,26 @@ An entry names a directory, which admits every file beneath it, or one file:
   `exec.sandbox-path-unrepresentable` (422).
 
 Whether one path lies in another is decided from the host's mount table, on `ext4`, `overlay`
-and `tmpfs`. Where that cannot be established the answer names one of nine causes:
+and `tmpfs`. Where that cannot be established the answer names one of ten causes:
 `mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`, `mount-id-unreported`,
-`mount-row-missing`, `mount-row-repeated`, `mount-root-deleted`, `mount-point-mismatch` or
-`file-system-unlisted` with the type.
+`mount-row-missing`, `mount-row-repeated`, `mount-root-deleted`, `mount-point-mismatch`,
+`mount-covered` or `file-system-unlisted` with the type.
+
+A file system mounted beneath a location a run can write (`workspace_root`, a declared writable
+root, a workspace) lies in that location: a read-only root declared on it counts as one a run
+can write, and a helper installed on it is refused. `mount-covered` names such a mount that a
+later mount hides, or two mounts on one mount point: unmount one, or declare another directory.
+
+A listed path is refused where it ends on another file-system type, reads a symbolic link
+there or passes through a directory there, with `file-system-unlisted`.
+
+A read-only root that shows a location a run can write is one itself from then on. A mount
+beneath it that cannot be compared refuses the start, as beneath a workspace.
+
+One limit: a file system that shows under two device numbers, such as a network file system
+mounted twice with different options or two FUSE mounts of one directory. The comparison of
+mounts cannot see that a read-only root and a writable location hold the same files. The only
+guard is that nothing on a file system other than `ext4`, `overlay` and `tmpfs` is followed.
 
 | Where | Cause | Answer |
 |---|---|---|
