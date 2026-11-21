@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-11-21
+
 ### Added
 
 - The `linux` confinement adapter, and `systemd` around it, can hold a run to an executable
@@ -62,6 +64,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     `tmpfs`. With `exec_gate` set and a path of the open on another file-system type, the
     adapter opens without the fact; `AdapterFacts::withheld` and the `confinement.fact-unserved`
     refusal name the cause, the path and the type.
+  - When a base directory (`/usr`, `/bin`, `/lib`, `/lib64`) shows a workspace, the `linux`
+    adapter opens without the fact `exec_subpaths` and its proof names no cause; every start
+    with a list is still refused `confinement.fact-unserved` before dispatch. Naming the cause
+    is planned as `story:linux-adapter-names-why-the-list-fact-is-absent`.
 
 ### Changed
 
@@ -102,6 +108,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   refuses the start `exec.sandbox-place-unserved` (501) with the cause and the field the
   mount was declared in, before anything is dispatched.
   A start without a list reads no mount table, as before.
+  The cases that stage a mount ran on a workstation only: a GitHub-hosted runner grants a user
+  namespace no mount, and its confinement lane lists them as absent, not passed; the cases on
+  synthetic mount tables and the cases without a mount ran there.
 - **A symbolic link on a file system of a type other than `ext4`, `overlay` and `tmpfs` is
   no longer followed.** Also on `main` since pull request 241, and in no release. A mount of
   such a type is compared with nothing, so a link a run had left on one, mounted beneath a
