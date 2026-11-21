@@ -24,11 +24,14 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
 - A `beneath` path is opened beneath its `<root>` with no symbolic link followed. A `follow` path
   is opened following links, and refused when what it resolves to lies in a `--writable` root, a
   mount of the view the run can write, or in a mount that is mounted beneath one. So is one
-  that resolves through a symbolic link lying there: the helper resolves a `follow` path one
-  name at a time and places every link it reads. Where a path or a link lies is read from the
-  view's mount table (`/proc/self/mountinfo`), never from the text of two paths, and a place,
-  or where a mount beneath a `--writable` root is attached, that cannot be established refuses
-  as well: a link on a file-system type other than `ext4`, `overlay` and `tmpfs` has none.
+  that resolves through a symbolic link lying there, or passes through a directory there on
+  its way elsewhere: the helper resolves a `follow` path one name at a time, places every
+  link it reads and every directory it passes through, and steps back for `..` to the
+  directory it came through, without asking the kernel. Where a path, a link or a directory
+  lies is read from the view's mount table (`/proc/self/mountinfo`), never from the text of
+  two paths, and a place, or where a mount beneath a `--writable` root is attached, that
+  cannot be established refuses as well: nothing on a file-system type other than `ext4`,
+  `overlay` and `tmpfs` has one. A path of either class is placed where it ends.
 - `--env` carries one variable of the program's environment. **The program starts with the
   `--env` operands as its whole environment, and nothing of the helper's own.** An empty name, a
   name that holds `=` and a name given twice are refused.
@@ -88,6 +91,16 @@ The kernel decides on the file a path resolves to. On a distribution that keeps 
 26.04, `/usr/bin/ln` is a link to `/usr/lib/cargo/bin/coreutils/ln`. List the tool by its own
 path, which puts the rule on the file the link resolves to, or list the directory the links
 point into as well.
+
+**A listed path must not pass through a directory the run can write**, even to leave it again:
+a link to `/workspace/../usr/bin` is refused, and `/usr/bin` listed in its place runs.
+
+**One limit of the comparison of mounts.** Where one file system shows under two device
+numbers (a network file system mounted twice with different options, two FUSE mounts of one
+directory), the comparison cannot see that a read-only root and a mount the run can write hold
+the same files. The only guard there is that nothing on a file system other than `ext4`,
+`overlay` and `tmpfs` is followed: a listed path that ends on one, reads a symbolic link on
+one or passes through a directory on one is refused.
 
 ## What the list does not stop
 

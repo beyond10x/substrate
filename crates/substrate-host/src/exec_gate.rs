@@ -834,29 +834,60 @@ pub(crate) fn class_of(source: &Reach, writable: &[Location]) -> Class {
     }
 }
 
-/// [`class_of`] for the host source the kernel reported as `source`, on `table`. A source whose
-/// place cannot be established has no class: the start is refused, and the mount is never
-/// classed `follow` for want of an answer (D24, D26).
+/// **The host source `source` as a location a run can write, where it is one** (D24, D30):
+/// `None` for a source classed `follow`.
+///
+/// Whether it is one is read from the table alone, which never refuses: a mount beneath the
+/// source that is covered, or whose mount point this user cannot open, is counted by the root
+/// its row names. That can only class the source `beneath` where the kernel's answer would
+/// have said `follow`, never the reverse, and a source that overlaps nothing writable starts,
+/// whatever is mounted beneath it.
+///
+/// A source that does overlap a writable location is from then on a writable location
+/// itself: its mount is one the helper is told the run can write, and the helper asks the
+/// kernel about every mount beneath such a mount and fails closed. So the same question is
+/// asked here, before dispatch, and the start is refused where it cannot be answered, in
+/// place of a run the helper ends with status 125.
 ///
 /// # Errors
 ///
-/// [`PLACE_UNSERVED`], with `address` naming the field the mount was declared in.
+/// [`PLACE_UNSERVED`], with `address` naming the field the mount was declared in: for a source
+/// whose own place cannot be established, which is never classed `follow` for want of an
+/// answer (D24, D26), and for a source classed `beneath` with a mount beneath it whose root
+/// cannot be taken as a place.
+pub(crate) fn writable_source(
+    address: &str,
+    source: &Opened,
+    writable: &[Location],
+    tree: &MountTree,
+) -> Result<Option<Location>, DriverError> {
+    let unplaced = |why: Unestablished| start_unplaced(address, &why);
+    let place = tree.table().place_of(source).map_err(unplaced)?;
+    if class_of(&tree.reaches_as_written(&place), writable) == Class::Follow {
+        return Ok(None);
+    }
+    Location::reaching(&source.path, &place, tree)
+        .map(Some)
+        .map_err(unplaced)
+}
+
+/// The class of the host source the kernel reported as `source`, on `tree`
+/// ([`writable_source`]).
+///
+/// # Errors
+///
+/// As [`writable_source`].
+#[cfg(test)]
 pub(crate) fn classed(
     address: &str,
     source: &Opened,
     writable: &[Location],
     tree: &MountTree,
 ) -> Result<Class, DriverError> {
-    let place = tree
-        .table()
-        .place_of(source)
-        .map_err(|why| start_unplaced(address, &why))?;
-    // The source is the side nothing is written through, so what it reaches is read from the
-    // table alone and never refuses: a mount beneath it that is covered, or whose mount point
-    // this user cannot open, is counted by the root its row names. That can only class the
-    // mount `beneath` where the kernel's answer would have said `follow`, never the reverse,
-    // and a host is not refused for a mount nothing writable touches.
-    Ok(class_of(&tree.reaches_as_written(&place), writable))
+    Ok(match writable_source(address, source, writable, tree)? {
+        Some(_) => Class::Beneath,
+        None => Class::Follow,
+    })
 }
 
 /// The mounts of one run's view an executable path may lie in, as the start pinned them.
@@ -986,7 +1017,8 @@ fn why_unopened(error: &io::Error) -> String {
 enum Unfollowed {
     /// The path itself is at fault: what follows the entry's text in the refusal.
     Refused(String),
-    /// A symbolic link the walk read has no place (D26, D30).
+    /// A symbolic link the walk read, or a directory it passed through, has no place (D26,
+    /// D30).
     Unplaced(Unestablished),
 }
 
@@ -998,7 +1030,7 @@ impl From<String> for Unfollowed {
 
 impl Unfollowed {
     /// The refusal of the start: `exec.sandbox-path-unrepresentable` for a path at fault, and
-    /// [`PLACE_UNSERVED`] with the cause for a link that has no place.
+    /// [`PLACE_UNSERVED`] with the cause for a link or a directory that has no place.
     fn refusal(self, text: &str, address: &str) -> DriverError {
         match self {
             Self::Refused(why) => unrepresentable(text, why, address),
@@ -1026,6 +1058,35 @@ fn judge_link(link: &Opened, tree: &MountTree, locations: &[Location]) -> Result
     }
 }
 
+/// **Every directory the walk of a followed entry passes through is placed** (D30): why one
+/// refuses the path, or `None`. `directory` is what the kernel reports for it, named by its
+/// path in the view.
+///
+/// A run that can write a directory on the way can rename it, or what it holds, while the
+/// helper resolves the same path in the run's view, and move the path's end to a directory
+/// neither side judged. A path that never passes through a place a run can write cannot be
+/// moved by a run. A directory that has no place refuses like a link that has none: whether
+/// a run can write it cannot be said.
+///
+/// The caller holds the answer until the path's end was judged, so a path that ends where a
+/// run can write, or reads a link that refuses, keeps the answer that names the end or the
+/// link: the walk only opens and reads on its way there.
+fn judge_passed(
+    directory: &Opened,
+    tree: &MountTree,
+    locations: &[Location],
+) -> Option<Unfollowed> {
+    match tree.table().place_of(directory) {
+        Err(why) => Some(Unfollowed::Unplaced(why)),
+        Ok(place) => shown_location(&place, locations).map(|location| {
+            Unfollowed::Refused(format!(
+                "passes through {}, which lies in {}, a location a run can write",
+                directory.path, location.path
+            ))
+        }),
+    }
+}
+
 /// Where a followed path ends in the view.
 struct Reached {
     /// The view path with every symbolic link resolved.
@@ -1037,13 +1098,17 @@ struct Reached {
     object: Option<Opened>,
     /// The first writable mount a symbolic link of the resolution was read in.
     crossed: Option<usize>,
+    /// Why the first directory the resolution passed through refuses the path: a run can
+    /// write it, or it has no place.
+    through: Option<Unfollowed>,
 }
 
 /// One start's view, as the driver will mount it, and what it needs to place a host path.
 struct Mounts<'a> {
     list: Vec<Mount<'a>>,
     /// Every host location a run can write: the workspace root and each declared writable root,
-    /// whether or not this start mounts them, and what this start binds writable.
+    /// whether or not this start mounts them, what this start binds writable, and the source
+    /// of every mount classed `beneath`.
     locations: Vec<Location>,
     tree: MountTree,
 }
@@ -1061,36 +1126,85 @@ fn fixed_mount<'a>(path: &str, source: Source<'a>, eligible: bool, writable: boo
     }
 }
 
-/// A mount that shows something of the host, classed from its source (D24).
-fn shown_mount<'a>(
-    address: &str,
-    path: &str,
+/// A mount that shows something of the host, before its source is classed (D24): the field
+/// it was declared in, and what the kernel reports for its source.
+struct Shown<'a> {
+    address: &'static str,
+    path: String,
     source: Source<'a>,
     file: bool,
     eligible: bool,
-    places: (&[Location], &MountTree),
-) -> Result<Mount<'a>, DriverError> {
-    let descriptor = match &source {
-        Source::Pinned(descriptor) => descriptor.as_raw_fd(),
-        Source::Host(descriptor) => descriptor.as_raw_fd(),
-        Source::Opaque => unreachable!("a shown mount binds a descriptor"),
-    };
-    let (locations, tree) = places;
-    let class = classed(
-        address,
-        &Opened::of_descriptor(descriptor, path),
-        locations,
-        tree,
-    )?;
-    Ok(Mount {
-        path: path.to_owned(),
-        names: names(path),
-        source,
-        file,
-        class,
-        eligible,
-        writable: class == Class::Beneath,
-    })
+    opened: Opened,
+}
+
+impl<'a> Shown<'a> {
+    fn of(
+        address: &'static str,
+        path: &str,
+        source: Source<'a>,
+        file: bool,
+        eligible: bool,
+    ) -> Self {
+        let descriptor = match &source {
+            Source::Pinned(descriptor) => descriptor.as_raw_fd(),
+            Source::Host(descriptor) => descriptor.as_raw_fd(),
+            Source::Opaque => unreachable!("a shown mount binds a descriptor"),
+        };
+        Self {
+            address,
+            path: path.to_owned(),
+            opened: Opened::of_descriptor(descriptor, path),
+            source,
+            file,
+            eligible,
+        }
+    }
+
+    fn mount(self, class: Class) -> Mount<'a> {
+        Mount {
+            names: names(&self.path),
+            path: self.path,
+            source: self.source,
+            file: self.file,
+            class,
+            eligible: self.eligible,
+            writable: class == Class::Beneath,
+        }
+    }
+}
+
+/// **The class of every shown mount, together** (D24, D30). A source that overlaps a location
+/// a run can write is classed `beneath` and joins `locations` ([`writable_source`]); the
+/// sources still classed `follow` are then asked again, against it too, until none changes.
+/// So the answer does not depend on the order the mounts were declared in, and what the
+/// helper will be told the run can write is what the driver judges every path against.
+///
+/// # Errors
+///
+/// As [`writable_source`].
+fn class_together(
+    shown: &[Shown<'_>],
+    locations: &mut Vec<Location>,
+    tree: &MountTree,
+) -> Result<Vec<Class>, DriverError> {
+    let mut classes = vec![Class::Follow; shown.len()];
+    loop {
+        let mut changed = false;
+        for (mount, class) in shown.iter().zip(&mut classes) {
+            if *class == Class::Beneath {
+                continue;
+            }
+            if let Some(location) = writable_source(mount.address, &mount.opened, locations, tree)?
+            {
+                locations.push(location);
+                *class = Class::Beneath;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(classes);
+        }
+    }
 }
 
 /// Every host location a run can write, placed on `tree` with what it reaches (D30): the
@@ -1144,8 +1258,7 @@ impl<'a> Mounts<'a> {
         let tree = table
             .into_tree()
             .map_err(|why| start_unplaced(ENTRY, &why))?;
-        let locations = writable_locations(view, config, &tree)?;
-        let places = (locations.as_slice(), &tree);
+        let mut locations = writable_locations(view, config, &tree)?;
         // In the order D24 lists the writable mounts: the workspace, the writable roots, the
         // mounts classed `beneath`, then the view's own file systems.
         let mut list = vec![fixed_mount(
@@ -1162,6 +1275,7 @@ impl<'a> Mounts<'a> {
                 true,
             ));
         }
+        let mut shown = Vec::new();
         for (path, eligible) in BASE_MOUNTS
             .iter()
             .map(|path| (*path, true))
@@ -1173,30 +1287,35 @@ impl<'a> Mounts<'a> {
                 continue;
             };
             let source = Source::Host(OwnedFd::from(directory));
-            list.push(shown_mount(ENTRY, path, source, false, eligible, places)?);
+            shown.push(Shown::of(ENTRY, path, source, false, eligible));
         }
         for root in view.read_only_roots {
             let source = Source::Pinned(root.descriptor());
-            list.push(shown_mount(
+            shown.push(Shown::of(
                 "read_only_roots",
                 root.mount(),
                 source,
                 false,
                 true,
-                places,
-            )?);
+            ));
         }
         for file in view.read_only_files {
             let source = Source::Pinned(file.descriptor());
-            list.push(shown_mount(
+            shown.push(Shown::of(
                 "read_only_files",
                 file.mount(),
                 source,
                 true,
                 true,
-                places,
-            )?);
+            ));
         }
+        let classes = class_together(&shown, &mut locations, &tree)?;
+        list.extend(
+            shown
+                .into_iter()
+                .zip(classes)
+                .map(|(mount, class)| mount.mount(class)),
+        );
         list.push(fixed_mount(TMP_MOUNT, Source::Opaque, false, true));
         list.push(fixed_mount(DEV_MOUNT, Source::Opaque, false, true));
         if view.scratch {
@@ -1240,11 +1359,16 @@ impl<'a> Mounts<'a> {
     /// bind, an absolute target starting again at the view's root, not the host's. `asked` is
     /// the path as the profile wrote it, which a refusal names.
     ///
-    /// Every symbolic link read is placed first ([`judge_link`]).
+    /// Every symbolic link read is placed first ([`judge_link`]), and refuses where it is
+    /// read. So is every directory passed through ([`judge_passed`]); what the first of them
+    /// refuses for is returned with the end, for the caller to hold against the path once the
+    /// end was judged. `..` drops the last name of the path so far, which holds no link: the
+    /// helper resolves the same way.
     fn follow(&self, path: &str, asked: &str) -> Result<Reached, Unfollowed> {
         let mut pending: VecDeque<String> = names(path).into();
         let mut current: Vec<String> = Vec::new();
         let mut crossed = None;
+        let mut through = None;
         let mut links = 0;
         while let Some(name) = pending.pop_front() {
             match name.as_str() {
@@ -1277,12 +1401,20 @@ impl<'a> Mounts<'a> {
                     mount: index,
                     object: None,
                     crossed,
+                    through,
                 });
             };
+            let here = join(&current);
+            // A mount the run can write, entered and not ended in: by the mount's own name.
+            if mount.writable && !pending.is_empty() && through.is_none() {
+                through = Some(Unfollowed::Refused(format!(
+                    "passes through {here}, in the writable mount {}",
+                    mount.path
+                )));
+            }
             if rel.is_empty() {
                 continue;
             }
-            let here = join(&current);
             if mount.file {
                 return Err(Unfollowed::Refused(format!(
                     "names {here}, beneath a mount that is a single file"
@@ -1314,9 +1446,15 @@ impl<'a> Mounts<'a> {
                 for name in names(&target).into_iter().rev() {
                     pending.push_front(name);
                 }
+            } else if !mount.writable && !pending.is_empty() && through.is_none() {
+                // A directory on the way, in a mount no class calls writable: by its place.
+                let passed = Opened::of_descriptor(opened.as_raw_fd(), &here);
+                through = judge_passed(&passed, &self.tree, &self.locations);
             }
         }
-        self.end(&current, asked, crossed)
+        let mut reached = self.end(&current, asked, crossed)?;
+        reached.through = through;
+        Ok(reached)
     }
 
     /// Where a walk ended: the mount `current` lies in, and what the kernel reports for the
@@ -1357,6 +1495,7 @@ impl<'a> Mounts<'a> {
             mount: index,
             object,
             crossed,
+            through: None,
         })
     }
 
@@ -1392,13 +1531,17 @@ impl<'a> Mounts<'a> {
             .table()
             .place_of(&object)
             .map_err(|why| start_unplaced(address, &why))?;
-        match shown_location(&place, &self.locations) {
-            Some(location) => Err(refuse(format!(
+        if let Some(location) = shown_location(&place, &self.locations) {
+            return Err(refuse(format!(
                 "resolves to {}, which shows {}, a location a run can write",
                 reached.view, location.path
-            ))),
-            None => Ok(()),
+            )));
         }
+        // The end is where no run can write; the way to it is judged last, so a path that
+        // ends where a run can write keeps the answer it had.
+        reached
+            .through
+            .map_or(Ok(()), |why| Err(why.refusal(text, address)))
     }
 
     /// One path of a list, located in the view and held to the rules of design 35 § 5.
@@ -1439,14 +1582,26 @@ impl<'a> Mounts<'a> {
             ));
         }
         match mount.class {
-            // No part may be a symbolic link: a run could have left one.
-            Class::Beneath if !rel.is_empty() => {
+            Class::Beneath => {
                 let directory = mount.descriptor().expect("an eligible mount is walked");
-                open_beneath(directory, &rel.join("/"), 0)
-                    .map(drop)
-                    .map_err(|error| refuse(why_unopened(&error)))?;
+                // No part may be a symbolic link: a run could have left one.
+                let opened = if rel.is_empty() {
+                    None
+                } else {
+                    Some(
+                        open_beneath(directory, &rel.join("/"), 0)
+                            .map_err(|error| refuse(why_unopened(&error)))?,
+                    )
+                };
+                // Every entry is placed where it ends, whatever its class (D26): an end on a
+                // mount of a type outside the list, beneath a mount a run can write, is
+                // compared with nothing, and is refused here as under a `follow` mount.
+                let end = opened.as_ref().unwrap_or(directory);
+                self.tree
+                    .table()
+                    .place_of(&Opened::of_descriptor(end.as_raw_fd(), &path))
+                    .map_err(|why| start_unplaced(address, &why))?;
             }
-            Class::Beneath => {}
             Class::Follow => self.check_followed(text, &path, address)?,
         }
         let rel = if rel.is_empty() {

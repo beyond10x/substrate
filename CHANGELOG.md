@@ -95,8 +95,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (501) at the open, and status 125 from the helper. A tenth cause, `mount-covered`, names a
   mount beneath such a location that a later mount hides or that lies under a stack; it
   refuses the open. The host directory of a read-only root, and `/usr`, `/bin`, `/lib` and
-  `/lib64`, are never refused for a mount beneath them: such a mount is counted by what the
-  mount table says it shows, which can only make the directory count as one a run can write.
+  `/lib64`, are never refused for a mount beneath them while they show nothing a run can
+  write: such a mount is counted by what the mount table says it shows, which can only make
+  the directory count as one a run can write. A directory that does count as one is asked
+  like every other location a run can write, and a mount beneath it that cannot be compared
+  refuses the start `exec.sandbox-place-unserved` (501) with the cause and the field the
+  mount was declared in, before anything is dispatched.
   A start without a list reads no mount table, as before.
 - **A symbolic link on a file system of a type other than `ext4`, `overlay` and `tmpfs` is
   no longer followed.** Also on `main` since pull request 241, and in no release. A mount of
@@ -110,10 +114,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   refused as before, and now by the helper as well, which checked only where a path ends.
   The same file system of such a type mounted beneath a workspace and beneath a read-only
   root also makes that root count as one a run can write.
+- **A listed path that passes through a directory a run can write is refused**, also where
+  it ends outside every such directory: a link in a read-only root to `/workspace/../usr/bin`
+  is such a path. Also on `main` since pull request 241, and in no release. A run that
+  shares the directory could rename what it holds while the helper resolved the path, and
+  move the path's end to a directory nothing had judged. The driver refuses the start
+  `exec.sandbox-path-unrepresentable` (422) and the helper exits 125; a directory on the way
+  that has no place refuses like a link that has none. The helper no longer asks the kernel
+  for `..`: it keeps the directories of its walk open and steps back to the one before, as
+  the driver resolves the same text.
+- **Every entry and the program are placed where they end, whatever the mount they lie
+  in.** One in a workspace or another mount a run can write was opened and not placed, so an
+  entry that ended on a file system of a type other than `ext4`, `overlay` and `tmpfs`
+  mounted there was admitted. It is refused `exec.sandbox-place-unserved` (501) now, and by
+  the helper with status 125.
 - `substrate_exec_gate::place`: `Unestablished` gains the public field `asked` (the new
   `Asked`) and `Cause` the variant `MountCovered`. New and public, for the host driver:
-  `MountTree` (`table`, `reaches`, `reaches_as_written`), `Reach` (`places`, `holds`,
-  `overlaps`), `Unlisted`, `MountTable::into_tree` and `into_tree_as_written`.
+  `MountTree` (`table`, `reaches`, `reaches_as_written`), `Reach` (`holds`, `overlaps`),
+  `Unlisted` and `MountTable::into_tree`. `Reach::places` and
+  `MountTable::into_tree_as_written` are public for test code and hidden from the
+  documentation. `Relation`, `Place::relation`, `Place::lies_in`, `MountTable::lies_in` and
+  the free function `place`, which pull request 241 made public and no release contains,
+  have no user outside the module and are private to the crate again.
 
 ## [0.22.0] — 2026-11-20
 

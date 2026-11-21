@@ -326,7 +326,9 @@ require_executed -p b10x-substrate-exec-gate gate \
 # and the lane says in one line which cases did not run: there they are workstation evidence,
 # never a passed case. A name written `?<name>|<reason>` depends on something else the host
 # may lack (a mount this user cannot open, `/usr/local`, an overlay in a user namespace): its
-# `ABSENT (` line is taken on any host where it gives that reason, and named.
+# `ABSENT (` line is taken on any host where it gives that reason, and named. A name written
+# `=<name>` is a case of such a root that makes no mount: its `executed` line is required on
+# every host.
 if unshare --user --map-root-user --mount -- mount -t tmpfs tmpfs /tmp >/dev/null 2>&1; then
   mounts_granted=1
 else
@@ -345,18 +347,22 @@ require_staged() {
   log="$(cargo test -p "${package}" --locked --test "${binary}" \
     -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${log}" >&2; exit 1; }
   printf '%s\n' "${log}"
-  local name reason
+  local name reason always
   for name in "$@"; do
     reason=""
+    always=0
     if [[ "${name}" == \?* ]]; then
       name="${name#\?}"
       reason="${name#*|}"
       name="${name%%|*}"
+    elif [[ "${name}" == =* ]]; then
+      name="${name#=}"
+      always=1
     fi
     if grep -qF "${name}: executed" <<<"${log}"; then
       continue
     fi
-    if (( ! mounts_granted )) && grep -qF "${name}: ABSENT (" <<<"${log}"; then
+    if (( ! mounts_granted && ! always )) && grep -qF "${name}: ABSENT (" <<<"${log}"; then
       unstaged+=("${binary}: ${name}")
       continue
     fi
@@ -381,10 +387,29 @@ require_staged adversary5_view_mounts \
   '?adversary5 exec view mounts usr local|no /usr/local on this host' \
   'adversary5 exec view mounts stack beneath a root' \
   '?adversary5 exec view mounts unopenable mount beneath a root|this host has no mount of a listed type'
+# The second review's roots: a root the count classes `beneath` is refused before dispatch,
+# every entry is placed where it ends, and a followed path that passes through a directory a
+# run can write is refused.
+require_staged adversary6_view_mounts \
+  'adversary6 exec view mounts beneath by the count' \
+  'adversary6 exec view mounts entry on an unlisted type' \
+  'adversary6 exec view mounts links'
+require_staged security6_view_mounts \
+  'security6 view mounts link on a mount beneath a root only' \
+  '?security6 view mounts root with mounts this user cannot open|this host has no mount beneath' \
+  '=security6 view mounts trusted link through the workspace'
 require_staged -p b10x-substrate-exec-gate view_mounts_gate \
   'exec gate view mounts follow into a mount beneath a writable mount' \
   'exec gate view mounts links of a followed path' \
+  'exec gate view mounts path through a writable directory' \
+  'exec gate view mounts beneath path placed' \
   'exec gate view mounts unlisted mount beneath a writable mount'
+require_staged -p b10x-substrate-exec-gate adversary6_links_gate \
+  'adversary6 exec gate links unplaced link' \
+  'adversary6 exec gate links writable link' \
+  'adversary6 exec gate links magic links' \
+  'adversary6 exec gate links walk' \
+  'adversary6 exec gate links no writable mount'
 require_staged -p b10x-substrate-exec-gate adversary5_view_mounts_gate \
   'adversary5 exec gate view mounts file bind' \
   'adversary5 exec gate view mounts chain and escapes' \
@@ -392,7 +417,7 @@ require_staged -p b10x-substrate-exec-gate adversary5_view_mounts_gate \
   'adversary5 exec gate view mounts writable root is a mount point' \
   'adversary5 exec gate view mounts planted link on an unlisted type' \
   'adversary5 exec gate view mounts covered mounts' \
-  '?adversary5 exec gate view mounts limit: overlay upper|the stage failed'
+  '?adversary5 exec gate view mounts limit: overlay upper|no overlay mount in a user namespace on this host'
 if (( ${#unstaged[@]} > 0 )); then
   if (( mounts_granted )); then
     why="this host lacks what they need"
@@ -406,6 +431,16 @@ fi
 require_executed -p b10x-substrate-exec-gate adversary5_mount_tree \
   'adversary5 mount tree 10000 rows side by side: linked in' \
   'adversary5 mount tree 10000 rows deep: linked in'
+require_executed -p b10x-substrate-exec-gate adversary6_reach \
+  'adversary6 reach: '
+# The helper's walk of a followed path, on directories of its own: no mount and no namespace.
+# Its last case holds the helper under `/usr/bin/strace`, as the trace case of
+# `security3_exec_gate` does the driver's start.
+require_executed -p b10x-substrate-exec-gate security6_gate \
+  'security6 exec gate links: program and loader: executed' \
+  'security6 exec gate links: absolute targets: executed' \
+  'security6 exec gate links: a writable directory on the way: executed' \
+  'security6 exec gate links: a directory moved during the walk: executed'
 require_executed -p b10x-substrate-exec-gate adversary_gate \
   'adversary landlock failures: executed'
 require_executed -p b10x-substrate-exec-gate security2_gate \

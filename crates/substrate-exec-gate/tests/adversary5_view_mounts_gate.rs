@@ -442,9 +442,17 @@ fn adversary5_covered_mounts_refuse_beneath_a_writable_mount_and_nowhere_else() 
 /// writable mount. The entry `fs/ro/ov/tool` is admitted, the run rewrites the upper file and
 /// the listed path runs the new bytes. The place of the overlay's file is on the overlay's own
 /// device, and no mount is beneath `fs/w`. Not a finding: the design specifies no refusal.
+///
+/// **Changed by the implementor in the third round of the fix, on the coordinator's
+/// request.** Where the stage failed the case gave the reason every stage gives, `the stage
+/// failed`, and the lane took that reason on any host. The stage now says when it was the
+/// overlay mount that was refused, and the case prints a reason that names it: the lane takes
+/// only that one on a host that grants a user namespace other mounts.
 #[test]
 fn adversary5_limit_an_overlay_whose_upper_directory_the_run_writes_is_followed() {
     const NAME: &str = "limit: overlay upper";
+    // What the stage prints when the overlay mount, and nothing before it, was refused.
+    const REFUSED_OVERLAY: &str = "the overlay mount at fs/ro/ov was refused";
     let Some(sh) = find("sh") else {
         println!("adversary5 exec gate view mounts {NAME}: ABSENT (no sh on this host)");
         return;
@@ -454,9 +462,12 @@ fn adversary5_limit_an_overlay_whose_upper_directory_the_run_writes_is_followed(
         sh.display()
     );
     let observed = match (Run {
-        stage: "$mkdir fs/ro/low fs/ro/ov fs/w/up fs/w/work && $cp fs/ro/tool fs/ro/low/tool \
-                && $cp fs/ro/tool fs/w/up/tool && $mount -t overlay overlay \
-                -o lowerdir=fs/ro/low,upperdir=fs/w/up,workdir=fs/w/work fs/ro/ov",
+        stage: &format!(
+            "$mkdir fs/ro/low fs/ro/ov fs/w/up fs/w/work && $cp fs/ro/tool fs/ro/low/tool \
+             && $cp fs/ro/tool fs/w/up/tool && {{ $mount -t overlay overlay \
+             -o lowerdir=fs/ro/low,upperdir=fs/w/up,workdir=fs/w/work fs/ro/ov \
+             || {{ echo '{REFUSED_OVERLAY}'; false; }}; }}"
+        ),
         allow: &["fs/ro/ov/tool"],
         writable: &["fs/w"],
         script: &script,
@@ -465,6 +476,13 @@ fn adversary5_limit_an_overlay_whose_upper_directory_the_run_writes_is_followed(
     .output()
     {
         Ok(output) => seen(&output),
+        Err(reason) if reason.contains(REFUSED_OVERLAY) => {
+            println!(
+                "adversary5 exec gate view mounts {NAME}: ABSENT (no overlay mount in a user \
+                 namespace on this host: {reason})"
+            );
+            return;
+        }
         Err(reason) => {
             println!("adversary5 exec gate view mounts {NAME}: ABSENT ({reason})");
             return;

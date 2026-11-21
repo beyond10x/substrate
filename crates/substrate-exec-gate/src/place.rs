@@ -57,19 +57,20 @@
 //!   source of a read-only mount) never refuses. A mount beneath it is counted as reached by
 //!   the root its own row names, whether or not the kernel shows it there: that can only make
 //!   the directory overlap more, never less, and a host is not refused for a mount nothing
-//!   writable touches.
+//!   writable touches. A caller that finds such a directory to overlap a location a run can
+//!   write takes it for one from then on, and asks it through [`MountTree::reaches`].
 //!
 //! A mount of a file-system type outside the list is not compared as a place, and is refused
 //! only where the caller says so ([`Unlisted`]). Its row is kept all the same: two such rows
 //! with one device, the root of one in the root of the other, show the same files, so two
 //! directories that each reach one of them overlap ([`Reach::overlaps`]). No path is ever
-//! placed on such a mount: **a symbolic link read there, like a file named there, has no
-//! place and refuses** where it is asked.
+//! placed on such a mount: **a symbolic link read there, a directory passed through there and a
+//! file named there have no place and refuse** where they are asked.
 //!
-//! [`place`] is the one function that establishes a place, from the reported mount ID, the
-//! descriptor's path and the table's text. The helper and the driver compile this file, so the
-//! two cannot disagree. The helper reads the table of the run's view; the driver reads its own,
-//! for host paths.
+//! [`MountTable::place`] is the one function that establishes a place, from the reported
+//! mount ID, the descriptor's path and the table. The helper and the driver compile this file,
+//! so the two cannot disagree. The helper reads the table of the run's view; the driver reads
+//! its own, for host paths.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -180,7 +181,7 @@ impl fmt::Display for Unestablished {
 
 /// How one place stands to another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Relation {
+pub(crate) enum Relation {
     /// Neither lies in the other.
     Apart,
     /// The first is the other or lies in it.
@@ -198,7 +199,7 @@ pub struct Place {
 
 impl Place {
     /// How this place stands to `other`.
-    pub fn relation(&self, other: &Self) -> Relation {
+    pub(crate) fn relation(&self, other: &Self) -> Relation {
         if self.device != other.device {
             Relation::Apart
         } else if self.names.starts_with(&other.names) {
@@ -211,12 +212,13 @@ impl Place {
     }
 
     /// Whether this place is `other` or lies beneath it.
-    pub fn lies_in(&self, other: &Self) -> bool {
+    pub(crate) fn lies_in(&self, other: &Self) -> bool {
         self.relation(other) == Relation::Within
     }
 }
 
-/// What the kernel reported for an opened path: the inputs of [`place`] beside the table.
+/// What the kernel reported for an opened path: the inputs of [`MountTable::place`] beside the
+/// table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Opened {
     /// The path as it was asked, which a refusal names.
@@ -257,6 +259,9 @@ pub struct Reach {
 
 impl Reach {
     /// The places: the directory's own first.
+    // Public for the cases that hold a reach, in this crate's `tests/`. No caller of the
+    // library reads the places: a reach is asked through `holds` and `overlaps`.
+    #[doc(hidden)]
     pub fn places(&self) -> &[Place] {
         &self.places
     }
@@ -438,7 +443,9 @@ impl MountTable {
     ///
     /// [`Unestablished`] when either place cannot be established. A caller cannot read a failure
     /// as "outside".
-    pub fn lies_in(&self, subject: &Opened, other: &Opened) -> Result<bool, Unestablished> {
+    // For the unit cases: every caller asks through what a directory reaches (D30).
+    #[cfg(test)]
+    pub(crate) fn lies_in(&self, subject: &Opened, other: &Opened) -> Result<bool, Unestablished> {
         Ok(self.place_of(subject)?.lies_in(&self.place_of(other)?))
     }
 }
@@ -477,6 +484,9 @@ pub enum Unlisted {
     Skipped,
     /// It refuses, `file-system-unlisted`: beneath a denied directory, whose files the
     /// profile denies wherever else that file system is mounted.
+    // No caller on this branch: the deny-list (`story:executable-deny-list`) asks this of
+    // every denied directory. Held here by the unit cases, so the two stories share one
+    // function.
     Refused,
 }
 
@@ -593,6 +603,9 @@ impl MountTable {
     /// the one root of the view, at `/`, or where a row's parents never reach that root;
     /// `mount-row-repeated` where more than one row has the parent ID; and
     /// `mount-point-mismatch` where a row's mount point is not its parent row's or beneath it.
+    // Public for the cases on tables written as text, in this crate's `tests/` and in the
+    // host driver's unit cases. Production reads this process's table: `into_tree`.
+    #[doc(hidden)]
     pub fn into_tree_as_written(self) -> Result<MountTree, Unestablished> {
         let at: HashMap<u64, &str> = self
             .rows
@@ -790,7 +803,10 @@ impl MountTree {
 /// The first cause that holds, in D26's order, of those that need no system call:
 /// `mount-table-unparsable`, `mount-id-unreported`, `mount-row-missing`, `mount-row-repeated`,
 /// `mount-root-deleted`, `mount-point-mismatch`, `file-system-unlisted`.
-pub fn place(
+// For the unit cases, which write a table as text: no caller outside them parses a table
+// to ask one place of it.
+#[cfg(test)]
+pub(crate) fn place(
     mount_id: Option<u64>,
     descriptor_path: Option<&str>,
     table: &str,

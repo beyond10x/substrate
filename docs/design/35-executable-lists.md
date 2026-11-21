@@ -4008,8 +4008,9 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
     `exec.sandbox-place-unserved`.
   - **On the read-only side a mount that cannot be asked, or is covered, never refuses.** It is
     counted as reached by the root its own table row names (`MountTree::reaches_as_written`,
-    used for a root's or base directory's source and for the helper's file); so are a removed
-    root and a mount ID two rows have. Measured before it: a start with a read-only root at
+    used for a root's or base directory's source only); so are a removed root and a mount ID
+    two rows have. The helper's file is not counted this way: it is one place, read from its
+    own descriptor and compared with each writable location's fail-closed reach. Measured before it: a start with a read-only root at
     `/var/lib` was refused `path-unopenable` on a workstation, for a container layer mount the
     user cannot open, and a stack beneath a root was refused `mount-covered`. The writable side
     keeps the fail-closed table. The decision rests on one sentence, that counting such a mount
@@ -4018,6 +4019,42 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
   - The walk beneath a directory is a loop (10 000 chained mounts overflowed the stack when it
     recursed), and a mount ID two rows share beneath a writable location is
     `mount-row-repeated`.
+- **Three decisions after the second review of that branch**, accepted by the stakeholder
+  (agent:sdc) on 2026-11-21. They narrow the two above.
+  - The stakeholder's condition on the read-only side was a target for the adversary: find a
+    root, a mount that cannot be opened and an entry where counting the mount as reached makes a
+    class looser. Result: the sentence holds for the class. 3 068 generated mount tables (stacks,
+    hidden rows, removed roots, repeated IDs, two unlisted types) gave 334 808 pairs of a source
+    and a location; in 285 325 the kernel's answer could be had and agreed with the table's, in
+    44 793 the kernel refused and the table's answer overlapped, and in none did the kernel's
+    answer overlap where the table's did not. It failed for two outcomes of the class, which the
+    first two decisions close.
+  - **A source whose reach as written overlaps a writable location is a writable location for
+    the driver too.** Its reach is asked strictly, and where that fails the start is refused
+    before dispatch `exec.sandbox-place-unserved` with the root's field as address. Measured
+    before it: such a root was handed to the helper as writable, and every start with it ended
+    125 after dispatch. A root classed this way joins the locations the other mounts are asked
+    against, so the answer does not depend on the order of declaration. "Never refuses" on the
+    read-only side therefore means a source that overlaps nothing writable.
+  - **Every entry is placed where it ends, whatever its class**, in the driver and in the
+    helper; no place refuses `exec.sandbox-place-unserved`, and the helper exits 125. Measured
+    before it: an entry on a `ramfs` was refused under a root classed `follow` and ran once a
+    covered mount beside it turned the root's class to `beneath`, because an entry of that class
+    was opened and never placed.
+  - **A followed path whose walk visits a directory in a place a writable location reaches is
+    refused on both sides**: `exec.sandbox-path-unrepresentable` before dispatch, 125 in the
+    helper; a directory on the way that has no place refuses too. Measured before it: the
+    helper's walk, name by name, asked the kernel for `..` in a second call, and a second run
+    that shared the writable mount renamed the directory in between; the execute right landed
+    one directory off in 363 of 4000 starts of a soak, never in a writable place. The helper now
+    also resolves `..` as the driver does, on the directories its walk holds open, and refuses a
+    relative path that leaves the directory it starts in.
+  - A limit stated with these, and not staged: where one file system shows under two device
+    numbers (a network file system mounted twice with different options, two FUSE mounts of one
+    directory), the comparison of mounts cannot see that a read-only root and a writable
+    location hold the same files. The guard there is that nothing on a file system outside
+    `ext4`, `overlay` and `tmpfs` is followed. No stage for NFS or FUSE exists without
+    privilege.
 - The ninth revision as a whole: nothing was run or built for it, except one read of the
   probe host's own `/proc/self/mountinfo`: 44 rows, one without a parent row, and one mount
   point with two rows. E18 to E22 are the reviews' cases and logs, read. The code was read at

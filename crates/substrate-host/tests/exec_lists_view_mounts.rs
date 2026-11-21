@@ -13,7 +13,8 @@
 //! - a read-only root holds a mount on which a declared writable root lies, and the profile
 //!   lists a link planted through that root;
 //! - a read-only root holds a mount of a file-system type outside the list, which no rule
-//!   compares, and the profile lists a link on it: the link has no place;
+//!   compares, and the profile lists a link on it: neither the link nor the directory it lies
+//!   in has a place;
 //! - the helper's own file is installed on the mount.
 //!
 //! The cases need `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a delegated cgroup v2 subtree this
@@ -221,11 +222,21 @@ async fn inside(host: &Path) {
     // rule compares: where the link lies cannot be said.
     let apart = host.join("apart");
     std::os::unix::fs::symlink("/usr/bin", apart.join("media/link")).expect("a link on the ramfs");
+    // And a link beside the mount whose target passes through the mount's directory and ends
+    // beside it again: no link and no end on the ramfs, only a directory on the way.
+    std::fs::create_dir_all(apart.join("bin")).expect("a directory beside the mount");
+    std::os::unix::fs::symlink("media/../bin", apart.join("around")).expect("a link around");
     match open(host, &cgroup_root, helper(), Vec::new()) {
-        Ok(adapter) => println!(
-            "{NAME} inside: unlisted {}",
-            run(&adapter, &workspace, &apart, "/opt/k/media/link", &script).await
-        ),
+        Ok(adapter) => {
+            println!(
+                "{NAME} inside: unlisted {}",
+                run(&adapter, &workspace, &apart, "/opt/k/media/link", &script).await
+            );
+            println!(
+                "{NAME} inside: passed {}",
+                run(&adapter, &workspace, &apart, "/opt/k/around", &script).await
+            );
+        }
         Err(error) => println!("{NAME} inside: unlisted did not open: {error}"),
     }
 
@@ -254,6 +265,10 @@ async fn inside(host: &Path) {
 /// - `unlisted`: a third mount, a `ramfs` at `<host>/apart/media`, is of a type outside the
 ///   list. A read-only root holds it and the profile lists a link on it. The link has no
 ///   place, so the start is refused `exec.sandbox-place-unserved` with the cause;
+/// - `passed`: the same root holds `around`, a link to `media/../bin`: its target passes
+///   through the mount's directory and ends beside the mount. The directory has no place
+///   either, so whether a run can write it cannot be said: the same refusal, naming the
+///   directory;
 /// - `gate`: the helper's file on the first mount is refused at the open,
 ///   `config.exec-gate-invalid`.
 #[tokio::test(flavor = "multi_thread")]
@@ -319,6 +334,16 @@ async fn what_is_mounted_beneath_a_writable_location_lies_in_it() {
         failures.push(format!(
             "a link on a mount of a type outside the list was followed, or refused for another \
              reason: {unlisted}"
+        ));
+    }
+    let passed = observed("passed");
+    println!("{NAME}: passed: {passed}");
+    if !(passed.starts_with("refused exec.sandbox-place-unserved")
+        && passed.contains("the place of /opt/k/media: file-system-unlisted ramfs"))
+    {
+        failures.push(format!(
+            "a path through a directory on a mount of a type outside the list was followed, or \
+             refused for another reason: {passed}"
         ));
     }
     let gate = observed("gate");

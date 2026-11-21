@@ -19,11 +19,11 @@ use substrate_guarded::DriverErrorClass;
 use substrate_wire::ReadOnlyRoot;
 
 use super::{
-    EXEC_GATE_INVALID, EXEC_GATE_UNSERVED, ExecGate, FileFacts, Location, OpenDecision,
-    OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, Unfollowed,
-    View, check_file, check_length, check_linkage, check_links, check_location, check_openable,
-    check_protocol, classed, decide_open, judge_link, open, place_open, plan, shown_location,
-    start_unplaced, withheld_facts,
+    EXEC_GATE_INVALID, EXEC_GATE_UNSERVED, ExecGate, FileFacts, Location, Mounts, OpenDecision,
+    OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, Shown, Source,
+    Unfollowed, View, check_file, check_length, check_linkage, check_links, check_location,
+    check_openable, check_protocol, class_together, classed, decide_open, judge_link, judge_passed,
+    open, place_open, plan, shown_location, start_unplaced, withheld_facts, writable_source,
 };
 use crate::confinement::{Fact, FactWithheld};
 use crate::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
@@ -321,10 +321,13 @@ fn a_mount_beneath_a_writable_location_that_cannot_be_compared_refuses_the_open(
 }
 
 /// D30 on the side nothing is written through: **a mount beneath the host source of a
-/// declared mount refuses no start**, whatever the kernel would say of it. A stack, a removed
-/// root and a mount ID two rows have are counted by the root each row names, and the class is
-/// decided: `follow` where none of them shows a writable place, and `beneath` where one does,
-/// although a later mount covers it. The fail-closed causes belong to the writable side
+/// declared mount refuses no start**, whatever the kernel would say of it, where the source
+/// overlaps nothing a run can write. A stack, a removed root and a mount ID two rows have are
+/// counted by the root each row names, and the class is `follow` where none of them shows a
+/// writable place. Where one does, although a later mount covers it, the source is a writable
+/// location from then on and is asked as one
+/// (`a_source_that_overlaps_a_writable_location_is_asked_as_one`). The fail-closed causes
+/// belong to the writable side
 /// (`a_mount_beneath_a_writable_location_that_cannot_be_compared_refuses_the_open`).
 #[test]
 fn a_mount_beneath_a_source_that_cannot_be_compared_refuses_no_start() {
@@ -349,10 +352,27 @@ fn a_mount_beneath_a_source_that_cannot_be_compared_refuses_no_start() {
         assert_eq!(class(rows, "/usr"), Class::Follow, "{rows}");
     }
     // Counted, not skipped: the covered mount shows a directory of a workspace, so the source
-    // is `beneath`. Never the looser answer for want of the kernel's.
+    // is never `follow` for want of the kernel's answer. It is a location a run can write, and
+    // the stack beneath it cannot be compared: refused here, before anything is dispatched.
     let covered = "80 31 259:2 /work/u/workspaces/ws_1/media /opt/tools/stack rw - ext4 /dev/a rw\n\
                    81 80 0:61 / /opt/tools/stack rw - tmpfs tmpfs rw\n";
-    assert_eq!(class(covered, "/opt/tools"), Class::Beneath);
+    let table = tree(&format!("{HOST}{covered}"));
+    let writable = established(&helper(), &table).writable;
+    let error = classed(
+        "read_only_roots",
+        &seen("/opt/tools", 31),
+        &writable,
+        &table,
+    )
+    .expect_err("a source that shows a workspace through a covered mount");
+    assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+    assert_eq!(error.address.as_deref(), Some("read_only_roots"));
+    assert!(
+        error
+            .message
+            .contains("cannot establish where /opt/tools/stack is attached: mount-covered"),
+        "{error}"
+    );
     assert_eq!(class(covered, "/opt/other"), Class::Follow);
     // The writable side still fails closed on the same stack.
     let stacked = tree(&format!(
@@ -389,6 +409,143 @@ fn a_mount_beneath_a_source_that_cannot_be_compared_refuses_no_start() {
     let error = start_unplaced("exec_subpaths", &unattached);
     assert_eq!(error.code, PLACE_UNSERVED);
     assert!(error.message.contains(attached), "{error}");
+}
+
+/// D24 and D30, **a source that overlaps a location a run can write is one from then on**:
+/// the helper is told the run can write its mount and asks the kernel about every mount
+/// beneath such a mount, so the driver asks the same before dispatch. Where every mount
+/// beneath the source can be compared it is a location with all it reaches; where one cannot,
+/// the start is refused `exec.sandbox-place-unserved` with the cause and the field the mount
+/// was declared in, in place of a run the helper ends with status 125.
+#[test]
+fn a_source_that_overlaps_a_writable_location_is_asked_as_one() {
+    // A mount beneath the source that shows a directory of a workspace.
+    const SHOWS: &str =
+        "80 31 259:2 /work/u/workspaces/ws_1/media /opt/tools/shown rw - ext4 /dev/a rw\n";
+    let asked = |rows: &str, address: &str| {
+        let table = tree(&format!("{HOST}{SHOWS}{rows}"));
+        let writable = established(
+            &sightings(seen("/opt/substrate/substrate-exec-gate", 31)),
+            &table,
+        )
+        .writable;
+        let source = writable_source(address, &seen("/opt/tools", 31), &writable, &table);
+        (table, source)
+    };
+    // Every mount beneath it can be compared: a location, with what it reaches.
+    let (table, location) = asked(
+        "84 31 0:64 / /opt/tools/cache rw - tmpfs tmpfs rw\n",
+        "read_only_roots",
+    );
+    let location = location
+        .expect("every mount beneath the source is compared")
+        .expect("a source that shows a workspace");
+    assert_eq!(location.path, "/opt/tools");
+    for (path, mount) in [
+        ("/opt/tools/bin", 31),
+        ("/opt/tools/shown/x", 80),
+        ("/opt/tools/cache/x", 84),
+    ] {
+        let place = table.table().place_of(&seen(path, mount)).expect("placed");
+        assert!(location.reaches.holds(&place), "{path}");
+    }
+    // One cannot: each cause the writable side fails closed on, with the declaring field.
+    for (rows, address, holds) in [
+        (
+            "81 31 0:60 / /opt/tools/stack rw - tmpfs tmpfs rw\n\
+             82 81 0:61 / /opt/tools/stack rw - tmpfs tmpfs rw\n",
+            "read_only_roots",
+            "cannot establish where /opt/tools/stack is attached: mount-covered",
+        ),
+        (
+            "82 31 259:2 /gone//deleted /opt/tools/removed rw - ext4 /dev/nvme0n1p2 rw\n",
+            "read_only_files",
+            "cannot establish where /opt/tools/removed is attached: mount-root-deleted",
+        ),
+        (
+            "83 31 0:62 / /opt/tools/twice rw - tmpfs tmpfs rw\n\
+             83 31 0:63 / /opt/tools/again rw - tmpfs tmpfs rw\n",
+            "exec_subpaths",
+            "mount-row-repeated",
+        ),
+    ] {
+        let error = asked(rows, address)
+            .1
+            .expect_err("a mount beneath a writable source that cannot be compared");
+        assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+        assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
+        assert_eq!(error.address.as_deref(), Some(address), "{error}");
+        assert!(error.message.contains(holds), "{error}");
+    }
+}
+
+/// D24, **the classes of the shown mounts are decided together.** A source classed `beneath`
+/// is a location a run can write, and a source that overlaps it is `beneath` too, although it
+/// overlaps no workspace and no declared writable root. The answer is the same in every order
+/// of declaration, and what the helper will be told the run can write is what every path is
+/// judged against.
+#[test]
+fn the_classes_of_the_shown_mounts_do_not_depend_on_their_order() {
+    // `/opt/a` shows a directory of a workspace and holds a tmpfs that `/opt/b` holds too.
+    const ROWS: &str = "\
+80 31 259:2 /work/u/workspaces/ws_1/media /opt/a/shown rw - ext4 /dev/a rw
+84 31 0:64 / /opt/a/shared rw - tmpfs tmpfs rw
+85 31 0:64 / /opt/b/shared rw - tmpfs tmpfs rw
+";
+    let shown = |address: &'static str, path: &str| Shown {
+        address,
+        path: path.to_owned(),
+        source: Source::Opaque,
+        file: false,
+        eligible: true,
+        opened: seen(path, 31),
+    };
+    let together = |rows: &str, order: [&str; 3]| {
+        let table = tree(&format!("{HOST}{ROWS}{rows}"));
+        let mut locations = established(
+            &sightings(seen("/opt/substrate/substrate-exec-gate", 31)),
+            &table,
+        )
+        .writable;
+        let shown: Vec<Shown<'_>> = order
+            .iter()
+            .map(|path| match *path {
+                "/opt/b" => shown("read_only_files", path),
+                _ => shown("read_only_roots", path),
+            })
+            .collect();
+        class_together(&shown, &mut locations, &table).map(|classes| {
+            let joined: Vec<String> = locations[2..]
+                .iter()
+                .map(|location| location.path.clone())
+                .collect();
+            (classes, joined)
+        })
+    };
+    let (classes, joined) = together("", ["/opt/a", "/opt/b", "/opt/c"]).expect("classed");
+    assert_eq!(classes, [Class::Beneath, Class::Beneath, Class::Follow]);
+    assert_eq!(joined, ["/opt/a", "/opt/b"]);
+    // `/opt/b` first: `follow` against the workspace alone, `beneath` once `/opt/a` joined.
+    let (classes, joined) = together("", ["/opt/b", "/opt/c", "/opt/a"]).expect("classed");
+    assert_eq!(classes, [Class::Beneath, Class::Follow, Class::Beneath]);
+    assert_eq!(joined, ["/opt/a", "/opt/b"]);
+    // And it is asked as a writable location: a stack beneath it refuses, with its own field.
+    let stack = "86 31 0:65 / /opt/b/stack rw - tmpfs tmpfs rw\n\
+                 87 86 0:66 / /opt/b/stack rw - tmpfs tmpfs rw\n";
+    for order in [
+        ["/opt/a", "/opt/b", "/opt/c"],
+        ["/opt/b", "/opt/c", "/opt/a"],
+    ] {
+        let error = together(stack, order).expect_err("a stack beneath a writable source");
+        assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+        assert_eq!(error.address.as_deref(), Some("read_only_files"), "{error}");
+        assert!(
+            error
+                .message
+                .contains("cannot establish where /opt/b/stack is attached: mount-covered"),
+            "{error}"
+        );
+    }
 }
 
 /// D30 and a file-system type outside the list. Such a mount is compared as a place nowhere:
@@ -529,6 +686,73 @@ fn a_symbolic_link_the_walk_reads_is_placed() {
         assert!(
             judged(&link(view, host, Some(mount_id))).is_ok(),
             "{view} was not followed"
+        );
+    }
+}
+
+/// D30, **every directory the walk of a followed entry passes through is placed.** One with no
+/// place refuses the start like a link with none, and one in a place a writable location
+/// reaches refuses the path: a run can rename what the directory holds while the helper
+/// resolves the same path. Either answer is handed back for the walk to hold until the
+/// path's end was judged.
+#[test]
+fn a_directory_the_walk_passes_through_is_placed() {
+    let table = tree(&format!(
+        "{HOST}\
+70 31 0:50 / /work/u/workspaces/ws_1/media rw - tmpfs tmpfs rw
+85 31 0:70 / /opt/tools/media rw - ramfs ramfs rw
+"
+    ));
+    let writable = established(
+        &sightings(seen("/opt/substrate/substrate-exec-gate", 31)),
+        &table,
+    )
+    .writable;
+    let passed = |view: &str, host: &str, mount_id: u64| {
+        let directory = Opened {
+            path: view.to_owned(),
+            mount_id: Some(mount_id),
+            descriptor_path: Some(host.to_owned()),
+            remaining: Vec::new(),
+        };
+        judge_passed(&directory, &table, &writable)
+    };
+    match passed("/opt/k/media/dir", "/opt/tools/media/dir", 85) {
+        Some(why @ Unfollowed::Unplaced(_)) => {
+            let error = why.refusal("/opt/k/media/dir/tool", "exec_subpaths");
+            assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+            assert_eq!(error.address.as_deref(), Some("exec_subpaths"));
+            assert!(
+                error.message.contains(
+                    "cannot establish the place of /opt/k/media/dir: file-system-unlisted ramfs"
+                ),
+                "{error}"
+            );
+        }
+        Some(Unfollowed::Refused(why)) => panic!("refused for the path: {why}"),
+        None => panic!("a directory with no place was passed"),
+    }
+    match passed("/opt/j/dir", "/work/u/workspaces/ws_1/media/dir", 70) {
+        Some(Unfollowed::Refused(why)) => {
+            assert_eq!(
+                why,
+                "passes through /opt/j/dir, which lies in /work/u/workspaces, a location a run \
+                 can write"
+            );
+            let error = Unfollowed::Refused(why).refusal("/opt/j/dir/../tool", "exec_subpaths");
+            assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
+        }
+        Some(Unfollowed::Unplaced(why)) => panic!("{why}"),
+        None => panic!("a directory a run can write was passed"),
+    }
+    for (view, host, mount_id) in [
+        ("/usr/lib", "/usr/lib", 31),
+        ("/opt/k/dir", "/opt/tools/dir", 31),
+        ("/tmp/dir", "/tmp/dir", 61),
+    ] {
+        assert!(
+            passed(view, host, mount_id).is_none(),
+            "{view} is in no place a run can write"
         );
     }
 }
@@ -1203,6 +1427,77 @@ impl Staged {
         self.plan_with_loader(roots, entries, program, None)
     }
 
+    /// Asks `ask` of this start's mounts, built on the host's own table and then given a
+    /// table in which **the mount the staged directories lie on has the type `ramfs`**: what
+    /// is placed once the view stands (an entry's end, a link and a directory of a walk) has
+    /// no place there. So a case holds that the question is asked at all, with no mount of
+    /// its own and no privilege.
+    fn on_an_unlisted_type<T>(
+        &self,
+        roots: &[(&Path, &str)],
+        ask: impl FnOnce(&Mounts<'_>) -> T,
+    ) -> T {
+        self.asked(roots, |mounts| mounts.tree = self.retyped(), ask)
+    }
+
+    /// Asks `ask` of this start's mounts, built on the host's own table and then changed by
+    /// `change`: what a walk is judged against once the view stands.
+    fn asked<T>(
+        &self,
+        roots: &[(&Path, &str)],
+        change: impl FnOnce(&mut Mounts<'_>),
+        ask: impl FnOnce(&Mounts<'_>) -> T,
+    ) -> T {
+        let workspace = OwnedFd::from(std::fs::File::open(&self.workspace).expect("workspace"));
+        let declared: Vec<ReadOnlyRoot> = roots
+            .iter()
+            .map(|(host, mount)| ReadOnlyRoot {
+                host_path: host.to_str().expect("UTF-8").to_owned(),
+                mount: (*mount).to_owned(),
+            })
+            .collect();
+        let pinned = crate::read_only_roots::pin(&declared).expect("pinned roots");
+        let view = View {
+            workspace: &workspace,
+            read_only_roots: &pinned,
+            read_only_files: &[],
+            writable_roots: &[],
+            scratch: false,
+        };
+        let config = HostConfig::minimum(self.root.path().join("workspaces"));
+        let mut mounts = Mounts::of(&view, &config).expect("the view on the host's table");
+        change(&mut mounts);
+        ask(&mounts)
+    }
+
+    /// This process's mount table, with the type of the mount the staged directories lie on
+    /// written as `ramfs`.
+    fn retyped(&self) -> MountTree {
+        let staged = Opened::of_path(self.root.path().to_str().expect("UTF-8"))
+            .expect("the staged directory opens")
+            .mount_id
+            .expect("the kernel reports its mount")
+            .to_string();
+        let mut retyped = String::new();
+        for row in std::fs::read_to_string("/proc/self/mountinfo")
+            .expect("the mount table")
+            .lines()
+        {
+            if row.split(' ').next() == Some(staged.as_str()) {
+                let (shared, own) = row.split_once(" - ").expect("the separator of a row");
+                let (_, own) = own.split_once(' ').expect("a file-system type");
+                retyped.push_str(shared);
+                retyped.push_str(" - ramfs ");
+                retyped.push_str(own);
+                retyped.push('\n');
+            } else {
+                retyped.push_str(row);
+                retyped.push('\n');
+            }
+        }
+        tree(&retyped)
+    }
+
     /// [`Self::plan`], for a helper that read `loader` as the host's ELF loader at open.
     fn plan_with_loader(
         &self,
@@ -1455,6 +1750,197 @@ fn a_followed_entry_that_resolves_into_a_writable_mount_is_refused() {
     let lists = plan("/opt/ro/system").expect("a link into the base system");
     assert_eq!(lists.allow[0].class(), Class::Follow);
     println!("exec gate followed entry into a writable mount: executed");
+}
+
+/// D24 and D30, **a followed path that passes through a directory a run can write is
+/// refused**, although no link lies there and the path ends where no run can write: the run
+/// can rename what the directory holds while the helper resolves the same path. The mount is
+/// named. A path that ends in a writable mount keeps the answer it had, and `..` in a target
+/// that never visits a writable place is resolved from the text.
+#[test]
+fn a_followed_path_through_a_writable_mount_is_refused() {
+    let staged = Staged::new();
+    if !placed("followed path through a writable mount", staged.root.path()) {
+        return;
+    }
+    std::fs::create_dir_all(staged.workspace.join("tools/bin")).expect("tools");
+    let shown = staged.root.path().join("workspaces/ws_2/shown");
+    std::fs::create_dir_all(shown.join("real")).expect("a directory in the workspace root");
+    let tools = staged.root.path().join("tools");
+    std::fs::create_dir_all(tools.join("dir")).expect("a root");
+    for (name, target) in [
+        ("around", "/workspace/../usr/bin"),
+        ("deeper", "/workspace/tools/bin/../../../usr/bin"),
+        ("beneath", "/opt/k/real/../../../usr/bin"),
+        ("ends", "/usr/../workspace/tools/bin"),
+        ("system", "/usr/bin"),
+        ("back", "dir/../system"),
+    ] {
+        std::os::unix::fs::symlink(target, tools.join(name)).expect("a link");
+    }
+    let plan = |entry: &str| {
+        staged.plan(
+            &[(&tools, "/opt/ro"), (&shown, "/opt/k")],
+            &[entry],
+            "/usr/bin/env",
+        )
+    };
+    for (entry, holds) in [
+        (
+            "/opt/ro/around",
+            "passes through /workspace, in the writable mount /workspace",
+        ),
+        (
+            "/opt/ro/deeper",
+            "passes through /workspace, in the writable mount /workspace",
+        ),
+        // A read-only root classed `beneath` is a mount the run can write.
+        (
+            "/opt/ro/beneath",
+            "passes through /opt/k, in the writable mount /opt/k",
+        ),
+        // The end is judged first.
+        (
+            "/opt/ro/ends",
+            "resolves to /workspace/tools/bin, in the writable mount /workspace",
+        ),
+    ] {
+        assert_refused(plan(entry), PATH_UNREPRESENTABLE, "exec_subpaths", holds);
+    }
+    // The host's loader is a followed path too.
+    assert_refused(
+        staged.plan_with_loader(
+            &[(&tools, "/opt/ro")],
+            &["/usr/bin"],
+            "/usr/bin/env",
+            Some("/opt/ro/around/env"),
+        ),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "passes through /workspace, in the writable mount /workspace",
+    );
+    for entry in ["/opt/ro/system", "/opt/ro/back"] {
+        let lists = plan(entry).expect("a path that visits no writable place");
+        assert_eq!(lists.allow[0].class(), Class::Follow, "{entry}");
+    }
+    println!("exec gate followed path through a writable mount: executed");
+}
+
+/// D26, **every entry is placed where it ends, whatever its class.** An entry and a program
+/// in a mount classed `beneath` are opened with no link followed and then placed: where the
+/// end has no place the start is refused `exec.sandbox-place-unserved` with the cause, as it
+/// is under a `follow` mount.
+#[test]
+fn an_entry_in_a_mount_classed_beneath_is_placed_where_it_ends() {
+    let staged = Staged::new();
+    if !placed("beneath entry placed", staged.root.path()) {
+        return;
+    }
+    write(&staged.workspace.join("bin/tool"), b"tool");
+    // On the host's own table each of them has a place.
+    staged
+        .plan(&[], &["bin", "/workspace"], "/workspace/bin/tool")
+        .expect("entries with a place");
+    for (text, address, named) in [
+        ("bin", "exec_subpaths", "/workspace/bin"),
+        (
+            "/workspace/bin/tool",
+            "exec_subpaths",
+            "/workspace/bin/tool",
+        ),
+        ("/workspace", "exec_subpaths", "/workspace"),
+        ("/workspace/bin/tool", "argv", "/workspace/bin/tool"),
+    ] {
+        let error = staged
+            .on_an_unlisted_type(&[], |mounts| mounts.located(text, address))
+            .expect_err("an end with no place");
+        assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+        assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
+        assert_eq!(error.address.as_deref(), Some(address), "{error}");
+        assert!(
+            error.message.contains(&format!(
+                "cannot establish the place of {named}: file-system-unlisted ramfs"
+            )),
+            "{error}"
+        );
+    }
+    println!("exec gate beneath entry placed: executed");
+}
+
+/// D30, **the walk asks**: `follow()` hands every symbolic link it reads to `judge_link`,
+/// before it takes the target, and every directory it passes through to `judge_passed`. Held
+/// on the driver's own walk of real files, through two changes made once the view stands:
+///
+/// - the files' own mount has no place. A link refuses where it is read and is named by its
+///   own view path, where the path's end would be named by the entry; a directory with no
+///   place before it is held, so the link is what the refusal names;
+/// - one directory of the root is a location a run can write. A path through it that ends
+///   beside it is refused for the directory, once the end was judged; a path that ends in it
+///   keeps the answer of the end.
+#[test]
+fn the_walk_asks_for_the_place_of_every_link_and_directory() {
+    let staged = Staged::new();
+    if !placed("walk asks for every place", staged.root.path()) {
+        return;
+    }
+    let tools = staged.root.path().join("tools");
+    for name in ["dir/inner", "beside"] {
+        std::fs::create_dir_all(tools.join(name)).expect("a directory of the root");
+    }
+    std::os::unix::fs::symlink("/usr/bin", tools.join("system")).expect("a link");
+    std::os::unix::fs::symlink("system", tools.join("hop")).expect("a link");
+    let roots: [(&Path, &str); 1] = [(&tools, "/opt/ro")];
+    // On the host's own table every path here is followed.
+    for path in ["/opt/ro/hop", "/opt/ro/dir/inner", "/opt/ro/beside"] {
+        staged
+            .plan(&roots, &[path], "/usr/bin/env")
+            .unwrap_or_else(|error| panic!("{path}: {error}"));
+    }
+    for path in ["/opt/ro/hop", "/opt/ro/dir/../hop"] {
+        let error = staged
+            .on_an_unlisted_type(&roots, |mounts| {
+                mounts.check_followed("the entry", path, "exec_subpaths")
+            })
+            .expect_err("a walk that reads a link with no place");
+        assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+        assert_eq!(error.address.as_deref(), Some("exec_subpaths"), "{error}");
+        assert!(
+            error
+                .message
+                .contains("cannot establish the place of /opt/ro/hop: file-system-unlisted ramfs"),
+            "{path}: {error}"
+        );
+    }
+    // `tools/dir` as a location a run can write, added once the root was classed `follow`.
+    let writable = |mounts: &mut Mounts<'_>| {
+        let directory = Opened::of_path(tools.join("dir").to_str().expect("UTF-8"))
+            .expect("the directory opens");
+        let place = mounts.tree.table().place_of(&directory).expect("placed");
+        let location = Location::reaching("the staged directory", &place, &mounts.tree)
+            .expect("nothing is mounted beneath it");
+        mounts.locations.push(location);
+    };
+    for (path, holds) in [
+        (
+            "/opt/ro/dir/../beside",
+            "passes through /opt/ro/dir, which lies in the staged directory, a location a run \
+             can write",
+        ),
+        (
+            "/opt/ro/dir/inner",
+            "resolves to /opt/ro/dir/inner, which shows the staged directory, a location a run \
+             can write",
+        ),
+    ] {
+        let followed = staged.asked(&roots, writable, |mounts| {
+            mounts.check_followed("the entry", path, "exec_subpaths")
+        });
+        let error = followed.expect_err("a walk through a directory a run can write");
+        assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
+        assert_eq!(error.address.as_deref(), Some("exec_subpaths"), "{error}");
+        assert!(error.message.contains(holds), "{path}: {error}");
+    }
+    println!("exec gate walk asks for every place: executed");
 }
 
 /// D26 on a real mount: the host's `/proc/sys` declared as a read-only root has a row of type

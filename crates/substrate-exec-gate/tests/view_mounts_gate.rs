@@ -7,6 +7,11 @@
 //! replace is refused, and so is one that has no place, on a mount of a file-system type
 //! outside the list. A mount of such a type beneath a writable root refuses nothing by itself.
 //!
+//! **So is every directory the path passes through**: a path through a directory the run can
+//! write is refused although it ends where the run cannot, and **every path is placed where
+//! it ends, whatever its class**: a `beneath` path that ends on a mount of a type outside the
+//! list is refused like a `follow` path.
+//!
 //! No case has a privilege. Each run makes its mounts in a user and mount namespace of its own,
 //! `unshare --user --map-root-user --mount`, and starts the shipped `substrate-exec-gate` there
 //! with an empty environment, so the helper reads that namespace's mount table as it reads a
@@ -67,6 +72,17 @@ fn base(path: &str) -> Located {
 /// starts the shell with `script`, `entry` as its one allow entry and `writable` as the mounts
 /// the run can write. `Err` holds why the case is absent on this host.
 fn run(stage: &str, entry: &str, writable: &[&str], script: &str) -> Result<Output, String> {
+    run_entry(stage, (Class::Follow, "", entry), writable, script)
+}
+
+/// [`run`] with an entry of any class: the class, the entry's root beneath the scratch root
+/// (empty for the scratch root itself) and the path beneath that root.
+fn run_entry(
+    stage: &str,
+    (class, within, entry): (Class, &str, &str),
+    writable: &[&str],
+    script: &str,
+) -> Result<Output, String> {
     let [unshare, sh, env, mount, cp, ln, tool] =
         tools(["unshare", "sh", "env", "mount", "cp", "ln", "true"])?;
     let directory = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("scratch");
@@ -96,14 +112,18 @@ fn run(stage: &str, entry: &str, writable: &[&str], script: &str) -> Result<Outp
     ] {
         std::os::unix::fs::symlink(target, root.join("fs/links").join(name)).expect("a link");
     }
-    let at = |rel: &str| root.join(rel).to_str().expect("UTF-8").to_owned();
+    let at = |rel: &str| {
+        let path = if rel.is_empty() {
+            root.clone()
+        } else {
+            root.join(rel)
+        };
+        path.to_str().expect("UTF-8").to_owned()
+    };
     let lists = Lists {
         program: base(&sh),
         loader: substrate_exec_gate::elf_interpreter(&std::fs::read(&env).expect("env")),
-        allow: vec![
-            Located::new(Class::Follow, root.to_str().expect("UTF-8"), entry)
-                .expect("a follow path"),
-        ],
+        allow: vec![Located::new(class, &at(within), entry).expect("a path of the gate")],
         writable: writable.iter().map(|rel| at(rel)).collect(),
     };
     let stage = stage
@@ -244,8 +264,8 @@ const RAMFS: &str = "{mount} -t ramfs ramfs fs/unlisted && {ln} -s ../apart fs/u
 ///
 /// - A link on a mount of a type outside the list has no place. No rule compares such a mount,
 ///   so whether the run can write the link cannot be said, and the helper exits 125 with the
-///   cause. With no writable mount nothing is the run's to write, no table is read, and the
-///   same entry runs.
+///   cause and the link. With no writable mount nothing is the run's to write, no table is
+///   read, and the same entry runs.
 /// - A link in the writable mount that points out of it is refused: the run can point it
 ///   anywhere. So is one on a tmpfs mounted beneath the writable mount.
 /// - A link nothing writable reaches is followed, as before, and the walk answers a link to
@@ -334,6 +354,172 @@ fn every_symbolic_link_a_followed_path_reads_is_placed() {
         let diagnostic = text(&output.stderr);
         let observed = (output.status.code(), text(&output.stdout));
         if (observed.0, observed.1.as_str()) != expected {
+            failures.push(format!(
+                "{what}: {observed:?}, not {expected:?}: {diagnostic}"
+            ));
+        }
+        for part in holds {
+            if !diagnostic.contains(part) {
+                failures.push(format!("{what}: no `{part}` in: {diagnostic}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    println!("exec gate view mounts {NAME}: executed");
+}
+
+/// D30: **a followed path that passes through a directory the run can write is refused**,
+/// although no link lies there and the path ends where the run cannot write. The run can
+/// rename what the directory holds while the path is resolved through it, so where the path
+/// ends is the run's to decide.
+///
+/// - `fs/links/through` is a link to `../tree/held/../../apart`: it enters the writable
+///   `fs/tree`, leaves it with `..` and ends at `fs/apart`. Refused with the directory and the
+///   mount. With no writable mount the same entry runs.
+/// - `fs/links/around` is a link to `../beside/../apart`: `..` through a directory nothing
+///   writable reaches. It runs: the helper resolves `..` itself, by dropping the directory it
+///   holds, and ends where the kernel would.
+/// - `fs/links/via` passes through a directory on a `ramfs`. It has no place, so whether the
+///   run can write it cannot be said: refused with the cause.
+/// - A path that ends in the writable mount keeps the line of D24: the end is judged first.
+#[test]
+fn a_followed_path_through_a_writable_directory_is_refused() {
+    const NAME: &str = "path through a writable directory";
+    const THROUGH: &str = "{ln} -s ../tree/held/../../apart fs/links/through";
+    let mut failures = Vec::new();
+    for (what, stage, entry, writable, expected, holds) in [
+        (
+            "through the writable mount and out of it by ..",
+            THROUGH,
+            "fs/links/through",
+            &["fs/tree"][..],
+            (Some(REFUSED), String::new()),
+            &["passes through", "fs/tree, in the writable mount"][..],
+        ),
+        (
+            "the same link with no writable mount",
+            THROUGH,
+            "fs/links/through",
+            &[][..],
+            (Some(0), "0\n".to_owned()),
+            &[][..],
+        ),
+        (
+            "by .. through a directory nothing writable reaches",
+            "{ln} -s ../beside/../apart fs/links/around",
+            "fs/links/around",
+            &["fs/tree"][..],
+            (Some(0), "0\n".to_owned()),
+            &[][..],
+        ),
+        (
+            "through a directory on a ramfs",
+            "{mount} -t ramfs ramfs fs/unlisted && {ln} -s ../unlisted/../apart fs/links/via",
+            "fs/links/via",
+            &["fs/tree"][..],
+            (Some(REFUSED), String::new()),
+            &[
+                "cannot establish the place of",
+                "fs/unlisted: file-system-unlisted ramfs",
+            ][..],
+        ),
+        (
+            "a path that ends in the writable mount",
+            ":",
+            "fs/links/held",
+            &["fs/tree"][..],
+            (Some(REFUSED), String::new()),
+            &["resolves to", "fs/tree/held, in the writable mount"][..],
+        ),
+    ] {
+        let script = format!("{entry}/true; echo $?");
+        let output = match run(stage, entry, writable, &script) {
+            Ok(output) => output,
+            Err(reason) => {
+                return println!("exec gate view mounts {NAME}: ABSENT ({what}: {reason})");
+            }
+        };
+        let diagnostic = text(&output.stderr);
+        let observed = (output.status.code(), text(&output.stdout));
+        if observed != expected {
+            failures.push(format!(
+                "{what}: {observed:?}, not {expected:?}: {diagnostic}"
+            ));
+        }
+        for part in holds {
+            if !diagnostic.contains(part) {
+                failures.push(format!("{what}: no `{part}` in: {diagnostic}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    println!("exec gate view mounts {NAME}: executed");
+}
+
+/// D26: **every path is placed where it ends, whatever its class.** A `beneath` path lies in a
+/// mount the run can write, so nothing is asked of its place but that it has one. On a `ramfs`
+/// mounted beneath the writable `fs/tree` it has none: such a mount is compared with nothing,
+/// and the helper exits 125 with the cause, for a directory and for a file. On a tmpfs there
+/// the same entry runs, and with no writable mount no table is read and nothing is placed.
+#[test]
+fn a_beneath_path_is_placed_where_it_ends() {
+    const NAME: &str = "beneath path placed";
+    const RAMFS: &str =
+        "{mount} -t ramfs ramfs fs/tree/held && {cp} fs/beside/true fs/tree/held/true";
+    let unlisted = "file-system-unlisted ramfs";
+    let mut failures = Vec::new();
+    for (what, stage, entry, writable, expected, holds) in [
+        (
+            "a directory on a ramfs",
+            RAMFS,
+            "held",
+            &["fs/tree"][..],
+            (Some(REFUSED), String::new()),
+            &["cannot establish the place of", "fs/tree/held: ", unlisted][..],
+        ),
+        (
+            "a file on a ramfs",
+            RAMFS,
+            "held/true",
+            &["fs/tree"][..],
+            (Some(REFUSED), String::new()),
+            &[
+                "cannot establish the place of",
+                "fs/tree/held/true: ",
+                unlisted,
+            ][..],
+        ),
+        (
+            "a directory on a tmpfs",
+            STAGES[0].1,
+            "held",
+            &["fs/tree"][..],
+            (Some(0), "0\n".to_owned()),
+            &[][..],
+        ),
+        (
+            "a directory on a ramfs, with no writable mount",
+            RAMFS,
+            "held",
+            &[][..],
+            (Some(0), "0\n".to_owned()),
+            &[][..],
+        ),
+    ] {
+        let output = match run_entry(
+            stage,
+            (Class::Beneath, "fs/tree", entry),
+            writable,
+            "fs/tree/held/true; echo $?",
+        ) {
+            Ok(output) => output,
+            Err(reason) => {
+                return println!("exec gate view mounts {NAME}: ABSENT ({what}: {reason})");
+            }
+        };
+        let diagnostic = text(&output.stderr);
+        let observed = (output.status.code(), text(&output.stdout));
+        if observed != expected {
             failures.push(format!(
                 "{what}: {observed:?}, not {expected:?}: {diagnostic}"
             ));
