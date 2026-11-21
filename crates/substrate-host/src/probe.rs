@@ -16,10 +16,13 @@ use substrate_wire::{
     ResourceUsageFacts, ScratchQuotaFacts, Signal,
 };
 
-use crate::HostConfig;
 use crate::confinement::AdapterName;
+use crate::confinement::linux::ExecListProof;
+use crate::exec_gate::ExecGate;
+use crate::{DriverError, HostConfig};
 
-const MAX_BACKEND_BINARY_BYTES: u64 = 64 * 1024 * 1024;
+/// The largest backend binary the driver reads: bubblewrap, and the executable gate.
+pub(crate) const MAX_BACKEND_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct BackendBinding {
@@ -31,6 +34,16 @@ pub(crate) struct BackendBinding {
     cgroup_device: u64,
     cgroup_inode: u64,
     controllers: Vec<String>,
+    /// The SHA-256 of the executable gate's sealed bytes, when one is configured (design 35
+    /// D20). The file's path, device and inode are not bound: it is never read again.
+    exec_gate_sha256: Option<String>,
+}
+
+/// What one open's probe yields: the capability snapshot, and the host-private proof of the
+/// executable lists the snapshot's identity binds and its facts do not publish (design 35 D14).
+pub(crate) struct Probed {
+    pub(crate) snapshot: CapabilitySnapshot,
+    pub(crate) exec_lists: ExecListProof,
 }
 
 #[derive(Serialize)]
@@ -45,12 +58,39 @@ struct SnapshotMaterial<'a> {
     probed_at: chrono::DateTime<Utc>,
     facts: &'a CapabilityFacts,
     backend: &'a Option<BackendBinding>,
+    /// What the probe proved of the executable lists (design 35 D14): bound by the identity,
+    /// published by no fact.
+    exec_lists: &'a ExecListProof,
 }
 
-#[allow(clippy::too_many_lines)] // One snapshot construction keeps every probed fact auditable.
+/// [`probe_host`] for a host without an executable gate, which refuses nothing.
+#[cfg(test)]
 pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
+    match probe_host(config, openat2, None, Vec::new()) {
+        Ok(probed) => probed.snapshot,
+        Err(error) => unreachable!("a probe without an executable gate refuses nothing: {error}"),
+    }
+}
+
+/// Probes the host. `gate` is the executable gate the driver read and sealed at open, and
+/// `withheld` what an open that does not use the configured gate recorded instead (design 35
+/// D27): the entries the returned proof carries. With entries there is no gate, and no probe of
+/// the lists runs.
+///
+/// # Errors
+///
+/// `config.exec-gate-unserved` when the confinement floor holds and `gate` does not answer
+/// `--version` with the protocol line in a throwaway sandbox (design 35 D19). Without the floor
+/// nothing of the gate is probed and no executable-list fact is proved.
+#[allow(clippy::too_many_lines)] // One snapshot construction keeps every probed fact auditable.
+pub(crate) fn probe_host(
+    config: &HostConfig,
+    openat2: bool,
+    gate: Option<&ExecGate>,
+    withheld: Vec<crate::confinement::FactWithheld>,
+) -> Result<Probed, DriverError> {
     let probed_at = Utc::now();
-    let backend = backend_binding(config);
+    let backend = backend_binding(config, gate.map(ExecGate::sha256));
     let workspace = openat2;
     let namespaces = probe_bubblewrap(config);
     let cgroup = probe_cgroup(config);
@@ -63,6 +103,22 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
     let unprivileged = effective_uid() != 0;
     let close_range = probe_close_range();
     let exec = namespaces && cgroup && unprivileged && close_range && backend.is_some();
+    // Design 35 D15: gated on the floor and on a configured helper. The protocol line first,
+    // from the sealed bytes; then one throwaway run in which the allowed execution happened and
+    // the refused ones did not.
+    let exec_lists = match gate {
+        Some(gate) if exec => {
+            check_exec_gate_protocol(config, gate)?;
+            ExecListProof {
+                subpaths: probe_exec_subpaths(config, gate),
+                withheld,
+            }
+        }
+        _ => ExecListProof {
+            subpaths: false,
+            withheld,
+        },
+    };
     let workspace_scoped_write = exec && probe_workspace_scoped_write(config);
     // Every clause is a proof and the fact is absent unless all of them hold. Nothing is probed at
     // all when no slot is declared, so a daemon that wants none pays nothing.
@@ -245,16 +301,20 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         probed_at,
         facts: &facts,
         backend: &backend,
+        exec_lists: &exec_lists,
     });
-    CapabilitySnapshot {
-        snapshot,
-        driver: HostDriverKind::Host,
-        driver_version: driver_version.to_owned(),
-        config_generation: config.config_generation,
-        probed_at,
-        valid_until: None,
-        facts,
-    }
+    Ok(Probed {
+        snapshot: CapabilitySnapshot {
+            snapshot,
+            driver: HostDriverKind::Host,
+            driver_version: driver_version.to_owned(),
+            config_generation: config.config_generation,
+            probed_at,
+            valid_until: None,
+            facts,
+        },
+        exec_lists,
+    })
 }
 
 fn snapshot_identity(material: &SnapshotMaterial<'_>) -> String {
@@ -297,7 +357,7 @@ fn publish_confinement(facts: &mut CapabilityFacts) {
     // audit: `spec/confinement` declares it served by every adapter (its OpenAdapter notes).
     facts.confinement_family_audit = Some(true);
     // paths-are-host-paths and sealed-paths are not proved under `linux` (the S0 story), and no
-    // story declares exec-subpaths or private-tmpdir for it (`spec/confinement` UNMAPPED).
+    // story declares private-tmpdir for it (`spec/confinement` UNMAPPED).
     facts.confinement_paths_are_host_paths = None;
     // whole-tree-kill: `cgroup.kill` on the run's own cgroup (`exec.cgroup-kill`).
     facts.confinement_whole_tree_kill = held(facts.exec_cgroup_kill == Some(true));
@@ -312,8 +372,179 @@ fn publish_confinement(facts: &mut CapabilityFacts) {
                 .is_some_and(|namespaces| namespaces.pid),
     );
     facts.confinement_sealed_paths = None;
+    // exec-subpaths: the one member `linux::proof` proves and this function withholds (design 35
+    // D16). The adapter proves it from the driver's own probe of the executable gate; a wire
+    // start has no field for the list, so a client that required the property would be admitted
+    // and its run would execute anything. `story:exec-start-carries-executable-lists` adds the
+    // field and publishes the fact.
     facts.confinement_exec_subpaths = None;
     facts.confinement_private_tmpdir = None;
+}
+
+/// The floor's argv around one throwaway run that starts from the executable gate's sealed bytes
+/// (design 35 D15): the namespaces, the base system directories, `extra` and the helper bound at
+/// its mount from `gate`, a descriptor the spawned bubblewrap inherits.
+fn exec_gate_sandbox(
+    config: &HostConfig,
+    gate: &std::os::fd::OwnedFd,
+    extra: &[String],
+) -> Command {
+    let mut inherited = vec![gate.as_raw_fd()];
+    inherited.extend(
+        extra
+            .windows(2)
+            .filter(|pair| pair[0].ends_with("-fd"))
+            .filter_map(|pair| pair[1].parse::<std::os::fd::RawFd>().ok()),
+    );
+    let mut command = Command::new(&config.bubblewrap);
+    // SAFETY: `pre_exec` runs after the fork and calls only async-signal-safe `fcntl`; the vector
+    // is built before the fork and only read after it.
+    unsafe {
+        command.pre_exec(move || crate::process::inherit(&inherited));
+    }
+    command
+        .env_clear()
+        .args(crate::process::USER_NAMESPACE_ARGV)
+        .args([
+            "--unshare-ipc",
+            "--unshare-pid",
+            "--unshare-net",
+            "--unshare-uts",
+            "--new-session",
+            "--die-with-parent",
+            "--clearenv",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind-try",
+            "/bin",
+            "/bin",
+            "--ro-bind-try",
+            "/lib",
+            "/lib",
+            "--ro-bind-try",
+            "/lib64",
+            "/lib64",
+            "--ro-bind-try",
+            "/etc/alternatives",
+            "/etc/alternatives",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+        ])
+        .args(extra)
+        .args(crate::exec_gate::bind_args(gate.as_raw_fd()))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Design 35 D19: the helper, started in a throwaway sandbox from its sealed bytes and never
+/// outside one, must answer `--version` with the protocol line.
+///
+/// # Errors
+///
+/// `config.exec-gate-unserved`, naming the configured path.
+pub(crate) fn check_exec_gate_protocol(
+    config: &HostConfig,
+    gate: &ExecGate,
+) -> Result<(), DriverError> {
+    let path = config.exec_gate.as_deref().unwrap_or_else(|| Path::new(""));
+    let answered = gate.reopen().and_then(|descriptor| {
+        exec_gate_sandbox(config, &descriptor, &[])
+            .args(["--", crate::exec_gate::GATE_MOUNT, "--version"])
+            .stdout(Stdio::piped())
+            .output()
+    });
+    match answered {
+        Ok(output) => {
+            crate::exec_gate::check_protocol(path, output.status.success(), &output.stdout)
+        }
+        Err(_) => crate::exec_gate::check_protocol(path, false, &[]),
+    }
+}
+
+/// The host's copy of a base tool the allow-list probe copies into its workspace.
+fn base_tool(name: &str) -> Option<PathBuf> {
+    ["/usr/bin", "/bin"]
+        .iter()
+        .map(|directory| Path::new(directory).join(name))
+        .find(|path| path.is_file())
+}
+
+/// Proves the allow-list in one throwaway run, as a start applies it (design 35 D15): the helper
+/// bound from the sealed bytes and given the arguments of D24, with `allowed` as the list.
+///
+/// Each half must hold. What the list allows happened: `allowed/true` ran, and `allowed/ln`
+/// linked a file between two unlisted directories, which needs the refer rule and so Landlock
+/// ABI 2 (D8). What it refuses did not: `outside/true` and the base system's own `true` each
+/// ended the shell's attempt with status 126. The link is then read on the host. A kernel
+/// without Landlock, a helper that does not restrict and a bubblewrap that cannot bind the bytes
+/// all answer `false`; no kernel version or ABI number is read.
+pub(crate) fn probe_exec_subpaths(config: &HostConfig, gate: &ExecGate) -> bool {
+    let (Some(host_true), Some(host_ln)) = (base_tool("true"), base_tool("ln")) else {
+        return false;
+    };
+    let Ok(root) = tempfile::tempdir() else {
+        return false;
+    };
+    let workspace = root.path().join("workspace");
+    let staged = ["allowed", "outside", "elsewhere"]
+        .iter()
+        .all(|name| std::fs::create_dir_all(workspace.join(name)).is_ok())
+        && std::fs::copy(&host_true, workspace.join("allowed/true")).is_ok()
+        && std::fs::copy(&host_ln, workspace.join("allowed/ln")).is_ok()
+        && std::fs::copy(&host_true, workspace.join("outside/true")).is_ok();
+    if !staged {
+        return false;
+    }
+    let Ok(pinned) = crate::fs::pin_workspace_directory(&workspace) else {
+        return false;
+    };
+    let Ok(access) = crate::process::ProcessRuntime::prepare_workspace_access(
+        &pinned,
+        &substrate_wire::WorkspaceAccess::ReadWrite,
+    ) else {
+        return false;
+    };
+    drop(pinned);
+    let Ok(lists) = crate::exec_gate::plan(
+        gate,
+        &["allowed".to_owned()],
+        "/bin/sh",
+        &crate::exec_gate::View {
+            workspace: access.root(),
+            read_only_roots: &[],
+            read_only_files: &[],
+            writable_roots: &[],
+            scratch: false,
+        },
+        config,
+    ) else {
+        return false;
+    };
+    let Ok(descriptor) = gate.reopen() else {
+        return false;
+    };
+    let script = format!(
+        "allowed/true || exit 11; \
+         outside/true 2>/dev/null; [ $? -eq 126 ] || exit 12; \
+         {} 2>/dev/null; [ $? -eq 126 ] || exit 13; \
+         allowed/ln outside/true elsewhere/linked || exit 14",
+        host_true.display()
+    );
+    let status = exec_gate_sandbox(config, &descriptor, &access.bind_args())
+        .args(["--chdir", "/workspace", "--", crate::exec_gate::GATE_MOUNT])
+        .args(lists.options())
+        .args(["/bin/sh", "-c"])
+        .arg(script)
+        .stdout(Stdio::null())
+        .status();
+    drop(access);
+    status.is_ok_and(|status| status.success()) && workspace.join("elsewhere/linked").is_file()
 }
 
 /// Proves ADR 0023's mount ordering in a disposable tree rather than publishing it from a
@@ -490,7 +721,10 @@ pub(crate) struct ProbedBackend {
 
 /// The full startup probe of the backend: the binary is read and hashed, between two `stat`s of
 /// it.
-pub(crate) fn probe_backend(config: &HostConfig) -> Option<ProbedBackend> {
+pub(crate) fn probe_backend(
+    config: &HostConfig,
+    exec_gate_sha256: Option<&str>,
+) -> Option<ProbedBackend> {
     let started = std::time::SystemTime::now();
     let (path, before) = bubblewrap_file(config)?;
     let sha256 = bubblewrap_sha256(&path)?;
@@ -500,7 +734,7 @@ pub(crate) fn probe_backend(config: &HostConfig) -> Option<ProbedBackend> {
         .filter(|(again, metadata)| *again == path && FileStamp::of(metadata) == stamp)
         .and(stamp.settled_before(started).then_some(stamp));
     Some(ProbedBackend {
-        binding: bind(&path, &before, sha256, config)?,
+        binding: bind(&path, &before, sha256, config, exec_gate_sha256)?,
         stamp,
     })
 }
@@ -519,7 +753,15 @@ pub(crate) fn backend_unchanged(config: &HostConfig, probed: &ProbedBackend) -> 
         };
         sha256
     };
-    bind(&path, &metadata, sha256, config).is_some_and(|current| current == probed.binding)
+    // The gate's bytes were sealed at open and are never read again: its hash is carried over.
+    bind(
+        &path,
+        &metadata,
+        sha256,
+        config,
+        probed.binding.exec_gate_sha256.as_deref(),
+    )
+    .is_some_and(|current| current == probed.binding)
 }
 
 fn bubblewrap_file(config: &HostConfig) -> Option<(PathBuf, std::fs::Metadata)> {
@@ -534,10 +776,13 @@ fn bubblewrap_sha256(path: &Path) -> Option<String> {
         .then(|| hex::encode(Sha256::digest(bubblewrap)))
 }
 
-pub(crate) fn backend_binding(config: &HostConfig) -> Option<BackendBinding> {
+pub(crate) fn backend_binding(
+    config: &HostConfig,
+    exec_gate_sha256: Option<&str>,
+) -> Option<BackendBinding> {
     let (path, metadata) = bubblewrap_file(config)?;
     let sha256 = bubblewrap_sha256(&path)?;
-    bind(&path, &metadata, sha256, config)
+    bind(&path, &metadata, sha256, config, exec_gate_sha256)
 }
 
 fn bind(
@@ -545,6 +790,7 @@ fn bind(
     bubblewrap_metadata: &std::fs::Metadata,
     bubblewrap_sha256: String,
     config: &HostConfig,
+    exec_gate_sha256: Option<&str>,
 ) -> Option<BackendBinding> {
     let cgroup_root = config.cgroup_root.as_ref()?.canonicalize().ok()?;
     let cgroup_metadata = std::fs::metadata(&cgroup_root).ok()?;
@@ -573,6 +819,7 @@ fn bind(
         cgroup_device: cgroup_metadata.dev(),
         cgroup_inode: cgroup_metadata.ino(),
         controllers,
+        exec_gate_sha256: exec_gate_sha256.map(str::to_owned),
     })
 }
 
@@ -1061,12 +1308,96 @@ mod tests {
                 probed_at,
                 facts,
                 backend: &None,
+                exec_lists: &ExecListProof::default(),
             })
         };
         let linux = identity(AdapterName::Linux, &facts);
         assert_eq!(linux, identity(AdapterName::Linux, &facts));
         assert_ne!(linux, identity(AdapterName::Macos, &facts));
         assert_ne!(linux, identity(AdapterName::Linux, &served));
+    }
+
+    /// Design 35 D14 and D20: the identity binds what the probe proved of the executable lists,
+    /// which no published fact shows, and the bytes of the helper that proved it.
+    #[test]
+    fn snapshot_identity_binds_the_exec_list_proof_and_the_gate_bytes() {
+        let probed_at = Utc::now();
+        let facts = probe(&HostConfig::minimum("/does/not/exist"), true).facts;
+        let directory = tempfile::tempdir().unwrap();
+        let config = backend_fixture(directory.path());
+        let identity = |exec_lists: ExecListProof, gate: Option<&str>| {
+            let backend = backend_binding(&config, gate);
+            assert!(backend.is_some(), "the fixture binds a backend");
+            snapshot_identity(&SnapshotMaterial {
+                adapter: AdapterName::Linux,
+                driver: HostDriverKind::Host,
+                driver_version: "fixture",
+                config_generation: 7,
+                probed_at,
+                facts: &facts,
+                backend: &backend,
+                exec_lists: &exec_lists,
+            })
+        };
+        let unproved = identity(ExecListProof::default(), Some("aa"));
+        assert_eq!(unproved, identity(ExecListProof::default(), Some("aa")));
+        assert_ne!(
+            unproved,
+            identity(
+                ExecListProof {
+                    subpaths: true,
+                    ..ExecListProof::default()
+                },
+                Some("aa")
+            ),
+            "the proof"
+        );
+        assert_ne!(
+            unproved,
+            identity(ExecListProof::default(), Some("bb")),
+            "the helper's bytes"
+        );
+        assert_ne!(
+            unproved,
+            identity(ExecListProof::default(), None),
+            "a helper at all"
+        );
+        assert_ne!(
+            unproved,
+            identity(
+                ExecListProof {
+                    withheld: vec![crate::confinement::FactWithheld {
+                        fact: crate::confinement::Fact::ExecSubpaths,
+                        cause: "file-system-unlisted",
+                        address: "config.workspace_root",
+                        path: "/data/workspaces".to_owned(),
+                        file_system: Some("xfs".to_owned()),
+                    }],
+                    ..ExecListProof::default()
+                },
+                Some("aa")
+            ),
+            "what the open withheld (D27)"
+        );
+        // The published facts are the same in every one of them.
+        let published = serde_json::to_value(&facts).expect("facts serialize");
+        assert!(published.get("confinement.exec-subpaths").is_none());
+    }
+
+    /// Design 35 D20: the helper's hash is read once, at open. A recheck carries it over and
+    /// reads no file for it, so the binding stays what the probe admitted.
+    #[test]
+    fn a_backend_recheck_carries_the_gate_hash_it_was_probed_with() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = backend_fixture(directory.path());
+        let probed = probe_backend(&config, Some("aa")).unwrap();
+        assert_eq!(
+            probed.binding,
+            backend_binding(&config, Some("aa")).unwrap(),
+            "the probe binds the hash it was given"
+        );
+        assert_ne!(probed.binding, backend_binding(&config, None).unwrap());
+        assert!(backend_unchanged(&config, &probed));
     }
 
     /// Design 30 § 4.3: `linux` publishes its families and properties from the same facts
@@ -1132,20 +1463,36 @@ mod tests {
         }
     }
 
-    fn proof_of(facts: &CapabilityFacts) -> crate::confinement::AdapterFacts {
-        crate::confinement::linux::proof(&CapabilitySnapshot {
-            snapshot: format!("sha256:{}", "0".repeat(64)),
-            driver: HostDriverKind::Host,
-            driver_version: "fixture".to_owned(),
-            config_generation: 1,
-            probed_at: Utc::now(),
-            valid_until: None,
-            facts: facts.clone(),
-        })
+    /// The adapter's proof on `facts`, with the executable-list probe held or not.
+    fn proof_of(facts: &CapabilityFacts, probe_held: bool) -> crate::confinement::AdapterFacts {
+        crate::confinement::linux::proof(
+            &CapabilitySnapshot {
+                snapshot: format!("sha256:{}", "0".repeat(64)),
+                driver: HostDriverKind::Host,
+                driver_version: "fixture".to_owned(),
+                config_generation: 1,
+                probed_at: Utc::now(),
+                valid_until: None,
+                facts: facts.clone(),
+            },
+            &ExecListProof {
+                subpaths: probe_held,
+                ..ExecListProof::default()
+            },
+        )
     }
 
+    /// The one member the adapter proves and the daemon does not publish (design 35 D16):
+    /// `linux::proof` proves `exec_subpaths` where the driver's probe held, and
+    /// `publish_confinement` withholds `confinement.exec-subpaths`, because a wire start has no
+    /// field for the list. `story:exec-start-carries-executable-lists` adds the field and removes
+    /// this exception.
+    const PROVED_AND_NOT_PUBLISHED: [ConfinementProperty; 1] = [ConfinementProperty::ExecSubpaths];
+
     /// The published set and the adapter's own proof agree member by member, on the full set
-    /// and on each set that loses one underlying fact, so neither can drift from the other.
+    /// and on each set that loses one underlying fact, so neither can drift from the other. The
+    /// one exception is [`PROVED_AND_NOT_PUBLISHED`], stated by name: with the executable-list
+    /// probe held the adapter proves it on the floor, and no set publishes it.
     #[test]
     fn the_published_set_is_the_linux_adapters_proof() {
         let full = delegated_facts();
@@ -1170,32 +1517,55 @@ mod tests {
         }
         for mut facts in variants {
             publish_confinement(&mut facts);
-            let proof = proof_of(&facts);
-            for family in ConfinementFamily::ALL {
-                let generated: crate::confinement::ContractFamily =
-                    serde_json::from_value(serde_json::json!(family.name().replace('-', "_")))
-                        .expect("a wire family is a contract family");
-                assert_eq!(
-                    facts.serves_family(family),
-                    proof.serves(&generated),
-                    "{}",
-                    family.name()
-                );
-            }
-            for property in ConfinementProperty::ALL {
-                let generated: crate::confinement::Fact =
-                    serde_json::from_value(serde_json::json!(property.name().replace('-', "_")))
-                        .expect("a wire property is a contract fact");
-                assert_eq!(
-                    facts.proves(property),
-                    proof.proves(&generated),
-                    "{}",
-                    property.name()
-                );
+            let floor = facts.exec_argv_only == Some(true) && facts.exec_namespaces.is_some();
+            for probe_held in [false, true] {
+                let proof = proof_of(&facts, probe_held);
+                for family in ConfinementFamily::ALL {
+                    let generated: crate::confinement::ContractFamily =
+                        serde_json::from_value(serde_json::json!(family.name().replace('-', "_")))
+                            .expect("a wire family is a contract family");
+                    assert_eq!(
+                        facts.serves_family(family),
+                        proof.serves(&generated),
+                        "{}",
+                        family.name()
+                    );
+                }
+                for property in ConfinementProperty::ALL {
+                    let generated: crate::confinement::Fact = serde_json::from_value(
+                        serde_json::json!(property.name().replace('-', "_")),
+                    )
+                    .expect("a wire property is a contract fact");
+                    if PROVED_AND_NOT_PUBLISHED.contains(&property) {
+                        assert!(
+                            !facts.proves(property),
+                            "{} is published; design 35 D16 withholds it until a wire start \
+                             carries the list",
+                            property.name()
+                        );
+                        assert_eq!(
+                            proof.proves(&generated),
+                            floor && probe_held,
+                            "the adapter proves {} exactly on the floor with the probe held",
+                            property.name()
+                        );
+                        continue;
+                    }
+                    assert_eq!(
+                        facts.proves(property),
+                        proof.proves(&generated),
+                        "{}",
+                        property.name()
+                    );
+                }
             }
         }
         let mut facts = full;
         publish_confinement(&mut facts);
+        assert!(
+            proof_of(&facts, true).proves(&crate::confinement::Fact::ExecSubpaths),
+            "the adapter proves exec_subpaths on the full set"
+        );
         assert_eq!(
             ConfinementFamily::ALL
                 .into_iter()
@@ -1252,9 +1622,9 @@ mod tests {
         let mut config = HostConfig::minimum(directory.path().join("workspaces"));
         config.bubblewrap = bubblewrap.clone();
         config.cgroup_root = Some(cgroup);
-        let first = backend_binding(&config).unwrap();
+        let first = backend_binding(&config, None).unwrap();
         std::fs::write(&bubblewrap, b"replacement backend").unwrap();
-        let second = backend_binding(&config).unwrap();
+        let second = backend_binding(&config, None).unwrap();
         assert_ne!(first, second);
     }
 
@@ -1274,12 +1644,12 @@ mod tests {
     fn a_backend_changed_just_before_the_probe_is_rehashed_at_every_recheck() {
         let directory = tempfile::tempdir().unwrap();
         let config = backend_fixture(directory.path());
-        let probed = probe_backend(&config).unwrap();
+        let probed = probe_backend(&config, None).unwrap();
         assert_eq!(
             probed.stamp, None,
             "a change inside the settle window is not trusted"
         );
-        assert_eq!(probed.binding, backend_binding(&config).unwrap());
+        assert_eq!(probed.binding, backend_binding(&config, None).unwrap());
         assert!(backend_unchanged(&config, &probed));
         std::fs::write(&config.bubblewrap, b"probed BACKEND").unwrap();
         assert!(!backend_unchanged(&config, &probed));
@@ -1289,7 +1659,7 @@ mod tests {
     fn a_backend_whose_metadata_cannot_be_read_refuses_the_recheck() {
         let directory = tempfile::tempdir().unwrap();
         let config = backend_fixture(directory.path());
-        let mut probed = probe_backend(&config).unwrap();
+        let mut probed = probe_backend(&config, None).unwrap();
         probed.stamp = Some(FileStamp::of(
             &std::fs::metadata(&config.bubblewrap).unwrap(),
         ));
@@ -1684,10 +2054,82 @@ exit 1
             "a backend that records and refuses cannot prove descriptor pass-through"
         );
 
+        // Design 35: the executable gate's protocol check and its allow-list probe, each a
+        // sandbox of its own, started from sealed bytes.
+        let gate = ExecGate::seal(b"a stand-in for the helper", None).expect("sealed bytes");
+        let error = check_exec_gate_protocol(&config, &gate)
+            .expect_err("a backend that records and refuses prints no protocol line");
+        assert_eq!(error.code, "config.exec-gate-unserved", "{error}");
+        let before = crate::process::recorded_sandboxes(&log).len();
+        assert!(
+            !probe_exec_subpaths(&config, &gate),
+            "a backend that records and refuses cannot prove the allow-list"
+        );
+        // The allow-list probe plans its list before it spawns, as a start does, and a host
+        // whose `/usr` or temporary directory lies on a file-system type outside the list
+        // establishes no place. Counted where it was observed, and required where every place
+        // of the plan is established.
+        let listed = crate::process::recorded_sandboxes(&log).len() - before;
+        let placed = substrate_exec_gate::place::MountTable::read().is_ok_and(|table| {
+            ["/usr", directory.path().to_str().expect("UTF-8")]
+                .iter()
+                .all(|path| {
+                    substrate_exec_gate::place::Opened::of_path(path)
+                        .is_ok_and(|opened| table.place_of(&opened).is_ok())
+                })
+        });
+        if placed {
+            assert_eq!(listed, 1, "the allow-list probe opened no sandbox");
+        } else {
+            println!("exec gate probe posture: ABSENT (a place of the plan is not established)");
+        }
+
         crate::process::assert_recorded_posture(
             "the probes in probe.rs",
             &crate::process::recorded_sandboxes(&log),
-            2 + usize::from(socat),
+            3 + usize::from(socat) + listed,
+        );
+    }
+
+    /// Design 35 D19: with no helper configured the probe refuses nothing and proves no
+    /// executable-list fact. Portable: no sandbox is opened for a helper that is not there.
+    #[test]
+    fn an_unset_helper_proves_no_executable_list_fact() {
+        let probed = probe_host(
+            &HostConfig::minimum("/does/not/exist"),
+            true,
+            None,
+            Vec::new(),
+        )
+        .expect("a probe without an executable gate refuses nothing");
+        assert_eq!(probed.exec_lists, ExecListProof::default());
+        assert!(!probed.exec_lists.subpaths);
+        assert_eq!(probed.snapshot.facts.confinement_exec_subpaths, None);
+    }
+
+    /// Design 35 D27: what an open that does not use the configured helper recorded is in the
+    /// driver's record as it was given, no executable-list fact is proved beside it, and nothing
+    /// of it is published. Portable: with no helper to run, no sandbox is opened for one.
+    #[test]
+    fn a_withheld_open_proves_no_executable_list_fact_and_records_why() {
+        let entries = vec![crate::confinement::FactWithheld {
+            fact: crate::confinement::Fact::ExecSubpaths,
+            cause: "file-system-unlisted",
+            address: "config.workspace_root",
+            path: "/data/workspaces".to_owned(),
+            file_system: Some("xfs".to_owned()),
+        }];
+        let config = HostConfig::minimum("/does/not/exist");
+        let probed = probe_host(&config, true, None, entries.clone())
+            .expect("a probe without an executable gate refuses nothing");
+        assert!(!probed.exec_lists.subpaths);
+        assert_eq!(probed.exec_lists.withheld, entries);
+        assert_eq!(probed.snapshot.facts.confinement_exec_subpaths, None);
+        let plain = probe_host(&config, true, None, Vec::new()).expect("probed");
+        assert_eq!(
+            serde_json::to_value(&probed.snapshot.facts).expect("facts serialize"),
+            serde_json::to_value(&plain.snapshot.facts).expect("facts serialize"),
+            "the published facts do not say why"
         );
     }
     /// Families the profile refuses that this probe has no instrument for, and why.

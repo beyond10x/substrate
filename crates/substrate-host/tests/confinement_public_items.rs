@@ -1435,8 +1435,8 @@ fn the_list_changes_with_a_renamed_added_or_changed_item_and_not_with_a_reformat
     );
 
     let (added, removed) = edited(
-        "    FactUnserved { adapter: AdapterName, fact: Fact },\n",
-        "    FactUnserved {\n        adapter: AdapterName,\n        fact: Fact,\n    },\n",
+        "    FactUnserved {\n        adapter: AdapterName,\n        fact: Fact,\n",
+        "    FactUnserved {\n        adapter: AdapterName, fact: Fact,\n",
     );
     assert!(
         added.is_empty() && removed.is_empty(),
@@ -1444,8 +1444,8 @@ fn the_list_changes_with_a_renamed_added_or_changed_item_and_not_with_a_reformat
     );
 
     let (added, removed) = edited(
-        "    FactUnserved { adapter: AdapterName, fact: Fact },\n",
-        "    FactUnserved { adapter: AdapterName, fact: Option<Fact> },\n",
+        "    FactUnserved {\n        adapter: AdapterName,\n        fact: Fact,\n",
+        "    FactUnserved {\n        adapter: AdapterName,\n        fact: Option<Fact>,\n",
     );
     assert_eq!(added.len(), 1, "a variant's field type: {added:?}");
     assert_eq!(removed.len(), 1, "{removed:?}");
@@ -1485,18 +1485,18 @@ fn a_reexported_type_is_held_by_its_definition_in_its_own_crate() {
     );
     assert!(removed.is_empty(), "{removed:?}");
 
-    let last_field = "    pub tmp_bytes: Option<u64>,\n}";
+    let last_field = "    pub exec_gate: Option<PathBuf>,\n}";
     let (added, removed) = edited(&[(
         "lib.rs",
         last_field,
-        "    pub tmp_bytes: Option<u64>,\n    reserved: u64,\n}",
+        "    pub exec_gate: Option<PathBuf>,\n    reserved: u64,\n}",
     )]);
     assert_eq!(added, ["lib.rs: struct HostConfig > (private fields)"]);
     assert!(removed.is_empty(), "{removed:?}");
     let (added, removed) = edited(&[(
         "lib.rs",
         last_field,
-        "    pub tmp_bytes: Option<u64>,\n    reserved: u64,\n    more: u64,\n}",
+        "    pub exec_gate: Option<PathBuf>,\n    reserved: u64,\n    more: u64,\n}",
     )]);
     assert_eq!(added, ["lib.rs: struct HostConfig > (private fields)"]);
     assert!(removed.is_empty(), "{removed:?}");

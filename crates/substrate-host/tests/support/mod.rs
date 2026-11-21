@@ -146,7 +146,7 @@ fn refusal(error: &ConfinementError) -> (String, String, Value) {
             "FamilyUnserved".into(),
             json!({"adapter": adapter.name(), "family": family.name()}),
         ),
-        ConfinementError::FactUnserved { adapter, fact } => (
+        ConfinementError::FactUnserved { adapter, fact, .. } => (
             format!("fact-unserved-{}", kebab(&fact.name())),
             "FactUnserved".into(),
             json!({"adapter": adapter.name(), "fact": fact.name()}),
@@ -346,12 +346,16 @@ impl<'a> Target<'a> {
                     .iter()
                     .filter(|fact| !self.unproved.contains(fact))
                     .collect();
+                // A fact the open withheld is named with its cause, its path and the file-system
+                // type (design 35 D27), so the lane's log says why the step failed.
                 assert_eq!(
                     observed["facts"],
                     json!(expected),
-                    "{} proved other facts than the scenario declares (unproved here: {:?})",
+                    "{} proved other facts than the scenario declares (unproved here: {:?}; \
+                     withheld at open: {:?})",
                     step.adapter,
-                    self.unproved
+                    self.unproved,
+                    facts.withheld
                 );
                 assert_eq!(observed["adapter"], json!(step.adapter));
                 assert_eq!(

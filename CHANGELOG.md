@@ -7,6 +7,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The `linux` confinement adapter, and `systemd` around it, can hold a run to an executable
+  allow-list (design 35). A profile with a non-empty `exec_subpaths` executes only its literal
+  program, the host's ELF loader and what the entries name; any other `execve` fails inside the
+  run with `EACCES`. The wire, the bundle and the daemon are unchanged: no wire start carries a
+  list, and the daemon does not publish `confinement.exec-subpaths`.
+  - The fact `exec_subpaths` is proved only where the embedder names the new helper
+    `substrate-exec-gate` (package `b10x-substrate-exec-gate`) in the new
+    `HostConfig.exec_gate`, and the open-time probe held a run to a list with it. It needs
+    Landlock ABI 2 (Linux 5.19). Cargo does not build a dependency's binary: build the helper
+    from the revision you pin, and install a copy, because cargo's own output has a second hard
+    link and is refused.
+  - **An empty list differs by adapter.** On `linux` it runs every program of the run's view, as
+    before; on `macos` it runs only the program.
+  - An entry is a path of the run's view, not a host path: relative beneath `/workspace`,
+    absolute beneath `/usr`, `/bin`, `/lib`, `/lib64`, `/workspace` or the mount of a declared
+    root or file. It must exist at the start. The program is an absolute path when the list is
+    not empty.
+  - Limits: an allowed interpreter runs any script it can read, the loader run as a program
+    loads any file, and a listed directory does not reach through a second mount of a part of
+    it, so a profile lists `/usr/bin` and not `/usr`.
+  - New refusals: `config.exec-gate-invalid` (422) and `config.exec-gate-unserved` (501) at the
+    open, and `exec.sandbox-place-unserved` (501) at the start of a profile with a list.
+    `exec.sandbox-path-unrepresentable` and `exec.sandbox-exec-subpath-undeclared` are new on
+    `linux`.
+  - Whether one path lies in another is decided from the mount table, on `ext4`, `overlay` and
+    `tmpfs`. With `exec_gate` set and a path of the open on another file-system type, the
+    adapter opens without the fact; `AdapterFacts::withheld` and the `confinement.fact-unserved`
+    refusal name the cause, the path and the type.
+
+### Changed
+
+- `confinement::linux::proof` takes a second argument, `&ExecListProof`.
+  `ConfinementError::FactUnserved` gains the field `withheld`, and `AdapterFacts` the public
+  field `withheld`, serialized only when it is not empty; both hold the new
+  `confinement::FactWithheld`. An embedder that builds the variant, or names both of its fields
+  in a pattern, changes one line.
+
 ## [0.22.0] — 2026-11-20
 
 The contract bundle moves to `substrate-wire/0.27.0`, which adds no route and raises three

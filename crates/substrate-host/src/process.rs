@@ -25,7 +25,9 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Notify, mpsc};
 
+use crate::confinement::AdmittedProfile;
 use crate::environment::baseline_value;
+use crate::exec_gate::ExecGate;
 pub use crate::observation::{ExecObservation, PipeFrame, PipeStream};
 use crate::output_retention::{KeptOutput, OutputRetention, Retention, RetentionBuffer};
 use crate::{DispatchOutcome, DriverError, HostConfig};
@@ -231,6 +233,64 @@ pub(crate) struct AdapterStart {
     pub(crate) live: Option<usize>,
 }
 
+/// The executable lists of one start (design 35 D22): a required argument of every path that
+/// builds a run's argv, of a type with no `Default` and no `Copy`, so no caller leaves the lists
+/// out without writing so.
+///
+/// Two constructors and no public field. [`Self::of`] is the adapter's and carries every entry
+/// of the admitted profile. `wire` is what the three wire sites of [`ProcessRuntime`] write: no
+/// list, because a wire start has no field for one. **`wire` has no visibility modifier**, so it
+/// is private to this module: `crate::confinement::linux` and the crate root, where the
+/// adapter's path runs, cannot name it, and a call from either does not compile.
+#[derive(Debug)]
+pub(crate) struct ExecLists {
+    subpaths: Vec<String>,
+}
+
+impl ExecLists {
+    /// The lists of an admitted profile, every entry of them.
+    pub(crate) fn of(admitted: &AdmittedProfile) -> Self {
+        Self {
+            subpaths: admitted.profile().exec_subpaths.clone(),
+        }
+    }
+
+    /// No list: what a wire start carries, which has no field for one (design 35 § 15).
+    fn wire() -> Self {
+        Self {
+            subpaths: Vec::new(),
+        }
+    }
+
+    /// A list of `entries`, for the cases that have no admitted profile at hand.
+    #[cfg(test)]
+    pub(crate) fn listing(entries: &[&str]) -> Self {
+        Self {
+            subpaths: entries.iter().map(|entry| (*entry).to_owned()).collect(),
+        }
+    }
+
+    /// Whether the start carries no list, and so runs as it did before the lists existed.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.subpaths.is_empty()
+    }
+
+    /// The allow-list entries, as the profile wrote them.
+    pub(crate) fn subpaths(&self) -> &[String] {
+        &self.subpaths
+    }
+}
+
+/// One start's executable gate (design 35 D20, D24): a fresh read-only descriptor of the helper's
+/// sealed bytes for bubblewrap to bind, and the helper's options for this start's lists.
+#[derive(Debug)]
+pub(crate) struct GateStart {
+    /// Above the secret-slot range and close-on-exec, as every descriptor bubblewrap consumes.
+    descriptor: OwnedFd,
+    /// The helper's options, ending with the `--` the program follows.
+    options: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PipeSettings {
     capture: substrate_wire::CaptureMode,
@@ -322,6 +382,11 @@ pub(crate) struct PreparedWorkspaceAccess {
 }
 
 impl PreparedWorkspaceAccess {
+    /// The pinned workspace directory itself, which `/workspace` binds.
+    pub(crate) fn root(&self) -> &OwnedFd {
+        &self.root
+    }
+
     /// Every pinned descriptor, which the confinement backend must inherit to mount.
     pub(crate) fn raw_fds(&self) -> Vec<RawFd> {
         std::iter::once(self.root.as_raw_fd())
@@ -465,6 +530,11 @@ pub struct ProcessRuntime {
     /// workspace beneath it, as the file routes do, never by re-opening the root's path. `None`
     /// only when no root could be opened, which no workspace can then be resolved beneath.
     workspace_root: Option<Arc<OwnedFd>>,
+    /// The executable gate the driver read and sealed at open, and whether its probe proved the
+    /// allow-list with it (design 35 D15, D20). A start with a list needs both; nothing runs with
+    /// a weaker list (invariant 3).
+    exec_gate: Option<Arc<ExecGate>>,
+    exec_subpaths_proved: bool,
 }
 
 impl ProcessRuntime {
@@ -473,7 +543,7 @@ impl ProcessRuntime {
         let root = File::open(&config.workspace_root)
             .ok()
             .map(|root| Arc::new(OwnedFd::from(root)));
-        Self::new_with_quotas(config, capability, None, root)
+        Self::new_with_quotas(config, capability, None, root, None, false)
     }
 
     pub(crate) fn new_with_quotas(
@@ -481,12 +551,17 @@ impl ProcessRuntime {
         capability: CapabilitySnapshot,
         quotas: Option<Arc<crate::quota::ProjectQuotas>>,
         workspace_root: Option<Arc<OwnedFd>>,
+        exec_gate: Option<Arc<ExecGate>>,
+        exec_subpaths_proved: bool,
     ) -> Result<Self, DriverError> {
-        let backend_binding = crate::probe::probe_backend(&config);
+        let backend_binding =
+            crate::probe::probe_backend(&config, exec_gate.as_deref().map(ExecGate::sha256));
         let runtime = Self {
             config,
             capability,
             backend_binding,
+            exec_gate,
+            exec_subpaths_proved,
             executions: Arc::new(Mutex::new(HashMap::new())),
             reservations: Arc::new(Mutex::new(HashSet::new())),
             unproven: Arc::new(Mutex::new(HashMap::new())),
@@ -813,21 +888,31 @@ impl ProcessRuntime {
         workspace: &Path,
         input: &ExecStartInput,
     ) -> DispatchOutcome<ExecObservation> {
-        self.start_inner(id, workspace, &[], input, None, AdapterStart::default())
-            .await
+        self.start_inner(
+            id,
+            workspace,
+            &[],
+            input,
+            None,
+            AdapterStart::default(),
+            &ExecLists::wire(),
+        )
+        .await
     }
 
     /// [`Self::start`] with what only the `linux` confinement adapter asks beyond the wire
     /// request (design 29): another retention than the head, and the registered-submodule rule.
-    /// No wire request can name either.
+    /// No wire request can name either. `lists` is the admitted profile's executable lists
+    /// (design 35 D22): required, so an adapter start cannot leave them out.
     pub(crate) async fn start_for_adapter(
         &self,
         id: &str,
         workspace: &Path,
         input: &ExecStartInput,
         adapter: AdapterStart,
+        lists: ExecLists,
     ) -> DispatchOutcome<ExecObservation> {
-        self.start_inner(id, workspace, &[], input, None, adapter)
+        self.start_inner(id, workspace, &[], input, None, adapter, &lists)
             .await
     }
 
@@ -846,6 +931,7 @@ impl ProcessRuntime {
             input,
             None,
             AdapterStart::default(),
+            &ExecLists::wire(),
         )
         .await
     }
@@ -956,10 +1042,77 @@ impl ProcessRuntime {
             &input.exec,
             Some(settings),
             AdapterStart::default(),
+            &ExecLists::wire(),
         )
         .await
     }
 
+    /// Refuses a start that carries an executable list on a driver that cannot hold a run to it:
+    /// no helper was configured, the probe did not prove the list with it (design 35 D19), or
+    /// the open withheld the fact and holds no helper (D27).
+    /// The adapter's admission refuses such a profile first; this is the driver's own answer, so
+    /// no caller starts a listed run without its list.
+    fn exec_lists_served(&self, lists: &ExecLists) -> Result<(), DriverError> {
+        if lists.is_empty() || (self.exec_gate.is_some() && self.exec_subpaths_proved) {
+            return Ok(());
+        }
+        Err(DriverError::unserved(
+            crate::confinement::FACT_UNSERVED,
+            "This host did not prove an executable allow-list, so a run that carries one is not \
+             started.",
+            "exec_subpaths",
+        ))
+    }
+
+    /// This start's executable gate, or `None` for a start without a list, whose argv is then
+    /// what it was before the lists existed (design 35 D5). Every entry and the program are
+    /// located in the mounts the start pinned, and each one the view cannot carry is its named
+    /// refusal here, before anything is dispatched (D3).
+    fn gate_start(
+        &self,
+        lists: &ExecLists,
+        input: &ExecStartInput,
+        workspace_access: &PreparedWorkspaceAccess,
+        read_only_roots: &[crate::read_only_roots::PinnedRoot],
+        read_only_files: &[crate::read_only_files::PinnedFile],
+        writable_roots: &[crate::writable_roots::PinnedWritableRoot],
+    ) -> Result<Option<GateStart>, DriverError> {
+        self.exec_lists_served(lists)?;
+        let (false, Some(gate)) = (lists.is_empty(), self.exec_gate.as_deref()) else {
+            return Ok(None);
+        };
+        let unresolved = |what: &str, error: &io::Error| {
+            DriverError::failed(
+                "exec.spawn-failed",
+                format!("executable gate {what}: {error}"),
+            )
+        };
+        let program = input.argv.first().map_or("", String::as_str);
+        let planned = crate::exec_gate::plan(
+            gate,
+            lists.subpaths(),
+            program,
+            &crate::exec_gate::View {
+                workspace: workspace_access.root(),
+                read_only_roots,
+                read_only_files,
+                writable_roots,
+                scratch: input.scratch.is_some(),
+            },
+            &self.config,
+        )?;
+        // A fresh open file description per start: bubblewrap reads the bytes to their end.
+        let descriptor = gate
+            .reopen()
+            .map_err(|error| unresolved("descriptor", &error))
+            .and_then(|descriptor| bubblewrap_descriptor(descriptor, "executable gate"))?;
+        Ok(Some(GateStart {
+            descriptor,
+            options: planned.options(),
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)] // The lists are a required argument of their own (D22).
     #[allow(clippy::too_many_lines)] // Admission, spawn barrier, and durable observation stay adjacent.
     async fn start_inner(
         &self,
@@ -969,7 +1122,11 @@ impl ProcessRuntime {
         input: &ExecStartInput,
         pipe_settings: Option<PipeSettings>,
         adapter: AdapterStart,
+        lists: &ExecLists,
     ) -> DispatchOutcome<ExecObservation> {
+        if let Err(error) = self.exec_lists_served(lists) {
+            return DispatchOutcome::NotDispatched(error);
+        }
         let retention = adapter.retention;
         let (pinned, read_only_roots, writable_roots) =
             match self.admit(id, workspace, git_roots, input) {
@@ -1010,6 +1167,19 @@ impl ProcessRuntime {
         ) {
             return DispatchOutcome::NotDispatched(error);
         }
+        // Before the permit, the cgroup and the spawn, in the objects the mounts bind: an entry
+        // or a program the view cannot carry is refused without running anything (design 35 D3).
+        let gate = match self.gate_start(
+            lists,
+            input,
+            &workspace_access,
+            &read_only_roots,
+            &read_only_files,
+            &writable_roots,
+        ) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
         let permit =
             match ActivePermit::acquire(Arc::clone(&self.active), self.config.max_concurrent_execs)
             {
@@ -1151,6 +1321,7 @@ impl ProcessRuntime {
             &read_only_files,
             &read_only_roots,
             &writable_roots,
+            gate.as_ref(),
         ) {
             Ok(value) => value,
             Err(error) => return contain_cgroup(&cgroup, error),
@@ -1185,6 +1356,8 @@ impl ProcessRuntime {
                     .iter()
                     .map(crate::writable_roots::PinnedWritableRoot::raw_fd),
             )
+            // The helper's sealed bytes, which bubblewrap copies into the view and closes.
+            .chain(gate.as_ref().map(|gate| gate.descriptor.as_raw_fd()))
             .collect::<Vec<_>>();
         retained.extend(
             workspace_fds
@@ -2570,7 +2743,9 @@ impl ProcessRuntime {
         &self,
         workspace: &Path,
         input: &ExecStartInput,
+        lists: &ExecLists,
     ) -> Result<(PathBuf, Vec<String>), DriverError> {
+        self.exec_lists_served(lists)?;
         if !input.writable_roots.is_empty()
             || !input.secret_slots.is_empty()
             || input.capsule.is_some()
@@ -2626,6 +2801,16 @@ impl ProcessRuntime {
         crate::submodules::refuse_registered_submodules(&pinned, &input.workspace_access)?;
         let access = Self::prepare_workspace_access(&pinned, &input.workspace_access)?;
         drop(pinned);
+        // The start's own entry rules and the helper's place in the argv (design 35 D22): a
+        // render of a listed profile shows the helper, or names the refusal a start names.
+        let gate = self.gate_start(
+            lists,
+            input,
+            &access,
+            &read_only_roots,
+            &read_only_files,
+            &[],
+        )?;
         let slots = crate::secrets::SecretSlotSet::acquire(&[], &[])?;
         let barrier = File::open("/dev/null").map_err(|error| {
             DriverError::failed("exec.render-failed", format!("render barrier: {error}"))
@@ -2643,6 +2828,7 @@ impl ProcessRuntime {
             &read_only_files,
             &read_only_roots,
             &[],
+            gate.as_ref(),
         )?;
         let command = command.as_std();
         Ok((
@@ -2686,6 +2872,7 @@ impl ProcessRuntime {
         read_only_files: &[crate::read_only_files::PinnedFile],
         read_only_roots: &[crate::read_only_roots::PinnedRoot],
         writable_roots: &[crate::writable_roots::PinnedWritableRoot],
+        gate: Option<&GateStart>,
     ) -> Result<(Command, File), DriverError> {
         // Above the slot range, close-on-exec: a slot declared at the profile's original number
         // would otherwise become the program bubblewrap installs. `start` clears the flag in the
@@ -2805,6 +2992,12 @@ impl ProcessRuntime {
         // By descriptor only, the read-write default included: the workspace is never bound by
         // path, so a link swapped in after admission cannot choose what is mounted.
         command.args(workspace_access.bind_args());
+        // The helper's bytes, never its file: bubblewrap copies them from the sealed memory into
+        // a read-only file of mode 0555 (design 35 D20). After every other mount, so no declared
+        // mount can stand where the helper is started from; absent for a start without a list.
+        if let Some(gate) = gate {
+            command.args(crate::exec_gate::bind_args(gate.descriptor.as_raw_fd()));
+        }
         // After every mount, so the requested directory is resolved inside the sandbox it names
         // (design 26 § 1). Absent is the workspace, as it always was.
         command
@@ -2850,6 +3043,14 @@ impl ProcessRuntime {
         if let Some(value) = input.env.set.get("PWD") {
             command.args(["/usr/bin/env", "--"]);
             command.arg(format!("PWD={value}"));
+        }
+        // Design 35 D4: the helper is the last program before the run's own. Everything
+        // bubblewrap, `setsid` and `env` execute happens before the ruleset exists, and the only
+        // `execve` after it is the program's.
+        if let Some(gate) = gate {
+            command
+                .arg(crate::exec_gate::GATE_MOUNT)
+                .args(&gate.options);
         }
         command.args(&input.argv);
         Ok((command, seccomp))
@@ -4522,6 +4723,11 @@ mod tests {
         NetworkMode, SandboxProfile, canonical_execution_capsule_hash,
     };
 
+    use std::fs::File;
+    use std::os::fd::OwnedFd;
+    use std::path::{Path, PathBuf};
+
+    use super::{AdapterStart, ExecGate, ExecLists, GateStart, PreparedWorkspaceAccess};
     use super::{CPU_PERIOD_MICROS, exec_cpu_quota};
     use super::{
         Cgroup, ChildChannel, ExecObservation, Execution, PipeState, PipeStream, ProcessRuntime,
@@ -8041,6 +8247,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                None,
             )
             .expect("the exec argv builds");
         command
@@ -8048,6 +8255,267 @@ mod tests {
             .get_args()
             .map(|part| part.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// A runtime over `root` with the workspace `ws_test`, holding a sealed stand-in for the
+    /// executable gate when `gate` says whether its probe held.
+    fn gated_runtime(root: &Path, gate: Option<bool>) -> (ProcessRuntime, PathBuf, String) {
+        let workspace = root.join("ws_test");
+        std::fs::create_dir_all(workspace.join("bin")).expect("workspace");
+        let cgroup_root = root.join("cgroups");
+        std::fs::create_dir_all(&cgroup_root).expect("cgroup root");
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root);
+        config.cgroup_root = Some(cgroup_root);
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts::default(),
+        };
+        let held = gate.map(|_| {
+            Arc::new(ExecGate::seal(b"a stand-in for the helper", None).expect("sealed bytes"))
+        });
+        let workspace_root = File::open(root)
+            .ok()
+            .map(|root| Arc::new(OwnedFd::from(root)));
+        let runtime = ProcessRuntime::new_with_quotas(
+            config,
+            capability,
+            None,
+            workspace_root,
+            held,
+            gate == Some(true),
+        )
+        .expect("runtime");
+        (runtime, workspace, snapshot)
+    }
+
+    /// The argv `command` builds for `input` with `gate`, as text.
+    fn argv_with(
+        runtime: &ProcessRuntime,
+        input: &ExecStartInput,
+        access: &PreparedWorkspaceAccess,
+        gate: Option<&GateStart>,
+    ) -> Vec<String> {
+        let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
+        let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
+        let (command, _seccomp) = runtime
+            .command(
+                input,
+                sync.as_raw_fd(),
+                ChildChannel::Quiet,
+                None,
+                &slots,
+                None,
+                None,
+                None,
+                access,
+                &[],
+                &[],
+                &[],
+                gate,
+            )
+            .expect("the exec argv builds");
+        command
+            .as_std()
+            .get_args()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn read_write(workspace: &Path) -> PreparedWorkspaceAccess {
+        let pinned = crate::fs::pin_workspace_directory(workspace).expect("pinned workspace");
+        ProcessRuntime::prepare_workspace_access(
+            &pinned,
+            &substrate_wire::WorkspaceAccess::ReadWrite,
+        )
+        .expect("read-write access")
+    }
+
+    /// **A start with a list runs the helper directly before the program** (design 35 D4, D20,
+    /// D24): its bytes bound with `--perms 0555 --ro-bind-data` after every other mount, and in
+    /// the argv after `env`, with the program, one `--allow` per entry and the mounts the run can
+    /// write. Portable: `command` builds an argv and spawns nothing.
+    #[test]
+    fn a_listed_start_binds_the_helper_and_runs_it_directly_before_the_program() {
+        let root = tempfile::tempdir().expect("a root");
+        let (runtime, workspace, snapshot) = gated_runtime(root.path(), Some(true));
+        let access = read_write(&workspace);
+        let mut input = pty_exec_input(&snapshot);
+        input.argv = vec!["/usr/bin/env".to_owned(), "true".to_owned()];
+        let lists = ExecLists::listing(&["bin", "/usr/bin"]);
+        let gate = match runtime.gate_start(&lists, &input, &access, &[], &[], &[]) {
+            Ok(gate) => gate.expect("a start with a list has a gate"),
+            // A host whose `/usr` or temporary directory lies on a file-system type outside
+            // the list establishes no place: the start is refused by name, and this case has
+            // no argv to read.
+            Err(error) if error.code == crate::exec_gate::PLACE_UNSERVED => {
+                println!("exec gate argv: ABSENT ({error})");
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        let argv = argv_with(&runtime, &input, &access, Some(&gate));
+        let position = |part: &str| {
+            argv.iter()
+                .position(|argument| argument == part)
+                .unwrap_or_else(|| panic!("no {part} in {argv:?}"))
+        };
+        let bind = position("--ro-bind-data");
+        let descriptor = gate.descriptor.as_raw_fd().to_string();
+        assert_eq!(
+            argv[bind - 2..bind + 3],
+            [
+                "--perms",
+                "0555",
+                "--ro-bind-data",
+                descriptor.as_str(),
+                "/.substrate-exec-gate"
+            ],
+            "{argv:?}"
+        );
+        assert!(
+            position("--bind-fd") < bind && bind < position("--chdir"),
+            "the helper is bound after the workspace and before the working directory: {argv:?}"
+        );
+        let helper = argv
+            .iter()
+            .rposition(|argument| argument == "/.substrate-exec-gate")
+            .expect("the helper in the argv");
+        assert!(helper > bind + 2, "{argv:?}");
+        assert_eq!(
+            argv[helper - 4..helper],
+            ["/usr/bin/env", "-u", "PWD", "--"],
+            "directly after env: {argv:?}"
+        );
+        assert_eq!(
+            argv[helper + 1..],
+            [
+                "--program",
+                "follow",
+                "/usr",
+                "bin/env",
+                "--allow",
+                "beneath",
+                "/workspace",
+                "bin",
+                "--allow",
+                "follow",
+                "/usr",
+                "bin",
+                "--writable",
+                "/workspace",
+                "--writable",
+                "/tmp",
+                "--writable",
+                "/dev",
+                "--",
+                "/usr/bin/env",
+                "true"
+            ],
+            "the options of D24, then the program: {argv:?}"
+        );
+        println!("exec gate argv: executed");
+    }
+
+    /// **A start without a list is what it was** (design 35 D5): no helper, no bind, no place
+    /// asked, on a runtime that holds a proved gate as on one that holds none. The two argv
+    /// lists differ only in the descriptor numbers each build drew.
+    #[test]
+    fn a_start_without_a_list_builds_the_argv_it_built_before() {
+        let root = tempfile::tempdir().expect("a root");
+        let (gated, workspace, snapshot) = gated_runtime(root.path(), Some(true));
+        let other = tempfile::tempdir().expect("a root");
+        let (plain, _, _) = gated_runtime(other.path(), None);
+        let access = read_write(&workspace);
+        let input = pty_exec_input(&snapshot);
+        let gate = gated
+            .gate_start(&ExecLists::wire(), &input, &access, &[], &[], &[])
+            .expect("a start without a list asks nothing");
+        assert!(gate.is_none(), "a start without a list has no gate");
+        let unnumbered = |argv: Vec<String>| -> Vec<String> {
+            argv.into_iter()
+                .filter(|part| part.parse::<u32>().is_err())
+                .collect()
+        };
+        let with_gate = unnumbered(argv_with(&gated, &input, &access, gate.as_ref()));
+        let without = unnumbered(argv_with(&plain, &input, &access, None));
+        assert_eq!(with_gate, without);
+        assert!(
+            !with_gate
+                .iter()
+                .any(|part| part == "--ro-bind-data" || part.contains("substrate-exec-gate")),
+            "{with_gate:?}"
+        );
+        assert_eq!(
+            with_gate[with_gate.len() - 6..],
+            ["--", "/usr/bin/env", "-u", "PWD", "--", "/bin/sh"],
+            "the program follows env directly: {with_gate:?}"
+        );
+    }
+
+    /// **A list never runs without its helper** (design 35 D19): a start that carries a list on
+    /// a driver without a gate, or with one its probe did not prove, is refused before anything
+    /// is dispatched, and a render of it is refused by the same name.
+    #[tokio::test]
+    async fn a_listed_start_without_a_proved_gate_is_not_dispatched() {
+        for gate in [None, Some(false)] {
+            let root = tempfile::tempdir().expect("a root");
+            let (runtime, workspace, snapshot) = gated_runtime(root.path(), gate);
+            let input = pty_exec_input(&snapshot);
+            let refused = |error: &crate::DriverError| {
+                assert_eq!(error.code, crate::confinement::FACT_UNSERVED, "{error}");
+                assert_eq!(error.class, crate::DriverErrorClass::Unserved, "{error}");
+                assert_eq!(error.address.as_deref(), Some("exec_subpaths"), "{error}");
+            };
+            let outcome = runtime
+                .start_for_adapter(
+                    "ex_listed",
+                    &workspace,
+                    &input,
+                    AdapterStart::default(),
+                    ExecLists::listing(&["bin"]),
+                )
+                .await;
+            match outcome {
+                DispatchOutcome::NotDispatched(error) => refused(&error),
+                _ => panic!("gate {gate:?}: a listed start without a proved gate was dispatched"),
+            }
+            refused(
+                &runtime
+                    .render(&workspace, &input, &ExecLists::listing(&["bin"]))
+                    .expect_err("a render of a listed start without a proved gate"),
+            );
+        }
+    }
+
+    /// **The wire constructor is named at exactly the three wire sites** (design 35 D22): a wire
+    /// exec start, a start with Git roots and a session start. Outside this module the compiler
+    /// refuses the call, because `ExecLists::wire` has no visibility modifier; inside it a
+    /// fourth site fails here until design 35 is revisited.
+    #[test]
+    fn the_wire_constructor_is_named_at_exactly_the_three_wire_sites() {
+        let source = include_str!("process.rs");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("the code before the tests");
+        assert_ne!(production.len(), source.len(), "the tests were not found");
+        let call = ["ExecLists", "::", "wire", "()"].concat();
+        assert_eq!(
+            production.matches(&call).count(),
+            3,
+            "ExecLists::wire() is written at another number of sites than the three wire paths"
+        );
+        // And it stays private to this module: no `pub` in front of it.
+        assert_eq!(production.matches("\n    fn wire() -> Self {").count(), 1);
+        assert!(
+            !production.contains("pub(crate) fn wire()") && !production.contains("pub fn wire()")
+        );
     }
 
     /// **The base view carries `/etc/alternatives`** (issue #223, ADR 0049 decision 1): on a
@@ -8150,6 +8618,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                None,
             )
             .expect("the exec argv builds");
         let argv: Vec<String> = command
@@ -8239,6 +8708,7 @@ mod tests {
                     &[],
                     &[],
                     &[],
+                    None,
                 )
                 .expect("the exec argv builds");
             let argv: Vec<String> = command
@@ -8337,6 +8807,7 @@ mod tests {
                 &[],
                 &roots,
                 &[],
+                None,
             )
             .expect("the exec argv builds");
         let argv: Vec<String> = command

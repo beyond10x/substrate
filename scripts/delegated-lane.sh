@@ -39,6 +39,34 @@ echo "+cpu +memory +pids" > "${root}/cgroup.subtree_control"
 echo "delegated-lane: root ${root}, controllers ${controllers}"
 export SUBSTRATE_VECTORS_CGROUP_ROOT="${root}"
 
+if ! command -v jq >/dev/null 2>&1; then
+  echo "delegated-lane: jq is required to read the paths cargo reports" >&2
+  exit 1
+fi
+
+# The executable gate (design 35): the helper that holds a run to its executable allow-list. The
+# linux adapter of this lane is opened with it, because every `linux` scenario's open step states
+# `exec_subpaths`; without it those steps fail on the missing fact instead of passing silently.
+# The path is the one cargo reports, for the reason given at the daemon below. The lane names a
+# copy, not cargo's output: cargo hard-links `substrate-exec-gate` to its file under `deps/`, and
+# the driver refuses a helper with a second link (`config.exec-gate-invalid`), which may lie where
+# a run can write.
+gate_built="$(
+  cargo build -p b10x-substrate-exec-gate --bin substrate-exec-gate --locked \
+    --message-format=json-render-diagnostics \
+    | jq -r 'select(.reason == "compiler-artifact" and .target.name == "substrate-exec-gate"
+                    and .executable != null) | .executable'
+)"
+if [[ -z "${gate_built}" || "${gate_built}" == *$'\n'* || ! -x "${gate_built}" ]]; then
+  echo "delegated-lane: cargo reported no single executable for substrate-exec-gate (got: '${gate_built}')" >&2
+  exit 1
+fi
+gate_bin="$(dirname "${gate_built}")/substrate-exec-gate.lane"
+rm -f "${gate_bin}"
+cp "${gate_built}" "${gate_bin}"
+echo "delegated-lane: executable gate ${gate_bin}"
+export SUBSTRATE_EXEC_GATE="${gate_bin}"
+
 # The host crate has delegated cases of its own — a pty session's echo, controlling terminal,
 # SIGWINCH, output bound and whole-tree cleanup (design 13). They read the same variable and are
 # *absent* without it, so a lane that ran only the daemon's runner would leave them looking green
@@ -117,7 +145,10 @@ require_executed security_review_confinement 'security review linux start env: e
   'egress listener review: executed, none held during the run, baseline restored'
 require_executed sandbox_parity \
   'sandbox parity bubblewrap delegated: executed, 23 rows present'
-# Design 29: scoped workspace write and output retention, each case by its own line.
+# Design 29: scoped workspace write and output retention, each case by its own line. Design 35:
+# the `exec` lines, runs held to an executable allow-list by the helper built above. The first
+# of them is the acceptance: a program beneath a listed directory runs, and one outside it fails
+# inside the run with status 126.
 require_executed ess_confinement_linux \
   'ESS confinement linux scoped write: executed' \
   'ESS confinement linux scoped git: executed' \
@@ -141,7 +172,27 @@ require_executed ess_confinement_linux \
   'ESS confinement linux live bounded: executed' \
   'ESS confinement linux live both streams: executed' \
   'ESS confinement linux live kill: executed' \
-  'ESS confinement linux live pending read: executed'
+  'ESS confinement linux live pending read: executed' \
+  'ESS confinement linux exec allow-list: executed' \
+  'ESS confinement linux exec entries: executed' \
+  'ESS confinement linux exec script refused: executed' \
+  'ESS confinement linux exec limit interpreter: executed' \
+  'ESS confinement linux exec limit loader: executed' \
+  'ESS confinement linux exec rename: executed' \
+  'ESS confinement linux exec limit rename into: executed' \
+  'ESS confinement linux exec limit recreated: executed' \
+  'ESS confinement linux exec limit second mount: executed' \
+  'ESS confinement linux exec refused at start: executed' \
+  'ESS confinement linux exec root in a workspace: executed' \
+  'ESS confinement linux exec follow into a writable mount: executed' \
+  'ESS confinement linux exec swapped link: executed' \
+  'ESS confinement linux exec place unserved: executed' \
+  'ESS confinement linux exec helper after open: executed' \
+  'ESS confinement linux exec helper unset: executed' \
+  'ESS confinement linux exec helper unrestricting: executed' \
+  'ESS confinement linux exec helper protocol: executed' \
+  'ESS confinement linux exec helper writable: executed' \
+  'ESS confinement linux exec withheld: executed'
 require_executed ess_confinement_systemd \
   'ESS confinement systemd local scoped write: executed' \
   'ESS confinement systemd linux scoped write: executed' \
@@ -151,7 +202,10 @@ require_executed ess_confinement_systemd \
   'ESS confinement systemd local live natural end: executed' \
   'ESS confinement systemd local live stall: executed' \
   'ESS confinement systemd linux live natural end: executed' \
-  'ESS confinement systemd linux live stall: executed'
+  'ESS confinement systemd linux live stall: executed' \
+  'ESS confinement systemd linux exec_subpaths admission: executed' \
+  'ESS confinement systemd linux exec allow-list: executed' \
+  'ESS confinement systemd linux exec withheld: executed'
 
 # `b10x-substrate confine run` opens the linux adapter on a private group beneath the delegated
 # root; its delegated cases are absent, exit 0, without it, so each is required by its line.
@@ -204,10 +258,6 @@ echo "delegated-lane: ${consumer_line}"
 # reads as a daemon defect rather than a missing build artefact. So no path is derived here: the
 # build itself reports the `executable` it produced (`--message-format=json-render-diagnostics`
 # keeps the human diagnostics on stderr), and the script refuses, by name, if it reported none.
-if ! command -v jq >/dev/null 2>&1; then
-  echo "delegated-lane: jq is required to read the daemon path cargo reports" >&2
-  exit 1
-fi
 daemon_bin="$(
   cargo build -p b10x-substrate-daemon --bin substrate-daemon --locked \
     --message-format=json-render-diagnostics \

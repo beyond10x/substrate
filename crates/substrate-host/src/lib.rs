@@ -19,6 +19,10 @@ pub mod confinement;
 mod confinement_types;
 #[cfg(target_os = "linux")]
 mod egress;
+// The executable gate of design 35: `HostConfig.exec_gate` checked, read once and sealed at open,
+// and a start's allow-list resolved into the helper's arguments.
+#[cfg(target_os = "linux")]
+mod exec_gate;
 #[cfg(all(target_os = "linux", feature = "git"))]
 mod git;
 // Without the `git` feature: the same entry points, refusing every Git source by name.
@@ -373,6 +377,33 @@ pub struct HostConfig {
     /// `HostDriver::open` refuses a size under [`MIN_TMP_BYTES`] as `config.tmp-bytes-invalid`,
     /// and a bubblewrap that does not take `--size` as `config.tmp-bytes-unserved`.
     pub tmp_bytes: Option<u64>,
+    /// `substrate-exec-gate`, the helper of this repository that holds a run to its executable
+    /// allow-list (design 35), named by an absolute path. The driver searches nowhere else.
+    /// [`HostConfig::minimum`] sets `None`: the `linux` adapter then proves no executable-list
+    /// fact, and a profile with a list is refused `confinement.fact-unserved`.
+    ///
+    /// `HostDriver::open` reads the file once and runs those bytes in every later start, so a
+    /// file replaced on disk changes nothing until the driver is opened again. A helper that
+    /// cannot be used is a configuration error and refuses the open:
+    ///
+    /// - `config.exec-gate-invalid` (422): the path is not absolute, the file lies in
+    ///   `workspace_root` or a declared writable root, which a run could have written, or it has
+    ///   more than one link;
+    /// - `config.exec-gate-unserved` (501): the file is missing, unreadable, not a regular file,
+    ///   over 64 MiB, or does not answer `--version` with `substrate-exec-gate/1` in a sandbox;
+    ///   or the driver cannot read the host's mount table or establish where the file,
+    ///   `workspace_root`, a `writable_roots` path, `/usr`, `/bin`, `/lib`, `/lib64` or the
+    ///   temporary directory lies in it. The message names the path and the cause.
+    ///
+    /// **One case opens without the lists and says why** (design 35 D27). The lists are served
+    /// on `ext4`, `overlay` and `tmpfs`. Where one of those paths lies on another file-system
+    /// type, for example a workspace volume on `xfs` or `btrfs`, or the kernel reports no mount
+    /// ID for it, the driver opens, the helper is not used, and the adapter proves no
+    /// executable-list fact. `AdapterFacts::withheld` then holds one entry per path with the
+    /// cause, the path and the type; a profile with a list is refused
+    /// `confinement.fact-unserved` and the refusal's text repeats the first entry; and the
+    /// driver writes one `warn` line per entry. Nothing runs with a list that is not enforced.
+    pub exec_gate: Option<PathBuf>,
 }
 
 /// The smallest `/tmp` an operator may set: one MiB (ADR 0049 decision 2).
@@ -541,6 +572,7 @@ impl HostConfig {
             host_processes: false,
             writable_roots: Vec::new(),
             tmp_bytes: None,
+            exec_gate: None,
         }
     }
 
@@ -978,6 +1010,9 @@ pub struct HostDriver {
     blocking_slots: Arc<Semaphore>,
     workspace_destroy_namespace: (libc::dev_t, libc::ino_t),
     quotas: Option<Arc<quota::ProjectQuotas>>,
+    /// What the open's probe proved of the executable lists (design 35 D14): host-private, never
+    /// a published fact.
+    exec_lists: confinement::linux::ExecListProof,
 }
 
 #[cfg(target_os = "linux")]
@@ -1117,6 +1152,11 @@ impl HostDriver {
         validate_writable_roots(&config.writable_roots)?;
         validate_tmp_bytes(config.tmp_bytes)?;
         check_tmp_size_served(&config.bubblewrap, config.tmp_bytes)?;
+        // Design 35 D19 to D21: a configured helper that cannot be the authority, or cannot be
+        // read, refuses the open here; one that is not of the protocol refuses it in the probe.
+        // D27: where a path of the open lies on a file-system type outside the list, the open
+        // goes on without the helper, and says why once per entry at the default level.
+        let (exec_gate, exec_withheld) = exec_gate::open(&config)?.announced();
         std::fs::create_dir_all(&config.workspace_root).map_err(|error| {
             DriverError::failed("workspace.root-failed", format!("workspace root: {error}"))
         })?;
@@ -1180,7 +1220,11 @@ impl HostDriver {
             config.read_limit_bytes,
             config.list_limit_items,
         )?);
-        let capability = probe::probe(&config, filesystem.openat2_available());
+        let openat2 = filesystem.openat2_available();
+        let probe::Probed {
+            snapshot: capability,
+            exec_lists,
+        } = probe::probe_host(&config, openat2, exec_gate.as_deref(), exec_withheld)?;
         let quotas = if capability.facts.workspace_storage_quota.is_some() {
             quota::ProjectQuotas::open(&config.workspace_root, config.project_quota_ids)?
         } else {
@@ -1191,6 +1235,8 @@ impl HostDriver {
             capability.clone(),
             quotas.clone(),
             Some(Arc::new(filesystem.root_descriptor()?)),
+            exec_gate,
+            exec_lists.subpaths,
         )?;
         let workspace_destroy_namespace = filesystem.root_identity()?;
         Ok(Arc::new(Self {
@@ -1201,7 +1247,15 @@ impl HostDriver {
             blocking_slots: Arc::new(Semaphore::new(16)),
             workspace_destroy_namespace,
             quotas,
+            exec_lists,
         }))
+    }
+
+    /// What this driver's probe proved of the executable lists at open (design 35 D14): the
+    /// second argument of [`confinement::linux::proof`]. Host-private: the capability snapshot
+    /// publishes none of it.
+    pub fn exec_list_proof(&self) -> confinement::linux::ExecListProof {
+        self.exec_lists.clone()
     }
 
     /// Resolves a validated internal workspace-root identity.
@@ -1229,8 +1283,10 @@ impl HostDriver {
     /// input is a pipe [`Self::write_pipe_session`] writes and the output is still recorded
     /// (design 32 § 5). With `live`, the output is also queued, at most that many frames, for
     /// [`Self::read_pipe_session`], under the session's backpressure and with no truncation
-    /// marker in the record. `pub(crate)`, so no session and no daemon route can ask for any of
+    /// marker in the record. `lists` is the admitted profile's executable lists (design 35 D22),
+    /// a required argument. `pub(crate)`, so no session and no daemon route can ask for any of
     /// them.
+    #[allow(clippy::too_many_arguments)] // The lists are a required argument of their own.
     pub(crate) async fn start_exec_for_adapter(
         &self,
         id: &str,
@@ -1239,6 +1295,7 @@ impl HostDriver {
         retention: OutputRetention,
         stdin: bool,
         live: Option<usize>,
+        lists: process::ExecLists,
     ) -> DispatchOutcome<ExecObservation> {
         let workspace = match self.workspace_path(workspace_root_name) {
             Ok(value) => value,
@@ -1251,7 +1308,7 @@ impl HostDriver {
             live,
         };
         self.processes
-            .start_for_adapter(id, &workspace, input, adapter)
+            .start_for_adapter(id, &workspace, input, adapter, lists)
             .await
     }
 

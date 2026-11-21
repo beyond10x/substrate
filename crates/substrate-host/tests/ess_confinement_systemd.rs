@@ -46,10 +46,16 @@ fn local_inner() -> InnerRequest {
     InnerRequest::Local(LocalRequest::default())
 }
 
+/// `substrate-exec-gate` as the delegated lane built it (design 35), or `None` where no lane
+/// names one: a plain `cargo test` on a workstation with a user manager.
+fn exec_gate() -> Option<PathBuf> {
+    std::env::var_os("SUBSTRATE_EXEC_GATE").map(PathBuf::from)
+}
+
 fn linux_inner(host: &Path) -> InnerRequest {
-    InnerRequest::Linux(Box::new(LinuxRequest::new(HostConfig::minimum(
-        host.join("workspaces"),
-    ))))
+    let mut config = HostConfig::minimum(host.join("workspaces"));
+    config.exec_gate = exec_gate();
+    InnerRequest::Linux(Box::new(LinuxRequest::new(config)))
 }
 
 fn open(inner: InnerRequest) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
@@ -114,22 +120,33 @@ fn ess_confinement_systemd_lane_executes_every_systemd_scenario() {
     let declared = scenarios.len();
     let mut inners = BTreeMap::<String, usize>::new();
     let mut hosts = Vec::new();
-    let (executed, audited, open_checks) = support::run(&scenarios, |step| {
-        assert_eq!(step.adapter, "systemd");
-        let inner = step
-            .inner
-            .clone()
-            .expect("a systemd scenario names its inner");
-        *inners.entry(inner.clone()).or_default() += 1;
-        let host = tempfile::tempdir().expect("host root");
-        let request = match inner.as_str() {
-            "local" => local_inner(),
-            "linux" => linux_inner(host.path()),
-            other => panic!("systemd wraps no {other}"),
-        };
-        hosts.push(host);
-        open(request)
-    });
+    // This case also runs outside the delegated lane, wherever a user manager answers, and
+    // there no helper is built. Without one `linux` proves no `exec_subpaths` (design 35 D19):
+    // each open step's expected set then lacks that fact, and the admission requiring it must
+    // be `confinement.fact-unserved` naming it. The delegated lane names the helper and
+    // requires the fact; which of the two ran is in the line this case prints.
+    let unproved: &[Fact] = if exec_gate().is_some() {
+        &[]
+    } else {
+        &[Fact::ExecSubpaths]
+    };
+    let (executed, audited, open_checks, refused_unproved) =
+        support::run_without(&scenarios, unproved, |step| {
+            assert_eq!(step.adapter, "systemd");
+            let inner = step
+                .inner
+                .clone()
+                .expect("a systemd scenario names its inner");
+            *inners.entry(inner.clone()).or_default() += 1;
+            let host = tempfile::tempdir().expect("host root");
+            let request = match inner.as_str() {
+                "local" => local_inner(),
+                "linux" => linux_inner(host.path()),
+                other => panic!("systemd wraps no {other}"),
+            };
+            hosts.push(host);
+            open(request)
+        });
     assert_eq!(
         executed, declared,
         "a delegated systemd scenario did not run"
@@ -140,11 +157,139 @@ fn ess_confinement_systemd_lane_executes_every_systemd_scenario() {
             "no systemd scenario around {inner} ran: {inners:?}"
         );
     }
+    assert_eq!(
+        refused_unproved,
+        unproved.len(),
+        "with the helper no admission is refused for want of exec_subpaths; without it exactly \
+         the scenario that requires the fact is"
+    );
     println!(
         "ESS confinement systemd delegated lane: {executed} scenarios executed of {declared} \
          declared for systemd ({inners:?}), {audited} refusal audit records asserted, \
          {open_checks} open checks refused, 0 failed"
     );
+    if unproved.is_empty() {
+        println!("ESS confinement systemd linux exec_subpaths admission: executed");
+    } else {
+        println!(
+            "ESS confinement systemd linux exec_subpaths admission: ABSENT \
+             (SUBSTRATE_EXEC_GATE is unset; refused confinement.fact-unserved instead)"
+        );
+    }
+}
+
+/// Design 35, `systemd` around `linux`: the inner adapter's proof is the scope's, so one run
+/// with an executable list is held to it. A program beneath the listed directory runs and one
+/// outside it fails inside the run with status 126.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_linux_run_is_held_to_its_executable_list() {
+    const NAME: &str = "ESS confinement systemd linux exec allow-list";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    if exec_gate().is_none() {
+        println!("{NAME}: ABSENT (SUBSTRATE_EXEC_GATE is unset)");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    assert!(
+        adapter.facts().proves(&Fact::ExecSubpaths),
+        "{:?}",
+        adapter.facts()
+    );
+    let workspace = host.path().join("workspaces").join("ws_exec");
+    let tool = ["/usr/bin/true", "/bin/true"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .expect("the host's true");
+    for directory in ["bin", "other"] {
+        std::fs::create_dir_all(workspace.join(directory)).expect(directory);
+        std::fs::copy(tool, workspace.join(directory).join("tool")).expect("copy true");
+    }
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            inner: Some(InnerAdapter::Linux),
+            workspace: Some(workspace),
+            exec_subpaths: vec!["bin".to_owned()],
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(
+            &admitted,
+            &shell("bin/tool; echo $?; other/tool 2>/dev/null; echo $?"),
+        )
+        .await
+        .expect("started");
+    let ended = adapter.wait(&run).await.expect("waited");
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    let output = adapter.output(&run).await.expect("output");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n126\n");
+    drop(adapter);
+    println!("{NAME}: executed");
+}
+
+/// Design 35 D27, `systemd` around `linux`: an inner adapter whose open withheld the allow-list
+/// fact, here for a declared writable root at `/proc/sys`, which lies on the type `proc`. The
+/// scope's proof carries the same entry, and a profile with a list is refused with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn systemd_around_a_linux_that_withheld_the_lists_reports_the_same_entries() {
+    const NAME: &str = "ESS confinement systemd linux exec withheld";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let Some(gate) = exec_gate() else {
+        println!("{NAME}: ABSENT (SUBSTRATE_EXEC_GATE is unset)");
+        return;
+    };
+    let host = tempfile::tempdir().expect("host root");
+    let mut config = HostConfig::minimum(host.path().join("workspaces"));
+    config.exec_gate = Some(gate);
+    config.writable_roots = vec![confinement::DeclaredWritableRoot {
+        name: "kernel".to_owned(),
+        path: PathBuf::from("/proc/sys"),
+    }];
+    let adapter = open(InnerRequest::Linux(Box::new(LinuxRequest::new(config))))
+        .expect("systemd around a linux that withholds the lists opens");
+    let entry = confinement::FactWithheld {
+        fact: Fact::ExecSubpaths,
+        cause: "file-system-unlisted",
+        address: "config.writable_roots",
+        path: "/proc/sys".to_owned(),
+        file_system: Some("proc".to_owned()),
+    };
+    let facts = adapter.facts();
+    assert!(!facts.proves(&Fact::ExecSubpaths), "{facts:?}");
+    assert_eq!(facts.withheld, std::slice::from_ref(&entry), "{facts:?}");
+    let workspace = host.path().join("workspaces").join("ws_exec");
+    std::fs::create_dir_all(workspace.join("bin")).expect("bin");
+    let error = adapter
+        .admit(&ConfinementProfile {
+            inner: Some(InnerAdapter::Linux),
+            workspace: Some(workspace),
+            exec_subpaths: vec!["bin".to_owned()],
+            ..ConfinementProfile::default()
+        })
+        .expect_err("a profile with a list on a scope whose inner adapter withheld it");
+    match &error {
+        ConfinementError::FactUnserved { fact, withheld, .. } => {
+            assert_eq!(*fact, Fact::ExecSubpaths);
+            assert_eq!(withheld.as_ref(), Some(&entry));
+        }
+        other => panic!("expected exec_subpaths unserved, got {other:?}"),
+    }
+    assert_eq!(error.status(), 501);
+    let message = error.to_string();
+    for holds in ["file-system-unlisted", "/proc/sys", "is on proc"] {
+        assert!(message.contains(holds), "{message}");
+    }
+    drop(adapter);
+    println!("{NAME}: executed");
 }
 
 #[test]

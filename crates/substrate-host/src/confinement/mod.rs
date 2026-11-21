@@ -61,7 +61,9 @@ pub use crate::confinement_types::{AdapterName, ContractFamily, Fact};
 pub use crate::{DeclaredWritableRoot, HostConfig};
 // Which bytes of each output stream a run keeps (design 29 § 5).
 pub use crate::output_retention::{KeptOutput, OutputRetention, Retention};
-pub use facts::{AdapterFacts, FACT_ORDER, FAMILY_ORDER, InnerAdapter, ReservedField};
+pub use facts::{
+    AdapterFacts, FACT_ORDER, FAMILY_ORDER, FactWithheld, InnerAdapter, ReservedField,
+};
 pub use profile::{
     ConfinementProfile, IoBounds, Ipc, Network, OutputDelivery, ProcessBounds, StdinMode,
     image_is_pinned,
@@ -191,6 +193,7 @@ pub fn check_open(facts: &AdapterFacts) -> Result<(), ConfinementError> {
         Some(fact) if !facts.proves(&fact) => Err(ConfinementError::FactUnserved {
             adapter: facts.adapter.clone(),
             fact,
+            withheld: None,
         }),
         _ => Ok(()),
     }
@@ -209,6 +212,34 @@ pub fn admit_unopened(adapter: &AdapterName, profile: &ConfinementProfile) -> Co
     error
 }
 
+/// What the text of `confinement.fact-unserved` adds for a fact the open withheld (design 35
+/// D27): the cause, the path, the configuration field it belongs to and the file-system type,
+/// so an operator learns why the lists are not served from the refusal itself. Empty otherwise.
+fn withheld_reason(withheld: Option<&FactWithheld>) -> String {
+    let Some(entry) = withheld else {
+        return String::new();
+    };
+    let FactWithheld {
+        cause,
+        address,
+        path,
+        ..
+    } = entry;
+    match &entry.file_system {
+        Some(file_system) => {
+            let (last, listed) = substrate_exec_gate::place::LISTED_FILE_SYSTEMS
+                .split_last()
+                .expect("the list of file-system types is not empty");
+            format!(
+                ": {cause}: {path} ({address}) is on {file_system}; the lists are served on {} \
+                 and {last}",
+                listed.join(", ")
+            )
+        }
+        None => format!(": {cause}: the kernel reports no mount ID for {path} ({address})"),
+    }
+}
+
 /// A named refusal of the confinement contract, or the host's own refusal met while running.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfinementError {
@@ -222,8 +253,18 @@ pub enum ConfinementError {
         adapter: AdapterName,
         family: ContractFamily,
     },
-    #[error("confinement.fact-unserved: {adapter:?} did not prove {fact:?}")]
-    FactUnserved { adapter: AdapterName, fact: Fact },
+    #[error(
+        "confinement.fact-unserved: {adapter:?} did not prove {fact:?}{}",
+        withheld_reason(withheld.as_ref())
+    )]
+    FactUnserved {
+        adapter: AdapterName,
+        fact: Fact,
+        /// Why the adapter withheld the fact at its open, where it did (design 35 D27): the
+        /// proof's first entry for the fact, which the text repeats. `None` for a fact that
+        /// is absent for any other reason.
+        withheld: Option<FactWithheld>,
+    },
     #[error("confinement.local-refused: the host's policy forbids {adapter:?}")]
     LocalRefused { adapter: AdapterName },
     #[error(
@@ -633,6 +674,7 @@ fn decide(
         return Err(ConfinementError::FactUnserved {
             adapter: adapter(),
             fact: fact.clone(),
+            withheld: facts.withheld_for(fact).cloned(),
         });
     }
     Ok(AdmittedProfile {
@@ -1126,5 +1168,187 @@ mod tests {
     fn the_shape_rule_is_checked_before_the_git_rule() {
         let (error, _) = refusal(&scoped(&["src", ".git"]));
         assert_eq!(error.code(), substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID);
+    }
+
+    fn withheld_entry(
+        address: &'static str,
+        path: &str,
+        file_system: Option<&str>,
+    ) -> FactWithheld {
+        FactWithheld {
+            fact: Fact::ExecSubpaths,
+            cause: if file_system.is_some() {
+                "file-system-unlisted"
+            } else {
+                "mount-id-unreported"
+            },
+            address,
+            path: path.to_owned(),
+            file_system: file_system.map(str::to_owned),
+        }
+    }
+
+    /// The proof of a `linux` that serves every family, proves the facts a plain run needs and
+    /// no executable-list fact, and carries `withheld`.
+    fn linux_without_lists(withheld: Vec<FactWithheld>) -> AdapterFacts {
+        let mut facts = AdapterFacts::new(
+            AdapterName::Linux,
+            None,
+            &FAMILY_ORDER
+                .iter()
+                .map(|family| (family.clone(), true))
+                .collect::<Vec<_>>(),
+            &[
+                (Fact::WholeTreeKill, true),
+                (Fact::IpcSocketAllowlist, true),
+            ],
+        );
+        facts.withheld = withheld;
+        facts
+    }
+
+    /// Admits a profile listing `entries` against `facts`, with the audit records it wrote.
+    fn admit_listing(
+        facts: &AdapterFacts,
+        entries: &[&str],
+    ) -> (
+        Result<AdmittedProfile, ConfinementError>,
+        Vec<serde_json::Value>,
+    ) {
+        let records = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink_records = Arc::clone(&records);
+        let profile = ConfinementProfile {
+            workspace: Some(std::path::PathBuf::from("/srv/workspaces/ws_1")),
+            exec_subpaths: entries.iter().map(|entry| (*entry).to_owned()).collect(),
+            audit: Some(AuditSink::new(move |record: &AuditRecord| {
+                sink_records
+                    .lock()
+                    .push(serde_json::to_value(record).expect("record"));
+            })),
+            ..ConfinementProfile::default()
+        };
+        let admitted = admission(facts, &profile, |_| Ok(()));
+        let records = records.lock().clone();
+        (admitted, records)
+    }
+
+    /// Design 35 D27: a profile with a list on an adapter whose open withheld the fact is
+    /// refused `confinement.fact-unserved`, and the refusal repeats the proof's first entry for
+    /// that fact: the cause, the path, the configuration field and the file-system type.
+    #[test]
+    fn a_withheld_fact_is_refused_with_its_cause() {
+        let first = withheld_entry(
+            "config.workspace_root",
+            "/var/lib/b10x-substrate/workspaces",
+            Some("xfs"),
+        );
+        let facts = linux_without_lists(vec![
+            first.clone(),
+            withheld_entry("config.exec_gate", "/usr", Some("xfs")),
+        ]);
+        let (refused, records) = admit_listing(&facts, &["bin"]);
+        let error = refused.expect_err("a list on an adapter that withheld the fact");
+        match &error {
+            ConfinementError::FactUnserved {
+                adapter,
+                fact,
+                withheld,
+            } => {
+                assert_eq!(*adapter, AdapterName::Linux);
+                assert_eq!(*fact, Fact::ExecSubpaths);
+                assert_eq!(
+                    withheld.as_ref(),
+                    Some(&first),
+                    "the first entry for the fact"
+                );
+            }
+            other => panic!("expected exec_subpaths unserved, got {other:?}"),
+        }
+        assert_eq!(error.code(), FACT_UNSERVED);
+        assert_eq!(error.status(), 501);
+        assert_eq!(
+            error.to_string(),
+            "confinement.fact-unserved: Linux did not prove ExecSubpaths: file-system-unlisted: \
+             /var/lib/b10x-substrate/workspaces (config.workspace_root) is on xfs; the lists \
+             are served on ext4, overlay and tmpfs"
+        );
+
+        // The audit record keeps its shape: the code and the fact, and no new member. It is the
+        // record the same refusal writes against a proof with no entry.
+        let (plain, plain_records) = admit_listing(&linux_without_lists(Vec::new()), &["bin"]);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0]["event"], "profile_refused");
+        assert_eq!(records[0]["code"], FACT_UNSERVED);
+        assert_eq!(records[0]["fact"], "exec_subpaths");
+        assert_eq!(records, plain_records);
+
+        // Against a proof with no entry: no reason, and the text the refusal had before.
+        let plain = plain.expect_err("a list on an adapter that did not prove the fact");
+        assert!(
+            matches!(
+                &plain,
+                ConfinementError::FactUnserved { fact, withheld: None, .. }
+                    if *fact == Fact::ExecSubpaths
+            ),
+            "{plain:?}"
+        );
+        assert_eq!(
+            plain.to_string(),
+            "confinement.fact-unserved: Linux did not prove ExecSubpaths"
+        );
+
+        // A profile without a list is admitted against the proof that withholds.
+        let (admitted, records) = admit_listing(&facts, &[]);
+        admitted.expect("a profile without a list");
+        assert_eq!(records[0]["event"], "profile_admitted", "{records:?}");
+    }
+
+    /// Design 35 D27: a kernel that reports no mount ID has no file-system type to name, and an
+    /// entry is repeated only by the refusal of the fact it is about.
+    #[test]
+    fn a_refusal_repeats_only_the_entry_of_its_own_fact() {
+        let unreported = withheld_entry("config.workspace_root", "/srv/workspaces", None);
+        let facts = linux_without_lists(vec![unreported.clone()]);
+        let (refused, _) = admit_listing(&facts, &["bin"]);
+        assert_eq!(
+            refused.expect_err("withheld").to_string(),
+            "confinement.fact-unserved: Linux did not prove ExecSubpaths: mount-id-unreported: \
+             the kernel reports no mount ID for /srv/workspaces (config.workspace_root)"
+        );
+
+        // `stdin_pipe` is absent from this proof for no named cause.
+        let piped = ConfinementProfile {
+            workspace: Some(std::path::PathBuf::from("/srv/workspaces/ws_1")),
+            stdin: StdinMode::Piped { limit_bytes: 1_024 },
+            ..ConfinementProfile::default()
+        };
+        let error = admission(&facts, &piped, |_| Ok(())).expect_err("stdin_pipe is not proved");
+        assert!(
+            matches!(
+                &error,
+                ConfinementError::FactUnserved { fact, withheld: None, .. }
+                    if *fact == Fact::StdinPipe
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "confinement.fact-unserved: Linux did not prove StdinPipe"
+        );
+
+        // The open's own check names no entry either, and reads as it did.
+        let local = AdapterFacts::new(AdapterName::Local, None, &[], &[]);
+        let error = check_open(&local).expect_err("local without declared_insecure");
+        assert!(
+            matches!(
+                &error,
+                ConfinementError::FactUnserved { withheld: None, .. }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "confinement.fact-unserved: Local did not prove DeclaredInsecure"
+        );
     }
 }

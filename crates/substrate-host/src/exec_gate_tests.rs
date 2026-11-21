@@ -1,0 +1,1072 @@
+//! The executable gate's decisions (design 35 D19 to D21, D24 to D27).
+//!
+//! The first half decides on what it is given: what the kernel reported for a path, a mount
+//! table as text, metadata and a protocol line, as `tmp_size_served_by` decides on help text.
+//! It needs no sandbox, no mount and no file system of a particular type.
+//!
+//! The second half asks the same of real files. A place is established only on the listed
+//! file-system types, so on a host whose temporary directory or `/usr` is on another type each
+//! of those cases prints that it is absent and why, and asserts nothing.
+
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+
+use sha2::{Digest as _, Sha256};
+use substrate_exec_gate::place::{Cause, MountTable, Opened, Unestablished};
+use substrate_exec_gate::{Class, Invocation, Lists};
+use substrate_guarded::DriverErrorClass;
+use substrate_wire::ReadOnlyRoot;
+
+use super::{
+    EXEC_GATE_INVALID, EXEC_GATE_UNSERVED, ExecGate, FileFacts, Location, OpenDecision,
+    OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, View,
+    check_file, check_links, check_location, check_protocol, classed, decide_open, open,
+    place_open, plan, start_unplaced, withheld_facts,
+};
+use crate::confinement::{Fact, FactWithheld};
+use crate::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
+use crate::{DriverError, HostConfig};
+
+/// A host: the workspace root is a directory of the root file system, and the host mounts it a
+/// second time at `/mnt/second` (K6). `/tmp` is a tmpfs, and `/data` a file system of a type
+/// outside the list.
+const HOST: &str = "\
+31 1 259:2 / / rw,noatime shared:1 - ext4 /dev/nvme0n1p2 rw
+60 31 259:2 /work/u/workspaces /mnt/second rw,noatime shared:1 - ext4 /dev/nvme0n1p2 rw
+61 31 0:40 / /tmp rw,nosuid,nodev shared:30 - tmpfs tmpfs rw
+62 31 8:17 / /data rw,noatime shared:40 - xfs /dev/sdb1 rw
+";
+
+fn host() -> MountTable {
+    MountTable::parse(HOST).expect("the host table parses")
+}
+
+/// What the kernel would report for `path`, opened on the mount with `mount_id`.
+fn seen(path: &str, mount_id: u64) -> Opened {
+    Opened {
+        path: path.to_owned(),
+        mount_id: Some(mount_id),
+        descriptor_path: Some(path.to_owned()),
+        remaining: Vec::new(),
+    }
+}
+
+/// The open of a host whose helper is `gate`: the workspace root, one declared writable root,
+/// `/usr` and the probes' temporary directory.
+fn sightings(gate: Opened) -> OpenSightings {
+    OpenSightings {
+        gate,
+        workspace_root: seen("/work/u/workspaces", 31),
+        writable_roots: vec![seen("/srv/out", 31)],
+        base: vec![seen("/usr", 31)],
+        temporary: seen("/tmp", 61),
+    }
+}
+
+/// The locations a run can write on that host, placed.
+fn writable() -> Vec<Location> {
+    ["/work/u/workspaces", "/srv/out"]
+        .iter()
+        .map(|path| Location {
+            path: (*path).to_owned(),
+            place: host().place_of(&seen(path, 31)).expect("placed"),
+        })
+        .collect()
+}
+
+/// The places of an open on which every place is established.
+fn established(sightings: &OpenSightings, table: &MountTable) -> OpenPlaces {
+    match place_open(sightings, table) {
+        OpenPlacement::Placed(places) => places,
+        other => panic!("a place of the open was not established: {other:?}"),
+    }
+}
+
+fn gate() -> &'static Path {
+    Path::new("/opt/substrate/substrate-exec-gate")
+}
+
+fn assert_invalid(error: &DriverError, holds: &str) {
+    assert_eq!(error.code, EXEC_GATE_INVALID, "{error}");
+    assert_eq!(error.class, DriverErrorClass::Refused, "{error}");
+    assert_eq!(error.address.as_deref(), Some("config.exec_gate"));
+    assert!(error.message.contains(holds), "{error}");
+}
+
+fn assert_unserved(error: &DriverError, holds: &str) {
+    assert_eq!(error.code, EXEC_GATE_UNSERVED, "{error}");
+    assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
+    assert_eq!(error.address.as_deref(), Some("config.exec_gate"));
+    assert!(error.message.contains(holds), "{error}");
+}
+
+/// D21: the helper's file is refused where a run can write, by its place. The second mount of
+/// the workspace root is the case the text of the two paths gets wrong (K6).
+#[test]
+fn a_gate_in_a_location_a_run_can_write_is_invalid_by_place() {
+    let table = host();
+    let outside = established(
+        &sightings(seen("/opt/substrate/substrate-exec-gate", 31)),
+        &table,
+    );
+    check_location(gate(), &outside).expect("a helper outside every writable location");
+    // On a tmpfs, which is a listed type and another device: outside too.
+    let temporary = established(&sightings(seen("/tmp/gate", 61)), &table);
+    check_location(gate(), &temporary).expect("a helper on another file system");
+    for (opened, location) in [
+        (
+            seen("/work/u/workspaces/ws_1/gate", 31),
+            "/work/u/workspaces",
+        ),
+        (seen("/srv/out/tools/gate", 31), "/srv/out"),
+        // Not beneath the workspace root as text, and inside it.
+        (seen("/mnt/second/ws_1/gate", 60), "/work/u/workspaces"),
+    ] {
+        let places = established(&sightings(opened), &table);
+        let error = check_location(gate(), &places).expect_err("a helper a run could have written");
+        assert_invalid(
+            &error,
+            &format!("lies in {location}, which a run can write"),
+        );
+        assert!(
+            error.message.contains("/opt/substrate/substrate-exec-gate"),
+            "the message names the configured path: {error}"
+        );
+    }
+}
+
+/// The entries of an open that withholds; any other placement fails the case.
+fn withheld(placement: OpenPlacement) -> Vec<OpenUnplaced> {
+    match placement {
+        OpenPlacement::Withheld(unplaced) => unplaced,
+        OpenPlacement::Placed(_) => panic!("every place was established"),
+        OpenPlacement::Refused(unplaced) => panic!("the open is refused: {unplaced:?}"),
+    }
+}
+
+fn entry(address: &'static str, path: &str, file_system: Option<&str>) -> FactWithheld {
+    FactWithheld {
+        fact: Fact::ExecSubpaths,
+        cause: if file_system.is_some() {
+            "file-system-unlisted"
+        } else {
+            "mount-id-unreported"
+        },
+        address,
+        path: path.to_owned(),
+        file_system: file_system.map(str::to_owned),
+    }
+}
+
+/// D27: a path of the open on a file-system type outside the list withholds the facts. The
+/// open's decision is "withheld", not an error, and each entry names the cause, the address of
+/// the configuration field, the path and the type, once per fact the helper would prove.
+#[test]
+fn an_unlisted_file_system_at_the_open_withholds_the_facts() {
+    let base = || sightings(seen("/opt/substrate/substrate-exec-gate", 31));
+    for file_system in ["xfs", "btrfs", "nfs4", "fuse.sshfs"] {
+        let table = MountTable::parse(&HOST.replace("xfs", file_system)).expect("parses");
+        // The workspace root, the helper's own file, a declared writable root, a base
+        // directory and the probes' temporary directory, each with its address.
+        let mut workspace_root = base();
+        workspace_root.workspace_root = seen("/data/workspaces", 62);
+        let mut helper = base();
+        helper.gate = seen("/data/substrate-exec-gate", 62);
+        let mut writable_root = base();
+        writable_root.writable_roots = vec![seen("/data/out", 62)];
+        let mut base_directory = base();
+        base_directory.base = vec![seen("/data/usr", 62)];
+        let mut temporary = base();
+        temporary.temporary = seen("/data/tmp", 62);
+        for (sightings, address, path) in [
+            (workspace_root, "config.workspace_root", "/data/workspaces"),
+            (helper, "config.exec_gate", "/data/substrate-exec-gate"),
+            (writable_root, "config.writable_roots", "/data/out"),
+            (base_directory, "config.exec_gate", "/data/usr"),
+            (temporary, "config.exec_gate", "/data/tmp"),
+        ] {
+            let unplaced = withheld(place_open(&sightings, &table));
+            assert_eq!(
+                unplaced,
+                [OpenUnplaced {
+                    address,
+                    why: Unestablished {
+                        path: path.to_owned(),
+                        cause: Cause::FileSystemUnlisted(file_system.to_owned()),
+                    },
+                }],
+                "{file_system} at {address}"
+            );
+            // One entry per fact the helper would prove; this story has the allow-list fact.
+            assert_eq!(
+                withheld_facts(&unplaced),
+                [entry(address, path, Some(file_system))],
+                "{file_system} at {address}"
+            );
+        }
+    }
+}
+
+/// D27: a kernel that reports no mount ID withholds too, with that cause and no type.
+#[test]
+fn an_unreported_mount_id_at_the_open_withholds_the_facts() {
+    let mut unreported = sightings(seen("/opt/substrate/substrate-exec-gate", 31));
+    unreported.workspace_root.mount_id = None;
+    let unplaced = withheld(place_open(&unreported, &host()));
+    assert_eq!(
+        withheld_facts(&unplaced),
+        [entry("config.workspace_root", "/work/u/workspaces", None)]
+    );
+    assert_eq!(unplaced[0].why.cause, Cause::MountIdUnreported);
+}
+
+/// D27: every path is placed before the answer. Two paths with a withholding cause are both
+/// recorded, in the open's order; one refusing cause on any path refuses the open, wherever it
+/// stands among the withholding ones.
+#[test]
+fn every_path_of_the_open_is_placed_before_the_answer() {
+    let table = host();
+    let mut two = sightings(seen("/data/substrate-exec-gate", 62));
+    two.temporary = seen("/data/tmp", 62);
+    assert_eq!(
+        withheld_facts(&withheld(place_open(&two, &table))),
+        [
+            entry("config.exec_gate", "/data/substrate-exec-gate", Some("xfs")),
+            entry("config.exec_gate", "/data/tmp", Some("xfs")),
+        ]
+    );
+    // The refusing cause is on the last path the open places, after a withholding one.
+    let mut mixed = sightings(seen("/data/substrate-exec-gate", 62));
+    mixed.temporary = seen("/tmp", 999);
+    match place_open(&mixed, &table) {
+        OpenPlacement::Refused(unplaced) => {
+            assert_eq!(unplaced.address, "config.exec_gate");
+            assert_eq!(unplaced.why.cause, Cause::MountRowMissing);
+            assert_eq!(unplaced.why.path, "/tmp");
+        }
+        OpenPlacement::Placed(_) | OpenPlacement::Withheld(_) => {
+            panic!("a refusing cause beside a withholding one did not refuse the open")
+        }
+    }
+}
+
+/// D26 and D27: each of the seven other causes refuses the open `config.exec-gate-unserved`,
+/// 501, with the address of whose path it was.
+#[test]
+fn each_refusing_cause_refuses_the_open() {
+    let deleted = "\
+31 1 259:2 / / rw - ext4 /dev/a rw
+63 31 259:2 /gone//deleted /work/u/workspaces rw - ext4 /dev/a rw
+61 31 0:40 / /tmp rw - tmpfs tmpfs rw
+";
+    let repeated = "\
+31 1 259:2 / / rw - ext4 /dev/a rw
+63 31 259:2 /a /work/u/workspaces rw - ext4 /dev/a rw
+63 31 259:2 /b /work/u/workspaces rw - ext4 /dev/a rw
+61 31 0:40 / /tmp rw - tmpfs tmpfs rw
+";
+    let base = || sightings(seen("/opt/substrate/substrate-exec-gate", 31));
+    let on = |mount_id: u64| {
+        let mut sightings = base();
+        sightings.workspace_root = seen("/work/u/workspaces", mount_id);
+        sightings
+    };
+    let mut unread = base();
+    unread.workspace_root.descriptor_path = None;
+    for (table, sightings, cause) in [
+        (deleted, on(63), Cause::MountRootDeleted),
+        (repeated, on(63), Cause::MountRowRepeated),
+        (HOST, on(999), Cause::MountRowMissing),
+        (HOST, on(61), Cause::MountPointMismatch),
+        (HOST, unread, Cause::MountPointMismatch),
+    ] {
+        let table = MountTable::parse(table).expect("parses");
+        let OpenPlacement::Refused(unplaced) = place_open(&sightings, &table) else {
+            panic!("{cause} did not refuse the open");
+        };
+        assert_eq!(unplaced.address, "config.workspace_root", "{cause}");
+        assert_eq!(unplaced.why.cause, cause);
+        let error = unplaced.refusal(gate());
+        assert_eq!(error.code, EXEC_GATE_UNSERVED, "{error}");
+        assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
+        assert_eq!(error.address.as_deref(), Some("config.workspace_root"));
+        assert!(error.message.contains(cause.name()), "{error}");
+    }
+    // The three causes met before a place is asked refuse through the same refusal.
+    for cause in [
+        Cause::MountTableUnreadable,
+        Cause::MountTableUnparsable,
+        Cause::PathUnopenable,
+    ] {
+        let unplaced = OpenUnplaced {
+            address: "config.exec_gate",
+            why: Unestablished {
+                path: "/opt/substrate/substrate-exec-gate".to_owned(),
+                cause: cause.clone(),
+            },
+        };
+        assert!(!unplaced.withholds(), "{cause}");
+        assert_eq!(unplaced.refusal(gate()).code, EXEC_GATE_UNSERVED);
+    }
+}
+
+/// D27, the order of the open: the file's own checks, then the places, then the trust check.
+/// A withheld open never reaches the trust check, because the helper is never used: a helper
+/// with two links on a table that withholds is "withheld", not `config.exec-gate-invalid`.
+#[test]
+fn a_withheld_open_never_reaches_the_trust_check() {
+    let table = host();
+    let two_links = FileFacts {
+        regular: true,
+        bytes: 1 << 20,
+        links: 2,
+    };
+    let mut on_xfs = sightings(seen("/opt/substrate/substrate-exec-gate", 31));
+    on_xfs.workspace_root = seen("/data/workspaces", 62);
+    match decide_open(gate(), two_links, place_open(&on_xfs, &table))
+        .expect("withheld, not refused")
+    {
+        OpenDecision::Withheld(entries) => assert_eq!(
+            entries,
+            [entry(
+                "config.workspace_root",
+                "/data/workspaces",
+                Some("xfs")
+            )]
+        ),
+        OpenDecision::Use => panic!("a helper on a host that withholds is used"),
+    }
+    // Where every place is established, the same helper is refused.
+    let placed = sightings(seen("/opt/substrate/substrate-exec-gate", 31));
+    assert_invalid(
+        &decide_open(gate(), two_links, place_open(&placed, &table)).expect_err("two links"),
+        "has 2 links",
+    );
+    // And a helper inside a workspace, with one link.
+    let one_link = FileFacts {
+        links: 1,
+        ..two_links
+    };
+    let inside = sightings(seen("/work/u/workspaces/ws_1/gate", 31));
+    assert_invalid(
+        &decide_open(gate(), one_link, place_open(&inside, &table)).expect_err("in a workspace"),
+        "which a run can write",
+    );
+    assert!(matches!(
+        decide_open(gate(), one_link, place_open(&placed, &table)),
+        Ok(OpenDecision::Use)
+    ));
+    // The file's own checks come first: a directory is unserved whatever the table says.
+    let directory = FileFacts {
+        regular: false,
+        ..one_link
+    };
+    assert_unserved(
+        &decide_open(gate(), directory, place_open(&on_xfs, &table)).expect_err("a directory"),
+        "is not a regular file",
+    );
+}
+
+/// D26 at a start: a declared root whose row has the type `xfs` has no class. The start is
+/// `exec.sandbox-place-unserved`, 501, with the declaring field as its address, and the mount
+/// is never classed `follow` for want of an answer.
+#[test]
+fn a_mount_whose_place_cannot_be_established_refuses_the_start() {
+    let error = classed(
+        "read_only_roots",
+        &seen("/data/tools", 62),
+        &writable(),
+        &host(),
+    )
+    .expect_err("a root on a file system outside the list");
+    assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+    assert_eq!(error.code, "exec.sandbox-place-unserved");
+    assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
+    assert_eq!(error.address.as_deref(), Some("read_only_roots"));
+    for holds in [
+        "cannot establish the place of /data/tools: file-system-unlisted xfs",
+        "ext4, overlay, tmpfs",
+    ] {
+        assert!(error.message.contains(holds), "{error}");
+    }
+    // Each other cause refuses the same way, and names itself.
+    let mut unreported = seen("/opt/tools", 31);
+    unreported.mount_id = None;
+    let mut unread = seen("/opt/tools", 31);
+    unread.descriptor_path = None;
+    for (source, cause) in [
+        (unreported, "mount-id-unreported"),
+        (seen("/opt/tools", 999), "mount-row-missing"),
+        (unread, "mount-point-mismatch"),
+        (seen("/opt/tools", 61), "mount-point-mismatch"),
+    ] {
+        let error = classed("read_only_files", &source, &writable(), &host())
+            .expect_err("an unestablished place");
+        assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+        assert_eq!(error.address.as_deref(), Some("read_only_files"));
+        assert!(error.message.contains(cause), "{error}");
+    }
+    let why = Unestablished {
+        path: "/opt/tool".to_owned(),
+        cause: Cause::MountTableUnparsable,
+    };
+    let error = start_unplaced("argv", &why);
+    assert_eq!(error.code, PLACE_UNSERVED);
+    assert_eq!(error.address.as_deref(), Some("argv"));
+    assert!(
+        error
+            .message
+            .contains("cannot establish the place of /opt/tool: mount-table-unparsable"),
+        "{error}"
+    );
+}
+
+/// D19 and D21 on metadata: what the file is, how large, and how many names it has.
+#[test]
+fn the_file_checks_decide_on_metadata() {
+    check_file(gate(), true, 1 << 20).expect("a regular file within the bound");
+    assert_unserved(
+        &check_file(gate(), false, 0).expect_err("a directory"),
+        "is not a regular file",
+    );
+    assert_unserved(
+        &check_file(gate(), true, crate::probe::MAX_BACKEND_BINARY_BYTES + 1)
+            .expect_err("over the bound"),
+        "over the bound",
+    );
+    check_links(gate(), 1).expect("one link");
+    // K4: a second name may lie in a workspace, and no path check sees it.
+    assert_invalid(
+        &check_links(gate(), 2).expect_err("a second hard link"),
+        "has 2 links",
+    );
+}
+
+/// D19: the protocol line, exactly, from a helper that exited 0.
+#[test]
+fn the_protocol_check_decides_on_the_line() {
+    check_protocol(gate(), true, b"substrate-exec-gate/1\n").expect("the protocol line");
+    for (succeeded, stdout) in [
+        (true, &b"substrate-exec-gate/2\n"[..]),
+        (true, &b"substrate-exec-gate/1"[..]),
+        (true, &b""[..]),
+        (true, &b"hello\nsubstrate-exec-gate/1\n"[..]),
+        (false, &b"substrate-exec-gate/1\n"[..]),
+    ] {
+        let error = check_protocol(gate(), succeeded, stdout).expect_err("another answer");
+        assert_unserved(&error, "does not answer --version with the protocol line");
+        assert!(
+            error.message.contains("/opt/substrate/substrate-exec-gate"),
+            "{error}"
+        );
+    }
+}
+
+/// D24: the class of a mount comes from its host source, by place and in both directions.
+#[test]
+fn the_class_of_a_mount_follows_its_host_source() {
+    let table = host();
+    let class = |path: &str, mount_id: u64, writable: &[Location]| {
+        classed("read_only_roots", &seen(path, mount_id), writable, &table)
+            .unwrap_or_else(|error| panic!("{path}: {error}"))
+    };
+    // Beside every writable location.
+    assert_eq!(class("/usr", 31, &writable()), Class::Follow);
+    assert_eq!(
+        class("/opt/toolchains/stable", 31, &writable()),
+        Class::Follow
+    );
+    // On another device, a listed type.
+    assert_eq!(class("/tmp/tools", 61, &writable()), Class::Follow);
+    // Inside the workspace root: writable as a whole (K10).
+    assert_eq!(
+        class("/work/u/workspaces/ws_1/tools", 31, &writable()),
+        Class::Beneath
+    );
+    // Holds the workspace root: the mount shows it (K9).
+    assert_eq!(class("/work/u", 31, &writable()), Class::Beneath);
+    assert_eq!(class("/", 31, &writable()), Class::Beneath);
+    // Inside it under the host's second mount, where the text is beside it.
+    assert_eq!(
+        class("/mnt/second/ws_1/tools", 60, &writable()),
+        Class::Beneath
+    );
+    // No writable location: nothing to hold or lie in.
+    assert_eq!(class("/work/u", 31, &[]), Class::Follow);
+}
+
+/// D20: the bytes are sealed against writing, resizing and any change of the seals, the hash is
+/// of the sealed bytes, and every reopen reads them from their start.
+#[test]
+fn the_sealed_bytes_cannot_change_and_every_reopen_reads_them_whole() {
+    use std::io::Read as _;
+    let bytes = b"\x7fELF not really".repeat(100);
+    let gate = ExecGate::seal(&bytes, Some("/lib64/ld.so".to_owned())).expect("sealed");
+    let seals = gate.seals();
+    for seal in [
+        libc::F_SEAL_WRITE,
+        libc::F_SEAL_GROW,
+        libc::F_SEAL_SHRINK,
+        libc::F_SEAL_SEAL,
+    ] {
+        assert_eq!(seals & seal, seal, "seal {seal:#x} of {seals:#x}");
+    }
+    assert_eq!(gate.sha256(), hex::encode(Sha256::digest(&bytes)));
+    assert_eq!(gate.loader(), Some("/lib64/ld.so"));
+    // K3: a second start reads the bytes again, because its descriptor is its own.
+    for _ in 0..2 {
+        let mut read = Vec::new();
+        std::fs::File::from(gate.reopen().expect("reopened"))
+            .read_to_end(&mut read)
+            .expect("read");
+        assert_eq!(read, bytes);
+    }
+    // The write seal refuses the write itself, whichever descriptor carries it: a descriptor
+    // opened for writing through `/proc` exists, and nothing it is given reaches the bytes.
+    let descriptor = gate.reopen().expect("reopened");
+    let link = format!(
+        "/proc/self/fd/{}",
+        std::os::fd::AsRawFd::as_raw_fd(&descriptor)
+    );
+    if let Ok(mut writing) = std::fs::OpenOptions::new().write(true).open(&link) {
+        use std::io::Write as _;
+        let refused = writing.write(b"changed").expect_err("a sealed write");
+        assert_eq!(refused.raw_os_error(), Some(libc::EPERM), "{refused}");
+    }
+    let mut read = Vec::new();
+    std::fs::File::from(gate.reopen().expect("reopened"))
+        .read_to_end(&mut read)
+        .expect("read");
+    assert_eq!(read, bytes, "the sealed bytes changed");
+}
+
+/// A temporary directory, as the repository's other cases stage their workspace roots.
+fn staged() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("exec-gate-")
+        .tempdir()
+        .expect("a temporary directory")
+}
+
+/// Whether the place of `directory` and of every base directory can be established here;
+/// prints why a case is absent when it cannot.
+fn placed(case: &str, directory: &Path) -> bool {
+    let place = |table: &MountTable, path: &str| {
+        table
+            .place_of(&Opened::of_path(path).map_err(|why| why.to_string())?)
+            .map(drop)
+            .map_err(|why| why.to_string())
+    };
+    let established = MountTable::read()
+        .map_err(|cause| cause.to_string())
+        .and_then(|table| {
+            place(&table, directory.to_str().expect("a UTF-8 path"))?;
+            ["/usr", "/bin", "/lib", "/lib64"]
+                .iter()
+                .filter(|path| Path::new(path).exists())
+                .try_for_each(|path| place(&table, path))
+        });
+    match established {
+        Ok(()) => true,
+        Err(why) => {
+            println!("exec gate {case}: ABSENT ({why})");
+            false
+        }
+    }
+}
+
+fn config(root: &Path, gate: &Path) -> HostConfig {
+    let mut config = HostConfig::minimum(root.join("workspaces"));
+    config.exec_gate = Some(gate.to_owned());
+    config
+}
+
+fn write(path: &Path, bytes: &[u8]) {
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
+    std::fs::write(path, bytes).expect("the file");
+}
+
+/// D19: no helper configured is no gate, and the open asks nothing.
+#[test]
+fn an_unset_gate_opens_as_none() {
+    let config = HostConfig::minimum("/nonexistent/workspaces");
+    assert!(matches!(open(&config).expect("opens"), Opening::Unset));
+}
+
+/// D21: a relative path is refused before anything is opened.
+#[test]
+fn a_relative_gate_is_invalid() {
+    let config = config(
+        Path::new("/nonexistent"),
+        Path::new("bin/substrate-exec-gate"),
+    );
+    assert_invalid(
+        &open(&config).expect_err("a relative path"),
+        "is not an absolute path",
+    );
+}
+
+/// D19: a set helper that cannot be used refuses the open and names the path.
+#[test]
+fn a_gate_that_cannot_be_used_is_unserved() {
+    let root = staged();
+    if !placed("unusable helper", root.path()) {
+        return;
+    }
+    std::fs::create_dir_all(root.path().join("workspaces")).expect("the workspace root");
+    let missing = root.path().join("install/missing");
+    let error = open(&config(root.path(), &missing)).expect_err("a missing file");
+    assert_unserved(&error, "cannot be opened");
+    assert!(error.message.contains(missing.to_str().unwrap()), "{error}");
+
+    let directory = root.path().join("install/directory");
+    std::fs::create_dir_all(&directory).expect("a directory");
+    let error = open(&config(root.path(), &directory)).expect_err("a directory");
+    assert_unserved(&error, "is not a regular file");
+    assert!(
+        error.message.contains(directory.to_str().unwrap()),
+        "{error}"
+    );
+
+    let unreadable = root.path().join("install/unreadable");
+    write(&unreadable, b"gate");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))
+        .expect("mode 000");
+    if std::fs::File::open(&unreadable).is_ok() {
+        println!("exec gate unreadable helper: ABSENT (this uid reads a file of mode 000)");
+    } else {
+        let error = open(&config(root.path(), &unreadable)).expect_err("an unreadable file");
+        assert_unserved(&error, "cannot be opened");
+        assert!(
+            error.message.contains(unreadable.to_str().unwrap()),
+            "{error}"
+        );
+    }
+    println!("exec gate unusable helper: executed");
+}
+
+/// D21 on real files: each open is `config.exec-gate-invalid`, and a helper outside every
+/// writable location with one link opens.
+#[test]
+fn a_gate_a_run_could_have_written_is_invalid() {
+    let root = staged();
+    if !placed("helper a run could have written", root.path()) {
+        return;
+    }
+    let workspaces = root.path().join("workspaces");
+    let declared = root.path().join("declared");
+    std::fs::create_dir_all(&workspaces).expect("the workspace root");
+    std::fs::create_dir_all(&declared).expect("a writable root");
+    let with_root = |gate: &Path| {
+        let mut config = config(root.path(), gate);
+        config.writable_roots = vec![crate::DeclaredWritableRoot {
+            name: "out".to_owned(),
+            path: declared.clone(),
+        }];
+        config
+    };
+
+    // In a workspace.
+    let inside = workspaces.join("ws_1/bin/gate");
+    write(&inside, b"gate");
+    assert_invalid(
+        &open(&with_root(&inside)).expect_err("a helper in a workspace"),
+        "which a run can write",
+    );
+    // Beneath a declared writable root.
+    let beneath = declared.join("gate");
+    write(&beneath, b"gate");
+    assert_invalid(
+        &open(&with_root(&beneath)).expect_err("a helper beneath a writable root"),
+        "which a run can write",
+    );
+    // A symbolic link outside both that points into a workspace.
+    let link = root.path().join("install/link");
+    std::fs::create_dir_all(link.parent().unwrap()).expect("install");
+    std::os::unix::fs::symlink(&inside, &link).expect("a link");
+    assert_invalid(
+        &open(&with_root(&link)).expect_err("a link into a workspace"),
+        "which a run can write",
+    );
+    // The workspace root configured through a symbolic link, the helper by its resolved path.
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&workspaces, &alias).expect("a link to the workspace root");
+    let mut through_link = with_root(&inside);
+    through_link.workspace_root = alias;
+    assert_invalid(
+        &open(&through_link).expect_err("a workspace root named through a link"),
+        "which a run can write",
+    );
+    // K4: outside every workspace, with a second hard link inside one.
+    let outside = root.path().join("install/gate");
+    write(&outside, b"gate");
+    let second = workspaces.join("ws_1/second-name");
+    std::fs::hard_link(&outside, &second).expect("a second link");
+    assert_invalid(
+        &open(&with_root(&outside)).expect_err("a helper with two links"),
+        "has 2 links",
+    );
+    // With that name gone the same file opens, and what is held is its bytes.
+    std::fs::remove_file(&second).expect("the second link removed");
+    let Opening::Gate(gate) =
+        open(&with_root(&outside)).expect("a helper outside every writable location")
+    else {
+        panic!("the helper is not used on a host where every place is established");
+    };
+    assert_eq!(gate.sha256(), hex::encode(Sha256::digest(b"gate")));
+    let env = std::fs::read("/usr/bin/env").expect("the host's env");
+    assert_eq!(
+        gate.loader().map(str::to_owned),
+        substrate_exec_gate::elf_interpreter(&env),
+        "the loader is the host's own, read from /usr/bin/env (D7)"
+    );
+    println!("exec gate helper a run could have written: executed");
+}
+
+/// D27 on a real host, with no privilege: a declared writable root at `/proc/sys` lies on the
+/// type `proc`, which is outside the list. The open answers "withheld" and names the cause, the
+/// field, the path and the type; the helper's bytes are never read, so a helper with two links
+/// is not refused here, and one that is a directory still is.
+#[test]
+fn an_open_with_a_path_on_an_unlisted_file_system_withholds_on_a_real_host() {
+    let root = staged();
+    if !placed("withheld open", root.path()) {
+        return;
+    }
+    std::fs::create_dir_all(root.path().join("workspaces")).expect("the workspace root");
+    let on_proc = |gate: &Path| {
+        let mut config = config(root.path(), gate);
+        config.writable_roots = vec![crate::DeclaredWritableRoot {
+            name: "kernel".to_owned(),
+            path: PathBuf::from("/proc/sys"),
+        }];
+        config
+    };
+    let expected = [FactWithheld {
+        fact: Fact::ExecSubpaths,
+        cause: "file-system-unlisted",
+        address: "config.writable_roots",
+        path: "/proc/sys".to_owned(),
+        file_system: Some("proc".to_owned()),
+    }];
+    let helper = root.path().join("install/gate");
+    write(&helper, b"gate");
+    for links in [1, 2] {
+        if links == 2 {
+            std::fs::hard_link(&helper, root.path().join("install/second-name"))
+                .expect("a second link");
+        }
+        match open(&on_proc(&helper)).expect("the adapter opens") {
+            Opening::Withheld(entries) => assert_eq!(entries, expected, "{links} links"),
+            Opening::Unset | Opening::Gate(_) => {
+                panic!("a writable root on proc did not withhold the facts ({links} links)")
+            }
+        }
+    }
+    // The file's own checks still come first.
+    let directory = root.path().join("install/directory");
+    std::fs::create_dir_all(&directory).expect("a directory");
+    assert_unserved(
+        &open(&on_proc(&directory)).expect_err("a directory"),
+        "is not a regular file",
+    );
+    assert_unserved(
+        &open(&on_proc(&root.path().join("install/missing"))).expect_err("a missing file"),
+        "cannot be opened",
+    );
+    println!("exec gate withheld open: executed");
+}
+
+/// One start's view on real directories: a workspace in the workspace root, and read-only
+/// roots the case declares.
+struct Staged {
+    root: tempfile::TempDir,
+    workspace: PathBuf,
+}
+
+impl Staged {
+    fn new() -> Self {
+        let root = staged();
+        let workspace = root.path().join("workspaces/ws_1");
+        std::fs::create_dir_all(&workspace).expect("a workspace");
+        Self { root, workspace }
+    }
+
+    fn plan(
+        &self,
+        roots: &[(&Path, &str)],
+        entries: &[&str],
+        program: &str,
+    ) -> Result<Lists, DriverError> {
+        let workspace = OwnedFd::from(std::fs::File::open(&self.workspace).expect("workspace"));
+        let declared: Vec<ReadOnlyRoot> = roots
+            .iter()
+            .map(|(host, mount)| ReadOnlyRoot {
+                host_path: host.to_str().expect("UTF-8").to_owned(),
+                mount: (*mount).to_owned(),
+            })
+            .collect();
+        let pinned = crate::read_only_roots::pin(&declared).expect("pinned roots");
+        let entries: Vec<String> = entries.iter().map(|entry| (*entry).to_owned()).collect();
+        plan(
+            &ExecGate::seal(b"gate", None).expect("sealed"),
+            &entries,
+            program,
+            &View {
+                workspace: &workspace,
+                read_only_roots: &pinned,
+                read_only_files: &[],
+                writable_roots: &[],
+                scratch: false,
+            },
+            &HostConfig::minimum(self.root.path().join("workspaces")),
+        )
+    }
+}
+
+fn assert_refused(planned: Result<Lists, DriverError>, code: &str, address: &str, holds: &str) {
+    let error = planned.expect_err("a refused list");
+    assert_eq!(error.code, code, "{error}");
+    assert_eq!(error.class, DriverErrorClass::Refused, "{error}");
+    assert_eq!(error.address.as_deref(), Some(address), "{error}");
+    assert!(error.message.contains(holds), "{error}");
+}
+
+/// D24: each path is located in a mount and classed, and the helper reads back what the driver
+/// wrote: one `--allow` per entry, the program, and the mounts the run can write.
+#[test]
+fn a_list_becomes_the_arguments_the_helper_parses() {
+    let staged = Staged::new();
+    if !placed("planned list", staged.root.path()) {
+        return;
+    }
+    std::fs::create_dir_all(staged.workspace.join("bin")).expect("bin");
+    let tools = staged.root.path().join("tools");
+    std::fs::create_dir_all(tools.join("real")).expect("a tool directory");
+    std::os::unix::fs::symlink("real", tools.join("link")).expect("a link within the root");
+    let lists = staged
+        .plan(
+            &[(&tools, "/opt/t")],
+            &["bin", "/workspace/bin", "/opt/t/link", "/opt/t", "/usr/bin"],
+            "/usr/bin/env",
+        )
+        .expect("a list the view carries");
+    let located: Vec<(Class, &str, &str)> = lists
+        .allow
+        .iter()
+        .map(|entry| (entry.class(), entry.root(), entry.rel()))
+        .collect();
+    assert_eq!(
+        located,
+        [
+            (Class::Beneath, "/workspace", "bin"),
+            (Class::Beneath, "/workspace", "bin"),
+            (Class::Follow, "/opt/t", "link"),
+            (Class::Follow, "/opt/t", "."),
+            (Class::Follow, "/usr", "bin"),
+        ]
+    );
+    assert_eq!(lists.program.path(), "/usr/bin/env");
+    assert_eq!(lists.program.class(), Class::Follow);
+    // The workspace first, then the view's own file systems; no read-only mount beside them.
+    assert_eq!(lists.writable, ["/workspace", "/tmp", "/dev"]);
+    let mut arguments: Vec<std::ffi::OsString> =
+        lists.options().into_iter().map(Into::into).collect();
+    arguments.push("/usr/bin/env".into());
+    arguments.push("true".into());
+    match substrate_exec_gate::parse(arguments).expect("the helper parses the options") {
+        Invocation::Run {
+            lists: parsed,
+            command,
+        } => {
+            assert_eq!(parsed, lists);
+            assert_eq!(command, ["/usr/bin/env", "true"]);
+        }
+        other @ Invocation::Version => panic!("parsed as {other:?}"),
+    }
+    println!("exec gate planned list: executed");
+}
+
+/// Design 35 § 5: what the view cannot carry is refused by name before anything is dispatched.
+#[test]
+fn an_entry_the_view_cannot_carry_is_refused_by_name() {
+    let staged = Staged::new();
+    if !placed("refused entries", staged.root.path()) {
+        return;
+    }
+    std::fs::create_dir_all(staged.workspace.join("bin")).expect("bin");
+    std::os::unix::fs::symlink("/usr/bin", staged.workspace.join("planted")).expect("a link");
+    let plan = |entries: &[&str], program: &str| staged.plan(&[], entries, program);
+    assert_refused(
+        plan(&["absent"], "/usr/bin/env"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "does not exist at the start",
+    );
+    assert_refused(
+        plan(&["/usr/bin/no-such-program"], "/usr/bin/env"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "does not exist at the start",
+    );
+    // A link in the workspace: an earlier run could have left it.
+    assert_refused(
+        plan(&["planted"], "/usr/bin/env"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "has a symbolic link in it",
+    );
+    for outside in [
+        "/tmp/tools",
+        "/proc/self",
+        "/dev/shm",
+        "/etc/alternatives",
+        "/opt/none",
+    ] {
+        assert_refused(
+            plan(&[outside], "/usr/bin/env"),
+            EXEC_SUBPATH_UNDECLARED,
+            "exec_subpaths",
+            "lies outside",
+        );
+    }
+    assert_refused(
+        plan(&["bin/../bin"], "/usr/bin/env"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "",
+    );
+    // The program is an absolute view path when the list is not empty.
+    assert_refused(
+        plan(&["bin"], "env"),
+        PATH_UNREPRESENTABLE,
+        "argv",
+        "is not an absolute path",
+    );
+    assert_refused(
+        plan(&["bin"], "/tmp/program"),
+        PATH_UNREPRESENTABLE,
+        "argv",
+        "lies in no mount",
+    );
+    assert_refused(
+        plan(&["bin"], "/workspace/planted/env"),
+        PATH_UNREPRESENTABLE,
+        "argv",
+        "has a symbolic link in it",
+    );
+    println!("exec gate refused entries: executed");
+}
+
+/// D24, the class comes from the host source: a read-only root whose host directory lies in the
+/// workspace root is opened `beneath`, so a link a run planted in it is refused and the helper
+/// is told the run can write the mount (K10).
+#[test]
+fn a_read_only_root_in_the_workspace_root_is_classed_beneath() {
+    let staged = Staged::new();
+    if !placed("root in the workspace root", staged.root.path()) {
+        return;
+    }
+    let tools = staged.root.path().join("workspaces/ws_2/tools");
+    std::fs::create_dir_all(tools.join("real")).expect("a tool directory");
+    std::os::unix::fs::symlink("/usr/bin", tools.join("link")).expect("a planted link");
+    assert_refused(
+        staged.plan(&[(&tools, "/opt/k")], &["/opt/k/link"], "/usr/bin/env"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "has a symbolic link in it",
+    );
+    let lists = staged
+        .plan(&[(&tools, "/opt/k")], &["/opt/k/real"], "/usr/bin/env")
+        .expect("a path of the root without a link");
+    assert_eq!(lists.allow[0].class(), Class::Beneath);
+    assert_eq!(lists.writable, ["/workspace", "/opt/k", "/tmp", "/dev"]);
+    println!("exec gate root in the workspace root: executed");
+}
+
+/// D24, a followed path into a writable mount: a link in a read-only root outside every
+/// writable location names a file the run can replace when it ends in `/workspace`, or passes
+/// through a link there (K9).
+#[test]
+fn a_followed_entry_that_resolves_into_a_writable_mount_is_refused() {
+    let staged = Staged::new();
+    if !placed("followed entry into a writable mount", staged.root.path()) {
+        return;
+    }
+    std::fs::create_dir_all(staged.workspace.join("tools/bin")).expect("tools");
+    std::os::unix::fs::symlink("/usr/bin", staged.workspace.join("forward")).expect("a link");
+    let tools = staged.root.path().join("tools");
+    std::fs::create_dir_all(&tools).expect("a root");
+    std::os::unix::fs::symlink("/workspace/tools/bin", tools.join("link")).expect("a link");
+    std::os::unix::fs::symlink("/tmp/built", tools.join("temporary")).expect("a link");
+    std::os::unix::fs::symlink("/workspace/forward", tools.join("hop")).expect("a link");
+    std::os::unix::fs::symlink("/proc/self/exe", tools.join("magic")).expect("a link");
+    std::os::unix::fs::symlink("/usr/bin", tools.join("system")).expect("a link");
+    std::os::unix::fs::symlink("/etc/passwd", tools.join("unbound")).expect("a link");
+    let plan = |entry: &str| staged.plan(&[(&tools, "/opt/ro")], &[entry], "/usr/bin/env");
+    assert_refused(
+        plan("/opt/ro/link"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "resolves to /workspace/tools/bin, in the writable mount /workspace",
+    );
+    assert_refused(
+        plan("/opt/ro/temporary"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "in the writable mount /tmp",
+    );
+    // Ends in `/usr/bin`, through a link the run can replace.
+    assert_refused(
+        plan("/opt/ro/hop"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "resolves through a symbolic link in the writable mount /workspace",
+    );
+    assert_refused(
+        plan("/opt/ro/magic"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "in /proc",
+    );
+    // An absolute target is the view's, not the host's: the view has no `/etc/passwd`.
+    assert_refused(
+        plan("/opt/ro/unbound"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "which the view does not have",
+    );
+    // A link that stays in mounts the run cannot write is followed.
+    let lists = plan("/opt/ro/system").expect("a link into the base system");
+    assert_eq!(lists.allow[0].class(), Class::Follow);
+    println!("exec gate followed entry into a writable mount: executed");
+}
+
+/// D26 on a real mount: the host's `/proc/sys` declared as a read-only root has a row of type
+/// `proc`, outside the list, so the mount has no class and the plan is refused
+/// `exec.sandbox-place-unserved` with the declaring field as its address (U3).
+#[test]
+fn a_declared_root_on_an_unlisted_file_system_refuses_the_plan() {
+    let staged = Staged::new();
+    if !placed("root on an unlisted file system", staged.root.path()) {
+        return;
+    }
+    let error = staged
+        .plan(
+            &[(Path::new("/proc/sys"), "/opt/p")],
+            &["/opt/p"],
+            "/usr/bin/env",
+        )
+        .expect_err("a root on procfs");
+    assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+    assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
+    assert_eq!(error.address.as_deref(), Some("read_only_roots"), "{error}");
+    for holds in [
+        "cannot establish the place of /opt/p: file-system-unlisted proc",
+        "ext4, overlay, tmpfs",
+    ] {
+        assert!(error.message.contains(holds), "{error}");
+    }
+    println!("exec gate root on an unlisted file system: executed");
+}
