@@ -38,7 +38,7 @@ scope:
   path: spec/confinement-suite.json
 - confidence: inferred
   path: website/docs/concepts/adapters.md
-revision: 15
+revision: 16
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T03:08:32Z", actor: "human:timo", revision: 14, decided_on: {"recorded":{"review_outcome":5}}, correlation: "sdc-accepts-usage-and-file-changes-2026-11-21"}
 - {from: "proposed", to: "active", at: "2026-11-21T03:08:32Z", actor: "human:timo", revision: 15, decided_on: {"recorded":{"review_outcome":5}}, correlation: "sdc-accepts-usage-and-file-changes-2026-11-21"}
@@ -79,11 +79,34 @@ Session `sdc` decided on 2026-11-21, under
 - When a second exec wrote the same workspace during an exec, no record is published for it. A
   digest pair is never wrong.
 - No fallback to a time window.
-- This story is worked after `story:run-observation-carries-usage`.
+- ~~This story is worked after `story:run-observation-carries-usage`.~~ Replaced on the same
+  evening, see below.
 
 Not chosen: an overlay upper directory per exec (exact for two writers of one workspace, but
 concurrent execs stop seeing each other's writes), and fanotify with the writer's pid (inferred:
 the marks that report another process's pid need `CAP_SYS_ADMIN`, which the daemon does not hold).
+
+## The consumer's requirements, 2026-11-21 evening
+
+Session `runbook` (the session formerly named `sdc`) accepted the story as written and added, as
+the consumer whose `watch/` crate this record replaces
+(`approval-record:order-of-work-after-0-23-0-2026-11-21`):
+
+- **The unit is the run.** A bound program (a check, a build, a test run) is one action, one
+  exec and one run. An agent step is one long-lived process for one action, and its tool calls
+  happen inside it: all its changes are one record, attributed to that run. That is enough for
+  the consumer; "what did this action change" is the question the record answers.
+- **The record carries the run's start and end instants.**
+- **Each listed path carries the file's modification time as read in the end walk**, so a
+  consumer can place a change between two instants of its own log. It is the file system's
+  time, marked as such and never called an observed instant, and it is absent for a delete. The
+  consumer's condition: the field costs no more than the `stat` the end walk already makes; if it
+  costs more, it is dropped and the consumer is told. The ADR states what the field is on a
+  rename and what a writer inside the run can do to it (a process can set a file's times).
+- The stakeholder confirmed the acceptance line for two runs that write one workspace: both
+  records unavailable with a named reason.
+- **Order.** This story and `story:exec-file-change-record-on-the-wire` are worked after
+  `story:executable-deny-list` and the two gate stories, and before the limit and usage stories.
 
 ## Why
 
@@ -181,8 +204,12 @@ Checks:
 ## Order
 
 Informed by `epic:runs-are-governed-and-limit-hits-are-events` and not part of it. After
-`story:run-observation-carries-usage`, as session `sdc` decided; both change
-`crates/substrate-host/src/confinement/mod.rs` and `crates/substrate-host/src/process.rs`. The
+`story:executable-deny-list`, `story:gate-test-step-ends-within-two-minutes` and
+`story:planning-only-pull-requests-skip-build-and-test`, and before
+`story:run-observation-names-the-limit-that-ended-it`, as session `runbook` decided on
+2026-11-21 (`approval-record:order-of-work-after-0-23-0-2026-11-21`). It shares
+`crates/substrate-host/src/confinement/mod.rs` and `crates/substrate-host/src/process.rs` with
+the limit and usage stories, which now take this story's `main`. The
 epic's later drafts `story:executable-lists-on-oci-and-pod` and
 `story:exec-start-carries-executable-lists` are ordered after this story because they share
 `spec/confinement/confinement.yaml`, `crates/substrate-host/src/process.rs` and
