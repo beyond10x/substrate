@@ -316,6 +316,42 @@ require_executed -p b10x-substrate-exec-gate gate \
   'exec gate environment: executed' \
   'exec gate own environment: executed' \
   'exec gate preload operand: executed'
+
+# Design 35 D30, what is mounted beneath a location a run can write: two roots make their own
+# mounts, each in a user and mount namespace of its own, and need a host that grants such a
+# namespace a mount. A workstation does; a hosted runner's AppArmor gives a user namespace no
+# capability. Where the mount is granted each case is required by its `executed` line. Where
+# it is not, each case must print its own `ABSENT` line with that reason, so one that neither
+# ran nor said why still fails, and the lane says in one line that they did not run: there
+# they are workstation evidence, never a passed case.
+require_unstaged() {
+  local package=b10x-substrate-host
+  if [[ "$1" == "-p" ]]; then
+    package="$2"
+    shift 2
+  fi
+  local binary="$1" line="$2"
+  local log
+  log="$(cargo test -p "${package}" --locked --test "${binary}" \
+    -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${log}" >&2; exit 1; }
+  printf '%s\n' "${log}"
+  if ! grep -qF "${line}" <<<"${log}"; then
+    echo "delegated-lane: ${binary} did not print '${line}'" >&2
+    exit 1
+  fi
+}
+if unshare --user --map-root-user --mount -- mount -t tmpfs tmpfs /tmp >/dev/null 2>&1; then
+  require_executed exec_lists_view_mounts \
+    'ESS confinement linux exec view mounts: executed'
+  require_executed -p b10x-substrate-exec-gate view_mounts_gate \
+    'exec gate view mounts follow into a mount beneath a writable mount: executed'
+else
+  require_unstaged exec_lists_view_mounts \
+    'ESS confinement linux exec view mounts: ABSENT (no '
+  require_unstaged -p b10x-substrate-exec-gate view_mounts_gate \
+    'exec gate view mounts follow into a mount beneath a writable mount: ABSENT (no '
+  echo "delegated-lane: a user namespace is granted no mount on this host; absent, not passed: exec_lists_view_mounts, view_mounts_gate"
+fi
 require_executed -p b10x-substrate-exec-gate adversary_gate \
   'adversary landlock failures: executed'
 require_executed -p b10x-substrate-exec-gate security2_gate \

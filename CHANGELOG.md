@@ -71,6 +71,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `confinement::FactWithheld`. An embedder that builds the variant, or names both of its fields
   in a pattern, changes one line.
 
+### Fixed
+
+- The executable allow-list's checks of what a run can write follow the mounts (design 35
+  D30). The defect is on `main` since pull request 241 (2026-11-21), with the allow-list
+  itself, and **no release contains it**. The `linux` adapter asked whether something lies in
+  a location a run can write by that location's own place alone, so a file system mounted
+  beneath `workspace_root`, a declared writable root or a workspace counted as outside it,
+  although a run that is given the location writes what is mounted there. Four checks had the
+  gap:
+  - a read-only root declared on such a mount, or one that holds a mount on which a declared
+    writable root lies, was classed as safe to follow. A symbolic link a run had left there,
+    listed by a later profile, admitted what it named: all of `/usr/bin` for a link to it;
+  - the helper `substrate-exec-gate` installed on such a mount passed the open;
+  - an entry that resolved onto such a mount was not refused by the driver, nor by the helper
+    for a mount beneath a writable mount of the run's view.
+
+  Each now asks the places the location reaches: its own, and the root of every mount that
+  is mounted beneath it, read from the parent IDs of the mount table. Where that cannot be
+  established the answer is the one a place has, with the mount point in its text,
+  `cannot establish where <mount point> is attached: <cause>`: `exec.sandbox-place-unserved`
+  (501) at a start with a list, `config.exec-gate-unserved` (501) at the open, and status 125
+  from the helper. A tenth cause, `mount-covered`, names a mount beneath such a location that
+  a later mount hides or that lies under a stack; it refuses the open. A mount of a
+  file-system type other than `ext4`, `overlay` and `tmpfs` beneath such a location is not
+  compared and refuses nothing. A start without a list reads no mount table, as before.
+  `substrate_exec_gate::place::Unestablished` gains the public field `asked`, and `Cause` the
+  variant `MountCovered`.
+
 ## [0.22.0] — 2026-11-20
 
 The contract bundle moves to `substrate-wire/0.27.0`, which adds no route and raises three

@@ -13,7 +13,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
-use substrate_exec_gate::place::{Cause, MountTable, Opened, Unestablished};
+use substrate_exec_gate::place::{Cause, MountTable, MountTree, Opened, Unestablished};
 use substrate_exec_gate::{Class, Invocation, Lists, Located};
 use substrate_guarded::DriverErrorClass;
 use substrate_wire::ReadOnlyRoot;
@@ -39,8 +39,16 @@ const HOST: &str = "\
 62 31 8:17 / /data rw,noatime shared:40 - xfs /dev/sdb1 rw
 ";
 
-fn host() -> MountTable {
-    MountTable::parse(HOST).expect("the host table parses")
+fn host() -> MountTree {
+    tree(HOST)
+}
+
+/// The table `text` as a tree in which no mount is hidden.
+fn tree(text: &str) -> MountTree {
+    MountTable::parse(text)
+        .expect("the table parses")
+        .into_tree_as_written()
+        .expect("every row of the table is attached")
 }
 
 /// What the kernel would report for `path`, opened on the mount with `mount_id`.
@@ -69,15 +77,15 @@ fn sightings(gate: Opened) -> OpenSightings {
 fn writable() -> Vec<Location> {
     ["/work/u/workspaces", "/srv/out"]
         .iter()
-        .map(|path| Location {
-            path: (*path).to_owned(),
-            place: host().place_of(&seen(path, 31)).expect("placed"),
+        .map(|path| {
+            let place = host().table().place_of(&seen(path, 31)).expect("placed");
+            Location::reaching(path, &place, &host()).expect("reached")
         })
         .collect()
 }
 
 /// The places of an open on which every place is established.
-fn established(sightings: &OpenSightings, table: &MountTable) -> OpenPlaces {
+fn established(sightings: &OpenSightings, table: &MountTree) -> OpenPlaces {
     match place_open(sightings, table) {
         OpenPlacement::Placed(places) => places,
         other => panic!("a place of the open was not established: {other:?}"),
@@ -137,6 +145,260 @@ fn a_gate_in_a_location_a_run_can_write_is_invalid_by_place() {
     }
 }
 
+/// A host with mounts beneath what a run can write, and with a writable location on a mount
+/// beneath a directory that is not one: a file system mounted in a workspace, another one
+/// mounted in that, and one mounted in `/srv/tools`, on which the declared writable root lies.
+const HOST_WITH_MOUNTS_BENEATH: &str = "\
+31 1 259:2 / / rw,noatime shared:1 - ext4 /dev/nvme0n1p2 rw
+61 31 0:40 / /tmp rw,nosuid,nodev shared:30 - tmpfs tmpfs rw
+70 31 0:50 / /work/u/workspaces/ws_1/media rw - tmpfs tmpfs rw
+71 70 0:51 / /work/u/workspaces/ws_1/media/deep rw - tmpfs tmpfs rw
+72 31 0:52 / /srv/tools/media rw - tmpfs tmpfs rw
+";
+
+/// The open of that host: the declared writable root lies on the mount in `/srv/tools`.
+fn open_with_mounts_beneath(gate: Opened) -> OpenSightings {
+    OpenSightings {
+        writable_roots: vec![seen("/srv/tools/media/out", 72)],
+        ..sightings(gate)
+    }
+}
+
+/// The locations a run can write on that host, each with what it reaches.
+fn writable_with_mounts_beneath(table: &MountTree) -> Vec<Location> {
+    established(
+        &open_with_mounts_beneath(seen("/opt/substrate/substrate-exec-gate", 31)),
+        table,
+    )
+    .writable
+}
+
+/// D30 on story 1's checks (design 35 § 6, *Through the view's mounts*): what is mounted
+/// beneath a location a run can write lies in that location, although its place is on another
+/// device. **The helper's file** there is refused (D21): on the mount in a workspace, and on
+/// the one mounted in that.
+#[test]
+fn what_is_mounted_beneath_a_writable_location_lies_in_it_for_the_helpers_file() {
+    let table = tree(HOST_WITH_MOUNTS_BENEATH);
+    for (path, mount) in [
+        ("/work/u/workspaces/ws_1/media/gate", 70),
+        ("/work/u/workspaces/ws_1/media/deep/gate", 71),
+    ] {
+        let places = established(&open_with_mounts_beneath(seen(path, mount)), &table);
+        let error = check_location(gate(), &places)
+            .expect_err("a helper in a mount beneath the workspace root");
+        assert_invalid(&error, "lies in /work/u/workspaces, which a run can write");
+    }
+    // Beside them: on the root file system, and on a mount beneath no writable location.
+    for (path, mount) in [
+        ("/opt/substrate/substrate-exec-gate", 31),
+        ("/tmp/gate", 61),
+    ] {
+        let places = established(&open_with_mounts_beneath(seen(path, mount)), &table);
+        check_location(gate(), &places).expect("a helper outside what a run can write");
+    }
+    // On the mount the declared writable root lies on, beside that root: the root reaches
+    // nothing above itself.
+    let beside = established(
+        &open_with_mounts_beneath(seen("/srv/tools/media/gate", 72)),
+        &table,
+    );
+    check_location(gate(), &beside).expect("a helper beside the writable root");
+}
+
+/// D30 on **the class of a mount** (D24): a read-only root whose host source lies on a mount
+/// beneath a writable location is classed `beneath`, and so is one that holds a mount on which
+/// a writable location lies.
+#[test]
+fn what_is_mounted_beneath_a_writable_location_lies_in_it_for_the_class() {
+    let table = tree(HOST_WITH_MOUNTS_BENEATH);
+    let writable = writable_with_mounts_beneath(&table);
+    for (path, mount, class) in [
+        // On a mount beneath the workspace root, and on one beneath that.
+        ("/work/u/workspaces/ws_1/media/tools", 70, Class::Beneath),
+        (
+            "/work/u/workspaces/ws_1/media/deep/tools",
+            71,
+            Class::Beneath,
+        ),
+        // Holds a mount on which the declared writable root lies.
+        ("/srv/tools", 31, Class::Beneath),
+        ("/srv", 31, Class::Beneath),
+        // Beside every writable location and every mount beneath one.
+        ("/srv/other", 31, Class::Follow),
+        ("/srv/tools/media/other", 72, Class::Follow),
+        ("/tmp/tools", 61, Class::Follow),
+    ] {
+        assert_eq!(
+            classed("read_only_roots", &seen(path, mount), &writable, &table).expect("classed"),
+            class,
+            "{path}"
+        );
+    }
+}
+
+/// D30 on **a followed entry** (D24): a path that ends on a mount beneath a writable location
+/// names a file a run can replace, on the mount in a workspace and on the one mounted in that.
+#[test]
+fn what_is_mounted_beneath_a_writable_location_lies_in_it_for_a_followed_object() {
+    let table = tree(HOST_WITH_MOUNTS_BENEATH);
+    let writable = writable_with_mounts_beneath(&table);
+    let ends_in = |path: &str, mount: u64| {
+        let place = table.table().place_of(&seen(path, mount)).expect("placed");
+        shown_location(&place, &writable).map(|location| location.path.clone())
+    };
+    assert_eq!(
+        ends_in("/work/u/workspaces/ws_1/media/x", 70).as_deref(),
+        Some("/work/u/workspaces"),
+        "a followed path that ends on a mount beneath the workspace root"
+    );
+    assert_eq!(
+        ends_in("/work/u/workspaces/ws_1/media/deep/x", 71).as_deref(),
+        Some("/work/u/workspaces"),
+        "and on a mount mounted in that one"
+    );
+    assert_eq!(
+        ends_in("/srv/tools/media/out/x", 72).as_deref(),
+        Some("/srv/tools/media/out")
+    );
+    assert_eq!(ends_in("/srv/tools/media/other", 72), None);
+    assert_eq!(ends_in("/tmp/x", 61), None);
+}
+
+/// D30's causes at the open. A mount beneath a writable location whose root cannot be
+/// compared refuses it `config.exec-gate-unserved`, with the location's own field as the
+/// address and the mount point in the text.
+#[test]
+fn a_mount_beneath_a_writable_location_that_cannot_be_compared_refuses_the_open() {
+    use substrate_exec_gate::place::Asked;
+    let helper = || sightings(seen("/opt/substrate/substrate-exec-gate", 31));
+    let stacked = format!(
+        "{HOST}\
+80 31 0:60 / /work/u/workspaces/ws_1/stack rw - tmpfs tmpfs rw
+81 80 0:61 / /work/u/workspaces/ws_1/stack rw - tmpfs tmpfs rw
+"
+    );
+    let deleted =
+        format!("{HOST}82 31 259:2 /gone//deleted /srv/out/removed rw - ext4 /dev/nvme0n1p2 rw\n");
+    for (table, address, mount_point, cause) in [
+        (
+            stacked.as_str(),
+            "config.workspace_root",
+            "/work/u/workspaces/ws_1/stack",
+            Cause::MountCovered,
+        ),
+        (
+            deleted.as_str(),
+            "config.writable_roots",
+            "/srv/out/removed",
+            Cause::MountRootDeleted,
+        ),
+    ] {
+        let OpenPlacement::Refused(unplaced) = place_open(&helper(), &tree(table)) else {
+            panic!("{cause} beneath a writable location did not refuse the open");
+        };
+        assert_eq!(unplaced.address, address, "{cause}");
+        assert_eq!(
+            unplaced.why,
+            Unestablished {
+                path: mount_point.to_owned(),
+                cause: cause.clone(),
+                asked: Asked::Attachment,
+            }
+        );
+        assert!(!unplaced.withholds(), "{cause} refuses the open");
+        let error = unplaced.refusal(gate());
+        assert_eq!(error.code, EXEC_GATE_UNSERVED, "{error}");
+        assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
+        assert_eq!(error.address.as_deref(), Some(address));
+        assert!(
+            error.message.contains(&format!(
+                "cannot establish where {mount_point} is attached: {cause}"
+            )),
+            "{error}"
+        );
+    }
+}
+
+/// D30's causes at a start. A mount whose root cannot be compared beneath the host source of
+/// a declared mount refuses the start `exec.sandbox-place-unserved`, with the declaring
+/// field. A row that is attached nowhere refuses the open and the start, whatever is asked. A
+/// mount of a file-system type outside the list is not compared and refuses neither.
+#[test]
+fn a_mount_beneath_a_source_that_cannot_be_compared_refuses_the_start() {
+    let helper = || sightings(seen("/opt/substrate/substrate-exec-gate", 31));
+    // The stack lies beneath the host source of a declared root, and beneath no writable
+    // location, so the open has nothing to refuse and the class cannot be decided.
+    let beside = tree(&format!(
+        "{HOST}\
+80 31 0:60 / /opt/tools/stack rw - tmpfs tmpfs rw
+81 80 0:61 / /opt/tools/stack rw - tmpfs tmpfs rw
+"
+    ));
+    let writable = established(&helper(), &beside).writable;
+    let error = classed(
+        "read_only_roots",
+        &seen("/opt/tools", 31),
+        &writable,
+        &beside,
+    )
+    .expect_err("a root that holds a mount whose root cannot be compared");
+    assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+    assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
+    assert_eq!(error.address.as_deref(), Some("read_only_roots"));
+    assert!(
+        error
+            .message
+            .contains("cannot establish where /opt/tools/stack is attached: mount-covered"),
+        "{error}"
+    );
+    // Only where the rule looks: a root beside the stack is classed.
+    assert_eq!(
+        classed("read_only_roots", &seen("/usr", 31), &writable, &beside).expect("classed"),
+        Class::Follow
+    );
+    // A row attached nowhere refuses the table, with the helper's field at the open and the
+    // list's at a start.
+    let unattached = MountTable::parse(&format!(
+        "{HOST}90 999 0:70 / /srv/lost rw - tmpfs tmpfs rw\n"
+    ))
+    .expect("the table parses")
+    .into_tree_as_written()
+    .expect_err("a row whose parent no row has");
+    assert_eq!(unattached.cause, Cause::MountRowMissing);
+    let at_open = OpenUnplaced::table(unattached.clone());
+    assert!(!at_open.withholds());
+    let error = at_open.refusal(gate());
+    assert_eq!(
+        (error.code, error.address.as_deref()),
+        (EXEC_GATE_UNSERVED, Some("config.exec_gate"))
+    );
+    let attached = "cannot establish where /srv/lost is attached: mount-row-missing";
+    assert!(error.message.contains(attached), "{error}");
+    let error = start_unplaced("exec_subpaths", &unattached);
+    assert_eq!(error.code, PLACE_UNSERVED);
+    assert!(error.message.contains(attached), "{error}");
+    // A mount of a type outside the list is not compared: beneath a workspace (the device
+    // nodes bubblewrap binds are such mounts) and beneath a declared root's host source.
+    let unlisted = tree(&format!(
+        "{HOST}\
+83 31 0:5 /null /work/u/workspaces/ws_1/null rw - devtmpfs devtmpfs rw
+84 31 8:33 / /opt/tools/data rw - xfs /dev/sdc1 rw
+"
+    ));
+    let writable = established(&helper(), &unlisted).writable;
+    assert_eq!(
+        classed(
+            "read_only_roots",
+            &seen("/opt/tools", 31),
+            &writable,
+            &unlisted
+        )
+        .expect("classed"),
+        Class::Follow
+    );
+}
+
 /// The entries of an open that withholds; any other placement fails the case.
 fn withheld(placement: OpenPlacement) -> Vec<OpenUnplaced> {
     match placement {
@@ -167,7 +429,7 @@ fn entry(address: &'static str, path: &str, file_system: Option<&str>) -> FactWi
 fn an_unlisted_file_system_at_the_open_withholds_the_facts() {
     let base = || sightings(seen("/opt/substrate/substrate-exec-gate", 31));
     for file_system in ["xfs", "btrfs", "nfs4", "fuse.sshfs"] {
-        let table = MountTable::parse(&HOST.replace("xfs", file_system)).expect("parses");
+        let table = tree(&HOST.replace("xfs", file_system));
         // The workspace root, the helper's own file, a declared writable root, a base
         // directory and the probes' temporary directory, each with its address.
         let mut workspace_root = base();
@@ -195,6 +457,7 @@ fn an_unlisted_file_system_at_the_open_withholds_the_facts() {
                     why: Unestablished {
                         path: path.to_owned(),
                         cause: Cause::FileSystemUnlisted(file_system.to_owned()),
+                        asked: substrate_exec_gate::place::Asked::Place,
                     },
                 }],
                 "{file_system} at {address}"
@@ -282,7 +545,7 @@ fn each_refusing_cause_refuses_the_open() {
         (HOST, on(61), Cause::MountPointMismatch),
         (HOST, unread, Cause::MountPointMismatch),
     ] {
-        let table = MountTable::parse(table).expect("parses");
+        let table = tree(table);
         let OpenPlacement::Refused(unplaced) = place_open(&sightings, &table) else {
             panic!("{cause} did not refuse the open");
         };
@@ -305,6 +568,7 @@ fn each_refusing_cause_refuses_the_open() {
             why: Unestablished {
                 path: "/opt/substrate/substrate-exec-gate".to_owned(),
                 cause: cause.clone(),
+                asked: substrate_exec_gate::place::Asked::Place,
             },
         };
         assert!(!unplaced.withholds(), "{cause}");
@@ -411,6 +675,7 @@ fn a_mount_whose_place_cannot_be_established_refuses_the_start() {
     let why = Unestablished {
         path: "/opt/tool".to_owned(),
         cause: Cause::MountTableUnparsable,
+        asked: substrate_exec_gate::place::Asked::Place,
     };
     let error = start_unplaced("argv", &why);
     assert_eq!(error.code, PLACE_UNSERVED);
@@ -1095,7 +1360,10 @@ fn a_followed_object_in_a_writable_location_is_found_by_place() {
     let table = host();
     let locations = writable();
     let shown = |path: &str, mount_id: u64| {
-        let place = table.place_of(&seen(path, mount_id)).expect("placed");
+        let place = table
+            .table()
+            .place_of(&seen(path, mount_id))
+            .expect("placed");
         shown_location(&place, &locations).map(|location| location.path.clone())
     };
     assert_eq!(
@@ -1123,6 +1391,7 @@ fn a_followed_object_in_a_writable_location_is_found_by_place() {
     assert_eq!(shown("/tmp/tools", 61), None, "another device");
     // With no writable location there is nothing to lie in.
     let place = table
+        .table()
         .place_of(&seen("/work/u/workspaces/ws_1", 31))
         .expect("placed");
     assert!(shown_location(&place, &[]).is_none());

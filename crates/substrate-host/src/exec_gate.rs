@@ -61,7 +61,8 @@ use std::path::Path;
 
 use sha2::{Digest as _, Sha256};
 use substrate_exec_gate::place::{
-    Cause, LISTED_FILE_SYSTEMS, MountTable, Opened, Place, Relation, Unestablished,
+    Cause, LISTED_FILE_SYSTEMS, MountTable, MountTree, Opened, Place, Unestablished, Unlisted,
+    lies_in_any, overlap,
 };
 use substrate_exec_gate::{Class, Linkage, Lists, Located, PROTOCOL};
 
@@ -80,20 +81,23 @@ pub(crate) const GATE_MOUNT: &str = "/.substrate-exec-gate";
 pub(crate) const EXEC_GATE_INVALID: &str = "config.exec-gate-invalid";
 /// `HostConfig.exec_gate` is set and this host cannot use it (D19, D26): the file is missing,
 /// unreadable, not a regular file, over the size bound or not of the driver's protocol, or a
-/// place the open needs cannot be established. The message then names the path and one of
-/// seven causes: `mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`,
-/// `mount-row-missing`, `mount-row-repeated`, `mount-root-deleted` or `mount-point-mismatch`.
-/// The other two of D26's nine, `file-system-unlisted` (a file-system type other than `ext4`,
+/// place the open needs cannot be established. The message then names the path, or the mount
+/// point of a mount beneath a writable location (D30), and one of eight causes:
+/// `mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`, `mount-row-missing`,
+/// `mount-row-repeated`, `mount-root-deleted`, `mount-point-mismatch` or `mount-covered`. The
+/// other two of the ten, `file-system-unlisted` (a file-system type other than `ext4`,
 /// `overlay` and `tmpfs`) and `mount-id-unreported`, do not refuse the open: they withhold the
 /// facts (D27, [`FactWithheld`]).
 pub(crate) const EXEC_GATE_UNSERVED: &str = "config.exec-gate-unserved";
 /// A start whose profile carries an executable list needs a place this host cannot establish
 /// (D26): of the program, of an entry, or of the host source of a declared mount. 501, before
-/// dispatch, and never for a start without a list. The message names the path and one of the
-/// nine causes: `mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`,
-/// `mount-id-unreported`, `mount-row-missing`, `mount-row-repeated`, `mount-root-deleted`,
-/// `mount-point-mismatch`, or `file-system-unlisted` with the type, for a file-system type
-/// other than `ext4`, `overlay` and `tmpfs`. The address is the field at fault.
+/// dispatch, and never for a start without a list. The message names the path, or the mount
+/// point of a mount beneath a writable location or a declared mount's host source (D30), and
+/// one of the ten causes: `mount-table-unreadable`, `mount-table-unparsable`,
+/// `path-unopenable`, `mount-id-unreported`, `mount-row-missing`, `mount-row-repeated`,
+/// `mount-root-deleted`, `mount-point-mismatch`, `mount-covered`, or `file-system-unlisted`
+/// with the type, for a file-system type other than `ext4`, `overlay` and `tmpfs`. The
+/// address is the field at fault.
 pub(crate) const PLACE_UNSERVED: &str = "exec.sandbox-place-unserved";
 
 const ADDRESS: &str = "config.exec_gate";
@@ -200,6 +204,15 @@ pub(crate) struct OpenUnplaced {
 }
 
 impl OpenUnplaced {
+    /// The mount table itself has a row whose attachment cannot be established (D30): the
+    /// helper's own field, as for a table that cannot be read.
+    pub(crate) const fn table(why: Unestablished) -> Self {
+        Self {
+            address: ADDRESS,
+            why,
+        }
+    }
+
     /// The refusal of the open: [`EXEC_GATE_UNSERVED`], with the cause and the path.
     pub(crate) fn refusal(&self, gate: &Path) -> DriverError {
         DriverError::unserved(
@@ -215,8 +228,8 @@ impl OpenUnplaced {
 
     /// Whether the cause withholds the facts and lets the adapter open (D27): the path lies on
     /// a file-system type outside the list, or the kernel reports no mount ID for it. Each of
-    /// the other seven causes says the driver could not read the host's table or a configured
-    /// path, and refuses the open.
+    /// the other eight causes says the driver could not read the host's table, a configured
+    /// path, or what is mounted beneath one, and refuses the open.
     pub(crate) fn withholds(&self) -> bool {
         matches!(
             self.why.cause,
@@ -334,11 +347,26 @@ pub(crate) fn bind_args(descriptor: RawFd) -> [String; 5] {
     ]
 }
 
-/// A host location a run can write, and its place.
+/// A host location a run can write, and the places it reaches (D30): its own place first,
+/// then the root of every mount that is mounted beneath it. What is mounted beneath a location
+/// a run can write is carried into the run's view with it and is the run's to write, although
+/// its place is on another file system.
 #[derive(Debug, Clone)]
 pub(crate) struct Location {
     pub(crate) path: String,
-    pub(crate) place: Place,
+    pub(crate) reaches: Vec<Place>,
+}
+
+impl Location {
+    /// The location at `path`, whose place is `place`, with what it reaches on `tree`. A mount
+    /// beneath it of a file-system type outside the list is not compared: whatever is asked
+    /// against a writable place is placed first, and has no place on such a type.
+    fn reaching(path: &str, place: &Place, tree: &MountTree) -> Result<Self, Unestablished> {
+        Ok(Self {
+            path: path.to_owned(),
+            reaches: tree.reaches(place, Unlisted::Skipped)?,
+        })
+    }
 }
 
 /// What the kernel reports for a configured path: opened, with its symbolic links followed, or
@@ -347,6 +375,7 @@ fn opened_path(path: &Path) -> Result<Opened, Unestablished> {
     let unopenable = || Unestablished {
         path: path.display().to_string(),
         cause: Cause::PathUnopenable,
+        asked: substrate_exec_gate::place::Asked::Place,
     };
     // The configured text as it is, made absolute and not normalized: `std::path::absolute`
     // would remove a `.` as text, and a `.` or `..` among names that do not exist yet is the
@@ -417,14 +446,15 @@ pub(crate) enum OpenPlacement {
     Refused(OpenUnplaced),
 }
 
-/// Establishes every place the open needs on `table` (D26): the helper's file, the workspace
+/// Establishes every place the open needs on `tree` (D26): the helper's file, the workspace
 /// root, each declared writable root, the base directories and the probes' temporary
-/// directory, in that order. **Every path is placed before the answer** (D27), and what cannot
-/// be established is returned as data: the configuration field, the path, and the cause with
+/// directory, in that order; and for each location a run can write the places it reaches
+/// (D30). **Every path is placed before the answer** (D27), and what cannot be established is
+/// returned as data: the configuration field, the path or the mount point, and the cause with
 /// the file-system type where that is the cause.
-pub(crate) fn place_open(sightings: &OpenSightings, table: &MountTable) -> OpenPlacement {
+pub(crate) fn place_open(sightings: &OpenSightings, tree: &MountTree) -> OpenPlacement {
     let mut unplaced = Vec::new();
-    let mut place = |address: &'static str, opened: &Opened| match table.place_of(opened) {
+    let mut place = |address: &'static str, opened: &Opened| match tree.table().place_of(opened) {
         Ok(place) => Some(place),
         Err(why) => {
             unplaced.push(OpenUnplaced { address, why });
@@ -432,7 +462,7 @@ pub(crate) fn place_open(sightings: &OpenSightings, table: &MountTable) -> OpenP
         }
     };
     let gate = place(ADDRESS, &sightings.gate);
-    let mut writable = Vec::new();
+    let mut placed = Vec::new();
     for (address, root) in std::iter::once((WORKSPACE_ROOT, &sightings.workspace_root)).chain(
         sightings
             .writable_roots
@@ -440,10 +470,7 @@ pub(crate) fn place_open(sightings: &OpenSightings, table: &MountTable) -> OpenP
             .map(|root| (WRITABLE_ROOTS, root)),
     ) {
         if let Some(place) = place(address, root) {
-            writable.push(Location {
-                path: root.path.clone(),
-                place,
-            });
+            placed.push((address, root, place));
         }
     }
     for directory in sightings
@@ -452,6 +479,15 @@ pub(crate) fn place_open(sightings: &OpenSightings, table: &MountTable) -> OpenP
         .chain(std::iter::once(&sightings.temporary))
     {
         place(ADDRESS, directory);
+    }
+    // What each location reaches, after every path was placed: a mount beneath one whose root
+    // cannot be taken as a place refuses, with the location's own field as its address.
+    let mut writable = Vec::new();
+    for (address, root, place) in placed {
+        match Location::reaching(&root.path, &place, tree) {
+            Ok(location) => writable.push(location),
+            Err(why) => unplaced.push(OpenUnplaced { address, why }),
+        }
     }
     if let Some(refusing) = unplaced.iter().find(|unplaced| !unplaced.withholds()) {
         return OpenPlacement::Refused(refusing.clone());
@@ -478,12 +514,19 @@ pub(crate) fn open_places(config: &HostConfig, gate: &Opened) -> OpenPlacement {
                 why: Unestablished {
                     path: gate.path.clone(),
                     cause,
+                    asked: substrate_exec_gate::place::Asked::Place,
                 },
             });
         }
     };
+    // The table as a tree (D30): a row whose attachment cannot be established may be mounted
+    // beneath anything, so it refuses before any location is asked what it reaches.
+    let tree = match table.into_tree() {
+        Ok(tree) => tree,
+        Err(why) => return OpenPlacement::Refused(OpenUnplaced::table(why)),
+    };
     match OpenSightings::of(config, gate) {
-        Ok(sightings) => place_open(&sightings, &table),
+        Ok(sightings) => place_open(&sightings, &tree),
         Err(unplaced) => OpenPlacement::Refused(unplaced),
     }
 }
@@ -544,7 +587,7 @@ pub(crate) fn check_location(path: &Path, places: &OpenPlaces) -> Result<(), Dri
     match places
         .writable
         .iter()
-        .find(|location| places.gate.lies_in(&location.place))
+        .find(|location| lies_in_any(&places.gate, &location.reaches))
     {
         Some(location) => Err(invalid(
             path,
@@ -774,14 +817,15 @@ fn literal(text: &str, address: &str) -> Result<(), DriverError> {
 /// D24: the class of a mount follows the host source it binds, not the mode it is bound with in
 /// this run. `beneath` when the source lies in a location a run can write, and when one lies in
 /// it: the first is writable as a whole, the second shows that location through the mount.
-pub(crate) fn class_of(source: &Place, writable: &[Location]) -> Class {
-    let shows = |location: &Location| {
-        matches!(
-            source.relation(&location.place),
-            Relation::Within | Relation::Holds
-        )
-    };
-    if writable.iter().any(shows) {
+///
+/// Both are asked through the mounts (D30): `source` is every place the host source reaches,
+/// and a writable location is every place it reaches. So a source on a mount beneath a
+/// writable location is `beneath`, and so is a source that holds a mount on which one lies.
+pub(crate) fn class_of(source: &[Place], writable: &[Location]) -> Class {
+    if writable
+        .iter()
+        .any(|location| overlap(source, &location.reaches))
+    {
         Class::Beneath
     } else {
         Class::Follow
@@ -799,12 +843,18 @@ pub(crate) fn classed(
     address: &str,
     source: &Opened,
     writable: &[Location],
-    table: &MountTable,
+    tree: &MountTree,
 ) -> Result<Class, DriverError> {
-    let place = table
+    let place = tree
+        .table()
         .place_of(source)
         .map_err(|why| start_unplaced(address, &why))?;
-    Ok(class_of(&place, writable))
+    // A mount beneath the source of a type outside the list is not compared: every writable
+    // place is on a listed type, and a file system of another type has another device.
+    let reaches = tree
+        .reaches(&place, Unlisted::Skipped)
+        .map_err(|why| start_unplaced(address, &why))?;
+    Ok(class_of(&reaches, writable))
 }
 
 /// The mounts of one run's view an executable path may lie in, as the start pinned them.
@@ -949,7 +999,7 @@ struct Mounts<'a> {
     /// Every host location a run can write: the workspace root and each declared writable root,
     /// whether or not this start mounts them, and what this start binds writable.
     locations: Vec<Location>,
-    table: MountTable,
+    tree: MountTree,
 }
 
 /// A mount of the view that is the run's own to write, or a file system of the view's own.
@@ -972,19 +1022,19 @@ fn shown_mount<'a>(
     source: Source<'a>,
     file: bool,
     eligible: bool,
-    places: (&[Location], &MountTable),
+    places: (&[Location], &MountTree),
 ) -> Result<Mount<'a>, DriverError> {
     let descriptor = match &source {
         Source::Pinned(descriptor) => descriptor.as_raw_fd(),
         Source::Host(descriptor) => descriptor.as_raw_fd(),
         Source::Opaque => unreachable!("a shown mount binds a descriptor"),
     };
-    let (locations, table) = places;
+    let (locations, tree) = places;
     let class = classed(
         address,
         &Opened::of_descriptor(descriptor, path),
         locations,
-        table,
+        tree,
     )?;
     Ok(Mount {
         path: path.to_owned(),
@@ -997,21 +1047,19 @@ fn shown_mount<'a>(
     })
 }
 
-/// Every host location a run can write, placed on `table`: the workspace root and each
-/// declared writable root, then the workspace and the writable roots this start binds.
+/// Every host location a run can write, placed on `tree` with what it reaches (D30): the
+/// workspace root and each declared writable root, then the workspace and the writable roots
+/// this start binds.
 fn writable_locations(
     view: &View<'_>,
     config: &HostConfig,
-    table: &MountTable,
+    tree: &MountTree,
 ) -> Result<Vec<Location>, DriverError> {
     let located = |address: &str, opened: Result<Opened, Unestablished>| {
-        let opened = opened.map_err(|why| start_unplaced(address, &why))?;
-        Ok::<_, DriverError>(Location {
-            place: table
-                .place_of(&opened)
-                .map_err(|why| start_unplaced(address, &why))?,
-            path: opened.path,
-        })
+        let unplaced = |why: Unestablished| start_unplaced(address, &why);
+        let opened = opened.map_err(unplaced)?;
+        let place = tree.table().place_of(&opened).map_err(unplaced)?;
+        Location::reaching(&opened.path, &place, tree).map_err(unplaced)
     };
     let mut locations = vec![located(WORKSPACE, opened_path(&config.workspace_root))?];
     for root in &config.writable_roots {
@@ -1042,11 +1090,16 @@ impl<'a> Mounts<'a> {
                 &Unestablished {
                     path: substrate_wire::EXEC_WORKSPACE_MOUNT.to_owned(),
                     cause,
+                    asked: substrate_exec_gate::place::Asked::Place,
                 },
             )
         })?;
-        let locations = writable_locations(view, config, &table)?;
-        let places = (locations.as_slice(), &table);
+        // The table as a tree (D30), asked whole before any location is asked what it reaches.
+        let tree = table
+            .into_tree()
+            .map_err(|why| start_unplaced(ENTRY, &why))?;
+        let locations = writable_locations(view, config, &tree)?;
+        let places = (locations.as_slice(), &tree);
         // In the order D24 lists the writable mounts: the workspace, the writable roots, the
         // mounts classed `beneath`, then the view's own file systems.
         let mut list = vec![fixed_mount(
@@ -1112,7 +1165,7 @@ impl<'a> Mounts<'a> {
         Ok(Self {
             list,
             locations,
-            table,
+            tree,
         })
     }
 
@@ -1269,7 +1322,8 @@ impl<'a> Mounts<'a> {
             )));
         };
         let place = self
-            .table
+            .tree
+            .table()
             .place_of(&object)
             .map_err(|why| start_unplaced(address, &why))?;
         match shown_location(&place, &self.locations) {
@@ -1347,7 +1401,7 @@ impl<'a> Mounts<'a> {
 fn shown_location<'l>(place: &Place, locations: &'l [Location]) -> Option<&'l Location> {
     locations
         .iter()
-        .find(|location| place.lies_in(&location.place))
+        .find(|location| lies_in_any(place, &location.reaches))
 }
 
 /// The longest path the kernel takes: `PATH_MAX` less its terminator.

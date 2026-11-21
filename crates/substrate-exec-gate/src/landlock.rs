@@ -7,7 +7,7 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 
-use crate::place::{MountTable, Opened, Place, Unestablished};
+use crate::place::{MountTable, MountTree, Opened, Place, Unestablished, Unlisted, lies_in_any};
 use crate::{Class, Lists, Located};
 
 /// `LANDLOCK_ACCESS_FS_EXECUTE`.
@@ -203,27 +203,37 @@ fn execute_targets(lists: &Lists) -> Result<Vec<(String, OwnedFd)>, String> {
 }
 
 /// The mounts of the view the run can write, and once they were needed the view's mount table
-/// with the place of each.
+/// with the places each reaches (D30): its own place, and the root of every mount that is
+/// mounted beneath it.
 struct Writable<'a> {
     roots: &'a [String],
-    placed: Option<(MountTable, Vec<Place>)>,
+    placed: Option<(MountTree, Vec<Vec<Place>>)>,
 }
 
 impl Writable<'_> {
     /// The table and the places, established at the first call.
-    fn placed(&mut self, path: &str) -> Result<&(MountTable, Vec<Place>), Unestablished> {
+    fn placed(&mut self, path: &str) -> Result<&(MountTree, Vec<Vec<Place>>), Unestablished> {
         if self.placed.is_none() {
             // The table before any path: D26 names its causes first.
             let table = MountTable::read().map_err(|cause| Unestablished {
                 path: path.to_owned(),
                 cause,
+                asked: crate::place::Asked::Place,
             })?;
+            // The table as a tree, asked whole before any root is asked what it reaches.
+            let tree = table.into_tree()?;
+            // A mount beneath a writable root of a type outside the list is not compared and
+            // does not refuse: bubblewrap binds each device node of `/dev` as one, and a
+            // followed path on such a type has no place and is refused for that.
             let places = self
                 .roots
                 .iter()
-                .map(|root| table.place_of(&Opened::of_path(root)?))
+                .map(|root| {
+                    let place = tree.table().place_of(&Opened::of_path(root)?)?;
+                    tree.reaches(&place, Unlisted::Skipped)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
-            self.placed = Some((table, places));
+            self.placed = Some((tree, places));
         }
         Ok(self.placed.as_ref().expect("established above"))
     }
@@ -232,8 +242,9 @@ impl Writable<'_> {
 /// Opens a `follow` path, following symbolic links, and refuses one that resolves into a mount
 /// the run can write (D24): what such a path names is a file the run can replace. Where the
 /// path lies is decided by its place (D25): the mount the kernel reports for the descriptor,
-/// in the view's mount table. A place that cannot be established refuses too, with its cause
-/// (D26); the text of the two paths decides nothing.
+/// in the view's mount table. A writable mount is every place it reaches (D30), so a path that
+/// resolves onto a mount beneath one is refused as well. A place that cannot be established
+/// refuses too, with its cause (D26); the text of the two paths decides nothing.
 fn open_follow(option: &str, path: &str, view: &mut Writable<'_>) -> Result<OwnedFd, String> {
     let descriptor = open_at(libc::AT_FDCWD, &c_path(path)?, 0)
         .map_err(|error| format!("cannot open {path:?}: {error}"))?;
@@ -241,11 +252,14 @@ fn open_follow(option: &str, path: &str, view: &mut Writable<'_>) -> Result<Owne
         return Ok(descriptor);
     }
     let roots = view.roots;
-    let (table, places) = view.placed(path).map_err(|why| why.to_string())?;
+    let (tree, places) = view.placed(path).map_err(|why| why.to_string())?;
     let opened = Opened::of_descriptor(descriptor.as_raw_fd(), path);
-    let place = table.place_of(&opened).map_err(|why| why.to_string())?;
+    let place = tree
+        .table()
+        .place_of(&opened)
+        .map_err(|why| why.to_string())?;
     for (root, writable) in roots.iter().zip(places) {
-        if place.lies_in(writable) {
+        if lies_in_any(&place, writable) {
             // The path the kernel holds for the descriptor: what the links resolved to.
             let resolved = opened.descriptor_path.as_deref().unwrap_or(path);
             return Err(format!(

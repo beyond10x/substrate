@@ -212,10 +212,15 @@ An entry names a directory, which admits every file beneath it, or one file:
   `exec.sandbox-path-unrepresentable` (422).
 
 Whether one path lies in another is decided from the host's mount table, on `ext4`, `overlay`
-and `tmpfs`. Where that cannot be established the answer names one of nine causes:
+and `tmpfs`. Where that cannot be established the answer names one of ten causes:
 `mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`, `mount-id-unreported`,
-`mount-row-missing`, `mount-row-repeated`, `mount-root-deleted`, `mount-point-mismatch` or
-`file-system-unlisted` with the type.
+`mount-row-missing`, `mount-row-repeated`, `mount-root-deleted`, `mount-point-mismatch`,
+`mount-covered` or `file-system-unlisted` with the type.
+
+A file system mounted beneath a location a run can write (`workspace_root`, a declared writable
+root, a workspace) lies in that location: a read-only root declared on it counts as one a run
+can write, and a helper installed on it is refused. `mount-covered` names such a mount that a
+later mount hides, or two mounts on one mount point: unmount one, or declare another directory.
 
 | Where | Cause | Answer |
 |---|---|---|

@@ -8,16 +8,24 @@ the route D28 had marked as not checked, and the seventh revision, `1d961b30f`, 
 (D29): the helper is statically linked, and on a start with a list no program runs in the view
 before it. The coordinator of the request decided D29 on 2026-11-21, and the stakeholder,
 session `sdc`, has no objection to it. A third pass of both reviews on `1d961b30f` found no
-blocker. This eighth revision records what that pass measured and writes three amendments
-from it: two that tighten D29 and one new stated limit. The stakeholder has not read this
-text. Serves `story:linux-executable-allow-list` and
+blocker. The eighth revision recorded what that pass measured and wrote three amendments from
+it, and story 1 is merged with it. Story 2, the deny-list, is implemented at `aafb9823a`. Its
+security review and its adversary pass both found one blocker that the design does not cover:
+the deny-list's "lies in" compares places, and a mount beneath a directory has another place,
+so a denied program in such a mount ran. This ninth revision closes it (D30): "lies in"
+follows the view's mounts. The coordinator of the request decided D30 on 2026-11-21, and the
+stakeholder, session `sdc`, accepted the decision; it has not read this text, which goes
+beyond the decision's words in places that § 6 marks. Reading the code for D30's scope found
+the same gap in four checks of story 1,
+which is merged (§ 6, *Through the view's mounts*). Serves `story:linux-executable-allow-list`
+and
 `story:executable-deny-list` (`epic:runs-are-governed-and-limit-hits-are-events`). It changes no
 wire byte and no contract bundle: the lists are substrate-host's confinement API
 ([ADR 0044](../../adr/0044-confinement-is-a-contract-family-served-by-declared-adapters.md)
 decisions 7 and 8). No code before acceptance (invariant 8). § 17 lists the decisions, § 18 every
 claim that is inferred and not observed, § 19 the three defaults the stakeholder decided.
 
-Revised eight times on 2026-11-21.
+Revised nine times on 2026-11-21.
 
 - After the first review: session `sdc` decided the helper (D5, D19) under
   `approval-record:sdc-decides-plan-and-design-2026-11-21`.
@@ -115,6 +123,50 @@ Revised eight times on 2026-11-21.
   This revision ran nothing and built nothing; the implementor was working in the same tree.
   The code was read at `1d961b30f` with `git show`, and the third reviews' cases, logs and
   trace were read.
+- Ninth revision. Story 1 is merged with the eighth revision; the coordinator corrected four
+  of that revision's sentences from the implementation's measurements, and the first item of
+  § 18's eighth-revision block says which. Story 2 is implemented at `aafb9823a`. Its security
+  review and its adversary pass ran on that commit and both found one blocker (§ 3.13, E18 to
+  E21):
+  - D11 decides "lies in" by place alone, and a place on another mount is never inside the
+    directory that mount sits beneath. The kernel grants the execute right by walking up from
+    the file through mount points. With a directory listed and a program denied in a mount
+    beneath it, the helper wrote one rule on the directory and the denied program ran. With a
+    directory denied and a mount beneath it listed, the mount got a rule and its programs ran;
+  - the driver's check of the program before dispatch has the same gap.
+
+  **D30** is the answer: "lies in" follows the view's mounts. A mount's attachment point is
+  established from the mount table as a place, the mounts beneath a directory are found from
+  it, and their roots enter every comparison the deny-list makes. It fails closed, with one
+  new cause, `mount-covered`, beside D26's nine. What else this revision writes:
+  - **a finding against merged code.** The four checks of story 1 that ask whether something
+    lies in a location a run can write compare places alone, as D11 did (§ 6). It is read
+    from the code and was not staged;
+  - **what an allow-list means across mounts.** A listed directory admits what is mounted
+    beneath it. That is the kernel's walk and what a client expects of `/usr`; the document
+    now says it, and nothing in it said otherwise (§ 5);
+  - the probe of § 9 stages a mount beneath its listed directory (a proposal);
+  - § 16 takes the three security cases and the adversary's four as permanent cases, with
+    unit cases for the attachment function;
+  - § 18 records what the review left unverified on `macos`.
+
+  Three corrections from the adversary's measurements, each in § 8.2:
+  - a deny entry the run creates is denied only as a new file. A hard link to, or a rename
+    of, a listed program of the same directory under the entry's name runs. It is a stated
+    limit now (§ 8.5);
+  - the stop at 65536 rules is the helper's exit 125 after dispatch, not a refusal before
+    dispatch. § 8 and § 12 say it that way;
+  - a name that is not UTF-8 in an expanded directory ended the start with status 125 and a
+    cause that does not fit. The implementor is making the expansion take names as bytes.
+
+  The stakeholder's words on D30: "D30 accepted: \"lies in\" follows the view's mounts,
+  attachment points read from the mount table as places, one function for the helper and the
+  driver's pre-dispatch checks, and a start is refused exec.sandbox-place-unserved where an
+  attachment point cannot be established. Not taking the blanket refusal of every directory
+  that holds a mount is right."
+
+  This revision ran nothing and built nothing; reviewers were building in the same tree. The
+  code was read at `aafb9823a`, and the fourth reviews' cases and logs were read.
 
 Releases, tags, merges to `main` and version numbers are the operator's. This document touches
 none of them.
@@ -597,6 +649,48 @@ cases are in `crates/substrate-host/tests/security3_exec_gate.rs`,
 - The same pass ran the committed suites on `1d961b30f`, and they pass there with the static
   helper, the cases of E6 and E7 among them.
 
+### 3.13 What the reviews of story 2's implementation measured
+
+Not probes of this document. A security review and an adversary pass ran against story 2's
+implementation at `aafb9823a` on 2026-11-21, on the probe host. This revision read their cases
+and logs and ran none. The cases are in `crates/substrate-exec-gate/tests/security4_gate.rs`,
+`crates/substrate-host/tests/security4_exec_denied.rs` and
+`crates/substrate-exec-gate/tests/adversary4_namespace_gate.rs`; they were not committed when
+this was written. The cases that need a mount make it in a user and mount namespace of their
+own and print that they are absent where the host grants none.
+
+| | case | what the run was | observed | required |
+|---|---|---|---|---|
+| E18 | `security4_a_program_denied_in_a_mount_beneath_a_listed_directory_is_not_executed`, the helper alone | `tree` is listed and `tree/held/tool` denied. `tree/held` is a mount: once another directory of the same file system bound there, once a tmpfs. The control, without the deny entry, runs all three programs | `denied:0`, `beside:0`, `listed:0`, for the bind and for the tmpfs: the helper wrote one rule on `tree` | `denied:126`, `beside:0`, `listed:0` |
+| E19 | `security4_a_listed_mount_beneath_a_denied_directory_is_not_executed`, the helper alone | `tree` is denied and the mount at `tree/held` is listed. The control lists the mount without the deny entry, and the program runs | `held:0`, for both mounts: the mount got its own rule | `held:126` |
+| E20 | `security4_a_program_denied_in_a_host_mount_beneath_a_listed_directory_is_not_executed`, through the driver | the host has a mount at `/usr/local/src`. The profile lists `/usr/local` and denies `/usr/local/src/tool`. The driver binds `/usr` with what is mounted beneath it | the start was dispatched, and the run printed `denied:0`, `beside:0` | `denied:126`, `beside:0`, or a named refusal before dispatch |
+| E21 | the adversary's cases in `adversary4_namespace_gate.rs`, the helper alone | (a) `fs` listed, `fs/tree/bin/tool` denied, and `fs/tree/bin` mounted a second time at `fs/one/deep`. (b) `fs/one` listed and the deny entry written through that mount, `fs/one/deep/tool`. (c) the same with a tmpfs at `fs/one/deep`. (d) `fs/one` denied and the mount `fs/one/deep` listed | (a) the denied name is refused and the same file runs through the second mount: `126`, `0`. (b) and (c) the denied path itself runs: `0`. (d) is E19's shape; it is not in the log this revision read | each denied path ends with status 126. The control, the same lists without a nested mount, holds |
+| E22 | held, for the record | the walk's bound; a deny entry on a file system outside the list; a trace of a start with a deny-list | the helper stops at 65536 rules with status 125 and nothing runs. A deny entry at a `vfat` mount beneath a declared root is refused before dispatch, `exec.sandbox-place-unserved` naming `file-system-unlisted vfat`; the same profile without the entry runs. Before the ruleset the start executes bubblewrap and the helper's mount and nothing else, and the helper maps no file | as observed |
+
+- **E18 to E21 are one cause.** Steps 1 and 2 of D11 ask whether one path lies in another, and
+  at `aafb9823a` the answer is the relation of two places
+  (`crates/substrate-exec-gate/src/landlock.rs:469-479`,
+  `crates/substrate-exec-gate/src/place.rs:129-144`). A place is a device and the names from
+  the root of that file system. What is mounted beneath a directory has another device, or
+  the same device and names that are not beneath the directory's. So it is never "in" the
+  directory by place. The kernel does not ask that question. It walks from the executed file
+  up to the root of its mount, goes on at the mount point in the mount above, and grants the
+  right if any directory on that walk has a rule. A rule on `tree` therefore grants everything
+  mounted beneath `tree`.
+- **The gap is in the two tests, not in the walk.** Where a directory is expanded for another
+  reason, an entry that is a mount point gets the place its own row gives it, and its
+  entries are compared with the deny-list correctly (`landlock.rs:498-506`).
+- **E21 (a) is wider than E18.** The deny entry is not written through the nested mount, and
+  it is not on it. The nested mount is another mount of the directory that holds the denied
+  file. So "the mount the denied path is on" is not enough to ask; what has to be asked is
+  what the mounts beneath a listed directory show (§ 6, D30).
+- **E20 is the same through the driver**, which checks the program against the deny-list
+  before dispatch with the same relation (`crates/substrate-host/src/exec_gate.rs:1637-1639`):
+  a program in a mount beneath a denied directory is not refused there.
+- **The controls of E18 and E19 are an observation of their own:** with no deny entry, a
+  listed directory admits the programs of a mount beneath it. That is the allow-list's
+  meaning (§ 5).
+
 ## 4. The rule
 
 **D1. On `linux` a profile with a non-empty `exec_subpaths` is held to its literal program and the
@@ -627,7 +721,9 @@ adapter proved it. It applies nothing on `linux`.
 
 ## 5. Entries
 
-**D2. An entry names a directory or one file.** A directory admits every file beneath it. A file
+**D2. An entry names a directory or one file.** A directory admits every file beneath it. Since
+the ninth revision this document says what "beneath" covers on `linux`: the directory's own
+files, and what is mounted beneath it in the view (D30, rule 5). A file
 admits itself. Landlock takes either: a rule's `parent_fd` "identifies the parent directory of a
 file hierarchy, or just a file" (`landlock.h`, `struct landlock_path_beneath_attr`; probe A14).
 `macos` renders an entry as `(subpath …)` (`seatbelt.rs:270-277`); that a `subpath` rule on a file
@@ -708,6 +804,19 @@ Reasons:
   symbolic link in a listed directory that points outside it is not admitted: the kernel asks
   for the right where the file is. § 7 states it as a limit, with the distribution it was
   measured on (E17).
+- **A listed directory admits what is mounted beneath it.** Ninth revision; it is the
+  allow-list's meaning, and it was always what the kernel does. The right is granted when a
+  directory on the walk from the file has a rule, and the walk goes from the root of the
+  file's mount on to the mount point in the mount above. So with `/usr` listed, a tool
+  directory the host mounts at `/usr/local/src` is admitted, as a client expects of `/usr`.
+  Observed: the controls of E18 and E19 run the programs of a mount beneath a listed
+  directory, for a bind and for a tmpfs. Three things follow:
+  - it is the other half of K7. A rule does not reach a file whose walk does not pass the
+    directory, and it reaches every file whose walk does;
+  - what is mounted beneath a listed directory may be something a run can write. The class
+    of a mount (D24) is decided with the mounts beneath it since D30;
+  - a client that does not want such a mount admitted denies it, by its mount point or by a
+    path in it. Before D30 that deny entry did nothing (E18, E20).
 
 ### Reference text
 
@@ -878,6 +987,10 @@ does not answer it:
   descriptor's path (`/proc/self/fd/<n>`) below the row's mount point.
 - **`X` lies in `Y`** when both places have the same device and the place of `X` is the place of
   `Y` or lies beneath it.
+- **Ninth revision: that is "lies in" by place, and it is half of the answer.** What is mounted
+  beneath `Y` has another place and is beneath `Y` in the view all the same. Each of the three
+  checks above asks about the view, so each also asks about the mounts beneath a directory
+  (D30). The place of a path is unchanged, and D30 builds on it.
 - A path that does not exist has the place of its nearest existing ancestor, joined with the
   remaining names.
 - **A remaining name of `..` or `.` is never joined.** The kernel resolves those two names; it
@@ -954,8 +1067,26 @@ one of these causes, and in nothing else:
 | `mount-root-deleted` | the row's root ends in `//deleted`: the directory the mount shows was removed (S3) |
 | `mount-point-mismatch` | the descriptor's path cannot be read, or the row's mount point is not that path or a prefix of it |
 | `file-system-unlisted` | the row's file-system type is not in the closed list below |
+| `mount-covered` | ninth revision, the tenth cause (D30): a mount that is taken as mounted beneath a directory is not the mount the kernel reports at its own mount point. It is hidden by a later mount, or it lies under a stack |
 
 The causes are checked in this order, and the first that holds is the one named.
+
+**Ninth revision: ten causes, and four of the nine are raised in one more place.** D30
+establishes where a mount is attached, and that can fail as a place can. `mount-covered` is
+new. Four existing causes are raised for a row of the table as well as for a path:
+
+- `mount-row-missing`: also, a row names a parent ID that no row has, and the row is not the
+  root of the view;
+- `mount-row-repeated`: also, more than one row has that parent ID;
+- `mount-point-mismatch`: also, a row's mount point is not its parent's mount point or beneath
+  it;
+- `mount-root-deleted`: unchanged in meaning; also raised for the root of a mount beneath a
+  directory, when that root is to be compared as a place.
+
+Where this document says "nine causes", read ten since this revision, and where it says seven
+of them refuse the open, read eight: `mount-covered` refuses, as every cause does that says
+the driver could not read the host's table (D27). § 6, *Through the view's mounts*, says when
+each is raised and why one new cause is enough.
 
 **A mount point that is not UTF-8 is `mount-table-unparsable`, not `mount-table-unreadable`.**
 The kernel writes a mount point's bytes into the table as they are and escapes only the space,
@@ -1276,6 +1407,204 @@ This is stated beside the hard-link limit of § 8.5, and no refusal is specified
 The stakeholder decided on 2026-11-21 that the embedder notes say it as a rule, in these words:
 "never list a lower directory of an overlay that is also in the view".
 
+### Through the view's mounts
+
+**D30. "Lies in" follows the view's mounts.** New in the ninth revision. The coordinator of
+the request decided it on 2026-11-21, after the security review and the adversary pass of
+story 2's implementation. The stakeholder, session `sdc`, accepted it: "D30 accepted: \"lies
+in\" follows the view's mounts, attachment points read from the mount table as places, one
+function for the helper and the driver's pre-dispatch checks, and a start is refused
+exec.sandbox-place-unserved where an attachment point cannot be established. Not taking the
+blanket refusal of every directory that holds a mount is right."
+
+**What was found.** D25 answers "does `X` lie in `Y`" from two places. A mount beneath `Y`
+shows files whose place is on another device, or on `Y`'s device under names that are not
+beneath `Y`'s. By place they are not in `Y`. In the view they are, and the kernel treats them
+so: it grants the execute right when any directory on the walk from the file has a rule, and
+the walk goes from the root of the file's mount on to the mount point in the mount above. So
+a rule on `Y` grants what is mounted beneath `Y`, and D11 did not know it (E18 to E21).
+
+**Three terms, each from the mount table and from places.**
+
+- **The attachment point of a mount.** A row of the table names its parent mount by ID (the
+  second field) and its own mount point. The attachment point is a place: the parent row's
+  device, and the parent row's root joined with the row's mount point taken relative to the
+  parent row's mount point. It is where the mount sits in the file system of the mount above
+  it. The root of the view has none: it is the one row whose mount point is `/` and whose
+  parent ID has no row.
+- **A mount is mounted beneath `Y`** when its attachment point lies in the place of `Y`, by
+  D25, or when its parent mount is mounted beneath `Y`. The second half is "directly or
+  through further mounts".
+- **The places `Y` reaches** are the place of `Y`, and the root of every mount that is mounted
+  beneath `Y`: that row's device and its root field, as a place.
+
+Nothing here compares the text of an entry's view path with anything. The only text that is
+compared is the table's own: one row's mount point against its parent row's, as D25 already
+compares a row's mount point against a descriptor's path.
+
+**The rule:**
+
+1. **`X` lies in `Y`, in the view, when the place of `X` lies in a place that `Y` reaches.**
+   For the deny-list that is the coordinator's rule in other words: the place of `X` lies in
+   the place of `Y`, or the mount `X` is on is attached, directly or through further mounts,
+   at a point that lies in `Y`.
+   - **It is written through "the places `Y` reaches" and not through "the mount `X` is on"
+     for one measured reason.** In E21 (a) the deny entry is `fs/tree/bin/tool`, and the mount
+     nested in the listed `fs/one` is a second mount of `fs/tree/bin`. The deny entry is not
+     on that mount; it is on the file system's own. Asked of the entry's own mount, nothing
+     is found, and the denied file runs through `fs/one/deep`. Asked of what `fs/one`
+     reaches, the root of the nested mount is the place of `fs/tree/bin`, which holds the
+     denied file's place. The comparison of places then does what D25 does for two mounts of
+     one directory (K5): it finds the file under every name.
+   - **Two sets of places overlap** when a place of one lies in a place of the other. The
+     checks below ask for overlap where either direction matters.
+2. **The deny-list.** The denied places are every place a deny entry reaches: the entry's own
+   place, and the root of every mount beneath a denied directory. D11's three steps run with
+   them:
+   - step 1, no rule: the place of `A` lies in a denied place, or `A` is another name of a
+     denied file. A listed mount beneath a denied directory gets no rule (E19, E21 (d)). This
+     is K8's rule across mounts;
+   - step 2, one rule on `A`: unless `A` is a directory and a place `A` reaches overlaps a
+     denied place. A listed directory with a denied program in a mount beneath it is
+     expanded (E18, E20, E21 (b), (c)), and so is one with a second mount of a denied file's
+     directory beneath it (E21 (a));
+   - step 3, the expansion, is as at `aafb9823a`: it descends into the mounts beneath `A`, and
+     an entry that is a mount point has the place its own row gives it
+     (`crates/substrate-exec-gate/src/landlock.rs:498-506`). Each entry goes through steps 1
+     and 2 with the places it reaches itself.
+   - **The driver's check of the program** uses the same denied places: a program whose place
+     lies in one, or that is another name of a denied file, is refused
+     `exec.sandbox-program-unlisted` before dispatch.
+   - **What a denied directory denies** follows from D23: the files of a mount beneath it,
+     under every name they have in the view. Where the same file system is mounted a second
+     time elsewhere, its files are denied there too. That is D23's "every mount of that
+     path", and it is the reading that never lets a denied file run.
+3. **It fails closed, in D26's form.** Where an attachment point cannot be established, a
+   start with a list is refused `exec.sandbox-place-unserved` (501) before dispatch, the open
+   is refused `config.exec-gate-unserved` (501), and the helper exits 125 with one line, each
+   with a named cause. Nothing falls back to a comparison of places alone, and nothing falls
+   back to text.
+4. **Scope: every check that asks "lies in".** There are six in the code, and one function
+   serves them all, compiled by the helper and by the driver from one source file, as the
+   place function is (D26). The table below names each.
+5. **An allow-list without a deny-list is not changed.** A listed directory admits what is
+   mounted beneath it, because the kernel's walk passes it. That is the allow-list's meaning
+   (§ 5). With no deny entry the helper writes one rule per entry as before, and no table
+   is read for the deny-list.
+6. **Not the blanket refusal.** The simpler rule would refuse a start whose listed or denied
+   directory holds any mount. It would refuse `/usr` on every host that mounts something
+   beneath `/usr`, and it would refuse the vfat mount beneath a declared root of E22, which
+   runs today. The stakeholder: "Not taking the blanket refusal of every directory that holds
+   a mount is right."
+
+**The six checks.** Read at `aafb9823a`. Each compares places alone there.
+
+| check | where | story | what a mount makes it miss |
+|---|---|---|---|
+| D11, steps 1 and 2: a path that is to get a rule against the deny entries | `crates/substrate-exec-gate/src/landlock.rs:473`, `:478` | 2 | measured: E18, E19, E21 |
+| D23: the program against the deny entries, before dispatch | `crates/substrate-host/src/exec_gate.rs:1637-1639` | 2 | the security review's finding, read: a program in a mount beneath a denied directory is not refused. E20 is the same start's deny entry not held by the helper |
+| D21: the helper's file in a location a run can write | `crates/substrate-host/src/exec_gate.rs:553-565` | 1, merged | read, not run: a helper on a mount beneath `workspace_root` or a declared writable root is accepted |
+| D24: the class of a mount from its host source | `crates/substrate-host/src/exec_gate.rs:796-808` | 1, merged | read, not run: a root whose host source is on a mount beneath a writable location is classed `follow`; so is a base directory or a root with a writable location on a mount beneath it |
+| D24: a followed entry that resolves into a writable location, in the driver | `crates/substrate-host/src/exec_gate.rs:1556-1560` | 1, merged | read, not run: a path that resolves onto a mount beneath a writable location is not refused |
+| D24: the same in the helper, against the `--writable` roots | `crates/substrate-exec-gate/src/landlock.rs:232-239`, used at `:248` | 1, merged | read, not run: the same, in the view |
+
+**A finding against merged code.** The last four rows are story 1, which is merged. Each asks
+whether something lies in a location a run can write, and each answers from places alone. A
+mount beneath a writable location is carried into a run's view by the recursive bind of that
+location, and the run can write it. By place it is not in the location. So, by reading:
+
+- a read-only root declared on such a mount is classed `follow`. A symbolic link a run
+  planted there is then followed, and a link to `/usr/bin` admits all of `/usr/bin`. This is
+  the planted link of § 5 and K10, through the gap;
+- a helper installed on such a mount passes D21;
+- an entry that resolves through a link onto such a mount is not refused by the driver or
+  by the helper.
+
+What this is and is not: it is read from the six sites above and from the cause E18 to E21
+share; none of the four was staged. It needs a host that has a mount beneath `workspace_root`,
+beneath a declared writable root or beneath a workspace, and a profile that declares a root
+or lists a path on it. The rule that closes it is the one below, and it is the same function.
+
+**The locations a run can write, with D30.** The writable places are every place a writable
+location reaches: the place of `workspace_root`, of each `writable_roots` path and of each
+directory this start binds writable, and the root of every mount beneath one of them. Then:
+
+- D21: the helper's file is refused when its place lies in a writable place;
+- D24, the class: a mount is `beneath` when a place its host source reaches overlaps a
+  writable place. That covers the three shapes: the source in a writable location, a
+  writable location in the source, and each of the two across a mount;
+- D24, the followed entry: it is refused when the place it resolves to lies in a writable
+  place. In the helper the writable places are what the `--writable` roots reach in the
+  view's table;
+- a mount beneath a writable location counts whether or not it is mounted read-only. The
+  rule does not read the mount's options.
+
+**Which table.** The helper reads the view's table, as it does for places. The driver reads
+its own, for host paths: a host mount beneath a host directory is beneath that directory's
+mount in the view, because bubblewrap binds recursively. That is observed for a base
+directory (E20) and for a declared root (E22), and inferred for the workspace and the
+writable roots, which are bound by descriptor (§ 18). The helper is the second line, on the
+table the run really has.
+
+**Failing closed: when, and with which cause.**
+
+| what is found | cause | for which rows |
+|---|---|---|
+| a row names a parent ID that no row has, and it is not the one root of the view; or two rows lack a parent row | `mount-row-missing` | every row of the table, once, when the table is first used for D30 |
+| more than one row has the parent ID | `mount-row-repeated` | the same |
+| a row's mount point is not its parent row's mount point or beneath it | `mount-point-mismatch` | the same |
+| the root of a mount beneath a directory ends in `//deleted` | `mount-root-deleted` | only a mount whose root is compared as a place: one of a listed type that is beneath a denied directory, beneath a writable location, or beneath a listed directory of a start with a deny-list |
+| the kernel reports another mount at the row's mount point | `mount-covered` | the same mounts. The row's mount point is opened and its mount ID is read, as D25 reads a path's; an ID that is not the row's means the mount is hidden by a later one or lies under a stack |
+| a mount beneath a denied directory is on a file-system type outside D26's list | `file-system-unlisted` | only beneath a denied directory. Its files are denied by the profile, and whether the same file system is also mounted beneath a listed directory cannot be decided from a root on such a type |
+
+**A mount of a type outside the list is not compared and, but for the last row, not
+refused.** Its root is not a place the rule can trust, so it enters no set of places. That is
+safe for two of the three kinds of directory, and each for a stated reason:
+
+- beneath a listed directory: every denied place is on a listed type, a file system of
+  another type has another device, and nothing denied can lie on it. E22's control is this
+  case: a vfat mount beneath a listed root, no deny entry on it, and the run starts;
+- beneath a writable location: whatever is compared with a writable place is placed first,
+  and a path, a source or a helper file on such a type has no place and is refused or
+  withheld there (D26, D27). The view always has this case: bubblewrap binds the device nodes
+  of `/dev` one by one, each a mount of type `devtmpfs` beneath the `--writable` root `/dev`
+  (U2). A rule that refused them would refuse every start with a list;
+- beneath a denied directory it is refused, by the last row.
+
+- **The first three are about the table as a tree**, so they are asked of the whole table:
+  a row whose attachment cannot be established may be mounted beneath anything. On the probe
+  host the table has 44 rows and one without a parent row, the root.
+- **The other three are asked only of the mounts the rule uses.** The probe host's own table
+  shows why: `/proc/sys/fs/binfmt_misc` has two rows, an automount point with the file
+  system mounted on it, and the upper row names the lower as its parent. A rule that refused
+  every stack in the table would refuse every start on that host.
+- **A tenth cause is needed, and one is enough.** `mount-covered` is the one finding none of
+  the nine can say: the table is well formed, and the kernel does not show the mount where
+  the table puts it. An operator answers it differently from the others: it unmounts
+  something, or lists another directory. The other failures are defects the nine already
+  name, found in a row and not in a path, so they keep their names. The diagnostic line says
+  which: `cannot establish where <mount point> is attached: <cause>`, beside D26's
+  `cannot establish the place of <path>: <cause>`. The wording of the line is a proposal.
+- **A covered mount refuses and is not skipped.** Skipping it would be right for the kernel's
+  walk: nothing in a hidden mount can be executed by path. It is not taken, because the
+  roots of the mounts beneath a denied directory become denied places, and a root taken from
+  a row the kernel does not confirm would deny files the profile never named.
+- **Two consequences.** A mount point that an automounter has filled is a stack, and the
+  lower row is of type `autofs`. That type is outside the list, so the row is not compared
+  and does not refuse; the file system mounted on it is the one the kernel reports and is
+  compared like any other. Beneath a denied directory the same row refuses the start, with
+  `file-system-unlisted`. And two mounts of listed types stacked on one mount point beneath a
+  directory the rule looks at refuse the start with `mount-covered`. § 20 has both.
+- **The addresses** are D26's: the field of the entry or location beneath which the mount was
+  found. At the open the address is the configured field (`config.workspace_root`,
+  `config.writable_roots`), and the code is `config.exec-gate-unserved`; `mount-covered`
+  refuses the open with the seven that already do (D27).
+
+**What it costs.** One pass over the table to link each row to its parent, once per start and
+once per helper. For each directory the rule looks at, a filter over the rows. One open and
+one `statx` per mount it finds beneath such a directory. The view of a run has a few dozen
+rows. Not measured (§ 18).
+
 ### The helper's arguments
 
 **D24. The driver states for every path which mount it lies in and how it is to be opened.** The
@@ -1357,6 +1686,13 @@ The driver decides the class of every mount at each start:
 - **"Lies in" is D25's**, on the driver's own mount table, in both directions. A source that
   holds a writable location shows that location through the mount (K9). A source inside one is
   writable as a whole.
+- **Ninth revision: it is D30's, and the merged code has D25's.** A host mount beneath a
+  writable location is writable through that location's bind and is not in it by place. So a
+  source on such a mount is classed `follow` at `aafb9823a`
+  (`crates/substrate-host/src/exec_gate.rs:796-808`), and so is a source with a writable
+  location on a mount beneath it. With D30 the class is `beneath` when a place the source
+  reaches overlaps a place a writable location reaches. Read from the code, not staged
+  (§ 6, *Through the view's mounts*).
 - A source whose place cannot be established has no class. The start is refused
   `exec.sandbox-place-unserved` (D26); the mount is never classed `follow` for want of an
   answer.
@@ -1389,6 +1725,12 @@ every option that carries a `follow` path: `--program`, `--loader`, `--allow` an
   wrongly passed as `follow`, whose host directory holds the workspace or lies in it, shows
   workspace files under a path that is not beneath `/workspace` as text. The place finds both;
   the view's ancestors find only the first (K9).
+- **Ninth revision: by place and by the mounts beneath a `--writable` root (D30).** A path
+  that resolves onto a mount beneath `/workspace` has a place that is not in the place of
+  `/workspace`, and the run can write it. The helper at `aafb9823a` does not refuse it
+  (`crates/substrate-exec-gate/src/landlock.rs:232-239`), and neither does the driver
+  (`crates/substrate-host/src/exec_gate.rs:1556-1560`). With D30 both compare with every
+  place a writable root reaches. Read, not staged.
 - The loader goes through the same check in the probes of § 9. On a host where it fails, the
   probe fails and the fact is absent.
 
@@ -1878,6 +2220,24 @@ was run on the probe host (§ 3.7); the paths are that host's.
   revision. On a start with a list it is refused before dispatch (D29, rule 7). It could never
   take the helper's place, and before the rule such a start ran or ended with status 125
   (E10, E16).
+- **What the host mounts beneath a directory belongs to that directory in the view.** Ninth
+  revision (D30).
+  - A listed directory admits what is mounted beneath it. With `/usr` listed, a tool
+    directory mounted at `/usr/local/src` runs. To keep it out, deny the mount point.
+  - A deny entry reaches into such a mount, and a denied directory denies what is mounted
+    beneath it, under every name those files have in the view.
+  - A mount beneath `workspace_root`, a declared writable root or a workspace counts as
+    something a run can write. Do not install the helper on one, and do not declare a
+    read-only root on one unless its links are meant to be refused (D24).
+  - Where the driver cannot tell how a mount beneath one of these directories is attached,
+    or the mount is hidden under another, the start with a list is refused
+    `exec.sandbox-place-unserved` with the cause; `mount-covered` is the new one. A mount of
+    a file-system type outside `ext4`, `overlay` and `tmpfs` beneath a denied directory is
+    refused the same way; beneath a listed directory it does not refuse the start.
+- **A deny entry for a file that does not exist yet holds against a new file only.** Ninth
+  revision. In a listed directory the run can write, the run can give a program it may
+  already start the denied name, by a hard link or a rename, and that runs (§ 8.5). Put a
+  deny entry in a directory no run can write, or do not list the directory.
 - **Write `workspace_root` and every `writable_roots` path without `..` and `.`.** With
   `exec_gate` set, such a path that does not exist yet is refused at open,
   `config.exec-gate-unserved` with the cause `path-unopenable` (D25).
@@ -1971,6 +2331,14 @@ The code is a `DriverError` of class `Refused` (status 422), the form of
 says which check failed. A helper that a package manager installed with a second hard link is
 refused too; the embedder installs a copy. The same checks are not made for
 `HostConfig.bubblewrap` today; this document does not change that.
+
+**Ninth revision: the second check follows the mounts beneath a writable location (D30).**
+At `aafb9823a`, and in the merged story 1, the check compares the helper's place with the
+place of each writable location (`crates/substrate-host/src/exec_gate.rs:553-565`). A helper
+installed on a mount beneath `workspace_root` or a declared writable root is on another
+place and passes, and a run that has that mount in its view could have written it. With D30
+the helper is refused when its place lies in any place a writable location reaches. Read
+from the code, not staged.
 
 **A helper that needs a loader is refused with the same code (seventh revision, D29).** The
 three checks above ask whether a run could have written the helper's file. This fourth asks
@@ -2236,6 +2604,25 @@ is to receive the execute right (an entry, the program, the loader; D23), resolv
 "Lies in" is D25's: it compares places, and a path lies in itself. Step 1 covers a listed
 directory inside a denied one: `/usr/bin` listed beside a denied `/usr` gets no rule (K8).
 
+**Ninth revision: "lies in" follows the view's mounts (D30).** The sentence above is what
+`aafb9823a` implements, and it is the blocker both reviews found. A place on another mount is
+never inside the directory that mount sits beneath, and the kernel's walk passes that
+directory all the same. So one rule on a listed directory granted a denied program in a mount
+beneath it (E18, E20, E21), and a listed mount beneath a denied directory got a rule (E19).
+With D30 the three steps read:
+
+1. `A`'s place lies in a denied place, or `A` is a file with the device and inode of a denied
+   file: no rule. The denied places are the place of each deny entry and the root of every
+   mount beneath a denied directory.
+2. `A` is a file, or no place `A` reaches overlaps a denied place: one rule on `A`. The places
+   `A` reaches are its own and the root of every mount beneath it.
+3. Otherwise: no rule on `A`, and the same three steps for each entry of `A`, into the mounts
+   beneath it. This step is unchanged; it handled a mount point among the entries correctly
+   already.
+
+§ 6, *Through the view's mounts*, defines the terms and says when the helper stops with a
+cause in place of an answer.
+
 What follows, each observed:
 
 - The denied file stays readable and is not executable (N1). A symbolic link to it is denied
@@ -2244,6 +2631,24 @@ What follows, each observed:
 - A file created during the run in an expanded directory is not executable (N2), and so is a
   deny entry created during the run (N6). The expansion fails closed. A client that needs new
   programs to be executable in a directory does not put a deny entry inside it.
+  - **Ninth revision: N6 holds for a new file only, and the sentence above said more.** The
+    adversary measured it in `adversary4_a_deny_entry_the_run_creates_later_is_denied`
+    (`crates/substrate-host/tests/adversary4_exec_denied.rs`). The deny entry does not exist
+    at the start, and its directory is listed and can be written by the run. A file the run
+    copies to the entry's name is refused: `copied 126`. A hard link to a listed program of
+    the same directory under that name runs, and so does that program renamed to it:
+    `linked 0`, `renamed 0`.
+  - **Why.** The expansion writes its rules on files, not on names. A link and a rename give
+    a file a second name or another name and leave it the same file with its rule. An absent
+    deny entry is a name, and the name is held only against a file that did not exist when
+    the rules were written.
+  - **What runs is bounded.** Only a program the run could already start under its own name
+    runs under the denied one. No program outside the list, and no program denied at the
+    start, runs this way: the first has no rule, and the second is refused by step 1
+    wherever its file is.
+  - **It is a stated limit** (§ 8.5), and the adversary's case is a `limit_` case (§ 16). A
+    client that denies a name in a directory the run can write gets a rule about new files
+    there, not about that name.
 - The run cannot link the denied file into another listed directory (`EXDEV`, N3).
 - A directory can be denied (N5).
 - **A program rebuilt in an expanded directory loses the execute right.** A file overwritten in
@@ -2251,7 +2656,25 @@ What follows, each observed:
   without one (B9). Compilers and linkers replace their output. So a directory a build writes
   its programs into must not hold a deny entry.
 
-The walk is bounded: the helper stops at 65536 rules and exits 125. The option the stories also
+The walk is bounded: the helper stops at 65536 rules and exits 125. **That stop is the
+helper's, after dispatch. It is not a refusal before dispatch** (ninth revision, measured as
+designed: E22, and the adversary's case at the exact count). The driver does not count the
+rules a start will need: it would have to walk the directories the helper walks. The run
+ends with status 125 and the line `the lists need more than 65536 rules`, nothing of the run's
+executes, and the adapter records an ended run, not a refused start. § 12 says the same.
+
+**A name that is not UTF-8 in an expanded directory** (ninth revision; the implementor's to
+confirm). The adversary put one in a listed directory that holds a deny entry. At `aafb9823a`
+the start ended with status 125 and the cause `mount-point-mismatch`: the walk builds the
+entry's path as text, and a name that is not text has none. Nothing ran, so it failed closed,
+with a cause that says nothing true about the directory. An earlier run can leave such a name
+in a directory it can write, and every later start with a deny entry there then ends 125.
+The implementor is changing the expansion to take names as bytes: the entry is opened by its
+name beneath the directory's descriptor, compared by place and by device and inode, and gets
+its rule like any other file. Whether a deny entry can name such a file is not a question:
+an entry is text by the lexical rule of § 5.
+
+The option the stories also
 name, a non-executable file bound over the denied path, works (N9) and was not chosen: the denied
 file would read as empty, a path that does not exist cannot be covered beneath a read-only mount
 (N10), and a directory cannot be denied that way.
@@ -2270,10 +2693,13 @@ it, and a second mount of a directory was not considered. Each is a way around a
 succeed. The driver resolves the program and every deny entry through the descriptors it pins the
 mounts with, as § 5 resolves an entry. It refuses the start `exec.sandbox-program-unlisted` (422)
 when the program lies in a denied path, or is the same file, by device and inode, as a denied
-file. "Lies in" is D25's, on the driver's own mount table. `/usr/bin/sh` beside a denied
-`/usr/bin/bash` is that case on the probe host. The helper is the second line: should the driver
-miss it, the program has no rule and nothing runs (B2). The driver does not refuse a denied
-loader. A static program still runs, and the client wrote the entry.
+file. "Lies in" is D25's, on the driver's own mount table. Ninth revision: it is D30's. The
+program is refused when its place lies in a denied place, and the denied places include the
+root of every host mount beneath a denied directory; at `aafb9823a` a program in such a mount
+is not refused (`crates/substrate-host/src/exec_gate.rs:1637-1639`). `/usr/bin/sh` beside a
+denied `/usr/bin/bash` is that case on the probe host. The helper is the second line: should
+the driver miss it, the program has no rule and nothing runs (B2). The driver does not refuse
+a denied loader. A static program still runs, and the client wrote the entry.
 
 **One directory under more than one path.** Three things put one directory, or a part of it, at
 a second path of the view:
@@ -2300,6 +2726,11 @@ the other (B5). What holds a deny entry against that:
   is denied under every name and its neighbour runs.
 - A place may be hidden in the view by a later mount. Then a directory is expanded that did not
   need it, which fails closed.
+- **Ninth revision: a fourth thing puts files beneath a directory, and it is not a second
+  path of one directory.** The host mounts something beneath a base directory or a declared
+  root, and the recursive bind carries it into the view (E20, E22). Its files have a place
+  that is not beneath the directory's, so the comparison of places above does not find them.
+  D30 adds the roots of the mounts beneath a directory to the places it compares.
 
 ### 8.3 `macos`: deny rules after the allows
 
@@ -2335,8 +2766,12 @@ allow-list that admits no directory the run can write.
 | a hard link the run creates in a listed directory | cannot be created (N3) | not known |
 | a hard link that existed before the start elsewhere beneath a listed path | **runs** (N4) | runs: the rule names a path |
 | a copy in a listed directory the run can write | runs (N3) | runs |
+| ninth revision: a deny entry that does not exist at the start, in a listed directory the run can write; the run gives a listed program of that directory the entry's name, by a hard link or a rename | **runs** (the adversary's case, § 8.2). A new file under that name does not | not known |
 
-A deny entry denies a path, and every mount of that path (D23, D25). It does not find every hard
+A deny entry denies a path, and every mount of that path (D23, D25). Ninth revision: and what
+is mounted beneath a denied directory, under every name those files have in the view (D30).
+Before D30 the first sentence was not true of a path in a mount beneath a listed directory
+(E18, E20, E21). It does not find every hard
 link to a file. Decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire
 story publishes the property (§ 19 Q4): the limit is stated, and a deny entry whose file has more
 than one link is not refused.
@@ -2373,6 +2808,42 @@ sealed bytes of D20 and given the arguments of D24, as a start does.
 The deny entry names the file only through the second mount, and that mount shows a part of the
 listed directory. This is the shape the text of a path and the view's ancestors both get wrong
 (K2, K5), so the probe proves D25's place handling and does not assume it.
+
+**Ninth revision: the deny probe also stages a mount beneath its listed directory (D30). A
+proposal.** By the reasoning of the paragraph above, the fact is proved only where the shape
+that D11 got wrong holds, and that shape is a mount beneath a listed directory. The same run
+gains one bind and two lines of its script:
+
+| what the probe adds | the script | proof |
+|---|---|---|
+| a directory `outside/held`, with a copy of `true` as `tool` and as `other`, bound at `/workspace/allowed/held`; the deny entry `allowed/held/tool` | `allowed/held/tool` fails with status 126; `allowed/held/other` succeeds | the row's exit 0 |
+
+- **It needs no namespace of the probe's own.** The question was whether a nested mount needs
+  one that the probe's sandbox may not grant. It does not: the mount is one more bind in the
+  arguments the probe already gives bubblewrap, which builds the view. The deny probe binds
+  `allowed/sub` at `/second` that way today (`crates/substrate-host/src/probe.rs:685`), and the
+  workspace probe binds a writable subtree beneath a read-only `/workspace`
+  (`probe_workspace_scoped_write`). The lane cases that make a mount on the host are a
+  different matter and do need a namespace (§ 16).
+- **What it proves** is step 2 of D11 across a mount, with the helper this host was
+  configured with and the mount table this bubblewrap writes: the helper found the mount from
+  the table's parent IDs and expanded the listed directory. An embedder builds the helper
+  itself, so that is not known before the open.
+- **What it does not prove** is the rest of D30: a listed mount beneath a denied directory,
+  a second mount of a denied file's directory, a mount on another file system, a covered
+  mount. Each is a lane case or a unit case (§ 16). The source is on the workspace's own
+  file system, so the probe's mount is the "bind of the same file system" form of E18.
+- **The driver's own part is not in the probe.** The probe hands the helper its lists
+  directly, as it does today, so the driver's check of a program against the denied places
+  is held by its unit cases and by E20's lane case.
+- **The alternative** is to leave the probe as it is and let the lane cases be the evidence.
+  It is not proposed: a helper built before D30 passes the probe as it is, answers
+  `substrate-exec-gate/1`, and would be served with the fact proved. The protocol line is
+  not raised for D30, because no helper of story 2 was released without it; if one is, the
+  line is raised then.
+
+The lane cases with a mount namespace of their own are the evidence either way, and they
+run only where a user namespace grants a mount (§ 16).
 
 Each half must hold: what the list allows happened, and what it refuses did not, as
 `seatbelt::probe_build` requires (`seatbelt.rs:429-431`). The `ln` step proves the refer rule, so
@@ -2522,6 +2993,30 @@ and is written through `..` or `.` (D25, E5).
   exception, and it is not a loader's path.
 - The sixth limit of § 7 adds no refusal. A link in a listed directory that points outside
   it is `EACCES` inside the run, as every unlisted execution is (D17).
+
+**Ninth revision: D30 adds no code and one cause.**
+
+- `exec.sandbox-place-unserved` (501) is also the answer where the attachment point of a
+  mount cannot be established, or a mount the rule needs is covered, has a deleted root, or
+  lies beneath a denied directory on a type outside the list. The causes are D26's nine and
+  `mount-covered`. It still arises only on a start with a list.
+- `config.exec-gate-unserved` (501) is also the answer at the open, for the mounts beneath
+  `workspace_root` and the declared writable roots. `mount-covered` refuses the open; it
+  does not withhold.
+- `exec.sandbox-program-unlisted` (422) is also the answer for a program in a mount beneath a
+  denied directory.
+- `config.exec-gate-invalid` (422) is also the answer for a helper on a mount beneath a
+  location a run can write.
+- `exec.sandbox-path-unrepresentable` (422) is also the answer for an entry that resolves
+  onto such a mount, and for an entry with a symbolic link in a root that D30 classes
+  `beneath` and D24 alone did not.
+- **The rule bound is not in this table and does not belong in it.** A start whose lists
+  need more than 65536 rules is dispatched, and the helper ends it with status 125 (§ 8.2).
+  It is not refused before dispatch, it has no code, and its audit record is that of a run
+  that ended. The same holds for every other stop of the helper (§ 6, *When the helper
+  fails*).
+- The limit of § 8.5 for a deny entry the run creates by a link or a rename adds no
+  refusal.
 
 No row compares the text of two paths where a place could not be established (D26). The two
 rows that name a place refuse, and where the open withheld the facts (D27) the row of
@@ -2893,7 +3388,70 @@ The helper's own cases for the two shapes come after these.
   The case mounts one inside `unshare --user --map-root-user --mount` and drives the helper, as
   the host bind mount case does. The overlay form of the same lists runs the same way;
 - a symbolic link to the denied program, its hard link in the same directory, a denied directory,
-  a deny entry created during the run: each denied;
+  a deny entry created during the run: each denied. Ninth revision: "a deny entry created
+  during the run" means a new file under the entry's name. The other two ways to create it
+  are the `limit_` case below;
+- **Ninth revision, D30. The reviews' cases, permanent, each run once** (§ 3.13). Each makes
+  its mount in a user and mount namespace of its own and starts the shipped helper, or the
+  driver, there:
+  - E18, `security4_a_program_denied_in_a_mount_beneath_a_listed_directory_is_not_executed`:
+    `tree` listed, `tree/held/tool` denied, `tree/held` a bind of another directory of the
+    same file system, and again a tmpfs. Each prints `denied:126`, `beside:0`, `listed:0`.
+    The control, without the deny entry, runs all three;
+  - E19, `security4_a_listed_mount_beneath_a_denied_directory_is_not_executed`: `tree` denied
+    and the mount at `tree/held` listed, for both mounts: `held:126`. The control lists the
+    mount without the deny entry, and the program runs;
+  - E20, `security4_a_program_denied_in_a_host_mount_beneath_a_listed_directory_is_not_executed`,
+    through the driver: a host mount at `/usr/local/src`, `/usr/local` listed and
+    `/usr/local/src/tool` denied. The run prints `denied:126`, `beside:0`. A refusal before
+    dispatch is not a passing answer here: the mount is of a listed type and D30 serves it;
+  - E21, the adversary's four in `adversary4_namespace_gate.rs`, and their control:
+    `adversary4_a_denied_program_runs_through_a_second_mount_nested_in_a_listed_directory`
+    (the denied file ends with status 126 under its own name and through the second mount),
+    `adversary4_a_deny_entry_beneath_a_mount_nested_in_a_listed_directory_is_enforced`,
+    `adversary4_a_deny_entry_on_another_file_system_mounted_in_a_listed_directory_is_enforced`,
+    `adversary4_a_listed_mount_inside_a_denied_directory_is_denied`, and
+    `adversary4_control_the_same_lists_without_a_nested_mount_hold`;
+  - the same for the program: a profile whose program lies in a host mount beneath a denied
+    directory is refused `exec.sandbox-program-unlisted` before dispatch, through the driver;
+  - E22's three stay as they are: the walk's bound, the deny entry on a file system outside
+    the list, and the trace of a start with a deny-list.
+- **Ninth revision, D30 for the locations a run can write.** Story 1's four checks, each
+  through the driver in a namespace with a mount beneath the lane's workspace root:
+  - a read-only root whose host directory is on that mount holds `link`, a symbolic link to
+    `/usr/bin`, and the profile lists it: the start is refused
+    `exec.sandbox-path-unrepresentable`, as K10's case is for a root in the workspace root
+    itself;
+  - `exec_gate` naming a file on that mount: the open is `config.exec-gate-invalid`;
+  - an entry in a root outside every writable location that is a link onto that mount: the
+    start is refused `exec.sandbox-path-unrepresentable`, and the helper given the same
+    arguments without the driver's check exits 125 with D24's line;
+  - the control for each: the same without the mount is refused the same way, and a mount
+    beside the workspace root, not beneath it, changes nothing.
+- **Where these cases run.** A case that makes a mount needs a user namespace that grants
+  one. The probe host grants it. A hosted runner may not, and there each case prints that it
+  is absent and why, and is not passed. So on such a runner they are workstation evidence,
+  recorded with the story, and the lane's own evidence there is the probe of § 9 and the
+  unit cases on tables. The script's count of executed cases says which it was.
+- **Ninth revision, the limit of § 8.2 and § 8.5.**
+  `limit_a_deny_entry_the_run_creates_by_a_link_or_a_rename_runs`, which is the adversary's
+  `adversary4_a_deny_entry_the_run_creates_later_is_denied` with its expectation turned: the
+  deny entry is absent at the start, in a listed directory the run can write. The run prints
+  `listed 0`, `copied 126`, `linked 0`, `renamed 0`. A second half of the same case holds
+  the bound of the limit: a program outside the list cannot be given the entry's name, because
+  a link or a rename from an unlisted directory into a listed one fails (`EXDEV`, R4), and a
+  copy of it is a new file and ends with status 126;
+- **Ninth revision, a name that is not UTF-8 in an expanded directory** (the implementor's to
+  confirm): `adversary4_a_name_that_is_not_utf8_in_an_expanded_directory_keeps_the_deny_entry`.
+  At `aafb9823a` it passes on a start that ends 125 with `mount-point-mismatch`. With the
+  expansion taking names as bytes it passes on the run only: the file with that name runs,
+  the denied program ends with status 126, and its neighbour runs;
+- **Ninth revision, the rule bound**: the cases assert an ended run with status 125 and the
+  helper's line, and that the start was dispatched. None asserts a refusal;
+- **Ninth revision, the adversary's mutants.** Relayed by the coordinator: its mutant run
+  found seven guards of the host crate and seven of the helper that no case held, and each
+  gets one. This revision could not name them from the logs, because one case fails in
+  every run of the host suite there;
 - `limit_a_hard_link_that_existed_in_another_listed_directory_runs`,
   `limit_a_copy_in_a_listed_writable_directory_runs`,
   `limit_the_loader_runs_a_denied_program`, `limit_sh_runs_a_denied_script`,
@@ -3009,6 +3567,55 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
     root, and the row of `hold/sub` is never chosen;
   - no fallback: for each cause above, the comparison "lies in" returns the cause and never a
     boolean, so a caller cannot read a failure as "outside".
+- **D30, the attachment function, each on a mount table written in the test.** Ninth
+  revision. The function takes the table's text and places, as the place function does, so
+  no test needs a mount, a namespace or a privilege, and each covers the helper and the
+  driver:
+  - a chain of three mounts: `/a`, a second file system at `/a/b` and a third at `/a/b/c`. The
+    attachment point of each is a place on the one above; the third is mounted beneath `/a`
+    and beneath `/a/b`, and not beneath `/a/x`; the places `/a` reaches are its own and the
+    two roots;
+  - a bind of a subdirectory: `/t` and its `bin` bound at `/t/one/deep` (E21 (a)). The places
+    `/t/one` reaches hold the place of `/t/bin`, so a denied `/t/bin/tool` overlaps them, and
+    `/t/two`, which holds no mount, reaches its own place only;
+  - a mount beneath a denied directory: its root is a denied place, a path in it lies in the
+    denied directory, and a path in a second mount of the same file system elsewhere lies in
+    it too;
+  - a hidden mount: the rows of S2. The mount at `hold/sub` is beneath `hold` by the table,
+    and the kernel's answer for its mount point, given to the function as the reported ID, is
+    the later mount's: `mount-covered`. With the reported ID equal to the row's it is taken;
+  - stacked mounts: two rows on one mount point, the upper one's parent the lower (S1). The
+    lower is `mount-covered` when the rule needs it, and is not asked when it does not;
+  - a missing parent row: a row that is not the root names a parent ID no row has:
+    `mount-row-missing`. Two rows without a parent row: the same. The one root, with a parent
+    ID that has no row and with a parent ID that is its own, is no error;
+  - a repeated parent row: `mount-row-repeated`;
+  - a mount point that is not beneath its parent's: `mount-point-mismatch`; a mount point
+    with an escaped space is taken relative to its parent's after both are unescaped;
+  - a deleted root of a mount the rule needs: `mount-root-deleted`. The same row beneath a
+    directory the rule does not look at is not asked;
+  - a type outside the list: beneath a denied directory, `file-system-unlisted`; beneath a
+    listed directory and beneath a writable location, not compared and no error. The view's
+    own shape is one of the tables: `/dev` on tmpfs with `/dev/null` on `devtmpfs` beneath it;
+  - no fallback: each cause is returned in place of "lies in" and of "overlaps", never as
+    `false`.
+- **D30, the six checks, each on a table given as text**, in the form of the D24 and D26 cases
+  above:
+  - the helper's three steps: a listed directory with a denied path in a mount beneath it is
+    expanded, a listed mount beneath a denied directory gets no rule, and a listed directory
+    with no mount beneath it and no denied place in it gets one rule;
+  - the driver's check of the program: a program in a mount beneath a denied directory is
+    `exec.sandbox-program-unlisted`;
+  - `class_of`: a source on a mount beneath a writable location is `beneath`; a source with a
+    writable location on a mount beneath it is `beneath`; a source beside both is `follow`;
+  - the helper's file on a mount beneath `workspace_root` is `config.exec-gate-invalid`;
+  - a followed entry that resolves onto a mount beneath a writable location is refused, in
+    the driver and in the helper;
+  - an allow-list alone: with no deny entry the helper writes one rule per entry for the
+    same tables, and asks no attachment for the deny-list.
+- `probe.rs`, D30: the deny probe's arguments hold the bind beneath the listed directory and
+  the deny entry in it (§ 9). A helper that compares places alone leaves `exec_denied_paths`
+  absent; how the test gets such a helper is the implementor's.
 - `lib.rs` and `process.rs`, D26: a start whose declared root has a row of type `xfs` is
   `exec.sandbox-place-unserved`, status 501, address `read_only_roots`, on a table given as
   text; the same open check with a table in which the workspace root's row has a root ending
@@ -3112,7 +3719,7 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 | # | decision |
 |---|---|
 | D1 | `linux`: a non-empty `exec_subpaths` holds the run to its program and the list; an empty one runs as today. `macos` is unchanged. The difference is stated, not removed. Decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire story publishes the property (Q2) |
-| D2 | an entry names a directory or one file |
+| D2 | an entry names a directory or one file. Ninth revision: a listed directory admits what is mounted beneath it in the view; that is the allow-list's meaning and is stated (D30, rule 5) |
 | D3 | on `linux` entries are view paths: relative beneath `/workspace`, absolute in the base system directories and declared mounts; they must exist; no symbolic link beneath a writable location; the program is absolute. Third revision: which mounts count as writable is D24's, a link elsewhere must not resolve into one, and a listed directory does not reach through a second mount of a part of it (K7). Sixth revision: a path the helper is given that is longer than 4095 bytes in the view is `exec.sandbox-path-unrepresentable` (422) before dispatch (E4). Eighth revision: a listed directory admits the files beneath it, not what a symbolic link in it points to; stated as a limit (§ 7, E17) |
 | D4 | Landlock, applied inside the sandbox by a helper that is the last program before the run's. Sixth revision: "the run cannot remove it" holds only with D28. Seventh revision: only with D28 and D29 |
 | D5 | the helper is `substrate-exec-gate`, a binary of this repository, named by `HostConfig.exec_gate`, absent from a start without a list. Decided by session `sdc`, 2026-11-21, `approval-record:sdc-decides-plan-and-design-2026-11-21`. Changed in the second revision: how it is bound is D20, its arguments are D24. Sixth revision: the programs before it start with none of the run's variables (D28). Seventh revision: it is statically linked, and no program runs before it on a start with a list (D29) |
@@ -3121,25 +3728,26 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 | D8 | the fact needs Landlock ABI 2; the probe decides, never a version number |
 | D9 | the list restricts `execve` targets, not the code an allowed program runs: interpreters, the loader, a memfd and mapped code are stated limits. No `memfd_create` refusal: decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire story publishes the property (Q3). Sixth revision: a fifth stated limit, a preload object inside the domain. Seventh revision: the limit is the loader's, for `/etc/ld.so.preload` as for the environment, and it is observed (E8). Eighth revision: a sixth stated limit, of the other kind and measured: a symbolic link in a listed directory that points outside it is not admitted (E17) |
 | D10 | `exec_denied_paths`, fact `exec_denied_paths` after `exec_subpaths`, at most 64 entries, a denied path wins. Changed: a denied program is refused by what it resolves to, not only as written (D23); the bound limits the profile, not the start's cost |
-| D11 | `linux` denies by expanding a listed directory into per-entry rules; the expansion fails closed, and a program replaced in an expanded directory loses the right. Another hard link elsewhere beneath a listed path still runs: decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire story publishes the property (Q4). Third revision: the three steps decide "lies in" by place (D25), and a listed path inside a denied one gets no rule (K8) |
+| D11 | `linux` denies by expanding a listed directory into per-entry rules; the expansion fails closed, and a program replaced in an expanded directory loses the right. Another hard link elsewhere beneath a listed path still runs: decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire story publishes the property (Q4). Third revision: the three steps decide "lies in" by place (D25), and a listed path inside a denied one gets no rule (K8). Ninth revision: the steps follow the view's mounts (D30): the denied places include the root of every mount beneath a denied directory, and a listed directory is expanded when a place it reaches overlaps one. A deny entry the run creates by a link or a rename of a listed program of the same directory runs: a stated limit. The stop at 65536 rules is the helper's exit 125 after dispatch, not a refusal |
 | D12 | `macos` denies with `process-exec` and `file-map-executable` deny rules after every allow |
 | D13 | a deny-list without an allow-list is `confinement.exec-denied-paths-without-subpaths`, 422, on every adapter, before any fact is read |
 | D14 | the probe's result is a host-private `ExecListProof`, a second argument of `linux::proof`. Fifth revision: it also holds the `withheld` entries of D27 |
-| D15 | each fact is proved by one throwaway run in which the allowed half happened and the refused half did not. Changed: the deny probe includes a second mount. Third revision: the deny entry names the file only through that mount, which shows a part of the listed directory. Sixth revision: `exec_subpaths` is proved only where a variable given as an operand reached the program and a helper started with that variable in its own environment executed nothing (D28); a proposal, with no compiled object at open |
+| D15 | each fact is proved by one throwaway run in which the allowed half happened and the refused half did not. Changed: the deny probe includes a second mount. Third revision: the deny entry names the file only through that mount, which shows a part of the listed directory. Sixth revision: `exec_subpaths` is proved only where a variable given as an operand reached the program and a helper started with that variable in its own environment executed nothing (D28); a proposal, with no compiled object at open. Ninth revision, a proposal: the deny probe also binds a directory beneath its listed one and denies a program in it (D30); bubblewrap makes the mount, so the probe needs no namespace of its own |
 | D16 | `confinement.exec-subpaths` stays unpublished, and the probe test names that exception |
 | D17 | a denied execution is `EACCES` inside the run |
 | D18 | no adapter observes or records a denied execution; § 11 lists what could, and designs none of it |
 | D19 | a profile with a list never runs without it: no `exec_gate` is `confinement.fact-unserved` (501) at admission; a set `exec_gate` that cannot be used is `config.exec-gate-unserved` (501) at open. Decided with D5. Changed: a file changed after the open has no effect (D20), so `exec.capability-stale` is gone from this row. Fifth revision: a file system outside D26's list is not such an open error; the adapter opens with the facts withheld and the cause carried (D27). Sixth revision: the first clause is about the open and admission; for an admitted start it holds only with D28. Seventh revision: only with D28 and D29; a helper that names a loader is `config.exec-gate-invalid` at open |
 | D20 | the driver reads the helper once at open through one descriptor, seals and hashes the bytes, and binds those bytes into every view with `--perms 0555 --ro-bind-data`; no name is resolved at a start. Third revision: `F_SEAL_SEAL` is added; each start opens the sealed memfd anew (K3); the two options are cited in the 0.11.2 source. Seventh revision: the bytes read are tested for `PT_INTERP` before they are sealed, so what is tested is what runs (D29) |
-| D21 | an `exec_gate` that is not absolute, whose place lies in the workspace root or a declared writable root, or that has more than one link, is `config.exec-gate-invalid` (422) at open. Third revision: both sides are resolved and compared by place (D25), and the link count is new (K4). Fifth revision: where the facts are withheld (D27) the trust check is not reached, because the helper is never used. Seventh revision: a fourth check with the same code, a helper whose bytes are not an ELF program for the driver's machine without `PT_INTERP` (D29). Eighth revision: nor an image the kernel would not start (its type, its program header size, its header count) |
+| D21 | an `exec_gate` that is not absolute, whose place lies in the workspace root or a declared writable root, or that has more than one link, is `config.exec-gate-invalid` (422) at open. Third revision: both sides are resolved and compared by place (D25), and the link count is new (K4). Fifth revision: where the facts are withheld (D27) the trust check is not reached, because the helper is never used. Seventh revision: a fourth check with the same code, a helper whose bytes are not an ELF program for the driver's machine without `PT_INTERP` (D29). Eighth revision: nor an image the kernel would not start (its type, its program header size, its header count). Ninth revision: "lies in the workspace root or a declared writable root" follows the mounts beneath them (D30); the merged check compares places alone, a finding read from the code |
 | D22 | the lists are a required argument of a type without `Default`, not a field of `AdapterStart`; the three wire sites write `ExecLists::wire()`. Third revision: `wire` is private to the module `crate::process`, so the adapter's modules cannot call it |
-| D23 | a denied file gets no execute rule from any source: an entry, the program, the loader, or a second mount of its directory; a denied program is `exec.sandbox-program-unlisted` (422) before dispatch. Third revision: the second mount is found by place (D25), and `--alias` is gone |
-| D24 | the helper's arguments: each path is a class (`follow` or `beneath`), a mount root and a relative path. Third revision: the class comes from the mount's host source, not its mode in this run; `--writable` names the mounts the run can write; a `follow` path that resolves into one is `exec.sandbox-path-unrepresentable` (422) before dispatch and exit 125 in the helper. Sixth revision: `--env <name> <value>` carries the program's environment (D28); the form is a proposal |
-| D25 | new in the third revision. Whether one path lies in another is decided by place: the device and root of its mount in `/proc/self/mountinfo`, joined with the rest of the path. The helper reads the view's table, the driver its own. The view-ancestor rule the review proposed is not taken (K2). Accepted by the stakeholder on 2026-11-21 with two conditions (D26, § 3.9). Fourth revision: the mount is the row with the mount ID the kernel reports for the opened path (`statx`, `STATX_MNT_ID`), not the longest matching mount point (S2). Sixth revision: a path that does not exist has no place where a name after its nearest existing ancestor is `..` or `.`; the cause is `path-unopenable` (E5) |
-| D26 | new in the fourth revision, the stakeholder's first condition. Where a place cannot be established, nothing compares path text: nine named causes, one of them a file-system type outside the closed list `ext4`, `overlay`, `tmpfs`. A start is refused `exec.sandbox-place-unserved` (501, new) before dispatch; the open is refused `config.exec-gate-unserved` (501, existing) with the cause; the helper exits 125 with one line. `btrfs`, `xfs` and every network file system are outside the list and refused by name. Accepted by the stakeholder on 2026-11-21, the mount-ID change included. Fifth revision: at the open, `file-system-unlisted` and `mount-id-unreported` withhold the facts and no longer refuse the open (D27); the other seven causes refuse it as before. Sixth revision: a table that was read and is not UTF-8 is `mount-table-unparsable`, and `path-unopenable` gains the case of D25 |
+| D23 | a denied file gets no execute rule from any source: an entry, the program, the loader, or a second mount of its directory; a denied program is `exec.sandbox-program-unlisted` (422) before dispatch. Third revision: the second mount is found by place (D25), and `--alias` is gone. Ninth revision: a program in a mount beneath a denied directory is refused too, and what a denied directory denies includes what is mounted beneath it, under every name (D30) |
+| D24 | the helper's arguments: each path is a class (`follow` or `beneath`), a mount root and a relative path. Third revision: the class comes from the mount's host source, not its mode in this run; `--writable` names the mounts the run can write; a `follow` path that resolves into one is `exec.sandbox-path-unrepresentable` (422) before dispatch and exit 125 in the helper. Sixth revision: `--env <name> <value>` carries the program's environment (D28); the form is a proposal. Ninth revision: the class of a mount, and the refusal of a followed path into a writable mount, follow the mounts beneath a writable location (D30); the merged checks compare places alone, a finding read from the code |
+| D25 | new in the third revision. Whether one path lies in another is decided by place: the device and root of its mount in `/proc/self/mountinfo`, joined with the rest of the path. The helper reads the view's table, the driver its own. The view-ancestor rule the review proposed is not taken (K2). Accepted by the stakeholder on 2026-11-21 with two conditions (D26, § 3.9). Fourth revision: the mount is the row with the mount ID the kernel reports for the opened path (`statx`, `STATX_MNT_ID`), not the longest matching mount point (S2). Sixth revision: a path that does not exist has no place where a name after its nearest existing ancestor is `..` or `.`; the cause is `path-unopenable` (E5). Ninth revision: this is "lies in" by place; the checks that use it also ask about the mounts beneath a directory (D30) |
+| D26 | new in the fourth revision, the stakeholder's first condition. Where a place cannot be established, nothing compares path text: nine named causes, one of them a file-system type outside the closed list `ext4`, `overlay`, `tmpfs`. A start is refused `exec.sandbox-place-unserved` (501, new) before dispatch; the open is refused `config.exec-gate-unserved` (501, existing) with the cause; the helper exits 125 with one line. `btrfs`, `xfs` and every network file system are outside the list and refused by name. Accepted by the stakeholder on 2026-11-21, the mount-ID change included. Fifth revision: at the open, `file-system-unlisted` and `mount-id-unreported` withhold the facts and no longer refuse the open (D27); the other seven causes refuse it as before. Sixth revision: a table that was read and is not UTF-8 is `mount-table-unparsable`, and `path-unopenable` gains the case of D25. Ninth revision: a tenth cause, `mount-covered`, for a mount the rule needs that the kernel does not report at its own mount point; `mount-row-missing`, `mount-row-repeated`, `mount-point-mismatch` and `mount-root-deleted` are also raised for a row whose attachment cannot be established (D30). It refuses the open, so eight causes refuse there and two withhold |
 | D27 | new in the fifth revision, decided by the stakeholder (agent:sdc) on 2026-11-21: "B now, C before the wire story". With a helper configured and a path of the open on a file-system type outside the list, the adapter opens, both facts stay absent, and a profile with a list is refused `confinement.fact-unserved` (501). The cause, path, address and type are in `ExecListProof`, in `AdapterFacts.withheld`, in the `FactUnserved` error and in one `warn` line; the audit record and the wire do not change. Which paths and causes withhold is a reading: every path the open places (the coordinator's), and `mount-id-unreported` beside `file-system-unlisted` (this document's). C: `xfs` is probed in the quota fixture's container before the wire story is planned and enters the list only if every case holds; `btrfs` stays refused by name. Sixth revision: its sentence "nothing ever runs with a list that is not enforced" holds for an admitted start only with D28 |
 | D28 | new in the sixth revision, decided by the coordinator of the request on 2026-11-21 after the adversary pass and the security review of story 1's implementation (E1 to E3); not yet read by the stakeholder. On a start with a list, no variable of the run reaches a process that runs before `landlock_restrict_self` returned: bubblewrap gets no `--setenv` of the run's variables, no stage before the helper starts with one, the driver hands the variables to the helper as operands, and the helper gives them only to the `execve` of the program. No variable is refused by name; a start without a list keeps its argv. This document's additions, each a proposal: no `--setenv` at all on such a start; the helper refuses to run when a variable other than bubblewrap's `PWD` reached its own process, where the decision said it clears them; the operand form `--env <name> <value>`. What remains is a stated limit (§ 7): inside the domain a preload object loads into every allowed dynamic program and can run code, and `execve` of an unlisted path still fails. Seventh revision: implemented at `767fbea57`; the coordinator settled the three additions as written (no `--setenv`, the helper refuses, `--env`), and the cases of E1 to E3 pass there |
 | D29 | new in the seventh revision, decided by the coordinator of the request on 2026-11-21 after the second adversary pass and the second security look (E6, E7). The stakeholder (agent:sdc): "No objection to D29: static helper, the driver refuses a helper that needs a dynamic loader, and a listed start with a controlling terminal is refused before dispatch until the helper takes the terminal itself." The helper is statically linked: at the open the driver tests the bytes it read through the one descriptor, the bytes it then seals and binds, and refuses `config.exec-gate-invalid` (422) unless they are an ELF program with no `PT_INTERP`. The rule is "no `PT_INTERP`", not "no `PT_DYNAMIC`", so a static position-independent helper passes (the stakeholder's first point). No list of loader files is kept and no declared mount is refused for its path. On a start with a list the helper is the first program bubblewrap starts in the view; a start with a list and a controlling terminal is refused before dispatch, with `session.pty-unserved` (501) proposed and the implementor's to confirm. The lane builds the helper static and refuses by name where it cannot. This document's additions, each a reading: bytes that are not an ELF image for the driver's machine, or whose headers cannot be read, are refused too. With D28: before `landlock_restrict_self` returns, the processes in the view are bubblewrap's own and the static helper, and nothing the run or the profile names is loaded as code. The limit inside the domain is unchanged (§ 7). Eighth revision: implemented at `1d961b30f`; the coordinator settled the fuller byte test and `session.pty-unserved` as proposed, and a third pass of both reviews found no blocker. The sentence is observed on one traced start (E13: bubblewrap 0.13.0, a static-pie musl helper); of the nine things it rests on, four are struck, two are settled for what was traced, and three are not run: a host with a registered `binfmt_misc` handler, a trace through `systemd`, and a host whose `/bin/sh` is dash. Amendment 1 to rule 1: the byte test also refuses an image the kernel would not start (only `ET_EXEC` and `ET_DYN`, the class's program header size, a header count the kernel accepts), because bubblewrap's `execvp` runs `/bin/sh` on a file the kernel refuses (E15). Amendment 2, rule 7: on a start with a list a declared mount at the helper's own path is refused before dispatch, with the driver's existing refusal for a mount that collides with one it owns; its code is the implementor's to report (E16) |
+| D30 | new in the ninth revision, decided by the coordinator of the request on 2026-11-21 after the security review and the adversary pass of story 2's implementation at `aafb9823a` (E18 to E21). The stakeholder (agent:sdc): "D30 accepted: \"lies in\" follows the view's mounts, attachment points read from the mount table as places, one function for the helper and the driver's pre-dispatch checks, and a start is refused exec.sandbox-place-unserved where an attachment point cannot be established. Not taking the blanket refusal of every directory that holds a mount is right." The attachment point of a mount is a place: its parent row's device, and the parent row's root joined with its mount point relative to the parent's. A mount is beneath a directory when its attachment point lies in the directory's place or its parent mount is beneath it. A directory reaches its own place and the root of every mount beneath it, and `X` lies in `Y` when the place of `X` lies in a place `Y` reaches. This document's form of the rule: it is written through what a directory reaches, not through the mount a path is on, because a second mount of a denied file's directory beneath a listed directory is not the mount the entry is on (E21 (a)). It serves six checks with one function: D11's two steps, the driver's check of the program, and story 1's four checks of a location a run can write, which compare places alone in merged code (read, not run). It fails closed with D26's causes and one new one, `mount-covered`. A mount of a type outside the list is not compared and refuses only beneath a denied directory. An allow-list without a deny-list is unchanged: a listed directory admits what is mounted beneath it |
 
 ## 18. Inferred, not observed
 
@@ -3350,6 +3958,94 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
   not checked.
 - § 16, the dynamically linked helper case: that a copy of the host's `/usr/bin/env` passes
   the three checks of D21 and reaches the test of the bytes was not run.
+- **The ninth revision against the implementation of D30 for the four sites of story 1**, made
+  after this revision was written (branch `fix/lies-in-follows-the-views-mounts`; logs
+  `r7-red-main.log`, `r7-mutants.log`, `r7-final-*.log` of the implementation's run). Where an
+  item below disagrees with this one, this one is the measurement.
+  - The finding against merged code is measured, on `main` at `df7b970e2`, with tmpfs mounts in
+    a private user and mount namespace and the real `linux` adapter: a read-only root declared
+    on a mount beneath the workspace root was classed `follow` and a planted link was followed
+    (the program exited 0; the control ends 126); the same for a root that holds a mount on
+    which a declared writable root lies; a helper file on a mount beneath the workspace root was
+    accepted at the open; in the helper, a link into a tmpfs beneath a writable mount was
+    admitted. With D30 at the four sites each is refused.
+  - The driver's followed-entry check is held by a unit case and its mutant only: with D30 at
+    the class decision no staged start reaches it with a place the class has not refused.
+  - The function is `MountTree::reaches` in `crates/substrate-exec-gate/src/place.rs`, with
+    `lies_in_any` and `overlap`; the helper and the driver compile the same file. Eight mutants
+    of it and of its four uses were each red against a case.
+  - Where a mount point cannot be asked, the cause is `mount-covered` when the path is gone or
+    shows another mount, `path-unopenable` when it cannot be opened for another reason, and
+    `mount-id-unreported` when the kernel reports no ID; the last withholds at the open as it
+    does for a path. D30 named only the first.
+  - A mount point is opened without following a last symbolic link. A parent with a deleted
+    root gives no attachment point, and its child is found only through it. Rows that name each
+    other as parents are `mount-row-missing`.
+  - For a cause of the whole table the address is `config.exec_gate` at the open and
+    `exec_subpaths` at a start, because no location is at fault.
+  - The deny-list's part of D30 (the expansion, K8, the denied-program check, the probe's extra
+    bind) is not in that branch; it is `story:executable-deny-list`'s.
+  - Not observed: the namespace cases on a hosted runner. The lane's branch for a host that
+    grants no mount was simulated inside `bwrap --unshare-user --disable-userns`, where both
+    roots print `ABSENT`.
+- The ninth revision as a whole: nothing was run or built for it, except one read of the
+  probe host's own `/proc/self/mountinfo`: 44 rows, one without a parent row, and one mount
+  point with two rows. E18 to E22 are the reviews' cases and logs, read. The code was read at
+  `aafb9823a`. D30 is not implemented.
+- D30, the rule's form. That "the places a directory reaches" is the right generalisation of
+  the coordinator's "the mount it is on" is argued from E21 (a) and from the kernel's walk.
+  The stakeholder accepted the decision's words, not this form.
+- D30, the kernel's walk: that the right is granted along the walk from the file through
+  mount points is from `landlock(7)` and from E18 to E21, which show its effect. The kernel's
+  source was not read for it.
+- D30, the attachment point: that the second field of a row is the parent mount's ID, and
+  that the root of a mount namespace names itself or an ID with no row, is from `proc(5)` and
+  from the probe host's table. That a mount stacked on another names the lower one as its
+  parent is read from that table: of the two rows at `/proc/sys/fs/binfmt_misc`, the `autofs`
+  row's parent is the row of `/proc`, and the upper row's parent is the `autofs` row. That
+  bubblewrap's view is a tree in this sense, with one root, was not read from a view's table
+  in this revision.
+- D30, the visibility test: that the mount ID the kernel reports for a row's mount point is
+  another row's exactly when the row is hidden or under a stack is an argument from S1 and
+  S2. No covered mount was put beneath an entry.
+- D30, a mount of a type outside the list: that nothing denied and nothing compared with a
+  writable place can lie on one is an argument from D26's refusals. That bubblewrap binds the
+  device nodes of `/dev` as mounts of type `devtmpfs` is from U2 and from bubblewrap's
+  behaviour as remembered. E22's control shows a start with a vfat mount beneath a declared
+  root running; it does not show a program on that mount being executed.
+- D30, the driver's table: that a host mount beneath a host directory is beneath that
+  directory's mount in the view rests on bubblewrap binding recursively. E20 and E22 show it
+  for `--ro-bind` and `--ro-bind-fd`. For the workspace and the writable roots, bound with
+  `--bind-fd`, it is from bubblewrap's source as remembered and was not run.
+- **The finding against story 1's merged checks is read, not run.** The four sites compare
+  places alone (`exec_gate.rs:553-565`, `:796-808`, `:1556-1560`; `landlock.rs:232-239`). That
+  a mount beneath a writable location is writable for a run, and that a link planted there is
+  then followed and admits what it points to, follows from K10 and from the recursive bind.
+  No such mount was made and no start was run against it.
+- D30, the probe: that bubblewrap binds a directory beneath the already bound workspace of
+  the probe is from `probe_workspace_scoped_write`, which binds beneath `/workspace` today.
+  The deny probe with the extra bind was not run. The cost of D30 per start was not
+  measured.
+- D30, where the lane cases run: that a hosted runner grants no mount in a user namespace is
+  the coordinator's relay. The fourth security look's `ns-probe.log` shows the probe host
+  granting it.
+- § 8.2, the deny entry the run creates: measured by the adversary for a hard link and a
+  rename within the listed directory. That a program outside the list cannot be given the
+  name is from R4, not from that case.
+- § 8.2, a name that is not UTF-8: the cause `mount-point-mismatch` is the coordinator's
+  relay of the adversary's log; this revision read the start of that log's line. That the
+  expansion will take names as bytes is the implementor's change in progress.
+- § 16, the adversary's mutants: seven guards in each crate without a case is the
+  coordinator's relay. This revision did not establish which.
+- `macos`, from the security review of story 2, read and not run
+  (`crates/substrate-host/src/seatbelt.rs:332-339`): the deny rules are rendered as
+  `(deny process-exec (subpath "<path>"))` and `(deny file-map-executable (subpath "<path>"))`
+  with the path as the profile wrote it and the driver resolved it. Two things stay
+  unverified on a case-insensitive volume: whether Seatbelt matches a deny entry against a
+  program reached under another letter case, and whether a deny entry for a file that does
+  not exist yet matches the file once it is created under another case. The `macos-15` lane
+  cases of § 16 hold neither. Until one does, D12 is not known to deny a program whose name
+  the run can spell differently.
 
 ## 19. The three defaults the stakeholder decided
 
@@ -3494,3 +4190,28 @@ refused by link count.
 - The trace of E13 as a release condition. It is a lane case that is absent without
   `strace`; whether a release requires it to have run, as it requires the lane records, is
   the operator's.
+- Story 1's merged checks of a location a run can write (D21, D24). D30 says what they must
+  ask and names the four sites. Whether the correction lands with story 2 or as a change of
+  its own to merged code, and whether it needs a release note, is the coordinator's and the
+  operator's.
+- An entry that admits its place under every mount of the view was listed above for the
+  allow-list (K7). D30 does the opposite half for the deny-list only. The allow-list's reach
+  stays the kernel's walk.
+- A covered mount beneath a directory the rule looks at refuses the start (`mount-covered`).
+  Skipping it would serve hosts that stack two mounts of listed types on one mount point
+  beneath a listed directory. No such host is known; if one is, the rule that takes only the
+  mounts the kernel confirms is designed then.
+- A mount of a type outside the list beneath a denied directory refuses the start. Denying
+  a directory that holds an automount point or a network mount is therefore not served.
+  `xfs` enters with D27's C; the others stay refused by name.
+- The options of a mount beneath a writable location. A read-only mount there counts as
+  writable. Reading the options would class fewer roots `beneath`. It is not designed;
+  counting every such mount is the answer that cannot be wrong in the unsafe direction.
+- The rule bound as a refusal before dispatch. The driver would have to walk the directories
+  the helper walks. Not designed; the stop is the helper's (§ 8.2).
+- A deny entry that holds against a name and not only against a new file (§ 8.5). It would
+  need a rule the kernel does not have, or a supervisor of `rename` and `link`.
+- Seatbelt and letter case (§ 18). A case on the `macos-15` lane decides it; none is written.
+- The hosted lane's evidence for D30. The cases that make a mount are absent on a runner
+  that grants none. Whether a release needs them run somewhere it records is the
+  operator's.

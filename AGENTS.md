@@ -406,7 +406,17 @@ open refused. The lane then requires, by each case's own `executed` line and wit
 no `ABSENT` line, the `exec` cases of `ess_confinement_linux` and `ess_confinement_systemd`, the
 adversary and security-review roots `adversary_exec_lists`, `security_exec_gate`,
 `security2_exec_gate` and `security3_exec_gate`, and the helper package's `gate`,
-`adversary_gate`, `security_gate` and `security2_gate`. The trace case of `security3_exec_gate`
+`adversary_gate`, `security_gate` and `security2_gate`. **Two roots make their own mounts**
+(D30, what is mounted beneath a location a run can write lies in it): the host crate's
+`exec_lists_view_mounts` and the helper package's `view_mounts_gate` each mount a file system
+beneath a writable location in a user and mount namespace of their own, with no privilege. The
+lane requires their `executed` lines where `unshare --user --map-root-user --mount` can mount a
+tmpfs, which a workstation grants. Where it cannot (a hosted runner, whose AppArmor gives a
+user namespace no capability) the lane requires each case's own `ABSENT` line with that reason
+and says in one line that they did not run: on `release-lanes.yml` and `gate.yml` those two
+roots are absent, and the evidence for them is a workstation's lane. The function they hold,
+`MountTree::reaches` in `crates/substrate-exec-gate/src/place.rs`, is held on every host by
+unit cases on mount tables written as text. The trace case of `security3_exec_gate`
 runs the driver's own start under `/usr/bin/strace`, which `release-lanes.yml` installs, and is
 absent, so refused by the lane, without it. **An entry admits a file by where the file itself
 lies**: a symbolic link in a listed directory that points outside it is not admitted
