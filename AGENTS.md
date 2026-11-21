@@ -43,7 +43,15 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.26.0` exist; `0.26.0` adds no route and publishes design 30 (ADR 0048): one optional
+   through `0.27.0` exist; `0.27.0` adds no route and moves three bounds (ADR 0013 and ADR 0010,
+   amendments of 2026-11-20, issue #236): one run selects up to `MAX_EGRESS_APERTURES` (8)
+   apertures, listening on `127.0.0.1` to `127.0.0.8`; the `exec.egress-apertures` fact lists up to
+   `MAX_DEPLOYMENT_EGRESS_APERTURES` (12), the deployment bound that moved into the wire crate; and
+   a start declares up to `MAX_READ_ONLY_ROOTS` (8) read-only roots, the fact's `max_roots`. Each is
+   held to its wire constant, and the vectors that probe the run and root bounds to nine entries,
+   by `cargo xtask check-bundle 0.27.0` (`xtask/src/bundle/run_bounds.rs`); the sources of `0.21.0`
+   to `0.26.0` state their four as a literal and are held to it, so no released byte moved;
+   `0.26.0` added no route and published design 30 (ADR 0048): one optional
    fact per confinement family, `confinement.family.<name>` in ADR 0044 decision 1's order
    (`ConfinementFamily`), and one per mechanism-neutral property, `confinement.<name>` in the
    `Fact` order of `spec/confinement/` (`ConfinementProperty`), each `const true` and absent when
@@ -119,8 +127,9 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon and Rust SDK advertise `substrate-wire/0.26.0` with the SHA-256 of that bundle's
-   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); design 30 records the confinement
+   The daemon and Rust SDK advertise `substrate-wire/0.27.0` with the SHA-256 of that bundle's
+   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); the 2026-11-20 amendments of ADR 0013
+   and ADR 0010 record the bounds of `0.27.0`, design 30 records the confinement
    facts and `requires`, design 34 § 11 records the namespace-driver additions, ADR 0036 S12 the process event stream, ADR 0010 the read-only roots, ADR 0038 the writable-root
    additions, design 26 records the working
    directory and aperture-list additions, design 21 records the Git source and
@@ -190,7 +199,7 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   deliberately not committed (`docs/design/09-delegated-context-and-grant-attribution.md` § 6), so
   the vectors are verify-only. They do **not** verify with `delegated_signing_key` in
   `crates/substrate-daemon/tests/runtime_vectors.rs`, whose published seed signs only the
-  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.26.0`. The exception is scoped by rule
+  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.27.0`. The exception is scoped by rule
   **and** by path; a JWT anywhere else, including any other vector, is still a finding. Proven, not
   asserted: the same token in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-*.json`
   is allowed and in `crates/substrate-daemon/src/` is caught. **Widening this allowlist is a
@@ -228,7 +237,7 @@ then `cargo test -p b10x-substrate-host --no-default-features` over `host_featur
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, one bounded
-`cargo xtask check-bundles 0.5.0 ... 0.26.0`,
+`cargo xtask check-bundles 0.5.0 ... 0.27.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 
@@ -260,8 +269,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
-| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.26.0` in one invocation |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-six |
+| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.27.0` in one invocation |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-seven |
 | `namespace-lane check [--bless]` | a lane object that differs from its golden in `xtask/tests/golden/namespace-lane/`, a Role that is not ADR 0047 decision 3's table as the ADR writes it, or a driver-side object that is cluster-scoped or lacks a design 34 § 4 ownership key | no — `.github/workflows/namespace-lane.yml`, and its cases under `cargo test` |
 | `namespace-lane observe [--admin-kubeconfig <file>] [--executor-image <ref>]` | runs design 34 § 10.3's O1 to O4, O6 to O8 and O10 on a kind cluster of its own (`substrate-namespace-lane-<id>`) through `b10x-substrate-kubernetes-client`, never `kubectl`. It then runs design 34's steps 3 to 7 against the shipped daemon with `--driver kubernetes`: it builds that daemon and the vectors' test binary before the cluster exists, and pushes the executor image to the lane's registry unless `--executor-image` names one, which `--admin-kubeconfig` requires. It also refuses a kubeconfig whose server is not `https://127.0.0.1:<port>`, and never reads `KUBECONFIG`; a given one is refused before it is read under `~/.kube` (of `HOME` and of the uid's passwd entry) or as a file `KUBECONFIG` names, then for a cluster or user member kind never writes (`tls-server-name`, `proxy-url`, `exec`, `auth-provider`), a context or cluster not `kind-substrate-namespace-lane-<id>`, and, before any write, no node `substrate-namespace-lane-<id>-control-plane`; prints `Namespace-lane: <sha> <count> <RFC 3339 UTC>` only when every observation ran at a clean, unmoved `HEAD`, every step case passed or was declared absent with its reason, what the run created was removed and no signal arrived; `<count>` is still the observations' | no — a workstation run |
 | `chart-lane static [--helm <path>]` | a rendering of `deploy/helm/substrate` that breaks ADR 0046 (a second Service selecting the pods, a Service certificate name, an unretained ledger claim, a token, a capability, host namespace or host path the profile does not grant, an open NetworkPolicy rule), or a privilege, cgroup, mount, quota, transport or egress posture the chart renders instead of refusing | no — `chart-lane.yml` |
@@ -289,7 +298,7 @@ already ahead of `0.4.0` — `ExecStartInput::read_only_roots` (the `ExecStartIn
 `crates/substrate-wire/src/lib.rs`) has no `0.4.0` schema — and no bound sits *on* a type as a
 derive attribute. The bounds the schemas state are free constants: the wire crate's own
 `pub const MAX_…`/`MIN_…` items (`grep -c '^pub const \(MAX\|MIN\)_' crates/substrate-wire/src/lib.rs`
-= 50), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
+= 56), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
 host-local literals their enforcement sites hold — `PIPE_MAX_FRAME_BYTES`,
 `PIPE_MAX_INPUT_BYTES` and `PIPE_MAX_QUEUED_FRAMES` in `crates/substrate-daemon/src/app.rs`, and
 `PIPE_FRAME_BYTES` and `PIPE_QUEUED_FRAMES` in `crates/substrate-host/src/process.rs`.
@@ -317,7 +326,7 @@ also for the one host root the runner declares, which it cannot prove without co
 124 cases, and its delegated lane 189, whose four writable-root cases bind that declared root and
 check the host side: the write lands, its parent and sibling do not change, a working directory
 beneath the mount runs there, and the declared path swapped for a symlink is
-`exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and five roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 4}`, four roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a fifth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a
+`exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and nine roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 8}` (bundle `0.27.0`), eight roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a ninth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a
 Git source served over HTTPS on loopback by `git upload-pack` (ADR 0038 kind 2): it serves
 `workspace.git` and materializes a Git workspace; the portable lane then refuses that workspace as
 a Git root `exec.writable-roots-git-unserved` (501), and the delegated lane mounts it, has a child
@@ -442,8 +451,8 @@ cases, because they are in a different crate and outside `DELEGATED_CASES`.
 **The gate verifies every released bundle, not just `0.1.0`.** The four
 `run python3 scripts/check-contract-bundle*.py` lines in `scripts/gate.sh` run the
 four frozen Python checkers, and the line after them runs `cargo xtask check-bundles` for `0.5.0`
-through `0.26.0`, so
-a green gate *is* evidence that all twenty-six still hold. Cutting a successor bundle therefore means
+through `0.27.0`, so
+a green gate *is* evidence that all twenty-seven still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 

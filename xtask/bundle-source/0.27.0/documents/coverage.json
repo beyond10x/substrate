@@ -1,0 +1,7 @@
+{
+  "$schema": "schemas/coverage.json",
+  "format": "b10x.substrate-conformance-coverage.v1",
+  "requirements": {
+    "$coverage": "requirements"
+  }
+}

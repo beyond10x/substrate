@@ -274,6 +274,24 @@ fn an_aperture_list_of_two_to_four_distinct_names_is_admitted() {
     assert_eq!(validate_aperture_selection(&selecting(None, &four)), Ok(()));
 }
 
+/// Issue #236 (ADR 0013, amended 2026-11-20): a run selects up to eight apertures, two forge
+/// hosts, the model host, the control-plane dial-in and room for package registries; a ninth is
+/// refused by the lexical rule.
+#[test]
+fn a_run_selects_up_to_eight_apertures_and_a_ninth_is_refused() {
+    let names: Vec<String> = (0..9).map(|n| format!("a{n}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    assert_eq!(
+        validate_aperture_selection(&selecting(None, &names[..8])),
+        Ok(()),
+        "eight apertures are one run's selection"
+    );
+    assert_eq!(
+        validate_aperture_selection(&selecting(None, &names)),
+        Err(WireValidationError::AperturesTooMany)
+    );
+}
+
 #[test]
 fn an_aperture_list_is_refused_by_the_rule_it_breaks() {
     let five: Vec<String> = (0..=MAX_EGRESS_APERTURES)

@@ -448,9 +448,7 @@
           "description": "The most read-only host roots one start may name (ADR 0010).",
           "properties": {
             "max_roots": {
-              "const": {
-                "$wire": "MAX_READ_ONLY_ROOTS"
-              }
+              "const": 4
             }
           },
           "required": [

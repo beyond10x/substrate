@@ -358,9 +358,10 @@ fn base_input(workspace: &str) -> Value {
     })
 }
 
-fn five_roots() -> Value {
+/// One root over the bound bundle `0.27.0` publishes, eight (ADR 0010, amended 2026-11-20).
+fn nine_roots() -> Value {
     Value::Array(
-        (1..=5)
+        (1..=9)
             .map(|i| json!({ "host_path": format!("/srv/r{i}"), "mount": format!("/opt/r{i}") }))
             .collect(),
     )
@@ -368,18 +369,18 @@ fn five_roots() -> Value {
 
 fn bundle_vector(name: &str) -> Value {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../contracts/substrate-wire/0.23.0/vectors/http")
+        .join("../../contracts/substrate-wire/0.27.0/vectors/http")
         .join(name);
     serde_json::from_slice(&std::fs::read(&path).expect("vector bytes")).expect("vector JSON")
 }
 
-/// Control: with the fact published and no other member, five roots are the lexical refusal.
+/// Control: with the fact published and no other member, nine roots are the lexical refusal.
 #[tokio::test(flavor = "multi_thread")]
-async fn control_five_roots_alone_are_read_only_root_invalid() {
+async fn control_nine_roots_alone_are_read_only_root_invalid() {
     let harness = Harness::open(true);
     let workspace = harness.workspace("01JROROOTADVTWOCONTROL01").await;
     let mut input = base_input(&workspace);
-    input["read_only_roots"] = five_roots();
+    input["read_only_roots"] = nine_roots();
     let (status, refused) = harness.start("01JROROOTADVTWOCONTROL02", input).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
     assert_eq!(
@@ -392,7 +393,7 @@ async fn control_five_roots_alone_are_read_only_root_invalid() {
 /// `compatibility.json` (0.23.0) states the order the daemon follows: the start's other confinement
 /// members first, each its rule and then its capability, then the root list's lexical rule, then
 /// the roots capability. The fixture publishes the roots fact and the floor, and not
-/// `exec.read-only-files`. A start naming five roots and one admissible read-only file breaks a
+/// `exec.read-only-files`. A start naming nine roots and one admissible read-only file breaks a
 /// root's lexical rule and needs an unpublished capability; by that order it is 501
 /// `exec.read-only-files-unserved`.
 ///
@@ -404,7 +405,7 @@ async fn an_unserved_sibling_capability_is_answered_before_a_broken_root_rule() 
     let harness = Harness::open(true);
     let workspace = harness.workspace("01JROROOTADVTWOORDER0001").await;
     let mut input = base_input(&workspace);
-    input["read_only_roots"] = five_roots();
+    input["read_only_roots"] = nine_roots();
     input["read_only_files"] =
         json!([{ "host_path": "/etc/gitconfig", "mount": "/etc/gitconfig" }]);
     let (status, refused) = harness.start("01JROROOTADVTWOORDER0002", input).await;
@@ -420,16 +421,16 @@ async fn an_unserved_sibling_capability_is_answered_before_a_broken_root_rule() 
     );
 }
 
-/// The three lexical vectors of 0.23.0, replayed against the daemon with the fact published: the
-/// status and the whole error body, apart from the per-call operation and request id, must be the
-/// daemon's own answer.
+/// The three lexical vectors 0.23.0 introduced, as the advertised 0.27.0 states them, replayed
+/// against the daemon with the fact published: the status and the whole error body, apart from the
+/// per-call operation and request id, must be the daemon's own answer.
 #[tokio::test(flavor = "multi_thread")]
 async fn each_lexical_refusal_vector_is_the_daemons_answer() {
     let harness = Harness::open(true);
     let workspace = harness.workspace("01JROROOTADVTWOVECTOR001").await;
     let mut mismatched = Vec::new();
     for (index, name) in [
-        "read-only-roots-five-is-refused.json",
+        "read-only-roots-nine-is-refused.json",
         "read-only-root-path-escape-is-refused.json",
         "read-only-root-mount-collision-is-refused.json",
     ]

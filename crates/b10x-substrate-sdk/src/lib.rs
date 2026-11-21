@@ -2313,6 +2313,26 @@ mod tests {
         &request[boundary..]
     }
 
+    /// Issue #236 (ADR 0010, amended 2026-11-20): the SDK sends eight read-only roots and
+    /// refuses a ninth before any request.
+    #[test]
+    fn eight_read_only_roots_are_sent_and_a_ninth_is_refused() {
+        let roots: Vec<ReadOnlyRoot> = (1..=9)
+            .map(|index| ReadOnlyRoot {
+                host_path: format!("/srv/r{index}"),
+                mount: format!("/mnt/r{index}"),
+            })
+            .collect();
+        assert!(validate_read_only_root_bound(&roots[..8]).is_ok());
+        let Err(SdkError::Protocol(message)) = validate_read_only_root_bound(&roots) else {
+            panic!("nine read-only roots are refused by the SDK")
+        };
+        assert_eq!(
+            message,
+            substrate_wire::WireValidationError::InvalidReadOnlyRootBounds.to_string()
+        );
+    }
+
     /// `story:sdk-read-only-root-bound`: more read-only roots than `MAX_READ_ONLY_ROOTS` are
     /// refused by the exec and session builders before any request is sent: the fake daemon's next
     /// request after both over-bound builds is the sentinel lookup.
@@ -2337,7 +2357,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.26.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(
@@ -2546,7 +2566,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.26.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(
@@ -2662,7 +2682,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.26.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(
@@ -2837,7 +2857,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.26.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(

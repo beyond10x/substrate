@@ -1,0 +1,161 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "process.start",
+    "request": {
+      "body": {
+        "input": {
+          "argv": [
+            "vite",
+            "--port",
+            "5173"
+          ],
+          "cwd": "/srv/checkout",
+          "env": {
+            "BAD=NAME": "x"
+          },
+          "lease": {
+            "ttl_ms": 300000
+          },
+          "owner": {
+            "name": "dev-server",
+            "session": "sess-vector"
+          },
+          "profile": "host",
+          "reason": "Serve the checkout for a browser test."
+        },
+        "op": "01JPROCREFUSE76CEE7F665B5"
+      },
+      "headers": {
+        "x-request-id": "req_process_invalid_env_name_is_refused"
+      },
+      "method": "POST",
+      "path": "/v1/processes",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "process.env-invalid",
+    "process.start-input-bounds"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "class": "refused",
+          "code": "process.env-invalid",
+          "message": "env must be a bounded map of valid names to values without NUL bytes.",
+          "operation": "01JPROCREFUSE76CEE7F665B5",
+          "retriable": false
+        },
+        "request_id": "req_process_invalid_env_name_is_refused"
+      },
+      "status": 422
+    }
+  },
+  "id": "process-start-invalid-env-name-is-refused",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "machine",
+      "name": "minimum-host",
+      "state": {
+        "config_generation": 7,
+        "driver": "host",
+        "driver_version": "fixture-1",
+        "facts": {
+          "events.pull": true,
+          "events.retention-events": 10000,
+          "events.stream": true,
+          "exec.argv-only": true,
+          "exec.cgroup-kill": true,
+          "exec.cgroup-limits": {
+            "cpu": true,
+            "memory": true,
+            "processes": true
+          },
+          "exec.inline-capsule": {
+            "max_file_bytes": 262144,
+            "max_files": 32,
+            "max_total_bytes": 524288,
+            "mount": "/runtime"
+          },
+          "exec.max-current": 2048,
+          "exec.namespaces": {
+            "ipc": true,
+            "mount": true,
+            "network": true,
+            "pid": true,
+            "user": true,
+            "uts": true
+          },
+          "exec.no-egress": true,
+          "exec.output-limit-bytes": 65536,
+          "exec.signals": [
+            "INT",
+            "TERM",
+            "KILL"
+          ],
+          "leases.clock-tolerance-ms": 30000,
+          "leases.explicit": true,
+          "operation.ledger-global-max-bytes": 4294967296,
+          "operation.ledger-global-max-rows": 1000000,
+          "operation.ledger-subject-max-bytes": 536870912,
+          "operation.ledger-subject-max-rows": 100000,
+          "process.host": true,
+          "snapshot.provenance-events": 1024,
+          "workspace.atomic-replace": true,
+          "workspace.guarded-io": true,
+          "workspace.list-limit-items": 100,
+          "workspace.max-current": 1024,
+          "workspace.max-file-bytes": 1048576,
+          "workspace.openat2-beneath": true,
+          "workspace.read-limit-bytes": 65536
+        },
+        "probed_at": "2026-08-13T12:00:00Z",
+        "snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    },
+    {
+      "kind": "process-host",
+      "name": "daemon",
+      "state": {
+        "daemon_uid": 1000,
+        "delegated_cgroup": "usable"
+      }
+    },
+    {
+      "kind": "host-path",
+      "name": "checkout",
+      "state": {
+        "entry": "directory",
+        "path": "/srv/checkout"
+      }
+    }
+  ]
+}

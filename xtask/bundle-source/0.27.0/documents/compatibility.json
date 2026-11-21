@@ -1,0 +1,24 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.27.0",
+  "client_visible_changes": [
+    "0.27.0 adds no route and preserves the 45 routes of 0.26.0 (ADR 0013 and ADR 0010, amendments of 2026-11-20, issue #236). No refusal, fact or member is added or removed; three bounds move.",
+    "One run selects up to 8 egress apertures (MAX_EGRESS_APERTURES, 4 in 0.21.0 to 0.26.0): the apertures list of an exec or session start, the requested sandbox of the exec record and the applied list each hold 2 to 8 entries, and the n-th applied aperture listens on 127.0.0.n, so the listen pattern admits 127.0.0.1 to 127.0.0.8. A list of nine is exec.apertures-too-many (422), whose message now states 8.",
+    "The exec.egress-apertures fact lists every aperture the deployment declared, and is bounded by MAX_DEPLOYMENT_EGRESS_APERTURES (12), not by the run bound. 0.6.0 to 0.26.0 bound that list by the run bound (4) while a daemon may declare more, so a snapshot of such a daemon did not validate against its own contract; a client that bounds the fact list by the run bound must accept up to 12 entries.",
+    "A start declares up to 8 read-only roots (MAX_READ_ONLY_ROOTS, 4 in 0.23.0 to 0.26.0): the read_only_roots start list and the applied record hold up to 8, and a host publishes exec.read-only-roots as {max_roots: 8}. Nine roots are exec.read-only-root-invalid (422).",
+    "Every bound is wider, so a request valid under 0.26.0 is valid under 0.27.0 and answered the same way; a client that validates a response against 0.26.0 rejects a list longer than 4 and must move to 0.27.0 before a host serves one. The vectors that probe one over each bound name nine apertures and nine roots."
+  ]
+}

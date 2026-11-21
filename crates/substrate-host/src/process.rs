@@ -4839,13 +4839,17 @@ mod tests {
         let at = |address: &str| Some(address.to_owned());
         let refused = crate::DriverErrorClass::Refused;
         let unserved = crate::DriverErrorClass::Unserved;
+        // One name past the wire bound, whatever the bound is: the length rule comes before
+        // the declaration rule, so the names past the two declared ones need no declaration.
+        let too_many: Vec<String> = ["model".to_owned(), "search".to_owned()]
+            .into_iter()
+            .chain((0..).map(|index| format!("extra{index}")))
+            .take(substrate_wire::MAX_EGRESS_APERTURES as usize + 1)
+            .collect();
+        let too_many: Vec<&str> = too_many.iter().map(String::as_str).collect();
         for (aperture, apertures, code) in [
             (None, &["model"][..], "exec.apertures-too-few"),
-            (
-                None,
-                &["model", "search", "a", "b", "c"][..],
-                "exec.apertures-too-many",
-            ),
+            (None, &too_many[..], "exec.apertures-too-many"),
             (None, &["model", "model"][..], "exec.aperture-listed-twice"),
             (
                 Some("model"),

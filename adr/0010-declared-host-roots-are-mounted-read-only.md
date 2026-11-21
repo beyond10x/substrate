@@ -79,3 +79,13 @@ refuse to declare any root rather than declare one and hope.
 - The wire, the capability snapshot, the contract bundle and the runtime vectors all grow a bounded
   field, and the refusals above need vectors for path escape, mount collision, a non-directory, and
   the bound.
+
+## Amendment, 2026-11-20: eight roots
+
+A box's toolchain closure already needs `~/.cargo` and `~/.rustup`, and a third tool root left the
+start one root short of `MAX_READ_ONLY_ROOTS` (four) with nothing to spare for a second language's
+closure (substrate#236). The bound becomes **eight**: the `read_only_roots` start list, the applied
+record and the `exec.read-only-roots` fact's `max_roots` state it from bundle `0.27.0`. The rule
+above is unchanged — each root is read-only, declared, pinned without a symlink and reported — and
+eight is still a list a reviewer reads. Bundles `0.23.0` to `0.26.0` keep their bytes and state
+four. (Decided 2026-11-20, issue #236.)

@@ -1081,13 +1081,11 @@ fn check_secret_slots(slots: &[SecretSlot]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How many egress apertures one deployment may declare (ADR 0013, amended 2026-11-18).
-///
-/// Above [`substrate_wire::MAX_EGRESS_APERTURES`], which still bounds one run: a host that serves
-/// boxes for two forges declares the model host, the control-plane dial-in and two hosts per
-/// forge, while each run selects at most four of them. Each declared aperture stays operator-named
-/// and reviewed; the bound keeps the list short enough to review.
-pub(crate) const MAX_DEPLOYMENT_EGRESS_APERTURES: usize = 6;
+/// How many egress apertures one deployment may declare: the wire's
+/// [`substrate_wire::MAX_DEPLOYMENT_EGRESS_APERTURES`] (ADR 0013, amended 2026-11-20), which also
+/// bounds the `exec.egress-apertures` fact this host publishes.
+const MAX_DEPLOYMENT_EGRESS_APERTURES: usize =
+    substrate_wire::MAX_DEPLOYMENT_EGRESS_APERTURES as usize;
 
 /// Resolves every declared aperture exactly once, at declaration, and pins what it resolved to.
 ///
@@ -2193,24 +2191,24 @@ mod tests {
     }
 
     #[test]
-    fn a_deployment_declares_up_to_six_egress_apertures_and_no_more() {
-        let six: Vec<EgressAperture> = (0..6u16)
+    fn a_deployment_declares_up_to_twelve_egress_apertures_and_no_more() {
+        let twelve: Vec<EgressAperture> = (0..12u16)
             .map(|n| aperture(&format!("a{n}"), 9000 + n))
             .collect();
         assert_eq!(
-            super::resolve_egress_apertures(&six)
-                .expect("six are declared")
+            super::resolve_egress_apertures(&twelve)
+                .expect("twelve are declared")
                 .len(),
-            6
+            12
         );
-        let seven: Vec<EgressAperture> = (0..7u16)
+        let thirteen: Vec<EgressAperture> = (0..13u16)
             .map(|n| aperture(&format!("a{n}"), 9000 + n))
             .collect();
-        let refused = super::resolve_egress_apertures(&seven).expect_err("seven are refused");
+        let refused = super::resolve_egress_apertures(&thirteen).expect_err("thirteen are refused");
         assert!(
             refused
                 .to_string()
-                .contains("at most 6 egress apertures may be declared"),
+                .contains("at most 12 egress apertures may be declared"),
             "{refused}"
         );
     }

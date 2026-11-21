@@ -15,59 +15,33 @@ What 0.16.1 first publishes is listed under 0.16.0 in the full changelog and sum
 
 <!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->
 
-## 0.21.0 (2026-11-19)
+## 0.22.0 (2026-11-20)
 
-The wire, the contract bundle (`substrate-wire/0.26.0`) and every published route are unchanged.
-A deployment declares up to six egress apertures; a confined run on a Debian-family host finds
-its `/etc/alternatives` tools; the daemon's `--tmp-bytes` sizes every run's `/tmp`. Four RustSec
-advisories are taken.
+The contract bundle moves to `substrate-wire/0.27.0`, which adds no route and raises three
+bounds: one run selects up to eight egress apertures, a deployment declares up to twelve, and a
+start declares up to eight read-only roots. A client pinned to `0.26.0` must move with it.
 
-### Changed in 0.21.0
+### Changed in 0.22.0
 
-- A deployment may declare up to six egress apertures (`MAX_DEPLOYMENT_EGRESS_APERTURES` in the
-  daemon, ADR 0013 amendment); one run still selects at most four (`MAX_EGRESS_APERTURES`, wire and
-  bundles unchanged). A host serving GitLab and GitHub instances declared five and the daemon
-  refused to start (#225).
+- One run selects up to eight egress apertures (`MAX_EGRESS_APERTURES`, was four), a deployment
+  declares up to twelve (`MAX_DEPLOYMENT_EGRESS_APERTURES`, was six and now a wire constant), and a
+  start declares up to eight read-only roots (`MAX_READ_ONLY_ROOTS`, was four), by the 2026-11-20
+  amendments of ADR 0013 and ADR 0010 (#236). A GitHub box already selected four apertures and
+  could add no package-registry egress. The daemon, the SDK and the conformance runner advertise
+  the successor bundle `substrate-wire/0.27.0` (inner `bundle.json` sha256
+  `b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7`), which adds no route and
+  publishes the three bounds; its `exec.egress-apertures` fact list is bounded by the deployment
+  bound, where `0.26.0` and earlier bounded it by the run's four and so refused the snapshot of a
+  daemon declaring five or six. A client pinned to `0.26.0` must move with it. Bundles `0.21.0` to
+  `0.26.0` keep their bytes; their sources state the old bound as a literal.
+- The release reads the four lane records (confinement, quota, chart node profiles, namespace) from
+  `release-lanes.yml`'s hosted run for the tagged commit; a recovery input and then a tag trailer
+  still take precedence per lane.
 
-### Added in 0.21.0
+### Fixed in 0.22.0
 
-- The Rust SDK's command, `pipe_session` and `pty_session` builders gain `writable_root`, repeatable
-  like `read_only_root`, and send the roots in the order given; the SDK re-exports `WritableRoot`,
-  `WritableHostRoot`, `WritableGitRoot`, `AppliedWritableRoot` and `MAX_WRITABLE_ROOTS`. More than
-  `MAX_WRITABLE_ROOTS` roots are refused before the request is sent. The wire, the bundle and the
-  daemon are unchanged.
-- The Rust SDK's command, `pipe_session` and `pty_session` builders gain `apertures`, which selects
-  several declared egress apertures in order (design 26 § 2); the n-th is reached in the run at
-  `127.0.0.n`. One name is still sent as `aperture`, so an existing start serializes as before.
-  The wire, the bundle and the daemon are unchanged.
-- The daemon's `--tmp-bytes BYTES` (`SUBSTRATE_TMP_BYTES`) sizes every confined run's `/tmp`
-  (#224, ADR 0049); absent keeps the kernel default, half the RAM. Startup refuses a size under one
-  MiB as `config.tmp-bytes-invalid`, and a size with a bubblewrap that does not take `--size` as
-  `config.tmp-bytes-unserved`. The wire and the bundle are unchanged.
-
-### Fixed in 0.21.0
-
-- A confined run on a Debian-family host finds `cc`, `awk`, `which` and every other `/usr/bin`
-  name that links through `/etc/alternatives`: the Linux base view now binds the host's
-  `/etc/alternatives` read-only when it has one (#223, ADR 0049). Nothing else of `/etc` joins it.
-
-- Tests make their FIFOs with `nix::unistd::mkfifo` instead of running `mkfifo`, which on the CI
-  runner now refuses a non-UTF-8 path ("invalid UTF-8 was detected in one or more arguments") and
-  failed the omitted-entries suite before the daemon was reached. Test-only change.
-
-### Security in 0.21.0
-
-- `libz-sys` is 1.1.33, taking zlib's fix for
-  [RUSTSEC-2026-0544](https://rustsec.org/advisories/RUSTSEC-2026-0544.html), a heap buffer
-  overflow in `gzwrite` after a write stall. The host driver's Git stack links it through
-  `curl-sys`.
-- `rusqlite` is 0.41.1 and the bundled `libsqlite3-sys` 0.39.1, taking SQLite's fix for
-  [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459.html), uninitialised memory
-  read through the WAL. The daemon's ledger and the SDK's store link this SQLite.
-- `rmcp` is pinned at 3.9.0, taking the fixes for
-  [RUSTSEC-2026-0461](https://rustsec.org/advisories/RUSTSEC-2026-0461.html),
-  [RUSTSEC-2026-0457](https://rustsec.org/advisories/RUSTSEC-2026-0457.html) and
-  [RUSTSEC-2026-0462](https://rustsec.org/advisories/RUSTSEC-2026-0462.html). All three are in the
-  Streamable HTTP transports and the OAuth client, which the model-only pin of `substrate-mcp`
-  does not compile, so no shipped binary was reachable through them.
-- `THIRD_PARTY_LICENSES.html` names the new versions.
+- The systemd local-run case of the delegated lane holds its leader under dash: a fork refused at
+  `pids.max` no longer ends the leader on a Debian-family host (#230). A test defect; the adapter
+  and the host were right.
+- The gate's tests phase fetches every target's dependencies before the workspace tests, so a cold
+  runner cache no longer fails the offline `cargo tree --target all` case.

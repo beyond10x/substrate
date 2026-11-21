@@ -2,8 +2,10 @@
 //! apertures per run.
 //!
 //! Every value this check expects comes from `substrate_wire`: the byte bound of a working
-//! directory, the most apertures a list may name, the fact name and each new refusal's code, status,
-//! class and message. A bound that moves in the crate and not in the bundle, or a refusal the
+//! directory, the fact name and each new refusal's code, status, class and message. The most
+//! apertures a list may name is the four `0.21.0` published, which the wire constant has since
+//! left (ADR 0013, amended 2026-11-20); [`run_bounds::Bounds::of`](super::run_bounds::Bounds::of)
+//! names it, and the too-many message states it. A bound that moves in the crate and not in the bundle, or a refusal the
 //! crate emits that no vector answers with its exact message, fails here. The bundle cannot bind
 //! these through a `{"$wire": …}` marker: `render_v2.rs` is hashed by every bundle it rendered
 //! (AGENTS.md § *The gate*), so the binding lives in this file, which no bundle hashes.
@@ -13,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};
 use substrate_wire as wire;
 
+use super::run_bounds::Bounds;
 use super::{Tree, json_at};
 
 /// The two start inputs that carry an exec start: the exec itself and the session that embeds it.
@@ -30,15 +33,16 @@ const WORKDIR_PATTERN: &str = "^(?:/|(?:/(?!\\.\\.?(?:/|$))[^/\\u0000]+)+)$";
 
 pub(super) fn check(version: &str, released: &Tree, failures: &mut Vec<String>) {
     check_workdir_definition(released, failures);
-    check_starts(released, failures);
+    let bounds = Bounds::of(version);
+    check_starts(bounds, released, failures);
     check_fact(released, failures);
-    check_applied_record(released, failures);
+    check_applied_record(bounds, released, failures);
     check_vectors(version, released, failures);
     check_client_visible_changes(released, failures);
 }
 
-fn max_apertures() -> Value {
-    json!(wire::MAX_EGRESS_APERTURES)
+fn max_apertures(bounds: Bounds) -> Value {
+    json!(bounds.run_apertures)
 }
 
 fn class_of(class: wire::ErrorClass) -> String {
@@ -213,7 +217,7 @@ fn start_in(workdir: &str) -> wire::ExecStartInput {
 
 /// Both starts carry `workdir` as the shared definition and `apertures` with the wire bounds and
 /// refusals.
-fn check_starts(released: &Tree, failures: &mut Vec<String>) {
+fn check_starts(bounds: Bounds, released: &Tree, failures: &mut Vec<String>) {
     let list_refusals = {
         let mut rows = table(&wire::APERTURE_LIST_REFUSALS);
         rows.insert((
@@ -242,7 +246,7 @@ fn check_starts(released: &Tree, failures: &mut Vec<String>) {
         };
         for (member, expected) in [
             ("minItems", json!(2)),
-            ("maxItems", max_apertures()),
+            ("maxItems", max_apertures(bounds)),
             ("uniqueItems", json!(true)),
         ] {
             if apertures.get(member) != Some(&expected) {
@@ -293,7 +297,7 @@ fn check_fact(released: &Tree, failures: &mut Vec<String>) {
 /// The applied network has a third form for a list, each element stating where it listened; every
 /// applied record may name its working directory; and a run whose directory vanished after
 /// admission can say so.
-fn check_applied_record(released: &Tree, failures: &mut Vec<String>) {
+fn check_applied_record(bounds: Bounds, released: &Tree, failures: &mut Vec<String>) {
     let path = "schemas/resource.json";
     let Some(resource) = json_at(released, path, failures) else {
         return;
@@ -303,7 +307,7 @@ fn check_applied_record(released: &Tree, failures: &mut Vec<String>) {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    check_applied_forms(path, &forms, failures);
+    check_applied_forms(bounds, path, &forms, failures);
     check_exec_branches(path, &resource, failures);
     let missing = wire::WORKDIR_REFUSALS[2];
     let admits_missing = resource
@@ -325,19 +329,19 @@ fn check_applied_record(released: &Tree, failures: &mut Vec<String>) {
 
 /// The list form holds 2 to `MAX_EGRESS_APERTURES` apertures, each stating a loopback `listen`;
 /// the single form keeps its `0.20.0` shape.
-fn check_applied_forms(path: &str, forms: &[Value], failures: &mut Vec<String>) {
+fn check_applied_forms(bounds: Bounds, path: &str, forms: &[Value], failures: &mut Vec<String>) {
     let list = forms
         .iter()
         .find(|form| form.get("type") == Some(&json!("array")));
     match list {
         None => failures.push(format!("{path}: applied-network has no list form")),
         Some(list) => {
-            if list.get("maxItems") != Some(&max_apertures())
+            if list.get("maxItems") != Some(&max_apertures(bounds))
                 || list.get("minItems") != Some(&json!(2))
             {
                 failures.push(format!(
                     "{path}: the applied list must hold 2 to {} apertures",
-                    wire::MAX_EGRESS_APERTURES
+                    bounds.run_apertures
                 ));
             }
             let required = list
@@ -350,14 +354,7 @@ fn check_applied_forms(path: &str, forms: &[Value], failures: &mut Vec<String>) 
                     "{path}: every applied aperture of a list must state listen"
                 ));
             }
-            let listen = format!(
-                "^{}\\.[1-{}]:[0-9]{{1,5}}$",
-                wire::APERTURE_LOOPBACK_ADDRESS
-                    .rsplit_once('.')
-                    .map_or("", |(network, _)| network)
-                    .replace('.', "\\."),
-                wire::MAX_EGRESS_APERTURES
-            );
+            let listen = bounds.listen_pattern().unwrap_or_default();
             if list.pointer("/items/properties/listen/pattern") != Some(&json!(listen)) {
                 failures.push(format!("{path}: listen pattern is not {listen}"));
             }
@@ -428,6 +425,7 @@ fn check_exec_branches(path: &str, resource: &Value, failures: &mut Vec<String>)
 /// each success shape is shown by a vector whose result validates against the exec result schema.
 fn check_vectors(version: &str, released: &Tree, failures: &mut Vec<String>) {
     let validator = exec_result_validator(version, released, failures);
+    let too_many = Bounds::of(version).apertures_too_many_message();
     let expected: BTreeMap<&str, &wire::ExecStartRefusal> = wire::WORKDIR_REFUSALS
         .iter()
         .chain(wire::APERTURE_LIST_REFUSALS.iter())
@@ -459,11 +457,17 @@ fn check_vectors(version: &str, released: &Tree, failures: &mut Vec<String>) {
                 error.get("message").and_then(Value::as_str),
             );
             let class = class_of(refusal.class);
+            // The one message that states a bound states the one this bundle publishes.
+            let message = if refusal.code == wire::EXEC_APERTURES_TOO_MANY {
+                too_many.as_str()
+            } else {
+                refusal.message
+            };
             if observed
                 != (
                     Some(u64::from(refusal.status)),
                     Some(class.as_str()),
-                    Some(refusal.message),
+                    Some(message),
                 )
             {
                 failures.push(format!(

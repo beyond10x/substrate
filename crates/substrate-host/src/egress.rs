@@ -185,7 +185,7 @@ pub(crate) fn a_host_is_mapped_twice<'a>(
 ///
 /// Admission bounds the list before it gets here. The bound is held again where it is spent, so
 /// that neither half of the mechanism can build a set nobody admitted: an empty one would install
-/// nothing and still report an aperture run, and a fifth would listen on an address no generated
+/// nothing and still report an aperture run, and a ninth would listen on an address no generated
 /// mapping names.
 fn listen_addresses(count: usize) -> Result<Vec<Ipv4Addr>, DriverError> {
     let addresses = (0..count).map(listen_address).collect::<Option<Vec<_>>>();
@@ -2553,6 +2553,10 @@ mod tests {
                 Some(Ipv4Addr::new(127, 0, 0, 2)),
                 Some(Ipv4Addr::new(127, 0, 0, 3)),
                 Some(Ipv4Addr::new(127, 0, 0, 4)),
+                Some(Ipv4Addr::new(127, 0, 0, 5)),
+                Some(Ipv4Addr::new(127, 0, 0, 6)),
+                Some(Ipv4Addr::new(127, 0, 0, 7)),
+                Some(Ipv4Addr::new(127, 0, 0, 8)),
                 None,
             ]
         );
