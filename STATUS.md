@@ -266,3 +266,5 @@ release-time observations and are not claimed before an eligible tag runs.
 
 Substrate has no source dependency on another b10x component. Cross-component compatibility
 uses stable wire contracts and conformance fixtures, never sibling implementation-path dependencies.
+
+Probe line for pull request 249; this branch is never merged.
