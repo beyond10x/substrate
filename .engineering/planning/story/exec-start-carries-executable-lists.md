@@ -50,7 +50,7 @@ scope:
   path: xtask/src/bundle
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 11
+revision: 13
 ---
 # Story: An exec start carries the executable lists on the wire
 
@@ -79,7 +79,13 @@ dispatch.
    `docs/design/37-executable-lists-on-the-wire.md`: the fields on both starts and their bounds,
    the applied record, each named refusal with its status, the deny-list property in
    `ConfinementProperty`, and consumer compatibility. A start without the fields serializes and
-   hashes as on the predecessor bundle.
+   hashes as on the predecessor bundle. It also decides how the wire tells an absent allow-list
+   from an empty one, and what each means, so that
+   `story:explicitly-empty-exec-subpaths-means-the-program-only` can later retype the profile
+   field without changing a wire byte. Session `sdc` decides that story when this one is planned.
+   The draft's proposal, for that decision: a start whose allow-list member is present and empty
+   is refused by a named refusal, published with its vector, so that no accepted byte means "runs
+   as today" now and "the program only" later.
 2. A successor bundle under `contracts/substrate-wire`, at the next free version when the story
    starts (`main` advertises `substrate-wire/0.27.0` at `638a7d70c`,
    `crates/substrate-wire/src/lib.rs:18`, so `0.28.0` or later). It is cut with

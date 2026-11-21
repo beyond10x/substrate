@@ -16,6 +16,8 @@ relations:
 - depends_on: story:executable-lists-on-oci-and-pod
 - depends_on: story:exec-observation-reports-process-count-hits
 - depends_on: story:exec-file-change-record-on-the-wire
+- depends_on: story:resolver-aperture-serves-dns
+- depends_on: story:explicitly-empty-exec-subpaths-means-the-program-only
 scope:
 - confidence: inferred
   path: AGENTS.md
@@ -47,7 +49,7 @@ scope:
   path: website/docs
 - confidence: cited
   path: website/docs/reference/contract.md
-revision: 10
+revision: 11
 ---
 # Story: A confinement profile declares the ingress a run serves
 
@@ -129,7 +131,11 @@ After `story:inbound-endpoint-for-a-confined-exec`: it uses that story's mechani
 `crates/substrate-daemon/tests/runtime_vectors.rs` with the second. After
 `story:exec-file-change-record-on-the-wire` only because both change
 `crates/substrate-daemon/tests/runtime_vectors.rs`, `crates/substrate-host/src/probe.rs` and
-`AGENTS.md`. Through these edges it is after every other story that changes `profile.rs`,
+`AGENTS.md`. After `story:resolver-aperture-serves-dns` only because both add an ADR with its
+`adr/README.md` row and change `crates/substrate-host/src/probe.rs` and
+`crates/substrate-daemon/tests/runtime_vectors.rs`. After
+`story:explicitly-empty-exec-subpaths-means-the-program-only` only because both change
+`profile.rs`. Through these edges it is after every other story that changes `profile.rs`,
 `facts.rs`, `mod.rs`, `linux.rs` or `probe.rs`, including `story:run-observation-carries-usage`
 and `story:exec-file-changes-are-recorded`, which are not part of the epic.
 

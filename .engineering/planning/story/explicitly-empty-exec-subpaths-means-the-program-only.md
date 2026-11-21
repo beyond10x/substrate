@@ -12,26 +12,43 @@ tags:
 relations:
 - decomposes: epic:runs-are-governed-and-limit-hits-are-events
 - depends_on: story:executable-deny-list
+- depends_on: story:exec-start-carries-executable-lists
+- depends_on: story:executable-lists-on-oci-and-pod
+- depends_on: story:aperture-reports-dial-outcome
 scope:
 - confidence: inferred
   path: CHANGELOG.md
+- confidence: inferred
+  path: contracts/substrate-wire
+- confidence: inferred
+  path: crates/substrate-daemon/src/app/operations.rs
+- confidence: inferred
+  path: crates/substrate-daemon/tests/runtime_vectors.rs
+- confidence: inferred
+  path: crates/substrate-exec-gate
 - confidence: inferred
   path: crates/substrate-host/src/confinement/linux.rs
 - confidence: cited
   path: crates/substrate-host/src/confinement/macos.rs
 - confidence: cited
   path: crates/substrate-host/src/confinement/profile.rs
+- confidence: inferred
+  path: crates/substrate-host/src/process.rs
 - confidence: cited
   path: crates/substrate-host/tests/confinement-public-items.txt
 - confidence: inferred
   path: docs/design/35-executable-lists.md
+- confidence: inferred
+  path: scripts/gate.sh
 - confidence: inferred
   path: spec/confinement-suite.json
 - confidence: inferred
   path: spec/confinement/confinement.yaml
 - confidence: inferred
   path: spec/confinement/scenarios
-revision: 3
+- confidence: inferred
+  path: xtask/bundle-source
+revision: 6
 ---
 # Story: An explicitly empty executable allow-list means the program only
 
@@ -71,7 +88,15 @@ draft follow-up, to be decided when `story:exec-start-carries-executable-lists` 
    every embedder that builds the profile with `..Default::default()`.
 2. `spec/confinement/confinement.yaml` states the three cases and their admission;
    `cargo xtask check-ess` regenerates the suite.
-3. `linux` and `macos` enforce the empty list as "the program only".
+3. `linux` and `macos` enforce the empty list as "the program only". On `linux` the helper of
+   design 35 is started with the program's rule and no entry.
+4. **The wire.** This story assumes what `story:exec-start-carries-executable-lists` is asked to
+   decide: until this story lands, the daemon refuses a start whose allow-list member is present
+   and empty, by a named refusal, and never runs it "as today". This story then admits that start
+   as "the program only". No byte a daemon already accepted changes its meaning. Turning the
+   refusal into an admission is a successor contract bundle at the next free version, with the
+   refusal's vector replaced by the admitted case. If the wire story decides otherwise, this
+   story is re-planned before it starts.
 
 ## Acceptance
 
@@ -91,14 +116,24 @@ Checks:
 
 ## Boundaries
 
-- No wire change. `story:exec-start-carries-executable-lists` decides how the wire field tells
-  absent from empty.
+- No new wire member. `story:exec-start-carries-executable-lists` decides how the wire field
+  tells absent from empty; this story changes only the daemon's answer to a present and empty
+  list, as item 4 says.
 - No change to what a non-empty list means.
 
 ## Order
 
 After `story:executable-deny-list`: it changes the same profile field, facts and design document.
-Decided, and started or dropped, when `story:exec-start-carries-executable-lists` is planned.
+After `story:exec-start-carries-executable-lists`: that story's design document decides how the
+wire field tells an absent list from an empty one, in a way this story's retyping of the profile
+field changes no wire byte. Session `sdc` decides this story, start or drop, when that story is
+planned. After `story:executable-lists-on-oci-and-pod` and `story:aperture-reports-dial-outcome`
+only because of shared files: `spec/confinement/confinement.yaml` with the first,
+`crates/substrate-host/src/confinement/linux.rs` with the second. Through
+`story:exec-start-carries-executable-lists` it is also after the limit, usage and file-change
+stories, which change the same spec files, `linux.rs` and
+`crates/substrate-host/tests/confinement-public-items.txt`.
+`story:confinement-profile-ingress-routes` is ordered after this story: both change `profile.rs`.
 
 ## Scope
 
@@ -109,4 +144,8 @@ Decided, and started or dropped, when `story:exec-start-carries-executable-lists
 - `crates/substrate-host/src/confinement/linux.rs`, `crates/substrate-host/src/confinement/macos.rs`.
   Cited: `macos.rs:3-5`.
 - `crates/substrate-host/tests/confinement-public-items.txt`. Cited: `:1-3`.
+- `crates/substrate-host/src/process.rs`, the helper's source. Inferred: the enforcement.
+- `crates/substrate-daemon/src/app/operations.rs`,
+  `crates/substrate-daemon/tests/runtime_vectors.rs`, `xtask/bundle-source`,
+  `contracts/substrate-wire`, `scripts/gate.sh`. Inferred: item 4.
 - `CHANGELOG.md`. Inferred.

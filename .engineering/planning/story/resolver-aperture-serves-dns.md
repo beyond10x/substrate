@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:resolver-aperture-serves-dns
 kind: story
-status: draft
+status: active
 title: A declared resolver aperture serves DNS to a confined run
 summary: A run that selects an operator-declared resolver aperture resolves names through it and nothing else; every other run keeps no resolver. An ADR amends ADR 0013 first.
 owner: substrate
@@ -38,7 +38,10 @@ scope:
   path: xtask/bundle-source
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 3
+revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-21T03:55:20Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"review_outcome":6}}, executor: "agent:substrate", correlation: "loom-accepts-aperture-stories-2026-11-21"}
+- {from: "proposed", to: "active", at: "2026-11-21T03:55:20Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":6}}, executor: "agent:substrate", correlation: "loom-accepts-aperture-stories-2026-11-21"}
 ---
 # Story: A declared resolver aperture serves DNS to a confined run
 
@@ -81,26 +84,31 @@ Verified at `main` `638a7d70c`:
    - that a resolved address is of no use to the run by itself: it still reaches only declared
      apertures;
    - the capability fact, the applied record and each named refusal.
-2. A successor contract bundle at the next free version, if the ADR adds a wire member
-   (invariant 6).
+2. A successor contract bundle at the next free version when the story starts. The capability
+   fact and the named refusals are published only in a bundle (invariant 6), so the bundle is
+   certain; its check is added to `scripts/gate.sh`.
 3. The host driver generates the resolver configuration for a run that selects the aperture and
    serves the relay.
 
 ## Acceptance
 
 In the delegated lane, a run that selects a declared resolver aperture resolves a name served by a
-test resolver on loopback, and a run that selects none fails the same lookup; before this story no
-run can resolve a name.
+test resolver on loopback with the system resolver (`getent hosts <name>`), with no resolver
+configuration supplied by the caller; before this story the driver generates no resolver
+configuration for any run, and the same command fails in the same run.
 
 Checks:
 
 - The ADR is accepted and indexed in `adr/README.md` before any code of this story.
+- A run that selects no resolver aperture fails the same lookup.
 - A run with the resolver aperture still cannot open a connection to an address it resolved
   unless that destination is a declared aperture it selected.
 - A name outside what the ADR allows is refused the way the ADR states.
 - Portable lane: the fact is absent and a start selecting a resolver aperture is refused by name
   before dispatch.
 - The bytes that crossed the resolver aperture are counted and held to its ceiling.
+- `cargo xtask check-bundles` through the new version and `cargo xtask check-json` pass in
+  `scripts/gate.sh`; every earlier bundle is byte-unchanged.
 
 ## Boundaries
 
@@ -111,16 +119,25 @@ Checks:
 
 ## Order
 
-After `story:aperture-reports-dial-outcome`: both change
-`crates/substrate-host/src/egress.rs` and, if this story cuts a bundle, the same wire and gate
-files.
+After `story:aperture-reports-dial-outcome`, as session `loom` asked: both change
+`crates/substrate-host/src/egress.rs` and the same wire and gate files, and this story's bundle
+is the later one. Its ADR takes the next free number in `adr/` when the story starts.
+`story:confinement-profile-ingress-routes` is ordered after this story: it also adds an ADR and an
+`adr/README.md` row and changes `crates/substrate-host/src/probe.rs` and
+`crates/substrate-daemon/tests/runtime_vectors.rs`. Session `loom` set this story's priority low.
+
+Not ordered against this story: the older drafts `story:host-process-adopt` and
+`story:host-process-container-records`, which plan a successor bundle on the same wire and gate
+files, and the proposed `story:docker-driver-entry-gate`, which also changes
+`crates/substrate-daemon/tests/runtime_vectors.rs`. None of them is being worked; whichever
+starts while this story is open is ordered then.
 
 ## Scope
 
 - `adr` (a new ADR), `adr/README.md`. Inferred.
-- `crates/substrate-host/src/egress.rs`. Cited: `:785`, `:1216`.
+- `crates/substrate-host/src/egress.rs`. Cited: `:1204-1216` (the relay's dial).
 - `crates/substrate-host/src/process.rs`, `crates/substrate-host/src/probe.rs`. Inferred.
 - `crates/substrate-wire/src/lib.rs`, `crates/substrate-daemon/tests/runtime_vectors.rs`,
   `xtask/bundle-source`, `contracts/substrate-wire`, `xtask/src/bundle.rs`, `scripts/gate.sh`.
-  Inferred, and only if the ADR adds a wire member.
+  Inferred.
 - `AGENTS.md`, `README.md`, `CHANGELOG.md`. Inferred.
