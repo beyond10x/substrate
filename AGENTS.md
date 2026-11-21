@@ -406,7 +406,37 @@ open refused. The lane then requires, by each case's own `executed` line and wit
 no `ABSENT` line, the `exec` cases of `ess_confinement_linux` and `ess_confinement_systemd`, the
 adversary and security-review roots `adversary_exec_lists`, `security_exec_gate`,
 `security2_exec_gate` and `security3_exec_gate`, and the helper package's `gate`,
-`adversary_gate`, `security_gate` and `security2_gate`. The trace case of `security3_exec_gate`
+`adversary_gate`, `security_gate` and `security2_gate`. **Eleven roots make their own mounts**
+(D30: what is mounted beneath a location a run can write lies in it; every symbolic link a
+followed entry reads and every directory it passes through is placed, and every entry where it
+ends; a read-only root that shows a location a run can write is asked as one): the host crate's
+`exec_lists_view_mounts`, `security5_view_mounts`, `adversary5_view_mounts`,
+`adversary6_view_mounts`, `security6_view_mounts`, `adversary7_view_mounts` and
+`security7_view_mounts`, and the helper package's `view_mounts_gate`,
+`adversary5_view_mounts_gate`, `adversary6_links_gate` and `adversary7_walk_gate`. Each case mounts
+in a user and mount
+namespace of its own, with no privilege. The lane (`require_staged`) requires every case by
+name: its `executed` line where `unshare --user --map-root-user --mount` can mount a tmpfs,
+which a workstation grants. Where it cannot (a hosted runner, whose AppArmor gives a user
+namespace no capability) the lane takes each case's own `ABSENT (` line instead and says in
+one line which cases did not run: on `release-lanes.yml` and `gate.yml` those cases are
+absent, and the evidence for them is a workstation's lane. Seven cases depend on something
+else a host may lack (a mount this user cannot open, twice; `/usr/local`, twice;
+`/usr/local/src`, twice; an
+overlay in a user namespace); their `ABSENT (` line is taken on any host where it gives that
+reason, and named in the same line. One case of those roots makes no mount, the trusted link
+through the workspace of `security6_view_mounts`, and its `executed` line is required on every
+host. What these cases stage is held on every host by cases on
+mount tables written as text: `MountTree::reaches` and `reaches_as_written` in
+`crates/substrate-exec-gate/src/place.rs`, the helper package's `adversary5_mount_tree` and
+`adversary6_reach`, which the lane requires too, and `writable_source`, `class_together`,
+`judge_link` and `judge_passed` in `crates/substrate-host/src/exec_gate.rs`, whose callers are
+held on real files by the driver's unit cases with a mount table in which the files' own mount
+has a type outside the list. The helper's walk of a followed path is held with no mount by
+`security6_gate` and `security7_gate`, which the lane requires with no `ABSENT` line; the last
+case of the first and the one case of the second run the helper under `/usr/bin/strace`, and
+the second moves a directory under the helper's walk. The trace
+case of `security3_exec_gate`
 runs the driver's own start under `/usr/bin/strace`, which `release-lanes.yml` installs, and is
 absent, so refused by the lane, without it. **An entry admits a file by where the file itself
 lies**: a symbolic link in a listed directory that points outside it is not admitted

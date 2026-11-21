@@ -316,6 +316,149 @@ require_executed -p b10x-substrate-exec-gate gate \
   'exec gate environment: executed' \
   'exec gate own environment: executed' \
   'exec gate preload operand: executed'
+
+# Design 35 D30, what is mounted beneath a location a run can write, and the symbolic links a
+# followed entry reads: these roots make their own mounts, each case in a user and mount
+# namespace of its own, and need a host that grants such a namespace a mount. A workstation
+# does; a hosted runner's AppArmor gives a user namespace no capability. Each case is required
+# by name. Where the mount is granted it must print its `executed` line. Where it is not, its
+# own `ABSENT (` line is taken instead, so a case that neither ran nor said why still fails,
+# and the lane says in one line which cases did not run: there they are workstation evidence,
+# never a passed case. A name written `?<name>|<reason>` depends on something else the host
+# may lack (a mount this user cannot open, `/usr/local`, an overlay in a user namespace): its
+# `ABSENT (` line is taken on any host where it gives that reason, and named. A name written
+# `=<name>` is a case of such a root that makes no mount: its `executed` line is required on
+# every host.
+if unshare --user --map-root-user --mount -- mount -t tmpfs tmpfs /tmp >/dev/null 2>&1; then
+  mounts_granted=1
+else
+  mounts_granted=0
+fi
+unstaged=()
+require_staged() {
+  local package=b10x-substrate-host
+  if [[ "$1" == "-p" ]]; then
+    package="$2"
+    shift 2
+  fi
+  local binary="$1"
+  shift
+  local log
+  log="$(cargo test -p "${package}" --locked --test "${binary}" \
+    -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${log}" >&2; exit 1; }
+  printf '%s\n' "${log}"
+  local name reason always
+  for name in "$@"; do
+    reason=""
+    always=0
+    if [[ "${name}" == \?* ]]; then
+      name="${name#\?}"
+      reason="${name#*|}"
+      name="${name%%|*}"
+    elif [[ "${name}" == =* ]]; then
+      name="${name#=}"
+      always=1
+    fi
+    if grep -qF "${name}: executed" <<<"${log}"; then
+      continue
+    fi
+    if (( ! mounts_granted && ! always )) && grep -qF "${name}: ABSENT (" <<<"${log}"; then
+      unstaged+=("${binary}: ${name}")
+      continue
+    fi
+    if [[ -n "${reason}" ]] && grep -F "${name}: ABSENT (" <<<"${log}" | grep -qF "${reason}"; then
+      unstaged+=("${binary}: ${name}")
+      continue
+    fi
+    echo "delegated-lane: ${binary} did not print '${name}: executed'" >&2
+    exit 1
+  done
+  echo "delegated-lane: ${binary} answered for each of its cases"
+}
+require_staged exec_lists_view_mounts \
+  'ESS confinement linux exec view mounts'
+require_staged security5_view_mounts \
+  'security5 view mounts link through a skipped mount' \
+  '?security5 view mounts ordinary|this host has no /usr/local/src'
+require_staged adversary5_view_mounts \
+  'adversary5 exec view mounts unlisted' \
+  'adversary5 exec view mounts bind' \
+  'adversary5 exec view mounts workspace root is a mount point' \
+  '?adversary5 exec view mounts usr local|no /usr/local on this host' \
+  'adversary5 exec view mounts stack beneath a root' \
+  '?adversary5 exec view mounts unopenable mount beneath a root|this host has no mount of a listed type'
+# The second review's roots: a root the count classes `beneath` is refused before dispatch,
+# every entry is placed where it ends, and a followed path that passes through a directory a
+# run can write is refused.
+require_staged adversary6_view_mounts \
+  'adversary6 exec view mounts beneath by the count' \
+  'adversary6 exec view mounts entry on an unlisted type' \
+  'adversary6 exec view mounts links'
+require_staged security6_view_mounts \
+  'security6 view mounts link on a mount beneath a root only' \
+  '?security6 view mounts root with mounts this user cannot open|this host has no mount beneath' \
+  '=security6 view mounts trusted link through the workspace'
+# The third review's roots: a chain of roots classed alike in either order, a base directory
+# that shows a workspace, an entry's end in a mount a run can write, and the driver's walk and
+# the helper's ending at the same file.
+require_staged adversary7_view_mounts \
+  'adversary7 exec view mounts chain of roots' \
+  '?adversary7 exec view mounts base directory|no /usr/local on this host' \
+  'adversary7 exec view mounts ends' \
+  'adversary7 exec view mounts walks'
+require_staged security7_view_mounts \
+  '?security7 view mounts base directory that holds the workspace root|this host has no /usr/local/src'
+require_staged -p b10x-substrate-exec-gate view_mounts_gate \
+  'exec gate view mounts follow into a mount beneath a writable mount' \
+  'exec gate view mounts links of a followed path' \
+  'exec gate view mounts path through a writable directory' \
+  'exec gate view mounts beneath path placed' \
+  'exec gate view mounts unlisted mount beneath a writable mount'
+require_staged -p b10x-substrate-exec-gate adversary6_links_gate \
+  'adversary6 exec gate links unplaced link' \
+  'adversary6 exec gate links writable link' \
+  'adversary6 exec gate links magic links' \
+  'adversary6 exec gate links walk' \
+  'adversary6 exec gate links no writable mount'
+require_staged -p b10x-substrate-exec-gate adversary7_walk_gate \
+  'adversary7 exec gate walk dot dot' \
+  'adversary7 exec gate walk passed directory' \
+  'adversary7 exec gate walk beneath ends'
+require_staged -p b10x-substrate-exec-gate adversary5_view_mounts_gate \
+  'adversary5 exec gate view mounts file bind' \
+  'adversary5 exec gate view mounts chain and escapes' \
+  'adversary5 exec gate view mounts beneath an unlisted type' \
+  'adversary5 exec gate view mounts writable root is a mount point' \
+  'adversary5 exec gate view mounts planted link on an unlisted type' \
+  'adversary5 exec gate view mounts covered mounts' \
+  '?adversary5 exec gate view mounts limit: overlay upper|no overlay mount in a user namespace on this host'
+if (( ${#unstaged[@]} > 0 )); then
+  if (( mounts_granted )); then
+    why="this host lacks what they need"
+  else
+    why="a user namespace is granted no mount on this host"
+  fi
+  echo "delegated-lane: ${why}; absent, not passed: $(IFS=';'; echo "${unstaged[*]}")"
+fi
+# The mount table as a tree, on tables written as text: no mount and no namespace, so it runs
+# on every host. Required by the lines of its two long tables.
+require_executed -p b10x-substrate-exec-gate adversary5_mount_tree \
+  'adversary5 mount tree 10000 rows side by side: linked in' \
+  'adversary5 mount tree 10000 rows deep: linked in'
+require_executed -p b10x-substrate-exec-gate adversary6_reach \
+  'adversary6 reach: '
+# The helper's walk of a followed path, on directories of its own: no mount and no namespace.
+# Its last case holds the helper under `/usr/bin/strace`, as the trace case of
+# `security3_exec_gate` does the driver's start.
+require_executed -p b10x-substrate-exec-gate security6_gate \
+  'security6 exec gate links: program and loader: executed' \
+  'security6 exec gate links: absolute targets: executed' \
+  'security6 exec gate links: a writable directory on the way: executed' \
+  'security6 exec gate links: a directory moved during the walk: executed'
+# A directory moved under the shipped helper's walk, held under `/usr/bin/strace` where its
+# open returns: absent, so refused here, without `strace` or where it may not trace.
+require_executed -p b10x-substrate-exec-gate security7_gate \
+  'security7 exec gate walk: no `..` asked of the kernel: executed'
 require_executed -p b10x-substrate-exec-gate adversary_gate \
   'adversary landlock failures: executed'
 require_executed -p b10x-substrate-exec-gate security2_gate \

@@ -46,8 +46,14 @@
 //! A `beneath` path is opened beneath its `<root>` without following any symbolic link, so a
 //! link swapped in after the driver's check is refused by the kernel. A `follow` path, the loader
 //! among them, is opened following symbolic links, and is refused when what it resolves to lies
-//! in a `--writable` root: a mount of the view the run can write. That question is answered by
-//! [place], from the view's mount table, and a place that cannot be established refuses as well.
+//! in a `--writable` root: a mount of the view the run can write, with every mount that is
+//! mounted beneath it (D30). Every symbolic link the path resolves through is asked the same
+//! question, and refused there too, and so is every directory it passes through: a run that
+//! can write one can move what it holds while the path is resolved. `..` steps back to the
+//! directory the walk came through and asks the kernel nothing. It is answered by [place],
+//! from the view's mount table, and a place, or where such a mount is attached, that cannot
+//! be established refuses as well: nothing on a file-system type outside the list has one. A
+//! path of either class is placed where it ends.
 //!
 //! ```text
 //! substrate-exec-gate: --allow /opt/ro/link resolves to /workspace/tools/bin, in the writable mount /workspace
