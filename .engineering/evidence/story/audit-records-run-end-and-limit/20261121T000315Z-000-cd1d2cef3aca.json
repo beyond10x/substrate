@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-21T00:03:15Z",
+  "actor": "human:timo",
+  "artifact": "story:audit-records-run-end-and-limit",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:sdc-run-governance-acceptance-round-1",
+    "review": "review-result:sdc-run-governance-acceptance-round-1",
+    "outcome": "fixed"
+  }
+}

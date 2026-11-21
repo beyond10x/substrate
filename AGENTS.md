@@ -886,6 +886,15 @@ New artifacts start in the lifecycle's initial state. Lifecycle moves are claims
 state: propose them and wait for the operator unless the operator asked for the specific move.
 `aep` must be on `PATH` (use the official current release); if it is absent, do not improvise machine-owned frontmatter.
 
+**The stakeholder of a request decides on the operator's behalf** (operator decision, 2026-11-21,
+`approval-record:stakeholder-decides-for-the-operator-2026-11-21`). A decision an agent would put
+to the operator (accepting an epic or a story, its order, a design answer, a default) goes to the
+stakeholder of that work instead: the session or person that submitted the request the artifact
+came from. An artifact names its stakeholder under *Where the requirement comes from*, and the
+answer is recorded as an `approval-record` that quotes it. A stakeholder decides for the work it
+requested, not for another stakeholder's. Merges, pushes to `main`, releases, tags and version
+numbers stay the operator's.
+
 A story that changes a contract or a capability still owes its ADR or design document **before
 code** (invariant 8); the story body names which. `ROADMAP.md` keeps the phase order and
 `STATUS.md` the observed state; the store holds the work items and their status, and nothing else
