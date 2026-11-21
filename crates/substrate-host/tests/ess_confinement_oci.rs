@@ -895,7 +895,8 @@ async fn stdin_served(
             &error,
             ConfinementError::FactUnserved {
                 adapter: AdapterName::Oci,
-                fact: Fact::StdinPipe
+                fact: Fact::StdinPipe,
+                ..
             }
         ),
         "{name}: {error:?}"

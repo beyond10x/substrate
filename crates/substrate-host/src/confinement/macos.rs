@@ -34,6 +34,12 @@
 //!   [`seatbelt::XCODE_SELECT_LINK`], [`seatbelt::XCODE_LICENSE_PREFERENCES`] and
 //!   [`seatbelt::BUILD_READ_SUBPATHS`].
 //!
+//!   **An empty list runs only the program here.** On `linux` an empty list runs every program
+//!   of the run's view, and only a non-empty list holds the run to its program and the entries
+//!   (design 35 D1). The difference is stated, not removed. There an entry is a path of the
+//!   run's view and must exist at the start; here a relative entry need not exist, and an
+//!   absolute one is a host path.
+//!
 //!   Inside the policy the `/usr/bin/cc` and `xcrun` shims cannot find the compiler or the SDK:
 //!   they ask `xcodebuild` through `/bin/sh`, which no exec subpath allows. So `open` asks
 //!   `xcrun`, unconfined and with a cleared environment, for the selected developer tools' macOS

@@ -30,6 +30,19 @@ substrate-guarded ──▶ substrate-wire
 store, the daemon, the Kubernetes client, `rustls` or `gix`, because the executor runs inside an
 operator's image. The client's `fake` feature is legal only as a development dependency.
 
+The executable gate of the `linux` confinement adapter
+([design 35](../docs/design/35-executable-lists.md) D5, D26):
+
+```text
+substrate-host ──▶ substrate-exec-gate (lib: the helper's argument grammar and the place of a path)
+substrate-exec-gate ──▶ libc, and nothing of this workspace
+```
+
+`substrate-exec-gate` is also a binary, the helper a confined run executes before its own
+program. It depends on `libc` alone, so it starts in any view. The host driver compiles the same
+source for the helper's arguments and for the place of a path, so the two cannot disagree. Cargo
+does not build a dependency's binary: an embedder builds the helper from the revision it pins.
+
 A product composition root may pin and compile the `substrate-daemon` crate solely to bootstrap a
 separate daemon child process from a single-file distribution. Product operations must still use
 the public Unix-socket contract; importing daemon application or host-driver APIs into product

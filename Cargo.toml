@@ -4,6 +4,7 @@ members = [
     "crates/substrate-store",
     "crates/substrate-guarded",
     "crates/substrate-executor",
+    "crates/substrate-exec-gate",
     "crates/substrate-host",
     "crates/substrate-kubernetes-client",
     "crates/substrate-kubernetes",

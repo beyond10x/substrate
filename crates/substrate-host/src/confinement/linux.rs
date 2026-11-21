@@ -20,6 +20,39 @@
 //! | `ipc_socket_allowlist` | the floor: every exec installs ADR 0039's seccomp socket filter or does not start |
 //! | `ipc_signals_contained` | the floor with a pid namespace |
 //! | `stdin_pipe`, `output_live` | the floor: the session path's pipes, through bubblewrap |
+//! | `exec_subpaths` | the floor, and the driver's probe held a run to an allow-list with the helper `HostConfig.exec_gate` names ([`ExecListProof`], design 35). Not where the open withheld it for a path on a file-system type other than `ext4`, `overlay` and `tmpfs`: the proof's `withheld` then says which path and type (D27) |
+//!
+//! **`exec_subpaths` on `linux`** (design 35). A profile with a non-empty list is held to its
+//! literal program and the list: a Landlock ruleset, applied inside the sandbox by
+//! `substrate-exec-gate` as the last program before the run's own, lets `execve` succeed only
+//! for the program, the host's ELF loader and what the entries name. **An empty list runs every
+//! program of the view, as before**; on `macos` an empty list runs only the program. That
+//! difference is stated, not removed.
+//!
+//! | an entry | on `linux` |
+//! |---|---|
+//! | names | a directory, which admits every file beneath it, or one file |
+//! | is written | in the run's view, not in host paths: relative beneath `/workspace`, absolute beneath `/usr`, `/bin`, `/lib`, `/lib64`, `/workspace` or the mount of a declared root or file |
+//! | anywhere else (`/tmp`, `/proc`, `/dev`, `/etc`) | `exec.sandbox-exec-subpath-undeclared` |
+//! | not normal, or holding a quote, backslash or control character | `exec.sandbox-path-unrepresentable`, at admission |
+//! | absent at the start | `exec.sandbox-path-unrepresentable`: a rule is tied to an open file, not to a name |
+//! | with a symbolic link in a mount that shows something a run can write | `exec.sandbox-path-unrepresentable` |
+//! | resolving through a link into a mount the run can write | `exec.sandbox-path-unrepresentable` |
+//!
+//! The program is an absolute view path when the list is not empty. Every one of these refusals
+//! is made before anything is dispatched, and writes its audit record.
+//!
+//! What the list does not stop: it restricts which files `execve` accepts, not what an allowed
+//! program does. An allowed interpreter runs a script outside the list, the loader run as a
+//! program loads one, and a program can map code it wrote. The run's variables are not
+//! filtered: on a start with a list they reach the run's program and no program before it
+//! (D28), and an object that `LD_PRELOAD` names is loaded into every allowed dynamic program
+//! and runs its code there, while an `execve` it makes of an unlisted path fails. A listed
+//! directory does not reach
+//! through a second mount of a part of it: with `/usr` listed, `/bin/sh` is denied where `/bin`
+//! is a mount of `/usr/bin`, so a profile lists `/usr/bin`, the directory that holds the
+//! programs. A rename or link into a listed directory fails with `EXDEV`, and a listed directory
+//! removed and created again is no longer listed.
 //!
 //! A live run's output is the session path's queue (design 32 § 5). `read_output` reads it in
 //! slices of at most 100 ms so that a `signal`, which takes the same receiver lock
@@ -27,8 +60,9 @@
 //! the host closes the queue, signals and kills the cgroup.
 //!
 //! `network_ingress` is served by no adapter. `paths_are_host_paths`, `sealed_paths`,
-//! `exec_subpaths`, `private_tmpdir` and `host_network` are not proved, and a profile requiring
-//! one is refused `confinement.fact-unserved`.
+//! `private_tmpdir` and `host_network` are not proved, and neither is `exec_subpaths` on a host
+//! without a configured helper or whose probe did not hold; a profile requiring one is refused
+//! `confinement.fact-unserved`.
 //!
 //! Some fields need more of the snapshot than their family's row, and admission refuses them by
 //! name when the snapshot lacks it, so a start never meets a fact admission could have read:
@@ -42,6 +76,7 @@
 //! | `network: Egress` names | each name in `exec.egress-apertures` | `exec.aperture-undeclared` |
 //! | `secret_slots` | `secrets.slots` | `exec.secret-slots-unserved` |
 //! | a slot's name | that name in `secrets.slots` | `exec.secret-slot-unknown` |
+//! | an `exec_subpaths` entry | a text every adapter can carry | `exec.sandbox-path-unrepresentable` |
 //!
 //! Before any of them, a workspace access meets the rules every adapter shares: the wire's shape
 //! (`exec.workspace-access-invalid`) and no writable subtree at or beneath `.git`
@@ -84,6 +119,24 @@ impl LinuxRequest {
     }
 }
 
+/// What a host driver's probe proved of the executable lists at open (design 35 D14): the second
+/// argument of [`proof`].
+///
+/// Host-private. The capability snapshot publishes none of it, and its digest binds it: the
+/// value is part of what the snapshot identity is computed over.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct ExecListProof {
+    /// One throwaway run under the helper `HostConfig.exec_gate` names executed what its
+    /// allow-list named and nothing else, and linked a file between two unlisted directories.
+    pub subpaths: bool,
+    /// Why the open withheld the executable-list facts, where it did (design 35 D27): one
+    /// entry per fact and path. Empty where no helper is configured, where every place of
+    /// the open was established, and where a probe did not hold. [`proof`] copies it into
+    /// [`AdapterFacts::withheld`](super::AdapterFacts::withheld) and proves no fact it names.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub withheld: Vec<super::FactWithheld>,
+}
+
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn open(
     _request: LinuxRequest,
@@ -120,7 +173,8 @@ mod imp {
         ConfinementProfile, ContractFamily, Fact, KeptOutput, Network, OutputEvent, ProcessBounds,
         RenderedCommand, RunExit, RunId, RunObservation, RunOutput, RunState, StdinMode,
     };
-    use super::LinuxRequest;
+    use super::{ExecListProof, LinuxRequest};
+    use crate::process::ExecLists;
     use crate::{DispatchOutcome, Driver as _, DriverError, HostDriver, PLATFORM_UNSERVED};
 
     /// The bounds a run gets when its profile states none: the driver bounds every run.
@@ -153,7 +207,7 @@ mod imp {
         })?;
         let machine = driver.machine();
         Ok(Arc::new(LinuxAdapter {
-            facts: proof(&machine),
+            facts: proof(&machine, &driver.exec_list_proof()),
             capability: machine.facts,
             snapshot: machine.snapshot,
             driver,
@@ -162,15 +216,19 @@ mod imp {
         }))
     }
 
-    /// The families and facts a host driver's capability snapshot proves.
-    pub fn proof(machine: &CapabilitySnapshot) -> AdapterFacts {
+    /// The families and facts a host driver's capability snapshot proves, and of the executable
+    /// lists what its probe proved beside the snapshot (design 35 D14): the snapshot's own
+    /// `confinement.exec-subpaths` is the published wire fact and stays absent. What the open
+    /// withheld is copied into the proof, and a fact an entry names is not proved (D27).
+    pub fn proof(machine: &CapabilitySnapshot, exec_lists: &ExecListProof) -> AdapterFacts {
         let facts = &machine.facts;
         let floor = facts.exec_argv_only == Some(true) && facts.exec_namespaces.is_some();
         let limits = facts
             .exec_cgroup_limits
             .as_ref()
             .is_some_and(|limits| limits.processes && limits.memory && limits.cpu);
-        AdapterFacts::new(
+        let withheld = |fact: &Fact| exec_lists.withheld.iter().any(|entry| entry.fact == *fact);
+        let mut proof = AdapterFacts::new(
             AdapterName::Linux,
             None,
             &[
@@ -209,8 +267,16 @@ mod imp {
                             .as_ref()
                             .is_some_and(|namespaces| namespaces.pid),
                 ),
+                // The helper runs inside the floor's sandbox, so without the floor there is
+                // nothing it was proved in.
+                (
+                    Fact::ExecSubpaths,
+                    floor && exec_lists.subpaths && !withheld(&Fact::ExecSubpaths),
+                ),
             ],
-        )
+        );
+        proof.withheld.clone_from(&exec_lists.withheld);
+        proof
     }
 
     pub struct LinuxAdapter {
@@ -464,7 +530,16 @@ mod imp {
             self.forget_writers();
             match self
                 .driver
-                .start_exec_for_adapter(&id, &root_name, &input, retention, piped.is_piped(), live)
+                .start_exec_for_adapter(
+                    &id,
+                    &root_name,
+                    &input,
+                    retention,
+                    piped.is_piped(),
+                    live,
+                    // Every entry of the admitted profile's lists (design 35 D22).
+                    ExecLists::of(admitted),
+                )
                 .await
             {
                 DispatchOutcome::Observed(_) => {
@@ -608,6 +683,11 @@ mod imp {
                 .into());
             }
         }
+        // The lexical rule `macos` applies, so a profile one adapter accepts is one the other
+        // accepts (design 35 D3). What needs the view is asked at the start.
+        for entry in &profile.exec_subpaths {
+            crate::exec_gate::check_literal(entry)?;
+        }
         Ok(())
     }
 
@@ -636,7 +716,10 @@ mod imp {
                 .driver
                 .workspace_path(&root_name)
                 .map_err(ConfinementError::Driver)?;
-            let (program, args) = self.driver.processes.render(&workspace, &input)?;
+            let (program, args) =
+                self.driver
+                    .processes
+                    .render(&workspace, &input, &ExecLists::of(admitted))?;
             Ok(RenderedCommand { program, args })
         }
 
@@ -794,6 +877,196 @@ mod imp {
                     .code(),
                 crate::confinement::WRITABLE_SUBTREE_GIT
             );
+        }
+
+        /// A snapshot with the confinement floor and the workspace family.
+        fn floor() -> CapabilitySnapshot {
+            CapabilitySnapshot {
+                snapshot: format!("sha256:{}", "0".repeat(64)),
+                driver: substrate_wire::HostDriverKind::Host,
+                driver_version: "fixture".to_owned(),
+                config_generation: 1,
+                probed_at: chrono::Utc::now(),
+                valid_until: None,
+                facts: CapabilityFacts {
+                    workspace_guarded_io: Some(true),
+                    exec_argv_only: Some(true),
+                    exec_namespaces: Some(substrate_wire::NamespaceFacts {
+                        user: true,
+                        mount: true,
+                        pid: true,
+                        ipc: true,
+                        uts: true,
+                        network: true,
+                    }),
+                    ..CapabilityFacts::default()
+                },
+            }
+        }
+
+        fn listing(entries: &[&str]) -> ConfinementProfile {
+            ConfinementProfile {
+                workspace: Some(std::path::PathBuf::from("/srv/workspaces/ws_1")),
+                exec_subpaths: entries.iter().map(|entry| (*entry).to_owned()).collect(),
+                ..ConfinementProfile::default()
+            }
+        }
+
+        /// Design 35 D14: `exec_subpaths` is proved where the driver's probe held, on the floor
+        /// the helper runs in, and nowhere else. The snapshot alone proves none of it.
+        #[test]
+        fn exec_subpaths_is_proved_by_the_probe_on_the_floor_and_by_nothing_else() {
+            let held = ExecListProof {
+                subpaths: true,
+                ..ExecListProof::default()
+            };
+            assert!(proof(&floor(), &held).proves(&Fact::ExecSubpaths));
+            assert!(!proof(&floor(), &ExecListProof::default()).proves(&Fact::ExecSubpaths));
+            let mut without_floor = floor();
+            without_floor.facts.exec_namespaces = None;
+            assert!(!proof(&without_floor, &held).proves(&Fact::ExecSubpaths));
+        }
+
+        /// Design 35 D27: what the open withheld is in the proof, with its cause, and a fact an
+        /// entry names is never proved. Serialized, a proof with no entry has no `withheld`
+        /// member, so every proof serialized before is unchanged.
+        #[test]
+        fn a_withheld_fact_is_in_the_proof_and_is_never_proved() {
+            let entry = |file_system: Option<&str>| crate::confinement::FactWithheld {
+                fact: Fact::ExecSubpaths,
+                cause: if file_system.is_some() {
+                    "file-system-unlisted"
+                } else {
+                    "mount-id-unreported"
+                },
+                address: "config.workspace_root",
+                path: "/data/workspaces".to_owned(),
+                file_system: file_system.map(str::to_owned),
+            };
+            let entries = vec![entry(Some("xfs")), entry(None)];
+            let facts = proof(
+                &floor(),
+                &ExecListProof {
+                    subpaths: false,
+                    withheld: entries.clone(),
+                },
+            );
+            assert!(!facts.proves(&Fact::ExecSubpaths));
+            assert_eq!(facts.withheld, entries);
+            // Whatever the probe's member says.
+            let contradictory = proof(
+                &floor(),
+                &ExecListProof {
+                    subpaths: true,
+                    withheld: entries.clone(),
+                },
+            );
+            assert!(!contradictory.proves(&Fact::ExecSubpaths));
+            assert_eq!(contradictory.withheld, entries);
+
+            let serialized = serde_json::to_value(&facts).expect("the proof serializes");
+            assert_eq!(
+                serialized["withheld"],
+                serde_json::json!([
+                    {
+                        "fact": "exec_subpaths",
+                        "cause": "file-system-unlisted",
+                        "address": "config.workspace_root",
+                        "path": "/data/workspaces",
+                        "file_system": "xfs",
+                    },
+                    {
+                        "fact": "exec_subpaths",
+                        "cause": "mount-id-unreported",
+                        "address": "config.workspace_root",
+                        "path": "/data/workspaces",
+                    },
+                ])
+            );
+            for exec_lists in [
+                ExecListProof::default(),
+                ExecListProof {
+                    subpaths: true,
+                    ..ExecListProof::default()
+                },
+            ] {
+                let plain = proof(&floor(), &exec_lists);
+                assert!(plain.withheld.is_empty());
+                let serialized = serde_json::to_value(&plain).expect("the proof serializes");
+                assert!(serialized.get("withheld").is_none(), "{serialized}");
+                // And the driver's own record, which the snapshot identity is computed over.
+                let own = serde_json::to_value(&exec_lists).expect("the record serializes");
+                assert!(own.get("withheld").is_none(), "{own}");
+            }
+        }
+
+        /// Design 35 D22: the lists the adapter hands the driver carry every entry of the
+        /// admitted profile, so no admitted profile with a list starts as one without.
+        #[test]
+        fn the_lists_of_an_admitted_profile_carry_every_entry() {
+            let facts = proof(
+                &floor(),
+                &ExecListProof {
+                    subpaths: true,
+                    ..ExecListProof::default()
+                },
+            );
+            let check =
+                |profile: &ConfinementProfile| check_snapshot(&CapabilityFacts::default(), profile);
+            for entries in [
+                vec!["bin"],
+                vec!["bin", "/usr/bin", "target/debug"],
+                vec!["/usr/bin/git"],
+            ] {
+                let admitted = crate::confinement::admission(&facts, &listing(&entries), check)
+                    .expect("a listed profile on a host that proved the list");
+                let lists = ExecLists::of(&admitted);
+                assert!(!lists.is_empty(), "{entries:?}");
+                assert_eq!(lists.subpaths(), entries, "every entry, in order");
+            }
+            let admitted = crate::confinement::admission(&facts, &listing(&[]), check)
+                .expect("a profile without a list");
+            assert!(ExecLists::of(&admitted).is_empty());
+            // Without the fact there is no admitted profile to take lists of.
+            let unproved = proof(&floor(), &ExecListProof::default());
+            let error = crate::confinement::admission(&unproved, &listing(&["bin"]), check)
+                .expect_err("a list on a host that did not prove it");
+            assert!(
+                matches!(
+                    &error,
+                    ConfinementError::FactUnserved { fact, .. } if *fact == Fact::ExecSubpaths
+                ),
+                "{error}"
+            );
+            assert_eq!(error.status(), 501);
+        }
+
+        /// Design 35 D3: the lexical rule is `macos`'s and is admission's. An entry no adapter
+        /// can carry is refused before any start.
+        #[test]
+        fn an_entry_no_adapter_can_carry_is_refused_at_admission() {
+            for entry in [
+                "bin/../other",
+                "/usr/./bin",
+                "a//b",
+                "it\"s",
+                "",
+                "back\\slash",
+            ] {
+                let error = check_snapshot(&CapabilityFacts::default(), &listing(&[entry]))
+                    .expect_err(entry);
+                assert_eq!(
+                    error.code(),
+                    crate::seatbelt::PATH_UNREPRESENTABLE,
+                    "{entry:?}: {error}"
+                );
+                assert_eq!(error.status(), 422, "{entry:?}");
+            }
+            check_snapshot(
+                &CapabilityFacts::default(),
+                &listing(&["bin", "target/debug", "/usr/bin", "/opt/t/bin/tool"]),
+            )
+            .expect("entries every adapter can carry; what needs the view is the start's");
         }
     }
 }

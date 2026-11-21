@@ -330,6 +330,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "b10x-substrate-exec-gate"
+version = "0.22.0"
+dependencies = [
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "b10x-substrate-executor"
 version = "0.22.0"
 dependencies = [
@@ -363,6 +371,7 @@ version = "0.22.0"
 dependencies = [
  "async-trait",
  "b10x-substrate-cli",
+ "b10x-substrate-exec-gate",
  "b10x-substrate-guarded",
  "b10x-substrate-kubernetes-client",
  "b10x-substrate-wire",

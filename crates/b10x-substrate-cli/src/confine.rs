@@ -284,6 +284,7 @@ async fn confine(
         return Err(Failure::Refused(ConfinementError::FactUnserved {
             adapter: chosen.name(),
             fact: Fact::ImageDigestPinned,
+            withheld: None,
         }));
     }
     if chosen == Chosen::Oci && !args.image.as_deref().is_some_and(image_is_pinned) {

@@ -44,6 +44,16 @@ impl PinnedFile {
         self.descriptor.as_raw_fd()
     }
 
+    /// The pinned file itself, which the bind mounts.
+    pub(crate) fn descriptor(&self) -> &OwnedFd {
+        &self.descriptor
+    }
+
+    /// The absolute path the file appears at inside the sandbox.
+    pub(crate) fn mount(&self) -> &str {
+        &self.mount
+    }
+
     /// The bubblewrap bind: the pinned object, never the declared path.
     ///
     /// A descriptor bind and never `--ro-bind /proc/self/fd/<n>`: bound by path, the descriptor

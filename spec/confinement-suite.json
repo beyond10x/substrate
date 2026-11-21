@@ -1644,6 +1644,255 @@
         }
       ]
     },
+    "substrate.confinement/authored/linux-admits-exec-subpaths-on-delegated": {
+      "purpose": "lane delegated: linux admits a profile requiring exec_subpaths, reported declared_insecure: false.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "whole_tree_kill",
+                "ipc_socket_allowlist",
+                "ipc_signals_contained",
+                "exec_subpaths",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "exec_subpaths"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "filesystem_view"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "linux",
+            "declared_insecure": false,
+            "facts": [
+              "exec_subpaths"
+            ],
+            "families": [
+              "process_run",
+              "filesystem_view"
+            ]
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "linux"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": false
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "exec_subpaths"
+                ]
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/linux-admits-filesystem-view-and-limits-on-delegated": {
       "purpose": "lane delegated: linux admits a profile requiring a filesystem view, limits and whole-tree kill, reported declared_insecure: false.",
       "steps": [
@@ -1662,6 +1911,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -1933,6 +2183,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -2179,6 +2430,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -2425,6 +2677,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -2671,6 +2924,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -2846,6 +3100,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3021,6 +3276,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3196,6 +3452,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3371,6 +3628,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3545,6 +3803,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3720,6 +3979,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -11898,6 +12158,268 @@
         }
       ]
     },
+    "substrate.confinement/authored/systemd-linux-admits-exec-subpaths-on-delegated": {
+      "purpose": "lane delegated: systemd around linux admits a profile requiring exec_subpaths, reported declared_insecure: false.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "systemd"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "whole_tree_kill",
+                "ipc_socket_allowlist",
+                "ipc_signals_contained",
+                "exec_subpaths",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "inner": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "systemd"
+            },
+            "inner": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "exec_subpaths"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "filesystem_view"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "systemd",
+            "declared_insecure": false,
+            "facts": [
+              "exec_subpaths"
+            ],
+            "families": [
+              "process_run",
+              "filesystem_view"
+            ],
+            "inner": "linux"
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "systemd"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": false
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "exec_subpaths"
+                ]
+              },
+              "inner": {
+                "kind": "literal",
+                "value": "linux"
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/systemd-linux-admits-limits-on-delegated": {
       "purpose": "lane delegated: systemd around linux admits a filesystem view with limits and whole-tree kill, reported declared_insecure: false.",
       "steps": [
@@ -11916,6 +12438,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -12173,6 +12696,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -12432,6 +12956,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -12691,6 +13216,7 @@
                 "whole_tree_kill",
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
+                "exec_subpaths",
                 "stdin_pipe",
                 "output_live"
               ]

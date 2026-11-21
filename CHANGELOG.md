@@ -7,6 +7,70 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The `linux` confinement adapter, and `systemd` around it, can hold a run to an executable
+  allow-list (design 35). A profile with a non-empty `exec_subpaths` executes only its literal
+  program, the host's ELF loader and what the entries name; any other `execve` fails inside the
+  run with `EACCES`. The wire, the bundle and the daemon are unchanged: no wire start carries a
+  list, and the daemon does not publish `confinement.exec-subpaths`.
+  - The fact `exec_subpaths` is proved only where the embedder names the new helper
+    `substrate-exec-gate` (package `b10x-substrate-exec-gate`) in the new
+    `HostConfig.exec_gate`, and the open-time probe held a run to a list with it. It needs
+    Landlock ABI 2 (Linux 5.19). Cargo does not build a dependency's binary: build the helper
+    from the revision you pin, and install a copy, because cargo's own output has a second hard
+    link and is refused.
+  - **The helper must be statically linked**, for example
+    `cargo build --release -p b10x-substrate-exec-gate --target x86_64-unknown-linux-musl`. A
+    helper whose program headers hold `PT_INTERP`, which cargo's default build has, and a file
+    that is not an ELF image of the driver's own machine with a readable program header table,
+    are refused `config.exec-gate-invalid` at the open: a loader would
+    run before the helper and read files a profile can mount, `/etc/ld.so.preload` among them.
+    So is an image the kernel does not start (a type other than `ET_EXEC` and `ET_DYN`, a
+    program header size that is not its class's, no program header or more than one 4 KiB
+    page of them), which bubblewrap would hand to a shell.
+    A start with a list and a controlling terminal is refused `session.pty-unserved`, and one
+    with a declared mount at or beneath `/.substrate-exec-gate`, where the helper is bound, by
+    the code its kind has for a mount the driver owns.
+  - An entry admits a file by where the file itself lies: a symbolic link in a listed
+    directory that points outside it is not admitted. On Ubuntu 26.04 `ln`, `env`, `cat`, `ls`
+    and `mkdir` in `/usr/bin` are such links, into `/usr/lib/cargo/bin/coreutils`.
+  - On a start with a list the run's variables reach the run's program and no program before
+    it: the driver gives them to the helper as `--env <name> <value>` operands and gives
+    bubblewrap no `--setenv`, and the helper refuses to run when a variable other than `PWD`
+    is in its own environment. No variable is refused by name. An object that `LD_PRELOAD`
+    names is still loaded into every allowed dynamic program; an `execve` it makes of an
+    unlisted path fails.
+  - **An empty list differs by adapter.** On `linux` it runs every program of the run's view, as
+    before; on `macos` it runs only the program.
+  - An entry is a path of the run's view, not a host path: relative beneath `/workspace`,
+    absolute beneath `/usr`, `/bin`, `/lib`, `/lib64`, `/workspace` or the mount of a declared
+    root or file. It must exist at the start. The program is an absolute path when the list is
+    not empty.
+  - Limits: an allowed interpreter runs any script it can read, the loader run as a program
+    loads any file, and a listed directory does not reach through a second mount of a part of
+    it, so a profile lists `/usr/bin` and not `/usr`.
+  - New refusals: `config.exec-gate-invalid` (422) and `config.exec-gate-unserved` (501) at the
+    open, and `exec.sandbox-place-unserved` (501) at the start of a profile with a list.
+    `exec.sandbox-path-unrepresentable` and `exec.sandbox-exec-subpath-undeclared` are new on
+    `linux`; the first also answers a program, a loader, an entry or a writable mount whose
+    path in the run's view is longer than 4095 bytes.
+  - Write `workspace_root` and every `writable_roots` path without `..` and `.`: with
+    `exec_gate` set, such a path that does not exist yet is refused at the open,
+    `config.exec-gate-unserved` with the cause `path-unopenable`.
+  - Whether one path lies in another is decided from the mount table, on `ext4`, `overlay` and
+    `tmpfs`. With `exec_gate` set and a path of the open on another file-system type, the
+    adapter opens without the fact; `AdapterFacts::withheld` and the `confinement.fact-unserved`
+    refusal name the cause, the path and the type.
+
+### Changed
+
+- `confinement::linux::proof` takes a second argument, `&ExecListProof`.
+  `ConfinementError::FactUnserved` gains the field `withheld`, and `AdapterFacts` the public
+  field `withheld`, serialized only when it is not empty; both hold the new
+  `confinement::FactWithheld`. An embedder that builds the variant, or names both of its fields
+  in a pattern, changes one line.
+
 ## [0.22.0] — 2026-11-20
 
 The contract bundle moves to `substrate-wire/0.27.0`, which adds no route and raises three

@@ -165,6 +165,67 @@ process. A profile admitted by one adapter starts only on that adapter, and a st
 profile again against the adapter's own facts. `observe`, `signal` and `render` (the program and
 arguments a start would run, without running it) take the same run or admitted profile.
 
+## Executable allow-lists on linux
+
+`exec_subpaths` names what a run may execute. The two adapters that prove the fact differ on an
+empty list, and the difference is deliberate:
+
+| `exec_subpaths` | `linux` | `macos` |
+|---|---|---|
+| empty | every program of the run's view runs | only the program runs |
+| not empty | the program and what the entries name | the program and what the entries name |
+
+On `linux` the fact needs a helper. Build `substrate-exec-gate` from the revision you pin the
+host crate at, install a copy, and name it in `HostConfig.exec_gate` as an absolute path. Without
+it the adapter opens and a profile with a list is `confinement.fact-unserved` (501).
+
+An entry names a directory, which admits every file beneath it, or one file:
+
+| Entry | On `linux` |
+|---|---|
+| relative | beneath `/workspace` |
+| absolute | beneath `/usr`, `/bin`, `/lib`, `/lib64`, `/workspace`, or the mount of a declared root or file |
+| anywhere else, such as `/tmp` | `exec.sandbox-exec-subpath-undeclared` (422) |
+| absent when the run starts | `exec.sandbox-path-unrepresentable` (422) |
+| a symbolic link where a run can write | `exec.sandbox-path-unrepresentable` (422) |
+| a link that resolves into a writable mount | `exec.sandbox-path-unrepresentable` (422) |
+
+- Entries are paths the run sees, not host paths. A toolchain in a home directory is declared as
+  a read-only root, and the entry names its mount.
+- The program is an absolute path when the list is not empty.
+- List the directory that holds the programs, not one above it. With `/usr` listed, `/bin/sh` is
+  denied on a host whose `/bin` is a link into `/usr`; with `/usr/bin` listed both names run.
+- An entry admits a file by where the file itself lies. A symbolic link in a listed directory
+  that points outside it is not admitted. On Ubuntu 26.04, `ln`, `env`, `cat`, `ls` and `mkdir`
+  in `/usr/bin` are links into `/usr/lib/cargo/bin/coreutils` and are denied with only
+  `/usr/bin` listed; `mv`, `cp`, `rm` and `true` are links to `gnu*` names in `/usr/bin` and
+  run. List the directory the tools really lie in as well, or the tool itself.
+- A declared root or file mounted at or beneath `/.substrate-exec-gate` is refused when the
+  profile has a list: the helper is bound there.
+- Create `target` or `node_modules` before the start: an entry must exist.
+- The list limits which files are executed. An allowed interpreter still runs any script it can
+  read, and the loader run as a program loads any file.
+- The run's variables are not filtered. An object that `LD_PRELOAD` names is loaded into every
+  allowed dynamic program and runs its code there; an execution it makes of an unlisted path
+  still fails. Leave such names out of `Command.env` where that is not wanted.
+- An entry, or the program, whose path in the run's view is longer than 4095 bytes is refused
+  `exec.sandbox-path-unrepresentable` (422).
+
+Whether one path lies in another is decided from the host's mount table, on `ext4`, `overlay`
+and `tmpfs`. Where that cannot be established the answer names one of nine causes:
+`mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`, `mount-id-unreported`,
+`mount-row-missing`, `mount-row-repeated`, `mount-root-deleted`, `mount-point-mismatch` or
+`file-system-unlisted` with the type.
+
+| Where | Cause | Answer |
+|---|---|---|
+| opening the adapter with `exec_gate` set | `file-system-unlisted` or `mount-id-unreported` | the adapter opens without the fact, and `facts().withheld` names the cause, the path and the type |
+| opening the adapter with `exec_gate` set | any other | `config.exec-gate-unserved` (501) |
+| starting a profile with a list | any | `exec.sandbox-place-unserved` (501) |
+
+Where the fact is withheld, a profile with a list is `confinement.fact-unserved` (501) and its
+text repeats the cause. A profile without a list asks for no place and runs as before.
+
 ## Build with the macOS developer tools
 
 Inside the Seatbelt policy, the `/usr/bin/cc` and `xcrun` shims cannot find the compiler or the

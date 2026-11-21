@@ -114,7 +114,7 @@ follows:
 | lane | scenarios |
 |---|---|
 | `portable` | 20: thirteen `local-*` (admission, a missing reason, host policy, a filesystem view, four facts, both reserved fields, the open without `declared_insecure`, `stdin_pipe` admitted, `output_live` admitted), three `*-open-without-*` for `systemd` around `local`, `oci` and `pod`, and four `absent-*` (`macos`, `systemd`, `oci`, `pod`) with their setup in the summary |
-| `delegated` | 20: eleven `linux-*`, nine `systemd-*` (four around `local`, five around `linux`, one of them requested on a scope opened around `local`); `stdin_pipe` and `output_live` each admitted on `linux` and on `systemd` around each |
+| `delegated` | 22: twelve `linux-*`, ten `systemd-*` (four around `local`, six around `linux`, one of them requested on a scope opened around `local`); `stdin_pipe` and `output_live` each admitted on `linux` and on `systemd` around each, and `exec_subpaths` on `linux` and on `systemd` around it (design 35: the open step states it, so the lane's adapter is opened with the helper `HostConfig.exec_gate` names) |
 | `macos` | 10: `absent-linux-*`, four `macos-s1-*`, three `macos-s2-*`, two `macos-io-*` (`stdin_pipe` admitted, `output_live` admitted) |
 | `oci` | 7: admission by digest, `stdin_pipe` admitted on the lane's pinned runtime, `output_live` admitted, egress refused, three images refused `image-unpinned` (a tag, `@sha256:` with no digest, a short digest) |
 | `pod` | 5: admission by digest, a filesystem view refused, `stdin_pipe` and `output_live` each refused `fact-unserved`, `@sha256:latest` refused `image-unpinned` |
@@ -132,7 +132,7 @@ no adapter row for an admission (`ESS-SYNTH-003`, "no candidate of the 15 tried 
 `substrate.confinement.Adapter` stored related row selecting this branch", and `ESS-SYNTH-001` for
 the reserved fields and `adapter-not-open`). The model
 keeps the refusals and the authored scenarios carry admission: each of the 37 outcomes of the two
-commands has at least one scenario among the 65 authored. All 70 scenarios pass against ESS
+commands has at least one scenario among the 67 authored. All 72 scenarios pass against ESS
 0.81.0's `interpreted` target.
 
 ## Open questions (`UNMAPPED:` in `confinement.yaml`)
@@ -146,6 +146,6 @@ commands has at least one scenario among the 65 authored. All 70 scenarios pass 
 - The shape of an ingress route and a rate bound. Any value is refused.
 - An `oci` or `pod` profile with no image is refused as unpinned. This fails closed, and no source
   says so.
-- The facts no story declares: `exec_subpaths` and `private_tmpdir` on `linux`; whole-tree kill,
+- The facts no story declares: `private_tmpdir` on `linux`; whole-tree kill,
   IPC, `private_tmpdir` and `paths_are_host_paths` on `oci`; whole-tree kill on `pod`; the `oci`
   story's rootless fact, which has no `Fact` variant; and the audit snapshot fact of decision 2.
