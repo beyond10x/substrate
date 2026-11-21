@@ -36,7 +36,7 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 11
+revision: 12
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
@@ -125,6 +125,11 @@ Checks:
 - `the_published_set_is_the_linux_adapters_proof` passes with `exec_subpaths` proved by the
   adapter and absent from the published set, and the runtime vectors' delegated lane still lists
   `whole-tree-kill`, `ipc-socket-allowlist` and `ipc-signals-contained` (`AGENTS.md` § The gate).
+- An entry's class and the helper's path are decided by the place of a path (design 35, D25).
+  Where the place cannot be established the profile or the open is refused by name; no code path
+  compares path text instead. A profile with an empty list takes no place check.
+- With `/usr` listed, `/bin/id` is not executable; with `/usr/bin` listed it is. A lane case
+  holds that limit.
 - A delegated-lane case holds each stated limit as it is: with `/usr/bin` listed, `sh script` runs
   a script outside the list, and a `#!` script outside the list is refused.
 - A run with a list can still rename a file within one directory and across two unlisted

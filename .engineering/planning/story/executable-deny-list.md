@@ -41,7 +41,7 @@ scope:
   path: spec/generated
 - confidence: inferred
   path: website/docs
-revision: 13
+revision: 14
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
@@ -109,6 +109,16 @@ Checks:
   `profile_refused` with that fact.
 - A unit test admits a profile with both lists against adapter facts that prove `exec_subpaths`
   and not the new fact, and the refusal names the new fact.
+- The story's first failing test is the driver's own: with `/usr` listed and `/bin/id` denied,
+  `/usr/bin/id` is denied (probe K2), and a listed directory inside a denied one is denied
+  (probe K8), each through the driver and not only through the helper
+  (`approval-record:sdc-accepts-d25-with-conditions-2026-11-21`).
+- Where the place of a path cannot be established (its mount is not in the mount table, two rows
+  could both be its mount, or the file system's type is outside the closed list the design
+  states), the profile is refused by the named refusal the design gives. A unit test per cause
+  uses synthetic mount-table text. No code path compares path text instead.
+- The design document records a run of the place rule on overlayfs before this story merges, and
+  the closed list of file-system types names every type the rule was shown to hold on.
 - Two permanent delegated-lane cases, kept at the stakeholder's request
   (`approval-record:sdc-accepts-design-35-2026-11-21`): a run whose program is a link to a denied
   program (`sh` to a denied `bash`, built from a read-only root) is refused before dispatch; and
