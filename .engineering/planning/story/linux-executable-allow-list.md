@@ -44,7 +44,7 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 19
+revision: 20
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
@@ -184,6 +184,51 @@ Not run by anyone, kept here at the stakeholder's request
 
 The chart's sentence about the served file systems and the daemon's publication of the fact are
 `story:exec-start-carries-executable-lists`.
+
+## Corrected after the merge
+
+The first review of `story:executable-deny-list` found a gap that this story had merged: whether
+something lies in a location a run can write was decided by that location's own place alone, so
+a file system mounted beneath the workspace root, a workspace or a declared writable root counted
+as outside it. Measured on `main` at `df7b970e2`, with tmpfs mounts in a private user and mount
+namespace and the real `linux` adapter: a root on such a mount holding `link -> /usr/bin`, with
+only the link listed, was dispatched and its program exited 0, where the control ends 126. No
+release contained it.
+
+Pull request 244, merge commit `731d06685`, 2026-11-21, corrects it by design 35's D30 with its
+amendments in § 18: "lies in" follows the view's mounts. The stakeholder's decisions are
+`approval-record:sdc-accepts-d30-and-its-amendments-2026-11-21`; the three review rounds are
+`review-result:mount-fix-adversary` and `review-result:mount-fix-security`. Release 0.23.0 is
+the first release with the allow-list and holds the correction.
+
+The stakeholder accepted one decision on a condition: that counting a mount which cannot be
+asked as reached "can only make a class stricter". The second adversary round took that sentence
+as its target:
+
+- For the class it held: 3 068 generated mount tables gave 334 808 pairs of a source and a
+  location, and in 0 of them did the kernel's answer overlap where the table's answer did not.
+- For two outcomes of the class it failed. A root the count classed as lying beside a writable
+  location was handed to the helper as writable, and every start with it ended 125 after
+  dispatch; it is now refused before dispatch `exec.sandbox-place-unserved` where its reach
+  cannot be asked. An entry on a `ramfs` was refused alone and ran once a covered mount beside it
+  changed its root's class; every entry is now placed where it ends.
+- The security review found a window in the helper's walk: a second run renaming a directory
+  between two calls moved the execute right one directory off in 363 of 4 000 starts, never into
+  a writable place. After the correction 0 of 4 000 moved.
+
+Limits added to the stated ones:
+
+- Where one file system shows under two device numbers (a network file system mounted twice, two
+  FUSE mounts of one directory) the comparison of mounts cannot see that a read-only root and a
+  writable location hold the same files. The guard there is that nothing on a file system
+  outside `ext4`, `overlay` and `tmpfs` is followed. Not staged:
+  `story:staged-case-for-one-file-system-under-two-device-numbers`.
+- When a base directory shows a workspace, the adapter opens without the fact and its proof
+  names no cause: `story:linux-adapter-names-why-the-list-fact-is-absent`.
+
+Where the cases ran: the cases that stage a mount ran on a workstation only. A GitHub-hosted
+runner grants a user namespace no mount, and its confinement lane lists them as absent, not
+passed. Not run by anyone: `systemd` around `linux` for these mount shapes, and macOS.
 
 ## Boundaries
 
