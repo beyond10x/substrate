@@ -7,7 +7,7 @@ wire byte and no contract bundle: the lists are substrate-host's confinement API
 decisions 7 and 8). No code before acceptance (invariant 8). § 17 lists the decisions, § 18 every
 claim that is inferred and not observed, § 19 the three defaults the stakeholder decided.
 
-Revised three times on 2026-11-21.
+Revised four times on 2026-11-21.
 
 - After the first review: session `sdc` decided the helper (D5, D19) under
   `approval-record:sdc-decides-plan-and-design-2026-11-21`.
@@ -23,6 +23,14 @@ Revised three times on 2026-11-21.
   carries the checks of D21, D23 and D24. The review proposed to compare the device and inode
   of a deny entry's view ancestors instead; a probe shows where that rule lets a denied file
   run (K2), so D25 is what the document specifies.
+- Fourth revision. The stakeholder accepted D25 on 2026-11-21 with two conditions, and the
+  third revision is `d6787264e`. Condition 1: where a place cannot be established, the answer
+  is a named refusal and never a comparison of path text. D26 is that rule, with a closed list
+  of file-system types. Condition 2: the place rule is probed on overlayfs before the deny
+  story merges; the coordinator added tmpfs. § 3.9 holds those probes. Writing the refusal
+  causes changed D25 in one point: a path's mount is now the row the kernel names by mount ID,
+  not the row with the longest matching mount point, because a probe shows a table where the
+  longest match is a hidden mount (S2).
 
 Releases, tags, merges to `main` and version numbers are the operator's. This document touches
 none of them.
@@ -284,6 +292,75 @@ bound at a second host path, as `/opt/x`. "Runs" for the static tool means that 
 
 B6 and B7 of § 3.7 gave the helper both names of the denied file by hand. K5 gives it one.
 
+### 3.9 Probes for the two conditions on D25
+
+The probe helper was rewritten for D25 as the fourth revision states it. For every path it
+opens the path, or the nearest ancestor that exists; asks `statx` for `STATX_MNT_ID`; takes the
+one row of `/proc/self/mountinfo` with that mount ID; and joins the row's root with the
+descriptor's path below the row's mount point. Each way this can fail prints
+`cannot establish the place of <path>: <cause>` and exits 125 (D26). The helper has no other
+way to compare two paths.
+
+**Three file systems, one set of lists.** The lists of K5, K8 and K9 ran with every listed and
+denied path on one file system, three times:
+
+- **ext4**: a directory of the scratch directory.
+- **overlay**: mounted inside `unshare -Urm` with its lower, upper and work directories in the
+  scratch directory. The kernel gave that mount the options `redirect_dir=nofollow`,
+  `index=off`, `uuid=null` and `metacopy=off`.
+- **tmpfs**: mounted inside the same namespace at a path of the scratch directory.
+
+Bubblewrap built the view with the floor's flags from that file system: one directory as
+`/opt/a` and, through a host bind mount, as `/opt/b`; a directory as `/opt/t` and its `bin`,
+through a host bind mount, as `/opt/x`; a workspace at `/workspace` and its `tools/bin` a second
+time at `/second`. On the overlay the tree holds three kinds of file: `lowonly` and `cup` exist
+only in the lower directory at the start, `uponly` was written through the mount, and the run
+appends to `cup`, which copies it up.
+
+What the view's table and `stat` said, per file system:
+
+| file system | device and root of the row of `/opt/x` | `st_dev` of the files | type field |
+|---|---|---|---|
+| ext4 | `259:2`, the host path of the directory, `…/ext4/tree/bin` | `259:2` | `ext4` |
+| overlay | `0:80`, `/tree/bin`: the path inside the overlay | `0:80` for the lower-only, the upper-only and the copied-up file alike; the inode of `cup` is the same before and after the copy-up | `overlay` |
+| tmpfs | `0:298`, `/tree/bin` | `0:298` | `tmpfs` |
+
+On all three the device of the row equals `st_dev` of the files, and two mounts of one directory
+have rows with one device and one root.
+
+| # | lists | right answer | ext4 | overlay | tmpfs |
+|---|---|---|---|---|---|
+| F1 | K5: `/opt/a` listed, `/opt/b/tool` denied; and the reverse | `tool` denied under both names, `other` runs | right | right | right |
+| F2 | K5: `/opt/t` listed, `/opt/x/tool` denied | `/opt/t/bin/tool` and `/opt/x/tool` denied, `other` runs | right | right | right |
+| F3 | K5: `/opt/t` listed, `/opt/t/bin/tool` denied | the same | right | right | right |
+| F4 | `/workspace/tools` listed; `lowonly`, `uponly` and `cup` denied through `/second` | each denied under both names; `cupok` and `other` run | right | right | right |
+| F5 | F4, then the run appends to `cup` and to `cupok` | `cup` still denied under both names, `cupok` still runs | right | right | right |
+| F6 | K8: `/opt/t/bin` and a workspace directory listed, `/opt/t` denied | `execve` of `/opt/t/bin/other` is `EACCES`; without the deny entry it runs | right | right | right |
+| F7 | K9: the `follow` check with `/workspace` writable, cases (a) to (d) | (a), (b) and (c) refused with exit 125, (d) passes | right | right | right |
+
+On the overlay the upper directory held `cup` and `cupok` after F5 and not before: the copy-up
+happened during the run. The four base-view lists of K1, K2 and K5 (`/usr/bin` with `/bin/id`,
+`/bin` with `/usr/bin/id`, `/usr` with `/bin/id`, `/usr` with `/usr/bin/id`) ran again with this
+helper and gave K5's answers, with 5963 rules for `/usr`.
+
+| # | probe | observed |
+|---|---|---|
+| F8 | the lists of F1 to F3, F6 and F7 in an `ubuntu:24.04` container on Docker 29.8.2, on the container's own root: an `overlay` row that Docker mounted, with `index=off` and neither `metacopy` nor `redirect_dir` named. No bubblewrap is in that image; the second mounts are bind mounts made inside `unshare -Urm` in the container, and the container ran under `deploy/seccomp/host-exec-v1-amd64.json`, with no AppArmor profile and no network | every answer right. Row of `/`: device `0:80`, root `/`; `st_dev` `0:80` |
+| F9 | in that container: `/usr` listed, a file of the image denied through a bind mount of `/usr/bin` at a second path; then the run appends to a denied and to an allowed image file | `id` is denied under both names and `true` runs, with 282 rules. After the copy-up the denied file is still denied under both names, the allowed one still runs, and `st_dev` and inode of both are unchanged |
+| L1 | an overlay at `/opt/m` and its lower directory at `/opt/low`, both listed; `/opt/m/tools/tool` denied | denied as `/opt/m/tools/tool`; **runs** as `/opt/low/tools/tool`. The two have different places: `0:80 /tools/tool` and `259:2 …/lower/tools/tool`. They share an inode number and differ in `st_dev` |
+| S1 | two mounts stacked on one mount point; the place of a file there | two rows with that mount point. The kernel names the upper mount's ID, and the place is in the upper mount's root. The file reads as the upper mount's |
+| S2 | a mount at `hold/sub`, then a second mount over `hold`; the place of `hold/sub/z` | the kernel names the row of `hold`. The row with the longest matching mount point is `hold/sub`, the hidden mount, whose root is another directory. The file reads as the second mount's |
+| S3 | a directory bound at a second path and then removed; the place of the mount point | the row's root is `…/gone//deleted`; `cannot establish the place of …/at: mount-root-deleted` |
+| U1 | a deny entry on `/proc` in the view | `cannot establish the place of /proc/version: file-system-unlisted proc`, exit 125, nothing runs |
+| U2 | places in the view: `/dev/null`, `/proc/version`, `/tmp`, `/dev`, `/` | `/dev/null` is `file-system-unlisted devtmpfs`, `/proc/version` is `file-system-unlisted proc`; `/tmp`, `/dev` and `/` are `tmpfs` rows and have places |
+| U3 | the host's `/proc/sys` bound read-only at `/opt/p`, `/opt/p` listed and a file in it denied | `cannot establish the place of /opt/p/kernel/ostype: file-system-unlisted proc`, exit 125 |
+| C1 | 10 starts with `/usr` expanded around `/bin/id` (5963 rules), the probe helper establishing every place anew | 92 ms per start. W12 measured 20 ms for about as many rules with the text comparison |
+
+The rule failed nowhere on the three types. L1 is not a failure of the rule: a layer directory
+is another file system to the kernel, and Landlock treats it so (`landlock(7)`, *Bind mounts
+and OverlayFS*: "A policy restricting an OverlayFS layer will not restrict the resulted merged
+hierarchy, and vice versa"). D26 states it as a limit.
+
 ## 4. The rule
 
 **D1. On `linux` a profile with a non-empty `exec_subpaths` is held to its literal program and the
@@ -371,6 +448,8 @@ The difference of D1 and the rules of this section are stated where a client rea
   (`profile.rs:17-36`, `:71-72`): an empty list runs every program of the view on `linux` and only
   the program on `macos`; on `linux` an entry is a view path and must exist;
 - the module documentation of `linux.rs` (`:17-31`) and `macos.rs` (`:28-35`);
+- the nine causes and the three file-system types of D26, in the doc comment where
+  `exec.sandbox-place-unserved` and `config.exec-gate-unserved` are raised;
 - the confinement pages under `website/docs`, which `cargo xtask check-docs` holds to the
   specification (§ 14).
 
@@ -488,17 +567,32 @@ does not answer it:
 | mounts one directory at two paths: the view's `/bin` and `/usr/bin` (B4), or a directory that has two host paths (K5) | neither path is beneath the other | they are one directory |
 | mounts a part of a directory at a second path (K2) | the second path is outside the directory | it is inside |
 
-- **The place** of a resolved path is read from `/proc/self/mountinfo`. The path's mount is the
-  line whose mount point is the longest prefix of the path, the last such line. The place is that
-  line's device field, and its root field joined with the rest of the path below the mount point.
+- **The path's mount** is the one the kernel names. The path is opened, and `statx` with
+  `STATX_MNT_ID` (Linux 5.8; D8 already needs 5.19) returns the mount ID of the descriptor. The
+  mount is the one row of `/proc/self/mountinfo` whose first field is that ID.
+- **The place** is that row's device field, and its root field joined with the rest of the
+  descriptor's path (`/proc/self/fd/<n>`) below the row's mount point.
 - **`X` lies in `Y`** when both places have the same device and the place of `X` is the place of
   `Y` or lies beneath it.
 - A path that does not exist has the place of its nearest existing ancestor, joined with the
   remaining names.
 - The helper reads the table of the view once, before its first rule. Bubblewrap mounts `/proc`
   in every view (`process.rs:2750`). The driver reads its own table, for host paths.
-- A line the reader cannot parse fails the check that needs it: the helper exits 125, and the
-  driver refuses.
+- Where any step fails, there is no place, and D26 says what happens. Nothing compares the text
+  of two paths in its stead.
+
+**Not the longest matching mount point.** The third revision chose the row whose mount point is
+the longest prefix of the path, the last such row. That is a guess at what the kernel knows.
+Two tables show it:
+
+- two mounts stacked on one mount point give two rows with that mount point, and only their
+  order in the table tells them apart (S1);
+- a mount at `hold/sub` that a later mount over `hold` hides still has its row, and it is the
+  longest match for `hold/sub/z`, which is a file of the later mount. There the guess is wrong
+  (S2).
+
+With the mount ID no two rows can both be the path's mount: the kernel reports one ID, and the
+reader refuses a table in which that ID has no row or more than one (D26).
 
 On the probe host the view's table has `/usr` with the root `/usr` and `/bin` with the root
 `/usr/bin`, on one device. `/bin/id` therefore has the place `/usr/bin/id`, which lies in the
@@ -520,6 +614,134 @@ passes the directories above that root in their own file system. The place does.
 Device and inode stay in use for one thing: another name of a denied file inside an expanded
 directory (D11 step 1, N2). The place does not find a hard link elsewhere; § 8.5 states that
 limit.
+
+**D26. Where a place cannot be established, the answer is a named refusal. Neither the driver
+nor the helper falls back to the text of a path.** This is the stakeholder's first condition on
+D25 (2026-11-21). One function establishes a place, from three inputs: the mount ID the kernel
+reported, the descriptor's path, and the text of the mount table. The helper and the driver
+compile the same source file for it, so the two cannot disagree, and the helper keeps no
+dependency beyond `libc` (D5). Getting the inputs and running the function ends in a place or in
+one of these causes, and in nothing else:
+
+| cause | when |
+|---|---|
+| `mount-table-unreadable` | `/proc/self/mountinfo` cannot be opened or read |
+| `mount-table-unparsable` | a row lacks its ID, device, root or mount point, has no ` - ` separator or no type after it, or holds an escape that is not three octal digits |
+| `path-unopenable` | the path cannot be opened for a reason other than not existing, or no ancestor of it exists |
+| `mount-id-unreported` | `statx` fails, or its result does not have `STATX_MNT_ID` set |
+| `mount-row-missing` | no row has the reported ID |
+| `mount-row-repeated` | more than one row has it |
+| `mount-root-deleted` | the row's root ends in `//deleted`: the directory the mount shows was removed (S3) |
+| `mount-point-mismatch` | the descriptor's path cannot be read, or the row's mount point is not that path or a prefix of it |
+| `file-system-unlisted` | the row's file-system type is not in the closed list below |
+
+The causes are checked in this order, and the first that holds is the one named.
+
+**How "two rows could both be its mount" is handled.** It is not detected; it cannot arise. The
+row is chosen by the ID the kernel reported for the opened path, never by matching mount points.
+Mounts stacked on one mount point are two rows with two IDs, and the kernel reports the upper
+one (S1). A mount hidden by a later mount keeps its row and is never reported for a path that
+can be opened (S2). `mount-row-missing` and `mount-row-repeated` refuse the two tables in which
+the ID does not name exactly one row.
+
+**The closed list of file-system types** is `ext4`, `overlay` and `tmpfs`. These are the types
+the rule was observed to hold on, with the same lists on each (§ 3.9). The list is a constant
+beside the place function. Adding a type is a change to this document, backed by the lists of
+§ 3.9 run on that type.
+
+- **What is compared** is the type field of the path's row: the first field after the ` - `
+  separator, as exact text. For a bind mount it is the type of the file system the mount shows.
+- **A type outside the list** is `file-system-unlisted`, whatever else is true of the path. The
+  refusal names the path, the type and the three listed types.
+- **`overlay`** was probed twice: mounted in a user namespace, and as the root of a container
+  that Docker mounted (F1 to F9). In both, every layer was on one ext4 file system.
+- **`btrfs`** is outside the list. Its subvolumes are the case where `st_dev` of a file and the
+  device of its row differ. Not probed.
+- **`xfs`** is outside the list. That it behaves as ext4 does here is inferred, and nothing was
+  run on it: no xfs is mounted on the probe host, and mounting one needs privilege the probes
+  did not have.
+- **Network and user-space file systems** are outside the list: `nfs`, `nfs4`, `cifs`, `smb3`,
+  `ceph`, `9p`, `virtiofs`, `fuse` and every `fuse.<name>`. Not probed.
+- **Kernel file systems** (`proc`, `sysfs`, `devtmpfs`, `devpts`, `cgroup2`, `mqueue`) are
+  outside it. No entry may lie on them (§ 5), and U1 and U2 show the refusal.
+
+**The view's own tmpfs mounts.** The view's root, `/dev` and `/tmp` are tmpfs that bubblewrap
+creates (U2). No entry may lie on them: an absolute entry lies beneath `/usr`, `/bin`, `/lib`,
+`/lib64`, `/workspace` or a declared mount, and `/tmp`, `/proc`, `/dev` and `/etc` are refused
+`exec.sandbox-exec-subpath-undeclared` (§ 5). `tmpfs` is in the list for two other reasons.
+A host directory can be on tmpfs: the repository's tests create their workspace root with
+`tempfile::tempdir()` (`crates/substrate-host/tests/ess_confinement_linux.rs:98`), and `/tmp` is
+tmpfs on the probe host. And the helper establishes the place of every `--writable` root, `/tmp`
+and `/dev` among them, for the check of D24.
+
+**Who refuses, and with what.**
+
+| where | what cannot be placed | answer |
+|---|---|---|
+| the open of `linux`, and of `systemd` around it, with `exec_gate` set | the helper's file, `workspace_root`, a `writable_roots` path, a base directory (`/usr`, `/bin`, `/lib`, `/lib64`), or the temporary directory the probes of § 9 build their workspace in (`tempfile::tempdir()`, as `probe.rs:324` does today) | `config.exec-gate-unserved`, 501: the existing code of D19, with the cause and the path in its message. Address: `config.exec_gate`, `config.workspace_root` or `config.writable_roots`, by whose path it was; `config.exec_gate` for a base directory and for the temporary directory |
+| a start whose profile has a list, before dispatch | the host source of a declared mount (for its class, D24), the program, or an entry of either list | `exec.sandbox-place-unserved`, 501: **new**. A `DriverError` of class `Unserved`, the form of `exec.sandbox-unavailable` (`read_only_roots.rs:85-90`). Address: `argv`, `exec_subpaths`, `exec_denied_paths`, `read_only_roots`, `read_only_files` or `writable_roots`. Its audit record is written as for every refused start |
+| the helper, inside the sandbox | any path of its arguments, or a `--writable` root | exit 125 and one line, `substrate-exec-gate: cannot establish the place of <path>: <cause>`, with the type after `file-system-unlisted`. Nothing is executed |
+| admission | nothing | admission reads no path. An entry is resolved at the start (§ 12), so the refusal is the start's |
+
+- **One new code, and one existing code with new causes.** At a start no existing code fits.
+  `exec.sandbox-path-unrepresentable` and `exec.sandbox-exec-subpath-undeclared` are 422 and
+  say the client wrote a path this policy cannot carry; here the path is well formed and the
+  host cannot serve it, which is 501 (invariant 3). `exec.sandbox-unavailable` is 501, and it
+  is what a host without the sandbox answers; a client that branches on the code could not
+  tell "no sandbox" from "move this root to another file system". At the open the existing
+  code already means what is needed: the helper is configured and this host cannot use it.
+- **The open is refused, not degraded.** With `exec_gate` set and a workspace root on a type
+  outside the list, no adapter opens. The embedder unsets `exec_gate`; the adapter then opens
+  without the two facts, and a profile with a list is `confinement.fact-unserved` (D19).
+- **The probes' temporary directory is placed before a probe runs.** Otherwise a temporary
+  directory on a type outside the list would make the helper exit 125 inside the probe, the
+  fact would be absent, and the cause would read as "this kernel has no Landlock".
+- **The reference text of both codes** names the nine causes and the three types: the doc
+  comment where each code is raised, and the confinement pages under `website/docs` (§ 5,
+  *Reference text*).
+- **The helper is the second line again.** The driver has placed every path before dispatch, so
+  an exit 125 with this line means the view's table differs from what the driver expected.
+- `exec.sandbox-place-unserved` cannot occur on a wire start: a wire start has no list (D22),
+  and nothing is placed for a start without one. Whether the wire story publishes the code is
+  that story's.
+
+**What this means for the daemon image and the lanes.** Read from the tree, with what a file
+cannot say marked as inferred. In these two stories no wire start carries a list (§ 15), so
+what follows reaches the daemon when the wire story lands and it sets `exec_gate`. It reaches an
+in-process embedder that runs in a container now.
+
+- **The daemon image.** Its base is `ubuntu:24.04` (`Dockerfile:60`), and it declares
+  `/var/lib/b10x-substrate` a volume (`Dockerfile:82`). The chart starts the daemon with
+  `--workspaces /var/lib/b10x-substrate/workspaces` and mounts the claim `ledger` there
+  (`deploy/helm/substrate/templates/statefulset.yaml:159-160`, `:286-287`, `:324-326`), with the
+  cluster's default storage class unless `persistence.storageClassName` is set
+  (`deploy/helm/substrate/values.yaml:16-17`). So the base directories of every view lie on the
+  container's root file system, and the workspaces lie on the volume.
+- **The container's root.** No file of the repository names its type: the container runtime's
+  storage driver decides it, and neither the `Dockerfile` nor a workflow file states one. On the
+  probe host Docker reports `overlay2`, the root row has the type `overlay`, and the rule holds
+  on it (F8, F9). That the hosted runners' Docker and the kind nodes' containerd use an overlay
+  too is inferred. A runtime with another driver gives another type, and the open is refused by
+  name.
+- **The volume.** Its type is the storage class's, or the Docker host's for an anonymous
+  volume. On `ext4` the lists are served. **On `xfs` or `btrfs` the open with `exec_gate` set is
+  refused, and the daemon serves no list there** until that type has been probed and added.
+- **The daemon's `/tmp`** is an `emptyDir` without a medium in the chart
+  (`statefulset.yaml:294-295`, `:321-323`): a directory of the node's own file system, whose
+  type no file states. The probes' temporary directory lies there, so the same holds for it.
+- **The hosted delegated lane** runs on the runner VM itself, not in a container
+  (`.github/workflows/release-lanes.yml:65`, `:118-122`). The job prints `df -h / /mnt`
+  (`:111`), which shows sizes and not types, so the workflow does not say what `/` or the
+  tests' temporary directory is on. That both are ext4 there is inferred. If one is not listed,
+  the lane's first `linux` open fails with `config.exec-gate-unserved` naming the type; it does
+  not pass silently.
+
+**A limit the place does not close: the layers of an overlay.** A directory that is a lower or
+upper layer of an overlay, mounted in the view beside the overlay, shows the same bytes as
+another file system. A deny entry on the overlay does not deny the layer's file (L1). In a
+container the layer directories lie on the host, outside the container's mounts. On a
+workstation an embedder would have to declare both the overlay and one of its layers as roots.
+This is stated beside the hard-link limit of § 8.5, and no refusal is specified for it (§ 20).
 
 ### The helper's arguments
 
@@ -593,6 +815,9 @@ The driver decides the class of every mount at each start:
 - **"Lies in" is D25's**, on the driver's own mount table, in both directions. A source that
   holds a writable location shows that location through the mount (K9). A source inside one is
   writable as a whole.
+- A source whose place cannot be established has no class. The start is refused
+  `exec.sandbox-place-unserved` (D26); the mount is never classed `follow` for want of an
+  answer.
 - A mount classed `beneath` refuses an entry with a symbolic link in it,
   `exec.sandbox-path-unrepresentable` (§ 5). On a host whose `/usr` holds the workspace root,
   that includes `/usr/bin/sh` where it is a link.
@@ -679,13 +904,22 @@ was run on the probe host (§ 3.7); the paths are that host's.
 - **A toolchain root lies outside the workspace root and every writable root.** A read-only root
   inside one is classed `beneath` (D24), and an entry or program with a symbolic link in it is
   then refused. On the probe host `npm`, `sh` and the rustup proxies are links (T5, T10).
-- **List the directory that holds the programs, not one above it.** With `/usr` listed, `/bin/sh`
-  and a script that starts with `#!/bin/sh` are `Permission denied` where `/bin` is a link into
-  `/usr`; with `/usr/bin` listed both names run (§ 5, K7).
 - **A missing entry shows as `Permission denied`** naming the program the tool could not start
   (T2, T3, T7), or as `bad interpreter` for a script (T12).
+- **The file systems the lists are served on are `ext4`, `overlay` and `tmpfs`** (D26). The
+  helper's file, the workspace root, every declared writable root, the base directories and
+  every root a listed start declares must lie on one of them. With `exec_gate` set and one of
+  the first four elsewhere, for example a workspace volume on `xfs` or `btrfs`, the adapter does
+  not open: `config.exec-gate-unserved` names the path and the type. A start that declares a
+  root elsewhere is refused `exec.sandbox-place-unserved`.
 - **Every entry must exist at the start** (§ 5). The client creates `target` or `node_modules`
   in a fresh clone before it starts the run.
+
+list `/usr/bin`, not `/usr`
+
+A rule on `/usr` does not reach a program that is named through `/bin`, `/lib` or `/lib64`
+where those are links into `/usr`, so with `/usr` listed `/bin/sh` and every script that starts
+with `#!/bin/sh` are `Permission denied`, and with `/usr/bin` listed they run (§ 5, K7).
 
 ### Without a usable helper
 
@@ -697,6 +931,7 @@ the embedder configured.** Decided with D5.
 | `exec_gate` is not set | the adapter opens; neither fact is proved; a profile with a list is refused at admission | `confinement.fact-unserved` naming `exec_subpaths`, 501 |
 | `exec_gate` is set and is not absolute, or the file lies beneath the workspace root or a declared writable root, or has more than one link (D21) | the open is refused before the file is read | `config.exec-gate-invalid`, 422, address `config.exec_gate`; new |
 | `exec_gate` is set and the file is missing, not a regular file, unreadable, over the size bound, or does not print the protocol line in the throwaway sandbox | the open is refused; no adapter exists, so nothing is admitted | `config.exec-gate-unserved`, 501, address `config.exec_gate`; new |
+| `exec_gate` is set and the place of the helper's file, of the workspace root, of a declared writable root, of a base directory or of the probes' temporary directory cannot be established (D26) | the same: the open is refused | `config.exec-gate-unserved`, 501, address the field whose path it was; the message names the path and the cause |
 | `exec_gate` is set and usable, and a probe of § 9 did not hold (no Landlock, ABI 1) | the adapter opens; the fact that probe proves is absent; a profile that needs it is refused at admission | `confinement.fact-unserved` naming the fact, 501 |
 | the file changed after the open | nothing: the bytes read at open run (D20) | none |
 
@@ -726,7 +961,7 @@ written by a run, so it cannot be that authority. The driver refuses the open
 | check | how | why |
 |---|---|---|
 | the configured path is not absolute | lexical | a relative path depends on the driver's working directory |
-| the file lies in the workspace root or a declared writable root | the path of the opened descriptor, and the canonical form of `workspace_root` and of each `writable_roots` path; then their places are compared (D25) | both sides are resolved. `HostConfig` holds the paths as the embedder wrote them: nothing in `lib.rs` canonicalizes them, and the adapter resolves the root where it needs it (`linux.rs:353`). Unresolved text would miss a workspace root named through a symbolic link. Canonical text would still miss a workspace root that the host mounts at a second path (K6); the place does not |
+| the file lies in the workspace root or a declared writable root | the path of the opened descriptor, and the canonical form of `workspace_root` and of each `writable_roots` path; then their places are compared (D25). A place that cannot be established does not pass the check: the open is refused `config.exec-gate-unserved` (D26) | both sides are resolved. `HostConfig` holds the paths as the embedder wrote them: nothing in `lib.rs` canonicalizes them, and the adapter resolves the root where it needs it (`linux.rs:353`). Unresolved text would miss a workspace root named through a symbolic link. Canonical text would still miss a workspace root that the host mounts at a second path (K6); the place does not |
 | the file has more than one link | `st_nlink` of the opened descriptor is above 1 | a hard link inside a workspace is another name of the same file, and the path check cannot see it (K4). Whether one of the other names lies in a workspace cannot be answered without walking every workspace. The link count is one `fstat` |
 
 The code is a `DriverError` of class `Refused` (status 422), the form of
@@ -809,8 +1044,9 @@ plan for them.
 ### When the helper fails
 
 The helper executes the program only after `landlock_restrict_self` returned 0. Any earlier
-failure (no Landlock, an argument it does not accept, an entry it cannot open, a mount table it
-cannot read, a `follow` path into a writable mount, a rule the kernel refuses) ends the run
+failure (no Landlock, an argument it does not accept, an entry it cannot open, a place it
+cannot establish (D26), a `follow` path into a writable mount, a rule the kernel refuses) ends
+the run
 before the program starts: one diagnostic line on standard error that
 begins `substrate-exec-gate:`, and exit status 125. When `execve` of the program fails it exits
 126, or 127 for `ENOENT`, as `/usr/bin/env` does in that position today. The driver has checked
@@ -867,8 +1103,12 @@ the same locations, the same lexical rule. On `linux` a deny entry may be absent
   the directories that hold a denied path, not the number of entries: one entry in `/usr/bin`
   wrote 5953 rules and cost 17 ms (W12), and 64 entries in that one directory would write about
   as many. What bounds a start is the helper's own limit of 65536 rules (§ 8.2), about 0.2 s at
-  the measured cost per rule (§ 18). `exec_subpaths` has no bound today and gets none here; the
-  wire story bounds both when it gives them a schema.
+  the measured cost per rule (§ 18). W12 used the text comparison. The fourth revision's probe
+  helper, which opens every entry of an expanded directory and looks its row up anew for each
+  deny entry, took 92 ms for 5963 rules (C1). The helper does less: one `statx` per entry,
+  which the walk makes anyway, and an entry whose mount ID is its directory's has the
+  directory's place and its own name. That cost is not measured (§ 18). `exec_subpaths` has no
+  bound today and gets none here; the wire story bounds both when it gives them a schema.
 - **Fact.** `exec_denied_paths` (`Fact::ExecDeniedPaths`), directly after `exec_subpaths`.
   `FACT_ORDER` grows to 14. A non-empty `exec_denied_paths` implies it
   (`profile.rs:213-229`). The fact has no wire property in these stories, as `stdin_pipe` and
@@ -998,9 +1238,13 @@ allow-list that admits no directory the run can write.
 | a copy in a listed directory the run can write | runs (N3) | runs |
 
 A deny entry denies a path, and every mount of that path (D23, D25). It does not find every hard
-link to a file. Decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire story
-publishes the property (§ 19 Q4): the limit is stated, and a deny entry whose file has more than
-one link is not refused.
+link to a file. Decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire
+story publishes the property (§ 19 Q4): the limit is stated, and a deny entry whose file has more
+than one link is not refused.
+
+It does not find the same bytes in a layer directory of an overlay that the view mounts beside
+the overlay either (L1, D26). That limit is new in the fourth revision and is not decided: the
+document states it and specifies no refusal (§ 20).
 
 ## 9. Facts, admission and the probe
 
@@ -1089,7 +1333,8 @@ recorded output work for an in-process embedder today without either.
 | `confinement.exec-denied-paths-without-subpaths` | 422 | a deny-list beside an empty `exec_subpaths` | admission, every adapter, after the reserved fields (D13); new |
 | `confinement.exec-denied-paths-exceeded` | 422 | more than `MAX_EXEC_DENIED_PATHS` entries | admission, every adapter; new |
 | `config.exec-gate-invalid` | 422 | `HostConfig.exec_gate` is not absolute, or the file's place is beneath the workspace root or a declared writable root, or the file has more than one link (D21) | the open of `linux`, and of `systemd` around it, before the file is read; new |
-| `config.exec-gate-unserved` | 501 | `HostConfig.exec_gate` is set and the file is missing, not a regular file, unreadable, over the size bound, or does not print the protocol line (D19) | the open of `linux`, and of `systemd` around it; new |
+| `config.exec-gate-unserved` | 501 | `HostConfig.exec_gate` is set and the file is missing, not a regular file, unreadable, over the size bound, or does not print the protocol line (D19); or the place of the helper's file, of the workspace root, of a declared writable root, of a base directory or of the probes' temporary directory cannot be established (D26), with the address of the field whose path it was | the open of `linux`, and of `systemd` around it; new |
+| `exec.sandbox-place-unserved` | 501 | the place of the program, of an entry of either list, or of the host source of a declared mount cannot be established: one of the nine causes of D26, among them a file-system type outside `ext4`, `overlay` and `tmpfs` | the start of a profile with a list, before dispatch; never admission, never a start without a list; new |
 | `confinement.fact-unserved` naming `exec_subpaths` | 501 | a non-empty `exec_subpaths` on an adapter that did not prove it: `linux` without `exec_gate`, `linux` whose probe did not hold, and every adapter of § 13 that proves neither fact | admission; existing |
 | `confinement.fact-unserved` naming `exec_denied_paths` | 501 | a deny-list on an adapter that proved `exec_subpaths` and not this fact | admission; existing code, new fact |
 | `exec.sandbox-path-unrepresentable` | 422 | an entry of either list that is not normal, holds a refused character, has a symbolic link in a mount classed `beneath`, resolves through a link into a writable mount (D24), or (allow entry on `linux`) does not exist; a program that is not absolute when a list is set, or that fails one of the two link rules | admission for the lexical rule, the start for the rest; existing code, new on `linux` |
@@ -1101,6 +1346,9 @@ Every refusal of an admission or a start writes its audit record, as it does tod
 gets the error from `open`. After dispatch there is no refusal: a helper failure is exit status
 125, which a program can also return (§ 6). No row lets a profile with a list run without it
 (D19). `exec.capability-stale` is not in the table: the helper's bytes are read once (D20).
+
+No row compares the text of two paths where a place could not be established (D26): the two
+rows that name a place refuse.
 
 ## 13. Per adapter
 
@@ -1124,6 +1372,10 @@ are cases of the adapter lanes (§ 16). `story:linux-executable-allow-list` asks
 an allowed and a denied execution": the scenario it gets is the admission, and the executions are
 lane cases. The stakeholder (agent:sdc) accepted this change to the story's acceptance explicitly
 in the review of 2026-11-21.
+
+D26's two refusals are raised at the open and at the start, on a mount table. The model has no
+file system and no start, so no scenario states them; they are unit tests and one lane case
+(§ 16).
 
 Story 1, `spec/confinement/confinement.yaml`:
 
@@ -1235,6 +1487,20 @@ Story 1:
 
 Story 2:
 
+**The story's first failing test is K2 and K8 through the driver.** The stakeholder asked for
+this on 2026-11-21: not only through the helper. The story therefore begins with two cases of
+this lane that start a run through `ConfinementAdapter` and fail before any code of the story
+exists:
+
+- K2: a directory declared as the read-only root `/opt/t` and its subdirectory `bin` as
+  `/opt/x`, the profile listing `/opt/t` and denying `/opt/x/tool`. The run's `execve` of
+  `/opt/t/bin/tool` and of `/opt/x/tool` fails with status 126, and `/opt/t/bin/other` runs.
+- K8: the same roots, the profile listing `/opt/t/bin` and denying `/opt/t`. With a program
+  beneath `/opt/t` the start is refused `exec.sandbox-program-unlisted`. With a program
+  elsewhere the run starts and its `execve` of `/opt/t/bin/other` fails with status 126.
+
+The helper's own cases for the two shapes come after these.
+
 - `/usr/bin` allowed, one program beneath it denied: another program in `/usr/bin` runs, the
   denied one fails inside the run (the story's acceptance);
 - **D23, a program that is a link to a denied program. A permanent case of the lane**, not only a
@@ -1268,6 +1534,13 @@ Story 2:
   the driver: a driver opened inside that namespace was not probed (§ 18). Where `unshare`
   cannot create the namespace, the case prints that it is absent and why;
 - D11 step 1: a listed directory inside a denied one gets no rule (K8);
+- D26, through the driver: the host's `/proc/sys` declared as a read-only root and listed. The
+  start is refused `exec.sandbox-place-unserved` before dispatch, the message names `proc` and
+  the three listed types, the audit record is written and nothing runs (U3 shows the helper's
+  side);
+- D26, the file systems: the lists of F1 to F7 run once with the workspace root on a tmpfs.
+  The case mounts one inside `unshare --user --map-root-user --mount` and drives the helper, as
+  the host bind mount case does. The overlay form of the same lists runs the same way;
 - a symbolic link to the denied program, its hard link in the same directory, a denied directory,
   a deny entry created during the run: each denied;
 - `limit_a_hard_link_that_existed_in_another_listed_directory_runs`,
@@ -1306,6 +1579,35 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
   that leaves its root, is refused; the place of a path is computed from a mount table given as
   text, for one directory at two mount points, for a part of a directory at a second one, for a
   path that does not exist, and for a mount point with an escaped space.
+- **D26, one unit test per cause, each on a mount table written in the test.** The place
+  function takes the reported mount ID, the descriptor's path and the table's text, so no test
+  needs a sandbox, a mount or a privilege. The function is the one source file the helper and
+  the driver both compile (D26), so each test covers both:
+  - `mount-table-unparsable`: a row without the ` - ` separator; a row with three fields; a
+    mount point with the escape `\04`;
+  - `mount-id-unreported`: no mount ID given;
+  - `mount-row-missing`: an ID no row has;
+  - `mount-row-repeated`: two rows with the ID;
+  - `mount-point-mismatch`: the row's mount point is `/opt/a` and the descriptor's path is
+    `/opt/b/tool`; and a descriptor path that could not be read;
+  - `mount-root-deleted`: a root of `/tree//deleted`;
+  - `file-system-unlisted`: one row each of type `btrfs`, `xfs`, `nfs4`, `fuse.sshfs`, `proc`
+    and `devtmpfs`, and the error carries the type; a row each of `ext4`, `overlay` and `tmpfs`
+    has a place;
+  - `mount-table-unreadable` and `path-unopenable` are the two causes outside the function:
+    the reader is given a path that does not exist as its table, and a path beneath a
+    directory of mode 000 as its subject;
+  - stacked mounts: two rows with one mount point and two IDs; the place is the root of the
+    row whose ID was given, for each of the two IDs (S1);
+  - a hidden mount: the rows of S2; with the ID of `hold` the place lies in the second mount's
+    root, and the row of `hold/sub` is never chosen;
+  - no fallback: for each cause above, the comparison "lies in" returns the cause and never a
+    boolean, so a caller cannot read a failure as "outside".
+- `lib.rs` and `process.rs`, D26: the open with a table in which the workspace root's row has
+  the type `xfs` is `config.exec-gate-unserved`, status 501, address `config.workspace_root`,
+  and the message names `xfs`; a start whose declared root has such a row is
+  `exec.sandbox-place-unserved`, status 501, address `read_only_roots`. Both checks take the
+  table as text.
 - `probe.rs`: `the_published_set_is_the_linux_adapters_proof` with its named exception;
   `every_probe_sandbox_carries_the_user_namespace_posture` counts the new probes;
   an unset helper, and one that exits without restricting, each withhold both facts.
@@ -1356,7 +1658,8 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 | D22 | the lists are a required argument of a type without `Default`, not a field of `AdapterStart`; the three wire sites write `ExecLists::wire()`. Third revision: `wire` is private to the module `crate::process`, so the adapter's modules cannot call it |
 | D23 | a denied file gets no execute rule from any source: an entry, the program, the loader, or a second mount of its directory; a denied program is `exec.sandbox-program-unlisted` (422) before dispatch. Third revision: the second mount is found by place (D25), and `--alias` is gone |
 | D24 | the helper's arguments: each path is a class (`follow` or `beneath`), a mount root and a relative path. Third revision: the class comes from the mount's host source, not its mode in this run; `--writable` names the mounts the run can write; a `follow` path that resolves into one is `exec.sandbox-path-unrepresentable` (422) before dispatch and exit 125 in the helper |
-| D25 | new in the third revision. Whether one path lies in another is decided by place: the device and root of its mount in `/proc/self/mountinfo`, joined with the rest of the path. The helper reads the view's table, the driver its own. The view-ancestor rule the review proposed is not taken (K2) |
+| D25 | new in the third revision. Whether one path lies in another is decided by place: the device and root of its mount in `/proc/self/mountinfo`, joined with the rest of the path. The helper reads the view's table, the driver its own. The view-ancestor rule the review proposed is not taken (K2). Accepted by the stakeholder on 2026-11-21 with two conditions (D26, § 3.9). Fourth revision: the mount is the row with the mount ID the kernel reports for the opened path (`statx`, `STATX_MNT_ID`), not the longest matching mount point (S2) |
+| D26 | new in the fourth revision, the stakeholder's first condition. Where a place cannot be established, nothing compares path text: nine named causes, one of them a file-system type outside the closed list `ext4`, `overlay`, `tmpfs`. A start is refused `exec.sandbox-place-unserved` (501, new) before dispatch; the open is refused `config.exec-gate-unserved` (501, existing) with the cause; the helper exits 125 with one line. `btrfs`, `xfs` and every network file system are outside the list and refused by name |
 
 ## 18. Inferred, not observed
 
@@ -1380,12 +1683,25 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 - D20: B10 ran on bubblewrap 0.13.0. For 0.11.2 the options and the code were read, not run. The
   real helper's size, and so the bytes copied per start, are not known. That the copy counts
   against the run's memory bound is not checked.
-- D25: the place rule ran in the probe helper, in the view (K5) and on host paths (K6), on one
-  host with an ext4 root and bind mounts. Not probed: btrfs subvolumes, overlayfs and network
-  file systems, where the device and root fields of `mountinfo` are taken to name a place the
-  same way; a mount whose root the kernel marks as deleted; a table longer than the probe's 256
-  lines. That nothing but a hard link gives a file a second place on one device is an argument,
-  not an observation.
+- D25 and D26: the place rule ran in the probe helper on ext4, on tmpfs, and on overlayfs
+  mounted two ways (§ 3.9), all on one host and one kernel. `btrfs`, `xfs` and the network
+  file systems were not run; D26 refuses them by name, so nothing rests on how they behave.
+- D26, what was not run: an overlay whose layers lie on more than one file system, where
+  `st_dev` of a lower file can differ from the device of the row; an overlay with `index=on`;
+  a container runtime other than Docker 29.8.2 with `overlay2`. That the hosted runners'
+  Docker, and containerd on the kind nodes, give the daemon an `overlay` root is inferred from
+  those being the usual defaults; no file of the repository says it. That the runner VM's `/`
+  and temporary directory are ext4 is inferred the same way.
+- D26, the causes: `mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`,
+  `mount-id-unreported`, `mount-row-missing`, `mount-row-repeated` and `mount-point-mismatch`
+  are specified and were not provoked. The probe helper implements them; only
+  `mount-root-deleted` (S3) and `file-system-unlisted` (U1 to U3) were observed.
+- D26, one source file for the helper and the driver: how the file is shared between the two
+  crates is the story's. Nothing was built.
+- D10: the cost of a start with places. C1 measured an implementation that does more work than
+  the one specified; one `statx` per entry is expected to cost about what W12 measured.
+- That nothing but a hard link, or a layer directory of an overlay (L1), gives a file's bytes a
+  second place is an argument, not an observation.
 - D25, the driver's side: reading its own mount table, resolving a `follow` entry as the view
   will, and comparing the program with a deny entry before dispatch are not prototyped. K6 read
   host places with the probe helper, not with driver code.
@@ -1503,6 +1819,13 @@ refused by link count.
   the root of a second mount does not reach through that mount (K7); the helper could add a rule
   for each such mount, through the deny check, with the table it already reads. The stories do
   not ask for it, and the limit is stated (§ 5).
+- More file-system types in D26's list. `xfs` is the first to probe: a workspace volume on it
+  refuses the open today. The lists of § 3.9 need a mounted xfs, which needs privilege; the
+  quota fixture's container already mounts a loop image (`fixtures/quota-lab/Dockerfile`) and
+  could carry the probe. `btrfs` needs the subvolume case looked at first.
+- A refusal for a view that mounts an overlay and one of its layer directories (L1). The row
+  of an overlay names its layer directories in its options; comparing them with the places of
+  the other mounts is not designed.
 - A refusal for a read-only root that is declared inside the workspace root. D24 classes it
   `beneath`; whether such a root should be admitted at all is a question for the roots' own
   design (ADR 0010).
