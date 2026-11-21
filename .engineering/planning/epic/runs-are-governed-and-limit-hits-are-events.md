@@ -9,7 +9,7 @@ owner: substrate
 tags:
 - confinement
 - sdc
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:41Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"review_outcome":2}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:41Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"review_outcome":2}}, correlation: "run-governance-first-slice-accepted"}
@@ -110,6 +110,12 @@ may be worked at the same time. Story 9's second story follows both 6 and 8.
 
 Stories 7 and 8 and `story:inbound-endpoint-for-a-confined-exec` each cut a successor contract
 bundle. Each takes the next free version when it starts; no story reserves a number.
+
+Two stories that are not part of this epic are worked between story 5 and stories 6 and 7, as
+session `sdc` decided on 2026-11-21: `story:run-observation-carries-usage`, then
+`story:exec-file-changes-are-recorded`. They change the same files as the first slice, so stories
+6 and 7 carry an edge to the second of them. `story:exec-file-change-record-on-the-wire` follows
+story 8 and precedes `story:confinement-profile-ingress-routes`.
 
 ## Out of scope
 

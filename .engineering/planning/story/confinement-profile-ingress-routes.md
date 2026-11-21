@@ -15,6 +15,7 @@ relations:
 - depends_on: story:inbound-endpoint-for-a-confined-exec
 - depends_on: story:executable-lists-on-oci-and-pod
 - depends_on: story:exec-observation-reports-process-count-hits
+- depends_on: story:exec-file-change-record-on-the-wire
 scope:
 - confidence: inferred
   path: AGENTS.md
@@ -46,7 +47,7 @@ scope:
   path: website/docs
 - confidence: cited
   path: website/docs/reference/contract.md
-revision: 9
+revision: 10
 ---
 # Story: A confinement profile declares the ingress a run serves
 
@@ -125,8 +126,12 @@ After `story:inbound-endpoint-for-a-confined-exec`: it uses that story's mechani
 `story:executable-lists-on-oci-and-pod` and
 `story:exec-observation-reports-process-count-hits` only because of shared files:
 `spec/confinement/confinement.yaml` with the first,
-`crates/substrate-daemon/tests/runtime_vectors.rs` with the second. Through them it is after every
-other story of the epic that changes `profile.rs`, `facts.rs`, `mod.rs`, `linux.rs` or `probe.rs`.
+`crates/substrate-daemon/tests/runtime_vectors.rs` with the second. After
+`story:exec-file-change-record-on-the-wire` only because both change
+`crates/substrate-daemon/tests/runtime_vectors.rs`, `crates/substrate-host/src/probe.rs` and
+`AGENTS.md`. Through these edges it is after every other story that changes `profile.rs`,
+`facts.rs`, `mod.rs`, `linux.rs` or `probe.rs`, including `story:run-observation-carries-usage`
+and `story:exec-file-changes-are-recorded`, which are not part of the epic.
 
 ## Scope
 

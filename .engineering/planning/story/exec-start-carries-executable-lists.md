@@ -14,6 +14,7 @@ relations:
 - decomposes: epic:runs-are-governed-and-limit-hits-are-events
 - depends_on: story:executable-deny-list
 - depends_on: story:process-count-limit-hit-is-observed
+- depends_on: story:exec-file-changes-are-recorded
 scope:
 - confidence: inferred
   path: AGENTS.md
@@ -49,7 +50,7 @@ scope:
   path: xtask/src/bundle
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 9
+revision: 10
 ---
 # Story: An exec start carries the executable lists on the wire
 
@@ -122,7 +123,9 @@ Checks:
 
 After `story:executable-deny-list`: it carries that story's field and fact. After
 `story:process-count-limit-hit-is-observed` only because both change
-`crates/substrate-host/src/process.rs`. Independent of `story:executable-lists-on-oci-and-pod`:
+`crates/substrate-host/src/process.rs`. After `story:exec-file-changes-are-recorded` only because
+both change `crates/substrate-host/src/process.rs` and `crates/substrate-host/src/probe.rs`.
+Independent of `story:executable-lists-on-oci-and-pod`:
 the two share no file and may be worked at the same time.
 `story:exec-observation-reports-process-count-hits` follows this story and cuts the bundle after
 this one's.

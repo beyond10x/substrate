@@ -13,6 +13,7 @@ relations:
 - decomposes: epic:runs-are-governed-and-limit-hits-are-events
 - depends_on: story:executable-deny-list
 - depends_on: story:process-count-limit-hit-is-observed
+- depends_on: story:exec-file-changes-are-recorded
 scope:
 - confidence: cited
   path: crates/substrate-host/tests/ess_confinement_oci.rs
@@ -27,8 +28,8 @@ scope:
 - confidence: inferred
   path: spec/confinement/scenarios
 - confidence: inferred
-  path: website/docs
-revision: 9
+  path: website/docs/concepts/adapters.md
+revision: 12
 ---
 # Story: The `oci` and `pod` adapters' answer to the executable lists is observed and held by a scenario
 
@@ -96,7 +97,9 @@ Checks:
 
 After `story:executable-deny-list`: the scenario names the deny-list field that story adds. After
 `story:process-count-limit-hit-is-observed` only because both change
-`spec/confinement/confinement.yaml` and the regenerated suite.
+`spec/confinement/confinement.yaml` and the regenerated suite. After
+`story:exec-file-changes-are-recorded` for the same reason: that story and
+`story:run-observation-carries-usage` before it change the same spec files.
 
 ## Scope
 
