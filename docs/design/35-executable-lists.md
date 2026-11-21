@@ -1,13 +1,15 @@
 # Design 35: an executable allow-list and deny-list on the confinement adapters
 
-Status: draft under review, 2026-11-21. Serves `story:linux-executable-allow-list` and
+Status: the fourth revision, `8c7318642`, was accepted by the stakeholder, session `sdc`, on
+2026-11-21. This fifth revision writes the one change the stakeholder decided with that
+acceptance (D27) and awaits its confirming read. Serves `story:linux-executable-allow-list` and
 `story:executable-deny-list` (`epic:runs-are-governed-and-limit-hits-are-events`). It changes no
 wire byte and no contract bundle: the lists are substrate-host's confinement API
 ([ADR 0044](../../adr/0044-confinement-is-a-contract-family-served-by-declared-adapters.md)
 decisions 7 and 8). No code before acceptance (invariant 8). § 17 lists the decisions, § 18 every
 claim that is inferred and not observed, § 19 the three defaults the stakeholder decided.
 
-Revised four times on 2026-11-21.
+Revised five times on 2026-11-21.
 
 - After the first review: session `sdc` decided the helper (D5, D19) under
   `approval-record:sdc-decides-plan-and-design-2026-11-21`.
@@ -31,6 +33,14 @@ Revised four times on 2026-11-21.
   causes changed D25 in one point: a path's mount is now the row the kernel names by mount ID,
   not the row with the longest matching mount point, because a probe shows a table where the
   longest match is a hidden mount (S2).
+- Fifth revision. The stakeholder accepted D26 and the fourth revision, the mount-ID change
+  included, and decided the deployment question that D26 left as a consequence: "B now, C
+  before the wire story". B: with a helper configured and a path on a file-system type outside
+  the closed list, the adapter opens, the two facts stay absent, and the cause is visible in
+  the open's result, in the adapter's proof and in the refusal of a profile with a list. C:
+  `xfs` is probed in the quota fixture's container before the wire story is planned. D27 is
+  that decision. It changes D19, D21 and D26 where they said such an open is refused. No probe
+  was run for this revision; the code it cites was read at `8c7318642`.
 
 Releases, tags, merges to `main` and version numbers are the operator's. This document touches
 none of them.
@@ -449,7 +459,8 @@ The difference of D1 and the rules of this section are stated where a client rea
   the program on `macos`; on `linux` an entry is a view path and must exist;
 - the module documentation of `linux.rs` (`:17-31`) and `macos.rs` (`:28-35`);
 - the nine causes and the three file-system types of D26, in the doc comment where
-  `exec.sandbox-place-unserved` and `config.exec-gate-unserved` are raised;
+  `exec.sandbox-place-unserved` and `config.exec-gate-unserved` are raised, and in the doc
+  comment of `FactWithheld` and of `AdapterFacts.withheld` (D27);
 - the confinement pages under `website/docs`, which `cargo xtask check-docs` holds to the
   specification (§ 14).
 
@@ -617,7 +628,9 @@ limit.
 
 **D26. Where a place cannot be established, the answer is a named refusal. Neither the driver
 nor the helper falls back to the text of a path.** This is the stakeholder's first condition on
-D25 (2026-11-21). One function establishes a place, from three inputs: the mount ID the kernel
+D25 (2026-11-21). At the open, two of the causes below withhold the two facts where the fourth
+revision refused the open (D27); the profile with a list is then the thing refused, by name and
+with the cause. One function establishes a place, from three inputs: the mount ID the kernel
 reported, the descriptor's path, and the text of the mount table. The helper and the driver
 compile the same source file for it, so the two cannot disagree, and the helper keeps no
 dependency beyond `libc` (D5). Getting the inputs and running the function ends in a place or in
@@ -678,8 +691,9 @@ and `/dev` among them, for the check of D24.
 
 | where | what cannot be placed | answer |
 |---|---|---|
-| the open of `linux`, and of `systemd` around it, with `exec_gate` set | the helper's file, `workspace_root`, a `writable_roots` path, a base directory (`/usr`, `/bin`, `/lib`, `/lib64`), or the temporary directory the probes of § 9 build their workspace in (`tempfile::tempdir()`, as `probe.rs:324` does today) | `config.exec-gate-unserved`, 501: the existing code of D19, with the cause and the path in its message. Address: `config.exec_gate`, `config.workspace_root` or `config.writable_roots`, by whose path it was; `config.exec_gate` for a base directory and for the temporary directory |
-| a start whose profile has a list, before dispatch | the host source of a declared mount (for its class, D24), the program, or an entry of either list | `exec.sandbox-place-unserved`, 501: **new**. A `DriverError` of class `Unserved`, the form of `exec.sandbox-unavailable` (`read_only_roots.rs:85-90`). Address: `argv`, `exec_subpaths`, `exec_denied_paths`, `read_only_roots`, `read_only_files` or `writable_roots`. Its audit record is written as for every refused start |
+| the open of `linux`, and of `systemd` around it, with `exec_gate` set: the cause is `file-system-unlisted` or `mount-id-unreported` | the helper's file, `workspace_root`, a `writable_roots` path, a base directory (`/usr`, `/bin`, `/lib`, `/lib64`), or the temporary directory the probes of § 9 build their workspace in (`tempfile::tempdir()`, as `probe.rs:324` does today) | **the adapter opens and proves neither fact (D27).** The cause, the path and the file-system type are in the open's result and in the adapter's proof. A profile with a list is refused `confinement.fact-unserved`, 501, at admission, and the refusal repeats them |
+| the same open: one of the other seven causes | the same paths | the open is refused `config.exec-gate-unserved`, 501: the existing code of D19, with the cause and the path in its message. Address: `config.exec_gate`, `config.workspace_root` or `config.writable_roots`, by whose path it was; `config.exec_gate` for a base directory and for the temporary directory |
+| a start whose profile has a list, before dispatch | the workspace, the host source of a declared mount (for its class, D24), the program, or an entry of either list | `exec.sandbox-place-unserved`, 501: **new**. A `DriverError` of class `Unserved`, the form of `exec.sandbox-unavailable` (`read_only_roots.rs:85-90`). Address: `workspace`, `argv`, `exec_subpaths`, `exec_denied_paths`, `read_only_roots`, `read_only_files` or `writable_roots`. Its audit record is written as for every refused start. It arises only on an adapter that proved the facts (D27) |
 | the helper, inside the sandbox | any path of its arguments, or a `--writable` root | exit 125 and one line, `substrate-exec-gate: cannot establish the place of <path>: <cause>`, with the type after `file-system-unlisted`. Nothing is executed |
 | admission | nothing | admission reads no path. An entry is resolved at the start (§ 12), so the refusal is the start's |
 
@@ -690,20 +704,185 @@ and `/dev` among them, for the check of D24.
   is what a host without the sandbox answers; a client that branches on the code could not
   tell "no sandbox" from "move this root to another file system". At the open the existing
   code already means what is needed: the helper is configured and this host cannot use it.
-- **The open is refused, not degraded.** With `exec_gate` set and a workspace root on a type
-  outside the list, no adapter opens. The embedder unsets `exec_gate`; the adapter then opens
-  without the two facts, and a profile with a list is `confinement.fact-unserved` (D19).
+- **A file-system type outside the list does not refuse the open.** The fourth revision
+  refused it, so that the cause could not hide behind an absent fact. The stakeholder decided
+  otherwise on 2026-11-21: the adapter opens without the two facts, and the cause is made
+  visible (D27). The other seven causes still refuse the open.
 - **The probes' temporary directory is placed before a probe runs.** Otherwise a temporary
   directory on a type outside the list would make the helper exit 125 inside the probe, the
-  fact would be absent, and the cause would read as "this kernel has no Landlock".
+  fact would be absent, and the cause would read as "this kernel has no Landlock". With the
+  place established first, the absence carries its own cause (D27).
 - **The reference text of both codes** names the nine causes and the three types: the doc
   comment where each code is raised, and the confinement pages under `website/docs` (§ 5,
-  *Reference text*).
+  *Reference text*). The doc comment of `FactWithheld` names the two causes that withhold.
 - **The helper is the second line again.** The driver has placed every path before dispatch, so
   an exit 125 with this line means the view's table differs from what the driver expected.
 - `exec.sandbox-place-unserved` cannot occur on a wire start: a wire start has no list (D22),
   and nothing is placed for a start without one. Whether the wire story publishes the code is
   that story's.
+
+**D27. With a helper configured and a path on a file-system type outside the list, the adapter
+opens, the two facts stay absent, and the absence says why.** Decided by the stakeholder
+(agent:sdc) on 2026-11-21, with its acceptance of the fourth revision: "B now, C before the wire
+story". Its words for B: "With a helper configured and a workspace volume on a file system
+outside the closed list, the open succeeds, the two facts stay absent, and a profile that
+carries a list is refused `confinement.fact-unserved`; nothing ever runs with a list that is not
+enforced." It set two conditions: the absence is visible and not silent, and C.
+
+**Which causes withhold the facts, and which still refuse the open.** The stakeholder's sentence
+names the workspace volume and one cause. The split below goes further in two places, and each
+is a reading, not the stakeholder's words:
+
+| cause at the open, on any path the open places | answer | whose reading, and why |
+|---|---|---|
+| `file-system-unlisted` | both facts are withheld; the adapter opens | the coordinator's reading: every path the open places, not the workspace volume alone. A host with an `xfs` root has the helper's own file and `/usr` on `xfs`, so a rule for the volume alone would still refuse that open |
+| `mount-id-unreported` | both facts are withheld; the adapter opens | this revision's. `STATX_MNT_ID` exists since Linux 5.8 (`statx(2)`), Landlock since 5.13 (`landlock(7)`, *VERSIONS*). A kernel that reports no mount ID has no Landlock, and for that host D19 already says the adapter opens and the facts are absent. Refusing the open there would make a configured helper on an old kernel an error, against that row |
+| `mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`, `mount-row-missing`, `mount-row-repeated`, `mount-root-deleted`, `mount-point-mismatch` | the open is refused `config.exec-gate-unserved` (D26) | unchanged. Each says the driver could not read the host's table or a configured path. None says what the host offers, and the stakeholder's decision does not name them |
+
+- **The split holds on its own terms.** The causes are checked in D26's order and the first
+  that holds decides, so `file-system-unlisted`, the last, is reached only by a path that has a
+  mount ID, one row, a live root and a matching mount point. U2 and U3 show that for two types
+  outside the list: with every type admitted, `/proc/version` and `/dev/null` had a mount ID
+  and a row. That a mount ID is reported on `xfs`, `btrfs` and the network file systems is
+  inferred: `statx(2)` marks other fields "support varies by filesystem" and not this one.
+- **Every path is placed before the answer is given.** The order is the helper's file,
+  `workspace_root`, each `writable_roots` path as declared, `/usr`, `/bin`, `/lib`, `/lib64`,
+  and the probes' temporary directory. One refusing cause on any of them refuses the open. With
+  none, every path that has a withholding cause is recorded, not only the first.
+- **One writable root on a type outside the list withholds the lists for every start**, also
+  for starts that do not mount it. D24 classes every mount against every writable location,
+  and a location without a place cannot be compared.
+
+**What the open does, in order.** This replaces the order § 6, *Embedder notes*, gave:
+
+1. `exec_gate` is not absolute: `config.exec-gate-invalid` (D21).
+2. The file is opened once (D20). Missing, not a regular file, unreadable or over the size
+   bound: `config.exec-gate-unserved` (D19).
+3. The places, as above. A refusing cause: `config.exec-gate-unserved`. A withholding cause:
+   both facts are withheld and the open goes on **without steps 4 to 6**. The helper is not
+   sealed, not bound and never executed, and no probe of § 9 runs.
+4. The file lies in a writable location, or has more than one link:
+   `config.exec-gate-invalid` (D21).
+5. The bytes are sealed and hashed, and `--version` is read in a throwaway sandbox (D20):
+   a wrong line is `config.exec-gate-unserved`.
+6. The two probes of § 9. A probe that does not hold leaves its fact absent (D19).
+
+A helper with two links on a host whose facts are withheld is therefore not refused there. It
+is refused on the first host where the facts could be proved.
+
+**Nothing runs with a list that is not enforced.** A non-empty list implies its fact
+(`profile.rs:213-229`), and admission refuses the first required fact the proof lacks
+(`mod.rs:631-637`). A deny-only profile is D13's refusal. A profile without a list is admitted
+and runs as today, with no helper in its argv (D5).
+
+**Where the cause is carried.** The stakeholder's first condition: "the open's result and the
+adapter's capability report carry the named cause (file-system type and path), and the refusal
+of a profile with a list repeats that cause, so the host's operator learns why lists are not
+served without reading a log at debug level". Each carrier, with the item that exists today:
+
+| carrier | what exists | what is added |
+|---|---|---|
+| the driver's open | `HostDriver::open` returns the driver (`crates/substrate-host/src/lib.rs:1111`). D14's `ExecListProof` is the driver's own record of what its probes proved | `ExecListProof` gains `withheld`, the entries below. The driver writes one `tracing::warn!` line per entry, as the floor's probe does when it withholds the floor (`probe.rs:614-617`) |
+| the open's result, in the confinement API | `open` returns the adapter (`mod.rs:159-170`), and `ConfinementAdapter::facts` returns its proof (`mod.rs:725`) | the proof carries the entries. A caller reads them from the value `open` returned, before it admits anything |
+| the adapter's capability report | the proof is `AdapterFacts`, with public fields and `Serialize` (`facts.rs:71-81`), built by `linux::proof` (`linux.rs:164-214`) and, for `systemd` around `linux`, from the inner proof (`systemd.rs:576-599`) | `AdapterFacts` gains `pub withheld: Vec<FactWithheld>`, serialized only when it is not empty. `linux::proof` fills it from `ExecListProof`; `systemd`'s proof copies the inner adapter's |
+| the refusal of a profile with a list | `decide` returns `ConfinementError::FactUnserved { adapter, fact }` (`mod.rs:631-637`), whose text is "did not prove" and the fact (`mod.rs:225-226`) | the variant gains `withheld: Option<FactWithheld>`. `decide` fills it with the proof's first entry for that fact, and the text ends with the cause, the path, its address and the type |
+| the audit record | `ProfileRefused` carries the code and the fact (`mod.rs:292-304`, built at `:327-345`) | nothing |
+| the daemon's capability snapshot | `publish_confinement` writes `Some(true)` for a proved fact and nothing for another (`probe.rs:269-317`) | nothing in these stories; see below |
+
+```rust
+/// Why an opened adapter does not prove a fact its probe could have proved.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FactWithheld {
+    pub fact: Fact,
+    /// `file-system-unlisted` or `mount-id-unreported`.
+    pub cause: &'static str,
+    /// `config.exec_gate`, `config.workspace_root` or `config.writable_roots`.
+    pub address: &'static str,
+    pub path: String,
+    /// The type field of the path's mount row; absent for `mount-id-unreported`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_system: Option<String>,
+}
+```
+
+The refusal then reads, for a workspace volume on `xfs`:
+
+```text
+confinement.fact-unserved: Linux did not prove ExecSubpaths: file-system-unlisted:
+/var/lib/b10x-substrate/workspaces (config.workspace_root) is on xfs; the lists are served
+on ext4, overlay and tmpfs
+```
+
+It is one line; it is broken here for the page. Its code and status do not change
+(`mod.rs:242-275`).
+
+- **The public items this adds** are one struct with five fields, one field of `AdapterFacts`,
+  one field of the `FactUnserved` variant and one field of D14's `ExecListProof`.
+  `AdapterFacts::new` keeps its signature (`facts.rs:86`); the struct has a private field
+  (`facts.rs:78-80`), so no caller outside the crate builds one by naming its fields, and a new
+  public field breaks none. `crates/substrate-host/tests/confinement-public-items.txt` records
+  each line, and § 16 regenerates it in both stories already.
+- **The field on `FactUnserved` changes an existing item.** Four places in the host crate's
+  source build the variant (`mod.rs:191`, `:633`, `pod.rs:989`, `:997`), and the CLI builds it
+  once (`crates/b10x-substrate-cli/src/confine.rs:284`). Each gains `withheld: None`, except
+  `decide` at `:633`. A pattern that names both fields gains `..`: the scenario runner
+  (`crates/substrate-host/tests/support/mod.rs:149`) and two tests in `pod.rs` (`:1906`,
+  `:1942`). A pattern that already ends in `..` is untouched (`mod.rs:246`, `:262`, `:334`,
+  `confine.rs:625`, `tests/ess_confinement_local.rs:477`). The snapshot test's own cases quote
+  the variant's text (`tests/confinement_public_items.rs:1438-1448`) and change with it. An
+  embedder that builds the variant, or names both of its fields in a pattern, has to change
+  one line.
+- **Not a second variant.** A new variant with the code `confinement.fact-unserved` would
+  change no existing item. It would also give one code two variants, where today each variant
+  has its own (`mod.rs:242-253`), and the scenario runner maps the variant to the
+  specification's error by name (`support/mod.rs:149-151`). A consumer that matches
+  `FactUnserved` would miss a withheld fact and not be told.
+- **The audit record stays as it is.** `ProfileRefused` is a serialized record with a fixed
+  shape, and the stakeholder's three carriers do not include it. It still names the fact. An
+  embedder that wants the cause in its audit trail reads the proof once at open.
+- **The specification does not change for this.** Its error `FactUnserved` has the fields
+  `adapter` and `fact` (`spec/confinement/confinement.yaml:161-165`), and the model has no file
+  system (§ 14). The cause is the host's word beside them, as an error's text is today.
+- **Visible by default.** The proof and the refusal are values the embedder already handles.
+  The `warn` line is the third way: the daemon's default filter is `info`
+  (`crates/substrate-daemon/src/main.rs:602-605`), and the driver writes no line below `warn`
+  for this.
+
+- **`withheld` is empty in D19's other rows.** With `exec_gate` unset, and where a probe did not
+  hold, the facts are absent with no entry. The stakeholder's decision is about a place, and
+  those two rows are as they were.
+
+**The daemon and the wire.** The daemon's capability snapshot cannot carry the cause without a
+bundle change: a confinement fact on the wire is `const true` or absent (`AGENTS.md`, invariant
+6, on bundle `0.26.0`), and `publish_confinement` writes exactly that. So in these two stories
+nothing of the cause reaches the wire. The daemon also does not set `exec_gate` in them: no
+wire start carries a list (§ 15). When the daemon does set it, the driver's `warn` line is what
+its operator sees at startup, once per withheld path. A published reason on the wire, and the
+daemon's own startup line if it wants one of its own, belong to
+`story:exec-start-carries-executable-lists`.
+
+**The start is unchanged.** With the facts absent no profile with a list is admitted, so none
+reaches a start. `exec.sandbox-place-unserved` can therefore arise only on an adapter that
+proved the facts at open, when a path of the start itself has no place: a workspace or a
+declared root on another file system, or an entry that resolves onto one. Its causes, its
+addresses and its status are D26's.
+
+**C, a recorded obligation.** The stakeholder's second condition: "probe xfs in the quota
+fixture's container before the wire story is planned, and add it to the closed list only if
+every probed case of the rule holds there; btrfs stays refused by name."
+
+- **What is owed:** the lists F1 to F7 of § 3.9 and the table of row device, root and `st_dev`,
+  run on a mounted `xfs`, before `story:exec-start-carries-executable-lists` is planned.
+- **Where:** the container `cargo xtask quota-fixture run` builds from
+  `fixtures/quota-lab/Dockerfile`, which already has `SYS_ADMIN` and loop access for a file
+  system image (`AGENTS.md`, § *The real project-quota lane*). The recipe installs `e2fsprogs`
+  and `util-linux` and checks for `mkfs.ext4` (`fixtures/quota-lab/Dockerfile:3-6`). It has no
+  `mkfs.xfs` and no bubblewrap, so the probe needs both added to a recipe. That is read from
+  the file; nothing was built or run.
+- **The rule for the list:** `xfs` enters D26's list only if every case gives the right answer.
+  One wrong answer keeps it out and is recorded with the case.
+- **`btrfs`** stays refused by name. Nothing here obliges a probe of it.
+- This revision ran no probe.
 
 **What this means for the daemon image and the lanes.** Read from the tree, with what a file
 cannot say marked as inferred. In these two stories no wire start carries a list (§ 15), so
@@ -721,11 +900,13 @@ in-process embedder that runs in a container now.
   storage driver decides it, and neither the `Dockerfile` nor a workflow file states one. On the
   probe host Docker reports `overlay2`, the root row has the type `overlay`, and the rule holds
   on it (F8, F9). That the hosted runners' Docker and the kind nodes' containerd use an overlay
-  too is inferred. A runtime with another driver gives another type, and the open is refused by
-  name.
+  too is inferred. A runtime with another driver gives another type; the adapter then opens
+  without the two facts and names that type (D27).
 - **The volume.** Its type is the storage class's, or the Docker host's for an anonymous
-  volume. On `ext4` the lists are served. **On `xfs` or `btrfs` the open with `exec_gate` set is
-  refused, and the daemon serves no list there** until that type has been probed and added.
+  volume. On `ext4` the lists are served. **On `xfs` or `btrfs` the adapter opens, serves no
+  list, and says why**: the proof names the path and the type, and every profile with a list
+  is refused `confinement.fact-unserved` with them (D27). `xfs` is probed before the wire story
+  is planned (C); `btrfs` stays outside the list.
 - **The daemon's `/tmp`** is an `emptyDir` without a medium in the chart
   (`statefulset.yaml:294-295`, `:321-323`): a directory of the node's own file system, whose
   type no file states. The probes' temporary directory lies there, so the same holds for it.
@@ -733,8 +914,27 @@ in-process embedder that runs in a container now.
   (`.github/workflows/release-lanes.yml:65`, `:118-122`). The job prints `df -h / /mnt`
   (`:111`), which shows sizes and not types, so the workflow does not say what `/` or the
   tests' temporary directory is on. That both are ext4 there is inferred. If one is not listed,
-  the lane's first `linux` open fails with `config.exec-gate-unserved` naming the type; it does
-  not pass silently.
+  the adapter opens without the facts, the open step of every `linux` scenario that expects
+  them fails, and the failure prints the proof with the type. The lane does not pass silently.
+
+**The chart's reader is told.** The stakeholder asked for one sentence. It belongs in
+`website/docs/guides/deployment.md`, § *Before you install*, after the table whose row
+`persistence.storageClassName` asks for "a class that binds `WaitForFirstConsumer`"
+(`website/docs/guides/deployment.md:205-213`):
+
+> The executable lists are served only on ext4, overlay and tmpfs volumes today.
+
+- Not under `deploy/helm/substrate`: `values.yaml` has no comment line today, the directory has
+  no README, and `templates/NOTES.txt` prints what an install did. The guide is where the
+  chart's values are explained.
+- The page is public and describes the daemon. In these two stories the daemon serves no list
+  (§ 15), so this document places the sentence with
+  `story:exec-start-carries-executable-lists`, when the chart's daemon first serves one. That
+  timing is this document's reading; the stakeholder's words give none. Until then the embedder
+  notes carry the same statement.
+- `cargo xtask check-docs` holds that page's reading load to `website/ux/baseline.json`; a
+  sentence raises it, and the change that adds it moves the baseline with a decision
+  (`AGENTS.md`, § *Public website*).
 
 **A limit the place does not close: the layers of an overlay.** A directory that is a lower or
 upper layer of an overlay, mounted in the view beside the overlay, shows the same bytes as
@@ -742,6 +942,8 @@ another file system. A deny entry on the overlay does not deny the layer's file 
 container the layer directories lie on the host, outside the container's mounts. On a
 workstation an embedder would have to declare both the overlay and one of its layers as roots.
 This is stated beside the hard-link limit of § 8.5, and no refusal is specified for it (§ 20).
+The stakeholder decided on 2026-11-21 that the embedder notes say it as a rule, in these words:
+"never list a lower directory of an overlay that is also in the view".
 
 ### The helper's arguments
 
@@ -876,10 +1078,11 @@ What the file must be:
 | able to start inside the view | only `/usr`, `/bin`, `/lib` and `/lib64` of the host are there (`process.rs:2732-2743`) |
 | of the driver's protocol | it answers `--version` with the line `substrate-exec-gate/1` and takes the arguments of D24 |
 
-What the driver does with it at open, in order: the trust check of D21; the read, seal and hash
-of D20; one run of `<gate> --version` in a throwaway sandbox, from the sealed bytes, which must
-print the protocol line; the two probes of § 9; the SHA-256 into `BackendBinding`. The driver
-never executes the file outside a sandbox. Who may write the file and its directory is the
+What the driver does with it at open is D27's list of six steps: the path's form, the file,
+the places, the trust check of D21, the seal, hash and `--version` of D20, and the two probes of
+§ 9, with the SHA-256 into `BackendBinding` at the end. On a host whose file system is outside
+D26's list the open stops after the places and the helper is never used. The driver never
+executes the file outside a sandbox. Who may write the file and its directory is the
 embedder's to settle, as it is for `HostConfig.bubblewrap`.
 
 **Deriving a list.** A list names what the step's tools execute, in view paths. Each line below
@@ -907,11 +1110,15 @@ was run on the probe host (§ 3.7); the paths are that host's.
 - **A missing entry shows as `Permission denied`** naming the program the tool could not start
   (T2, T3, T7), or as `bad interpreter` for a script (T12).
 - **The file systems the lists are served on are `ext4`, `overlay` and `tmpfs`** (D26). The
-  helper's file, the workspace root, every declared writable root, the base directories and
-  every root a listed start declares must lie on one of them. With `exec_gate` set and one of
-  the first four elsewhere, for example a workspace volume on `xfs` or `btrfs`, the adapter does
-  not open: `config.exec-gate-unserved` names the path and the type. A start that declares a
-  root elsewhere is refused `exec.sandbox-place-unserved`.
+  helper's file, the workspace root, every declared writable root, the base directories, the
+  temporary directory and every root a listed start declares must lie on one of them.
+  - With `exec_gate` set and one of the first five elsewhere, for example a workspace volume on
+    `xfs` or `btrfs`, the adapter opens and serves no list (D27). Read `facts().withheld` on the
+    adapter `open` returned: each entry names the fact, the cause, the path and the type. A
+    profile with a list is refused `confinement.fact-unserved`, and the refusal's text repeats
+    the first entry. The driver also writes one `warn` line per entry.
+  - A start that declares a root elsewhere is refused `exec.sandbox-place-unserved`.
+  - A temporary directory elsewhere is moved with `TMPDIR`, which `tempfile::tempdir()` reads.
 - **Every entry must exist at the start** (§ 5). The client creates `target` or `node_modules`
   in a fresh clone before it starts the run.
 
@@ -920,6 +1127,11 @@ list `/usr/bin`, not `/usr`
 A rule on `/usr` does not reach a program that is named through `/bin`, `/lib` or `/lib64`
 where those are links into `/usr`, so with `/usr` listed `/bin/sh` and every script that starts
 with `#!/bin/sh` are `Permission denied`, and with `/usr/bin` listed they run (§ 5, K7).
+
+never list a lower directory of an overlay that is also in the view
+
+A deny entry on the overlay does not deny the same file reached through the lower directory,
+because the kernel treats the two as different files (L1, D26).
 
 ### Without a usable helper
 
@@ -931,9 +1143,13 @@ the embedder configured.** Decided with D5.
 | `exec_gate` is not set | the adapter opens; neither fact is proved; a profile with a list is refused at admission | `confinement.fact-unserved` naming `exec_subpaths`, 501 |
 | `exec_gate` is set and is not absolute, or the file lies beneath the workspace root or a declared writable root, or has more than one link (D21) | the open is refused before the file is read | `config.exec-gate-invalid`, 422, address `config.exec_gate`; new |
 | `exec_gate` is set and the file is missing, not a regular file, unreadable, over the size bound, or does not print the protocol line in the throwaway sandbox | the open is refused; no adapter exists, so nothing is admitted | `config.exec-gate-unserved`, 501, address `config.exec_gate`; new |
-| `exec_gate` is set and the place of the helper's file, of the workspace root, of a declared writable root, of a base directory or of the probes' temporary directory cannot be established (D26) | the same: the open is refused | `config.exec-gate-unserved`, 501, address the field whose path it was; the message names the path and the cause |
+| `exec_gate` is set and the helper's file, the workspace root, a declared writable root, a base directory or the probes' temporary directory lies on a file-system type outside D26's list, or the kernel reports no mount ID (D27) | the adapter opens; neither fact is proved; the proof names the cause, the path and the type; a profile with a list is refused at admission, and the refusal repeats them | `confinement.fact-unserved` naming `exec_subpaths`, 501, with the cause |
+| `exec_gate` is set and the place of one of those paths cannot be established for one of the other seven causes (D26) | the open is refused | `config.exec-gate-unserved`, 501, address the field whose path it was; the message names the path and the cause |
 | `exec_gate` is set and usable, and a probe of § 9 did not hold (no Landlock, ABI 1) | the adapter opens; the fact that probe proves is absent; a profile that needs it is refused at admission | `confinement.fact-unserved` naming the fact, 501 |
 | the file changed after the open | nothing: the bytes read at open run (D20) | none |
+
+The rows apply in the order of D27's six steps. On a host that withholds the facts, the trust
+check of D21, the protocol line and the probes are not reached: the helper is never used there.
 
 Reasons:
 
@@ -948,6 +1164,10 @@ Reasons:
   which `ConfinementError::Driver` reports with status 501 (`mod.rs:264-271`). Its message names
   the path and which requirement failed. `linux::open` returns it as it returns every other driver
   error (`linux.rs:144-153`).
+- **A file system outside the list is not a configuration error either** (D27, decided by the
+  stakeholder on 2026-11-21). The reason above for refusing was that an absent fact hides its
+  cause. Here the cause travels with the absence: in the proof, in the refusal and in one `warn`
+  line. The same helper on an `ext4` volume proves the facts.
 - **A probe that did not hold is not a configuration error.** The same helper on another kernel
   proves the fact. The fact is absent, as for every probed fact.
 - **Without the floor nothing is probed.** The protocol line is read in a sandbox, so a host
@@ -961,7 +1181,7 @@ written by a run, so it cannot be that authority. The driver refuses the open
 | check | how | why |
 |---|---|---|
 | the configured path is not absolute | lexical | a relative path depends on the driver's working directory |
-| the file lies in the workspace root or a declared writable root | the path of the opened descriptor, and the canonical form of `workspace_root` and of each `writable_roots` path; then their places are compared (D25). A place that cannot be established does not pass the check: the open is refused `config.exec-gate-unserved` (D26) | both sides are resolved. `HostConfig` holds the paths as the embedder wrote them: nothing in `lib.rs` canonicalizes them, and the adapter resolves the root where it needs it (`linux.rs:353`). Unresolved text would miss a workspace root named through a symbolic link. Canonical text would still miss a workspace root that the host mounts at a second path (K6); the place does not |
+| the file lies in the workspace root or a declared writable root | the path of the opened descriptor, and the canonical form of `workspace_root` and of each `writable_roots` path; then their places are compared (D25). A place that cannot be established does not pass the check. For two causes the facts are withheld and the helper is never used (D27); for the other seven the open is refused `config.exec-gate-unserved` (D26) | both sides are resolved. `HostConfig` holds the paths as the embedder wrote them: nothing in `lib.rs` canonicalizes them, and the adapter resolves the root where it needs it (`linux.rs:353`). Unresolved text would miss a workspace root named through a symbolic link. Canonical text would still miss a workspace root that the host mounts at a second path (K6); the place does not |
 | the file has more than one link | `st_nlink` of the opened descriptor is above 1 | a hard link inside a workspace is another name of the same file, and the path check cannot see it (K4). Whether one of the other names lies in a workspace cannot be answered without walking every workspace. The link count is one `fstat` |
 
 The code is a `DriverError` of class `Refused` (status 422), the form of
@@ -1256,7 +1476,9 @@ its own input.
 denied_paths }`, and `linux::proof` takes it as a second argument.** The value is serialized into
 `SnapshotMaterial` (`probe.rs:36-48`), so the snapshot digest binds it; no published fact changes.
 `proof` is a public item, so `crates/substrate-host/tests/confinement-public-items.txt` is
-regenerated in the first story too.
+regenerated in the first story too. Since the fifth revision the value has a third member,
+`withheld`: the entries of D27, empty unless the open withheld the facts for a named cause.
+`linux::proof` copies them into `AdapterFacts.withheld`.
 
 **D15. Each fact is proved at open by one run in a throwaway sandbox**, with
 `USER_NAMESPACE_ARGV` and the argv of `probe_workspace_scoped_write` (`probe.rs:358-391`), gated on
@@ -1279,7 +1501,13 @@ an ABI 1 kernel fails it. The probe proves the kernel and the helper together; i
 kernel version or an ABI number to decide.
 
 `systemd` around `linux` copies the inner adapter's proved facts
-(`crates/substrate-host/src/confinement/systemd.rs:576-599`) and needs no change.
+(`crates/substrate-host/src/confinement/systemd.rs:576-599`), so it needs no change for the two
+facts. It builds its own proof with `AdapterFacts::new`, which carries no withheld entry, so
+since the fifth revision it copies the inner proof's `withheld` as well: one line (D27).
+
+**No probe runs where the facts are withheld.** D27's third step ends the helper's part of the
+open, so neither row above is run on a host whose file system is outside the list, and the
+probes' temporary directory is placed before that decision.
 
 **D16. `publish_confinement` keeps `confinement_exec_subpaths` at `None`** (`probe.rs:315`). The
 test `the_published_set_is_the_linux_adapters_proof` keeps every other member equal and states
@@ -1333,9 +1561,9 @@ recorded output work for an in-process embedder today without either.
 | `confinement.exec-denied-paths-without-subpaths` | 422 | a deny-list beside an empty `exec_subpaths` | admission, every adapter, after the reserved fields (D13); new |
 | `confinement.exec-denied-paths-exceeded` | 422 | more than `MAX_EXEC_DENIED_PATHS` entries | admission, every adapter; new |
 | `config.exec-gate-invalid` | 422 | `HostConfig.exec_gate` is not absolute, or the file's place is beneath the workspace root or a declared writable root, or the file has more than one link (D21) | the open of `linux`, and of `systemd` around it, before the file is read; new |
-| `config.exec-gate-unserved` | 501 | `HostConfig.exec_gate` is set and the file is missing, not a regular file, unreadable, over the size bound, or does not print the protocol line (D19); or the place of the helper's file, of the workspace root, of a declared writable root, of a base directory or of the probes' temporary directory cannot be established (D26), with the address of the field whose path it was | the open of `linux`, and of `systemd` around it; new |
-| `exec.sandbox-place-unserved` | 501 | the place of the program, of an entry of either list, or of the host source of a declared mount cannot be established: one of the nine causes of D26, among them a file-system type outside `ext4`, `overlay` and `tmpfs` | the start of a profile with a list, before dispatch; never admission, never a start without a list; new |
-| `confinement.fact-unserved` naming `exec_subpaths` | 501 | a non-empty `exec_subpaths` on an adapter that did not prove it: `linux` without `exec_gate`, `linux` whose probe did not hold, and every adapter of § 13 that proves neither fact | admission; existing |
+| `config.exec-gate-unserved` | 501 | `HostConfig.exec_gate` is set and the file is missing, not a regular file, unreadable, over the size bound, or does not print the protocol line (D19); or the place of the helper's file, of the workspace root, of a declared writable root, of a base directory or of the probes' temporary directory cannot be established for one of seven causes: every cause of D26 but `file-system-unlisted` and `mount-id-unreported` (D27). The address is the field whose path it was | the open of `linux`, and of `systemd` around it; new |
+| `exec.sandbox-place-unserved` | 501 | the place of the workspace, of the program, of an entry of either list, or of the host source of a declared mount cannot be established: one of the nine causes of D26, among them a file-system type outside `ext4`, `overlay` and `tmpfs` | the start of a profile with a list, before dispatch, on an adapter that proved the facts; never admission, never a start without a list; new |
+| `confinement.fact-unserved` naming `exec_subpaths` | 501 | a non-empty `exec_subpaths` on an adapter that did not prove it: `linux` without `exec_gate`, `linux` whose probe did not hold, `linux` that withheld the facts at open (D27), and every adapter of § 13 that proves neither fact. In the withheld case the refusal carries the cause, the path, its address and the file-system type | admission; existing code, with one new field on its error (D27) |
 | `confinement.fact-unserved` naming `exec_denied_paths` | 501 | a deny-list on an adapter that proved `exec_subpaths` and not this fact | admission; existing code, new fact |
 | `exec.sandbox-path-unrepresentable` | 422 | an entry of either list that is not normal, holds a refused character, has a symbolic link in a mount classed `beneath`, resolves through a link into a writable mount (D24), or (allow entry on `linux`) does not exist; a program that is not absolute when a list is set, or that fails one of the two link rules | admission for the lexical rule, the start for the rest; existing code, new on `linux` |
 | `exec.sandbox-exec-subpath-undeclared` | 422 | an absolute entry of either list outside the eligible locations (§ 5) | the start; existing code, new on `linux` |
@@ -1347,14 +1575,19 @@ gets the error from `open`. After dispatch there is no refusal: a helper failure
 125, which a program can also return (§ 6). No row lets a profile with a list run without it
 (D19). `exec.capability-stale` is not in the table: the helper's bytes are read once (D20).
 
-No row compares the text of two paths where a place could not be established (D26): the two
-rows that name a place refuse.
+No row compares the text of two paths where a place could not be established (D26). The two
+rows that name a place refuse, and where the open withheld the facts (D27) the row of
+`confinement.fact-unserved` refuses every profile with a list.
+
+A refused open writes no record, and an open that withholds the facts writes no audit record
+either: there is no profile yet. What it leaves is the proof's `withheld` entries and the
+driver's `warn` lines (D27).
 
 ## 13. Per adapter
 
 | adapter | `exec_subpaths` | `exec_denied_paths` |
 |---|---|---|
-| `linux` | proved where the probe held (story 1) | proved where the probe held (story 2) |
+| `linux` | proved where the open did not withhold it (D27) and the probe held (story 1) | proved where the open did not withhold it and the probe held (story 2) |
 | `systemd` around `linux` | `linux`'s | `linux`'s |
 | `macos` | proved, unchanged | proved where `probe_build` held (story 2) |
 | `local`, `systemd` around `local`, `oci`, `pod` | not proved | not proved |
@@ -1375,7 +1608,10 @@ in the review of 2026-11-21.
 
 D26's two refusals are raised at the open and at the start, on a mount table. The model has no
 file system and no start, so no scenario states them; they are unit tests and one lane case
-(§ 16).
+(§ 16). D27 adds nothing to the model either: an adapter that withheld the facts is, to the
+model, an adapter that did not prove them, and `fact-unserved-exec-subpaths` is its outcome.
+The cause is not a field of the specification's `FactUnserved`
+(`spec/confinement/confinement.yaml:161-165`).
 
 Story 1, `spec/confinement/confinement.yaml`:
 
@@ -1437,7 +1673,10 @@ Each case runs its scenario once. A case named `limit_…` asserts a limit of §
 
 **Delegated lane** (`bash scripts/delegated-lane.sh`, `crates/substrate-host/tests/ess_confinement_linux.rs`).
 The script builds `substrate-exec-gate` and names it in the lane's `HostConfig`; without it the
-open step of every `linux` scenario fails on the missing fact and does not pass silently.
+open step of every `linux` scenario fails on the missing fact and does not pass silently. On a
+host that withholds the facts (D27) the same step fails the same way, and the scenario runner
+prints the proof's `withheld` entries with the failure, so the lane's log names the path and the
+file-system type.
 
 Story 1:
 
@@ -1483,6 +1722,17 @@ Story 1:
   - `exec_gate` naming a path that does not exist, a directory, and an unreadable file: each open
     is `config.exec-gate-unserved`, status 501, and the message names the path;
   - `exec_gate` naming a program that does not print the protocol line: the same refusal;
+- **D27, through the driver, with no privilege.** The case opens an adapter of its own. Its
+  `HostConfig` is the lane's with one more declared writable root, whose path is `/proc/sys`
+  and which no start names; the driver checks only a root's name and that its path is absolute
+  when it opens (`lib.rs:470-500`). With `exec_gate` set:
+  - the adapter opens;
+  - `facts()` proves neither `exec_subpaths` nor `exec_denied_paths`, and its `withheld` names
+    `file-system-unlisted`, `config.writable_roots`, `/proc/sys` and `proc` for each;
+  - a profile with a list is refused `confinement.fact-unserved`, its text holds `/proc/sys`
+    and `proc`, its `profile_refused` record is written, and nothing runs;
+  - a profile without a list is admitted and runs, with no helper in its argv;
+  - `systemd` around that adapter reports the same entries (`ess_confinement_systemd`);
 - `systemd` around `linux`: one run with a list (`ess_confinement_systemd`).
 
 Story 2:
@@ -1603,11 +1853,41 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
     root, and the row of `hold/sub` is never chosen;
   - no fallback: for each cause above, the comparison "lies in" returns the cause and never a
     boolean, so a caller cannot read a failure as "outside".
-- `lib.rs` and `process.rs`, D26: the open with a table in which the workspace root's row has
-  the type `xfs` is `config.exec-gate-unserved`, status 501, address `config.workspace_root`,
-  and the message names `xfs`; a start whose declared root has such a row is
-  `exec.sandbox-place-unserved`, status 501, address `read_only_roots`. Both checks take the
-  table as text.
+- `lib.rs` and `process.rs`, D26: a start whose declared root has a row of type `xfs` is
+  `exec.sandbox-place-unserved`, status 501, address `read_only_roots`, on a table given as
+  text; the same open check with a table in which the workspace root's row has a root ending
+  in `//deleted` is `config.exec-gate-unserved`, status 501, address `config.workspace_root`,
+  and so is each of the other six refusing causes.
+- **D27, the open that withholds, each on a table given as text and with no sandbox:**
+  - the workspace root's row has the type `xfs`: the open's decision is "withheld", not an
+    error. Both facts are absent from `ExecListProof`, and its `withheld` has two entries, one
+    per fact, each with the cause `file-system-unlisted`, the address `config.workspace_root`,
+    the root's path and the type `xfs`;
+  - the same for the helper's own file, for a `writable_roots` path, for `/usr`, and for the
+    probes' temporary directory, each with its address; and for `btrfs`, `nfs4` and
+    `fuse.sshfs` in place of `xfs`;
+  - no mount ID reported: withheld with the cause `mount-id-unreported` and no type;
+  - two paths on types outside the list: four entries, in the open's order;
+  - one path with a withholding cause and another with a refusing one: the open is refused;
+  - a withheld open never reaches the trust check: the decision function is given a helper
+    with two links and a table that withholds, and answers "withheld" and not
+    `config.exec-gate-invalid`;
+  - `linux::proof` given that `ExecListProof`: `facts` lacks `exec_subpaths` and
+    `exec_denied_paths`, and `withheld` holds the entries. Serialized, a proof with no entry
+    has no `withheld` member, so every existing serialized proof is unchanged;
+  - `systemd`'s proof around such an inner proof carries the same entries.
+- `mod.rs`, D27, the refusal repeats the cause:
+  - a profile with `exec_subpaths` admitted against that proof is `FactUnserved` naming
+    `exec_subpaths`, with `withheld` set to the proof's first entry for that fact. Its code is
+    `confinement.fact-unserved` and its status 501, and its text holds the cause, the path,
+    the address and `xfs`;
+  - a profile with both lists names `exec_subpaths` first, as the `Fact` order has it;
+  - a profile without a list is admitted against the same proof, and renders the argv it
+    rendered before;
+  - the `profile_refused` record of the first case has its code and its fact and no new
+    member;
+  - against a proof with no entry, `FactUnserved` has `withheld: None` and the text it has
+    today, for `declared_insecure` at open (`mod.rs:191`) and for a fact at admission.
 - `probe.rs`: `the_published_set_is_the_linux_adapters_proof` with its named exception;
   `every_probe_sandbox_carries_the_user_namespace_posture` counts the new probes;
   an unset helper, and one that exits without restricting, each withhold both facts.
@@ -1647,19 +1927,20 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 | D11 | `linux` denies by expanding a listed directory into per-entry rules; the expansion fails closed, and a program replaced in an expanded directory loses the right. Another hard link elsewhere beneath a listed path still runs: decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire story publishes the property (Q4). Third revision: the three steps decide "lies in" by place (D25), and a listed path inside a denied one gets no rule (K8) |
 | D12 | `macos` denies with `process-exec` and `file-map-executable` deny rules after every allow |
 | D13 | a deny-list without an allow-list is `confinement.exec-denied-paths-without-subpaths`, 422, on every adapter, before any fact is read |
-| D14 | the probe's result is a host-private `ExecListProof`, a second argument of `linux::proof` |
+| D14 | the probe's result is a host-private `ExecListProof`, a second argument of `linux::proof`. Fifth revision: it also holds the `withheld` entries of D27 |
 | D15 | each fact is proved by one throwaway run in which the allowed half happened and the refused half did not. Changed: the deny probe includes a second mount. Third revision: the deny entry names the file only through that mount, which shows a part of the listed directory |
 | D16 | `confinement.exec-subpaths` stays unpublished, and the probe test names that exception |
 | D17 | a denied execution is `EACCES` inside the run |
 | D18 | no adapter observes or records a denied execution; § 11 lists what could, and designs none of it |
-| D19 | a profile with a list never runs without it: no `exec_gate` is `confinement.fact-unserved` (501) at admission; a set `exec_gate` that cannot be used is `config.exec-gate-unserved` (501) at open. Decided with D5. Changed: a file changed after the open has no effect (D20), so `exec.capability-stale` is gone from this row |
+| D19 | a profile with a list never runs without it: no `exec_gate` is `confinement.fact-unserved` (501) at admission; a set `exec_gate` that cannot be used is `config.exec-gate-unserved` (501) at open. Decided with D5. Changed: a file changed after the open has no effect (D20), so `exec.capability-stale` is gone from this row. Fifth revision: a file system outside D26's list is not such an open error; the adapter opens with the facts withheld and the cause carried (D27) |
 | D20 | the driver reads the helper once at open through one descriptor, seals and hashes the bytes, and binds those bytes into every view with `--perms 0555 --ro-bind-data`; no name is resolved at a start. Third revision: `F_SEAL_SEAL` is added; each start opens the sealed memfd anew (K3); the two options are cited in the 0.11.2 source |
-| D21 | an `exec_gate` that is not absolute, whose place lies in the workspace root or a declared writable root, or that has more than one link, is `config.exec-gate-invalid` (422) at open. Third revision: both sides are resolved and compared by place (D25), and the link count is new (K4) |
+| D21 | an `exec_gate` that is not absolute, whose place lies in the workspace root or a declared writable root, or that has more than one link, is `config.exec-gate-invalid` (422) at open. Third revision: both sides are resolved and compared by place (D25), and the link count is new (K4). Fifth revision: where the facts are withheld (D27) the trust check is not reached, because the helper is never used |
 | D22 | the lists are a required argument of a type without `Default`, not a field of `AdapterStart`; the three wire sites write `ExecLists::wire()`. Third revision: `wire` is private to the module `crate::process`, so the adapter's modules cannot call it |
 | D23 | a denied file gets no execute rule from any source: an entry, the program, the loader, or a second mount of its directory; a denied program is `exec.sandbox-program-unlisted` (422) before dispatch. Third revision: the second mount is found by place (D25), and `--alias` is gone |
 | D24 | the helper's arguments: each path is a class (`follow` or `beneath`), a mount root and a relative path. Third revision: the class comes from the mount's host source, not its mode in this run; `--writable` names the mounts the run can write; a `follow` path that resolves into one is `exec.sandbox-path-unrepresentable` (422) before dispatch and exit 125 in the helper |
 | D25 | new in the third revision. Whether one path lies in another is decided by place: the device and root of its mount in `/proc/self/mountinfo`, joined with the rest of the path. The helper reads the view's table, the driver its own. The view-ancestor rule the review proposed is not taken (K2). Accepted by the stakeholder on 2026-11-21 with two conditions (D26, § 3.9). Fourth revision: the mount is the row with the mount ID the kernel reports for the opened path (`statx`, `STATX_MNT_ID`), not the longest matching mount point (S2) |
-| D26 | new in the fourth revision, the stakeholder's first condition. Where a place cannot be established, nothing compares path text: nine named causes, one of them a file-system type outside the closed list `ext4`, `overlay`, `tmpfs`. A start is refused `exec.sandbox-place-unserved` (501, new) before dispatch; the open is refused `config.exec-gate-unserved` (501, existing) with the cause; the helper exits 125 with one line. `btrfs`, `xfs` and every network file system are outside the list and refused by name |
+| D26 | new in the fourth revision, the stakeholder's first condition. Where a place cannot be established, nothing compares path text: nine named causes, one of them a file-system type outside the closed list `ext4`, `overlay`, `tmpfs`. A start is refused `exec.sandbox-place-unserved` (501, new) before dispatch; the open is refused `config.exec-gate-unserved` (501, existing) with the cause; the helper exits 125 with one line. `btrfs`, `xfs` and every network file system are outside the list and refused by name. Accepted by the stakeholder on 2026-11-21, the mount-ID change included. Fifth revision: at the open, `file-system-unlisted` and `mount-id-unreported` withhold the facts and no longer refuse the open (D27); the other seven causes refuse it as before |
+| D27 | new in the fifth revision, decided by the stakeholder (agent:sdc) on 2026-11-21: "B now, C before the wire story". With a helper configured and a path of the open on a file-system type outside the list, the adapter opens, both facts stay absent, and a profile with a list is refused `confinement.fact-unserved` (501). The cause, path, address and type are in `ExecListProof`, in `AdapterFacts.withheld`, in the `FactUnserved` error and in one `warn` line; the audit record and the wire do not change. Which paths and causes withhold is a reading: every path the open places (the coordinator's), and `mount-id-unreported` beside `file-system-unlisted` (this document's). C: `xfs` is probed in the quota fixture's container before the wire story is planned and enters the list only if every case holds; `btrfs` stays refused by name |
 
 ## 18. Inferred, not observed
 
@@ -1696,6 +1977,27 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
   `mount-id-unreported`, `mount-row-missing`, `mount-row-repeated` and `mount-point-mismatch`
   are specified and were not provoked. The probe helper implements them; only
   `mount-root-deleted` (S3) and `file-system-unlisted` (U1 to U3) were observed.
+- D27 is read from the code and not built. The fields of `FactWithheld`, the field on
+  `AdapterFacts`, the field on `FactUnserved` and the count of places that change are a
+  proposal from the files cited; nothing was compiled, and the public-items snapshot was not
+  regenerated.
+- D27, the split of causes. That only `file-system-unlisted` and `mount-id-unreported` should
+  withhold, and that every path of the open counts, are readings of the stakeholder's sentence,
+  which names the workspace volume. That a kernel without `STATX_MNT_ID` has no Landlock is
+  from the two manual pages; no such kernel was run. That `xfs`, `btrfs` and the network file
+  systems report a mount ID is inferred from `statx(2)`; U2 and U3 observed it for `proc` and
+  `devtmpfs`.
+- D27, the open's `warn` line: that a `warn` line of the driver reaches an in-process
+  embedder's operator depends on the embedder's subscriber. The daemon's default filter was
+  read (`main.rs:602-605`); no line was written.
+- D27, the lane case: that the driver places `/proc/sys` as type `proc` when it is a declared
+  writable root was not run through the driver. U3 ran the helper on a bind of `/proc/sys`.
+- D27, `TMPDIR`: that `tempfile::tempdir()` follows `TMPDIR` is that crate's and the standard
+  library's documented behaviour, not a run.
+- D27, C: that the quota fixture's container can mount an `xfs` image once `xfsprogs` is in a
+  recipe. The recipe was read; nothing was built.
+- D27, the chart sentence: where it belongs was read from the guide and the chart's files. That
+  it lands with the wire story is this document's reading.
 - D26, one source file for the helper and the driver: how the file is shared between the two
   crates is the story's. Nothing was built.
 - D10: the cost of a start with places. C1 measured an implementation that does more work than
@@ -1819,10 +2121,13 @@ refused by link count.
   the root of a second mount does not reach through that mount (K7); the helper could add a rule
   for each such mount, through the deny check, with the table it already reads. The stories do
   not ask for it, and the limit is stated (§ 5).
-- More file-system types in D26's list. `xfs` is the first to probe: a workspace volume on it
-  refuses the open today. The lists of § 3.9 need a mounted xfs, which needs privilege; the
-  quota fixture's container already mounts a loop image (`fixtures/quota-lab/Dockerfile`) and
-  could carry the probe. `btrfs` needs the subvolume case looked at first.
+- Whether `xfs` enters D26's list. That is no longer open-ended: D27's C obliges the probe
+  before `story:exec-start-carries-executable-lists` is planned, and says what its result
+  decides. Until then a workspace volume on `xfs` opens without the lists and says why.
+  `btrfs` stays refused by name; a probe of it would start with the subvolume case.
+- The cause of a withheld fact on the wire, and in the daemon's own startup output:
+  `story:exec-start-carries-executable-lists` (D27).
+- The cause in the audit record. `ProfileRefused` keeps its shape (D27).
 - A refusal for a view that mounts an overlay and one of its layer directories (L1). The row
   of an overlay names its layer directories in its options; comparing them with the places of
   the other mounts is not designed.
