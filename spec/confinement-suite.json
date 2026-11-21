@@ -3,8 +3,8 @@
     "suite_version": "ess-conformance/34",
     "system": "substrate",
     "specification_version": "v1",
-    "spec_digest": "df98a2f81db665bd8493b7ad303ca6f70ee6bf5f2fe6148d7429027338f21c1f",
-    "contract_digest": "59aa97c5c2ed64992c17aff43577228fb3eecbd7303edc15a9558822ba0da7fa",
+    "spec_digest": "ed42e5b678af84801036603dea23cd863b2cf1fa39bb19e3f7474ee5b9003139",
+    "contract_digest": "8f38af7d371de09e783926da037c6f993f141c4dbbb94d8247211d98b260cf06",
     "scenario_initial_state": "empty"
   },
   "scenarios": {
@@ -810,6 +810,7 @@
                 "ipc_signals_contained",
                 "sealed_paths",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "private_tmpdir",
                 "stdin_pipe",
                 "output_live"
@@ -1644,6 +1645,271 @@
         }
       ]
     },
+    "substrate.confinement/authored/linux-admits-exec-denied-paths-on-delegated": {
+      "purpose": "lane delegated: linux admits a profile with both executable lists, requiring exec_subpaths and exec_denied_paths.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "whole_tree_kill",
+                "ipc_socket_allowlist",
+                "ipc_signals_contained",
+                "exec_subpaths",
+                "exec_denied_paths",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "exec_denied_path_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin/id"
+              ]
+            },
+            "exec_subpath_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin"
+              ]
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "exec_subpaths",
+                "exec_denied_paths"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "filesystem_view"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "linux",
+            "declared_insecure": false,
+            "facts": [
+              "exec_subpaths",
+              "exec_denied_paths"
+            ],
+            "families": [
+              "process_run",
+              "filesystem_view"
+            ]
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "linux"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": false
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "exec_subpaths",
+                  "exec_denied_paths"
+                ]
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/linux-admits-exec-subpaths-on-delegated": {
       "purpose": "lane delegated: linux admits a profile requiring exec_subpaths, reported declared_insecure: false.",
       "steps": [
@@ -1663,6 +1929,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -1912,6 +2179,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -2184,6 +2452,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -2431,6 +2700,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -2678,6 +2948,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -2925,6 +3196,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3082,6 +3354,186 @@
         }
       ]
     },
+    "substrate.confinement/authored/linux-exec-denied-paths-without-subpaths-on-delegated": {
+      "purpose": "lane delegated: a linux profile with a deny-list and no allow-list is refused confinement.exec-denied-paths-without-subpaths.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "whole_tree_kill",
+                "ipc_socket_allowlist",
+                "ipc_signals_contained",
+                "exec_subpaths",
+                "exec_denied_paths",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "exec_denied_path_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin/id"
+              ]
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": []
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "process_run"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "exec-denied-paths-without-subpaths"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.confinement.ExecDeniedPathsWithoutSubpaths",
+          "fields": {
+            "adapter": "linux"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "counts",
+            "at_most": 0
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "exec-denied-paths-without-subpaths"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.confinement.ExecDeniedPathsWithoutSubpaths"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/linux-host-network-unserved-on-delegated": {
       "purpose": "lane delegated: linux, asked for host_network, is refused confinement.fact-unserved naming host_network.",
       "steps": [
@@ -3101,6 +3553,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3277,6 +3730,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3453,6 +3907,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3629,6 +4084,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3804,6 +4260,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -3980,6 +4437,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -4889,6 +5347,378 @@
         {
           "kind": "event",
           "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
+    "substrate.confinement/authored/local-exec-denied-paths-without-subpaths-on-portable": {
+      "purpose": "lane portable: a local profile with a deny-list and no allow-list is refused confinement.exec-denied-paths-without-subpaths.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "local"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "declared_insecure",
+                "paths_are_host_paths",
+                "local_permitted",
+                "host_network",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "local"
+            },
+            "exec_denied_path_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin/id"
+              ]
+            },
+            "local_reason": {
+              "kind": "literal",
+              "value": "the operator runs this task on the developer's own machine"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": []
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "process_run"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "exec-denied-paths-without-subpaths"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.confinement.ExecDeniedPathsWithoutSubpaths",
+          "fields": {
+            "adapter": "local"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "counts",
+            "at_most": 0
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "exec-denied-paths-without-subpaths"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.confinement.ExecDeniedPathsWithoutSubpaths"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
+    "substrate.confinement/authored/local-exec-lists-unserved-on-portable": {
+      "purpose": "lane portable: local with a reason and both executable lists is refused confinement.fact-unserved naming exec_subpaths.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "local"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "declared_insecure",
+                "paths_are_host_paths",
+                "local_permitted",
+                "host_network",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "local"
+            },
+            "exec_denied_path_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin/id"
+              ]
+            },
+            "exec_subpath_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin"
+              ]
+            },
+            "local_reason": {
+              "kind": "literal",
+              "value": "the operator runs this task on the developer's own machine"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "exec_subpaths",
+                "exec_denied_paths"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "process_run"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "fact-unserved-exec-subpaths"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.confinement.FactUnserved",
+          "fields": {
+            "adapter": "local",
+            "fact": "exec_subpaths"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "counts",
+            "at_most": 0
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "fact-unserved-exec-subpaths"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.confinement.FactUnserved"
         },
         {
           "kind": "view",
@@ -6732,6 +7562,7 @@
                 "ipc_signals_contained",
                 "sealed_paths",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "private_tmpdir",
                 "stdin_pipe",
                 "output_live"
@@ -6979,6 +7810,7 @@
                 "ipc_signals_contained",
                 "sealed_paths",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "private_tmpdir",
                 "stdin_pipe",
                 "output_live"
@@ -7207,6 +8039,271 @@
         }
       ]
     },
+    "substrate.confinement/authored/macos-lists-admits-exec-denied-paths-on-macos": {
+      "purpose": "lane macos: macos admits a profile with both executable lists, requiring exec_subpaths and exec_denied_paths.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "macos"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "paths_are_host_paths",
+                "ipc_signals_contained",
+                "sealed_paths",
+                "exec_subpaths",
+                "exec_denied_paths",
+                "private_tmpdir",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "macos"
+            },
+            "exec_denied_path_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin/id"
+              ]
+            },
+            "exec_subpath_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin"
+              ]
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "exec_subpaths",
+                "exec_denied_paths"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "filesystem_view"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "macos",
+            "declared_insecure": false,
+            "facts": [
+              "exec_subpaths",
+              "exec_denied_paths"
+            ],
+            "families": [
+              "process_run",
+              "filesystem_view"
+            ]
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "macos"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": false
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "exec_subpaths",
+                  "exec_denied_paths"
+                ]
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/macos-s1-admits-filesystem-view-on-macos": {
       "purpose": "lane macos: macos admits a profile requiring a filesystem view with host paths and contained signals, reported declared_insecure: false.",
       "steps": [
@@ -7226,6 +8323,7 @@
                 "ipc_signals_contained",
                 "sealed_paths",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "private_tmpdir",
                 "stdin_pipe",
                 "output_live"
@@ -7493,6 +8591,7 @@
                 "ipc_signals_contained",
                 "sealed_paths",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "private_tmpdir",
                 "stdin_pipe",
                 "output_live"
@@ -7668,6 +8767,7 @@
                 "ipc_signals_contained",
                 "sealed_paths",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "private_tmpdir",
                 "stdin_pipe",
                 "output_live"
@@ -7843,6 +8943,7 @@
                 "ipc_signals_contained",
                 "sealed_paths",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "private_tmpdir",
                 "stdin_pipe",
                 "output_live"
@@ -8019,6 +9120,7 @@
                 "ipc_signals_contained",
                 "sealed_paths",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "private_tmpdir",
                 "stdin_pipe",
                 "output_live"
@@ -8268,6 +9370,7 @@
                 "ipc_signals_contained",
                 "sealed_paths",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "private_tmpdir",
                 "stdin_pipe",
                 "output_live"
@@ -8517,6 +9620,7 @@
                 "ipc_signals_contained",
                 "sealed_paths",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "private_tmpdir",
                 "stdin_pipe",
                 "output_live"
@@ -8736,6 +9840,196 @@
         {
           "kind": "event",
           "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
+    "substrate.confinement/authored/model-exec-denied-paths-unserved-on-interpreted": {
+      "purpose": "lane interpreted: an adapter row with exec_subpaths and without exec_denied_paths refuses a profile with both executable lists confinement.fact-unserved naming exec_denied_paths.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "whole_tree_kill",
+                "ipc_socket_allowlist",
+                "ipc_signals_contained",
+                "exec_subpaths",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "exec_denied_path_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin/id"
+              ]
+            },
+            "exec_subpath_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin"
+              ]
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "exec_subpaths",
+                "exec_denied_paths"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "filesystem_view"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "fact-unserved-exec-denied-paths"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.confinement.FactUnserved",
+          "fields": {
+            "adapter": "linux",
+            "fact": "exec_denied_paths"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "counts",
+            "at_most": 0
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "fact-unserved-exec-denied-paths"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.confinement.FactUnserved"
         },
         {
           "kind": "view",
@@ -12158,6 +13452,284 @@
         }
       ]
     },
+    "substrate.confinement/authored/systemd-linux-admits-exec-denied-paths-on-delegated": {
+      "purpose": "lane delegated: systemd around linux admits a profile with both executable lists, requiring exec_subpaths and exec_denied_paths.",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.OpenAdapter",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "systemd"
+            },
+            "facts": {
+              "kind": "literal",
+              "value": [
+                "whole_tree_kill",
+                "ipc_socket_allowlist",
+                "ipc_signals_contained",
+                "exec_subpaths",
+                "exec_denied_paths",
+                "stdin_pipe",
+                "output_live"
+              ]
+            },
+            "inner": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "served_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "process_watch",
+                "output_read",
+                "wait",
+                "workspace",
+                "filesystem_view",
+                "limits",
+                "audit"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.confinement.AdmitProfile",
+          "actor": "substrate.confinement.Embedder",
+          "input": {
+            "adapter": {
+              "kind": "literal",
+              "value": "systemd"
+            },
+            "exec_denied_path_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin/id"
+              ]
+            },
+            "exec_subpath_entries": {
+              "kind": "literal",
+              "value": [
+                "/usr/bin"
+              ]
+            },
+            "inner": {
+              "kind": "literal",
+              "value": "linux"
+            },
+            "required_facts": {
+              "kind": "literal",
+              "value": [
+                "exec_subpaths",
+                "exec_denied_paths"
+              ]
+            },
+            "required_families": {
+              "kind": "literal",
+              "value": [
+                "process_run",
+                "filesystem_view"
+              ]
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "payload": {
+            "adapter": "systemd",
+            "declared_insecure": false,
+            "facts": [
+              "exec_subpaths",
+              "exec_denied_paths"
+            ],
+            "families": [
+              "process_run",
+              "filesystem_view"
+            ],
+            "inner": "linux"
+          },
+          "shape": {
+            "adapter": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux",
+                "macos",
+                "systemd",
+                "oci",
+                "pod"
+              ]
+            },
+            "declared_insecure": {
+              "holds": "primitive",
+              "kind": "boolean"
+            },
+            "facts": {
+              "holds": "list"
+            },
+            "families": {
+              "holds": "list"
+            },
+            "inner": {
+              "holds": "enum",
+              "variants": [
+                "local",
+                "linux"
+              ],
+              "optional": true
+            },
+            "local_reason": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "profile": {
+              "holds": "primitive",
+              "kind": "uuid"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "run",
+          "entity": "substrate.confinement.Profile",
+          "event": "substrate.confinement.ProfileAdmitted",
+          "field": "profile"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.confinement.Profiles"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.confinement.Profiles",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "adapter": {
+                "kind": "literal",
+                "value": "systemd"
+              },
+              "declared_insecure": {
+                "kind": "literal",
+                "value": false
+              },
+              "facts": {
+                "kind": "literal",
+                "value": [
+                  "exec_subpaths",
+                  "exec_denied_paths"
+                ]
+              },
+              "inner": {
+                "kind": "literal",
+                "value": "linux"
+              },
+              "profile": {
+                "kind": "instance",
+                "instance": "run"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.confinement"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.AdapterName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ContractFamily"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Fact"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ImageReference"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.InnerAdapter"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.Profile.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.confinement.ProfileId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.confinement.Profile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.AdmitProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.confinement.OpenAdapter"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.AdmitProfile",
+            "outcome": "admitted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.confinement.OpenAdapter",
+            "outcome": "opened"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.confinement.ProfileAdmitted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.confinement.Profiles"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.confinement.Embedder"
+        }
+      ]
+    },
     "substrate.confinement/authored/systemd-linux-admits-exec-subpaths-on-delegated": {
       "purpose": "lane delegated: systemd around linux admits a profile requiring exec_subpaths, reported declared_insecure: false.",
       "steps": [
@@ -12177,6 +13749,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -12439,6 +14012,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -12697,6 +14271,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -12957,6 +14532,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]
@@ -13217,6 +14793,7 @@
                 "ipc_socket_allowlist",
                 "ipc_signals_contained",
                 "exec_subpaths",
+                "exec_denied_paths",
                 "stdin_pipe",
                 "output_live"
               ]

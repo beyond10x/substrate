@@ -109,13 +109,17 @@ pub(crate) fn probe_host(
     let exec_lists = match gate {
         Some(gate) if exec => {
             check_exec_gate_protocol(config, gate)?;
+            // The deny-list is proved only where the allow-list was (design 35 § 9).
+            let subpaths = probe_exec_subpaths(config, gate);
             ExecListProof {
-                subpaths: probe_exec_subpaths(config, gate),
+                subpaths,
+                denied_paths: subpaths && probe_exec_denied_paths(config, gate),
                 withheld,
             }
         }
         _ => ExecListProof {
             subpaths: false,
+            denied_paths: false,
             withheld,
         },
     };
@@ -556,6 +560,7 @@ pub(crate) fn probe_exec_subpaths(config: &HostConfig, gate: &ExecGate) -> bool 
     let Ok(lists) = crate::exec_gate::plan(
         gate,
         &["allowed".to_owned()],
+        &[],
         "/bin/sh",
         &crate::exec_gate::View {
             workspace: access.root(),
@@ -609,6 +614,94 @@ pub(crate) fn probe_exec_subpaths(config: &HostConfig, gate: &ExecGate) -> bool 
     };
     drop(access);
     seen.held()
+}
+
+/// Proves the deny-list in one throwaway run, as a start applies it (design 35 D15, § 9).
+///
+/// The workspace holds `allowed/true` and `allowed/sub/true`, with `allowed/sub/again` a hard
+/// link to the latter. `allowed` is the allow-list. `allowed/sub` is bound a second time at
+/// `/second`, and the deny-list is `/second/true`: the entry names the file only through the
+/// second mount, which shows a part of the listed directory. That is the shape the text of
+/// two paths and the ancestors of the entry in the view both get wrong (K2, K5), so the run
+/// proves the helper's place handling (D25) and does not assume it.
+///
+/// Each half must hold. `allowed/true` ran. `/second/true`, `allowed/sub/true`, which is the
+/// same file under its listed name, and `allowed/sub/again`, another name of it, each ended
+/// the shell's attempt with status 126. Any other outcome, a helper that takes no `--deny`
+/// among them, answers `false`.
+pub(crate) fn probe_exec_denied_paths(config: &HostConfig, gate: &ExecGate) -> bool {
+    const SECOND: &str = "/second";
+    let Some(host_true) = base_tool("true") else {
+        return false;
+    };
+    let Ok(root) = tempfile::tempdir() else {
+        return false;
+    };
+    let workspace = root.path().join("workspace");
+    let sub = workspace.join("allowed/sub");
+    let staged = std::fs::create_dir_all(&sub).is_ok()
+        && std::fs::copy(&host_true, workspace.join("allowed/true")).is_ok()
+        && std::fs::copy(&host_true, sub.join("true")).is_ok()
+        && std::fs::hard_link(sub.join("true"), sub.join("again")).is_ok();
+    let Some(sub) = sub.to_str().filter(|_| staged) else {
+        return false;
+    };
+    let Ok(pinned) = crate::fs::pin_workspace_directory(&workspace) else {
+        return false;
+    };
+    let Ok(access) = crate::process::ProcessRuntime::prepare_workspace_access(
+        &pinned,
+        &substrate_wire::WorkspaceAccess::ReadWrite,
+    ) else {
+        return false;
+    };
+    drop(pinned);
+    let Ok(mut lists) = crate::exec_gate::plan(
+        gate,
+        &["allowed".to_owned()],
+        &[],
+        "/bin/sh",
+        &crate::exec_gate::View {
+            workspace: access.root(),
+            read_only_roots: &[],
+            read_only_files: &[],
+            writable_roots: &[],
+            scratch: false,
+        },
+        config,
+    ) else {
+        return false;
+    };
+    // The second mount is the probe's own, not a mount a profile can declare, so its entry is
+    // written here: a mount that shows something a run can write, opened `beneath`.
+    let Ok(denied) =
+        substrate_exec_gate::Located::new(substrate_exec_gate::Class::Beneath, SECOND, "true")
+    else {
+        return false;
+    };
+    lists.deny.push(denied);
+    lists.writable.push(SECOND.to_owned());
+    let mut binds = access.bind_args();
+    binds.extend(["--ro-bind".to_owned(), sub.to_owned(), SECOND.to_owned()]);
+    let Ok(descriptor) = gate.reopen() else {
+        return false;
+    };
+    let status = exec_gate_sandbox(config, &descriptor, &binds)
+        .args(["--chdir", "/workspace", "--", crate::exec_gate::GATE_MOUNT])
+        .args(lists.options())
+        .args([
+            "/bin/sh",
+            "-c",
+            "allowed/true || exit 21; \
+             /second/true 2>/dev/null; [ $? -eq 126 ] || exit 22; \
+             allowed/sub/true 2>/dev/null; [ $? -eq 126 ] || exit 23; \
+             allowed/sub/again 2>/dev/null; [ $? -eq 126 ] || exit 24",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    drop(access);
+    status.is_ok_and(|status| status.code() == Some(0))
 }
 
 /// Proves ADR 0023's mount ordering in a disposable tree rather than publishing it from a
@@ -1541,6 +1634,7 @@ mod tests {
             },
             &ExecListProof {
                 subpaths: probe_held,
+                denied_paths: probe_held,
                 ..ExecListProof::default()
             },
         )
@@ -1553,10 +1647,49 @@ mod tests {
     /// this exception.
     const PROVED_AND_NOT_PUBLISHED: [ConfinementProperty; 1] = [ConfinementProperty::ExecSubpaths];
 
+    /// The second member the adapter proves and the daemon does not publish (design 35 D16, D10):
+    /// `exec_denied_paths` has no wire property at all, so there is nothing for
+    /// `publish_confinement` to set, and the published facts hold no member of this name.
+    /// `story:exec-start-carries-executable-lists` gives it one.
+    const PROVED_WITHOUT_A_WIRE_PROPERTY: [(crate::confinement::Fact, &str); 1] = [(
+        crate::confinement::Fact::ExecDeniedPaths,
+        "exec-denied-paths",
+    )];
+
+    /// What [`PROVED_WITHOUT_A_WIRE_PROPERTY`] states, for one published set and one proof.
+    fn assert_proved_without_a_wire_property(
+        facts: &CapabilityFacts,
+        proof: &crate::confinement::AdapterFacts,
+        expected: bool,
+    ) {
+        for (fact, name) in &PROVED_WITHOUT_A_WIRE_PROPERTY {
+            assert!(
+                ConfinementProperty::ALL
+                    .into_iter()
+                    .all(|property| property.name() != *name),
+                "{name} is a wire property; design 35 D16 has none until a wire start carries \
+                 the list"
+            );
+            assert!(
+                serde_json::to_value(facts)
+                    .expect("facts serialize")
+                    .get(format!("confinement.{name}"))
+                    .is_none(),
+                "{name} is published"
+            );
+            assert_eq!(
+                proof.proves(fact),
+                expected,
+                "the adapter proves {name} exactly on the floor with the probe held"
+            );
+        }
+    }
+
     /// The published set and the adapter's own proof agree member by member, on the full set
     /// and on each set that loses one underlying fact, so neither can drift from the other. The
-    /// one exception is [`PROVED_AND_NOT_PUBLISHED`], stated by name: with the executable-list
-    /// probe held the adapter proves it on the floor, and no set publishes it.
+    /// two exceptions are stated by name, [`PROVED_AND_NOT_PUBLISHED`] and
+    /// [`PROVED_WITHOUT_A_WIRE_PROPERTY`]: with the executable-list probes held the adapter
+    /// proves both list facts on the floor, and no set publishes either.
     #[test]
     fn the_published_set_is_the_linux_adapters_proof() {
         let full = delegated_facts();
@@ -1622,6 +1755,7 @@ mod tests {
                         property.name()
                     );
                 }
+                assert_proved_without_a_wire_property(&facts, &proof, floor && probe_held);
             }
         }
         let mut facts = full;

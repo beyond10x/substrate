@@ -171,6 +171,14 @@ fn refusal(error: &ConfinementError) -> (String, String, Value) {
             "ReservedFieldUnserved".into(),
             json!({"field": field.name()}),
         ),
+        ConfinementError::ExecDeniedPathsWithoutSubpaths { adapter } => (
+            "exec-denied-paths-without-subpaths".into(),
+            "ExecDeniedPathsWithoutSubpaths".into(),
+            json!({"adapter": adapter.name()}),
+        ),
+        ConfinementError::ExecDeniedPathsExceeded { .. } => {
+            panic!("the model states no bound of the deny-list: {error}")
+        }
         ConfinementError::Driver(error) => panic!("the model names no driver refusal: {error}"),
     }
 }
@@ -406,6 +414,15 @@ impl<'a> Target<'a> {
             image: input.get("image").map(|value| text(value).to_owned()),
             ingress_routes: input.get("ingress_routes").cloned(),
             rate_bounds: input.get("rate_bounds").cloned(),
+            // The model's two list inputs are the profile's two lists (design 35 section 14).
+            exec_subpaths: input
+                .get("exec_subpath_entries")
+                .map(strings)
+                .unwrap_or_default(),
+            exec_denied_paths: input
+                .get("exec_denied_path_entries")
+                .map(strings)
+                .unwrap_or_default(),
             audit: Some(AuditSink::new(move |record: &AuditRecord| {
                 sink_records.lock().push(record.clone());
             })),

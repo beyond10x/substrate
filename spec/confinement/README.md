@@ -113,26 +113,26 @@ follows:
 
 | lane | scenarios |
 |---|---|
-| `portable` | 20: thirteen `local-*` (admission, a missing reason, host policy, a filesystem view, four facts, both reserved fields, the open without `declared_insecure`, `stdin_pipe` admitted, `output_live` admitted), three `*-open-without-*` for `systemd` around `local`, `oci` and `pod`, and four `absent-*` (`macos`, `systemd`, `oci`, `pod`) with their setup in the summary |
-| `delegated` | 22: twelve `linux-*`, ten `systemd-*` (four around `local`, six around `linux`, one of them requested on a scope opened around `local`); `stdin_pipe` and `output_live` each admitted on `linux` and on `systemd` around each, and `exec_subpaths` on `linux` and on `systemd` around it (design 35: the open step states it, so the lane's adapter is opened with the helper `HostConfig.exec_gate` names) |
-| `macos` | 10: `absent-linux-*`, four `macos-s1-*`, three `macos-s2-*`, two `macos-io-*` (`stdin_pipe` admitted, `output_live` admitted) |
+| `portable` | 22: fifteen `local-*` (admission, a missing reason, host policy, a filesystem view, four facts, both reserved fields, the open without `declared_insecure`, `stdin_pipe` admitted, `output_live` admitted, a deny-list without an allow-list refused, both executable lists refused naming `exec_subpaths`), three `*-open-without-*` for `systemd` around `local`, `oci` and `pod`, and four `absent-*` (`macos`, `systemd`, `oci`, `pod`) with their setup in the summary |
+| `delegated` | 25: fourteen `linux-*`, eleven `systemd-*` (four around `local`, seven around `linux`, one of them requested on a scope opened around `local`); `stdin_pipe` and `output_live` each admitted on `linux` and on `systemd` around each, `exec_subpaths` and both executable lists on `linux` and on `systemd` around it (design 35: the open step states both list facts, so the lane's adapter is opened with the helper `HostConfig.exec_gate` names), and a deny-list without an allow-list refused on `linux` |
+| `macos` | 11: `absent-linux-*`, four `macos-s1-*`, three `macos-s2-*`, two `macos-io-*` (`stdin_pipe` admitted, `output_live` admitted), one `macos-lists-*` (both executable lists admitted) |
 | `oci` | 7: admission by digest, `stdin_pipe` admitted on the lane's pinned runtime, `output_live` admitted, egress refused, three images refused `image-unpinned` (a tag, `@sha256:` with no digest, a short digest) |
 | `pod` | 5: admission by digest, a filesystem view refused, `stdin_pipe` and `output_live` each refused `fact-unserved`, `@sha256:latest` refused `image-unpinned` |
-| `interpreted` | 3: `model-*`, the six families every declared adapter serves, each refused by name, and `stdin_pipe` and `output_live` each refused by name on a row that holds `linux`'s other facts |
+| `interpreted` | 4: `model-*`, the six families every declared adapter serves, each refused by name, `stdin_pipe` and `output_live` each refused by name on a row that holds `linux`'s other facts, and `exec_denied_paths` refused by name on a row that holds `exec_subpaths` without it |
 
 **Synthesized scenarios check the model against the interpreted reference only.** ESS names them
 by command and outcome (`substrate.confinement.OpenAdapter/outcome/opened`) and cannot rename
 them, so they carry no adapter and no lane, and no adapter lane selects them. Adapter lanes run the
 authored scenarios above.
 
-Synthesis writes 5 scenarios, all on `OpenAdapter`, and refuses 32 obligations, every one on
+Synthesis writes 5 scenarios, all on `OpenAdapter`, and refuses 34 obligations, every one on
 `AdmitProfile`. The open refusals that keep a `local` row declared insecure and an `oci` or `pod`
 row digest-pinned are guards on the adapter identity, and with them ESS 0.81.0 synthesis arranges
 no adapter row for an admission (`ESS-SYNTH-003`, "no candidate of the 15 tried satisfies
 `substrate.confinement.Adapter` stored related row selecting this branch", and `ESS-SYNTH-001` for
 the reserved fields and `adapter-not-open`). The model
-keeps the refusals and the authored scenarios carry admission: each of the 37 outcomes of the two
-commands has at least one scenario among the 67 authored. All 72 scenarios pass against ESS
+keeps the refusals and the authored scenarios carry admission: each of the 39 outcomes of the two
+commands has at least one scenario among the 74 authored. All 79 scenarios pass against ESS
 0.81.0's `interpreted` target.
 
 ## Open questions (`UNMAPPED:` in `confinement.yaml`)

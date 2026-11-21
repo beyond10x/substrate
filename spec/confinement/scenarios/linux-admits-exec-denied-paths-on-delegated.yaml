@@ -1,0 +1,47 @@
+# Design 35 section 8 (`story:executable-deny-list`): `linux` proves `exec_denied_paths` where its
+# probe held a run to a deny-list beside an allow-list. This is the admission; that a denied
+# program fails inside the run and its neighbour runs is a case of the delegated lane.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-admits-exec-denied-paths-on-delegated
+summary: "lane delegated: linux admits a profile with both executable lists, requiring exec_subpaths and exec_denied_paths."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-11-21T10:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, exec_denied_paths, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T10:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [process_run, filesystem_view]
+      required_facts: [exec_subpaths, exec_denied_paths]
+      exec_subpath_entries: [/usr/bin]
+      exec_denied_path_entries: [/usr/bin/id]
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: linux
+          families: [process_run, filesystem_view]
+          facts: [exec_subpaths, exec_denied_paths]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: linux
+      facts: [exec_subpaths, exec_denied_paths]
+      declared_insecure: false

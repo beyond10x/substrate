@@ -1,5 +1,7 @@
 //! Design 35 (`docs/design/35-executable-lists.md`), `story:linux-executable-allow-list`: runs on
-//! the `linux` adapter held to an executable allow-list.
+//! the `linux` adapter held to an executable allow-list. The cases of
+//! `story:executable-deny-list` are the last two of this file, probes K2 and K8 through the
+//! driver, and the module `exec_denied.rs` beside it.
 //!
 //! Each case opens the real adapter with `substrate-exec-gate`, starts one run and reads what the
 //! run itself observed. A case named `limit_…` asserts a limit the design states as it is, so a
@@ -23,6 +25,9 @@ use substrate_host::confinement::{
     linux::LinuxRequest,
 };
 use substrate_host::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
+
+#[path = "exec_denied.rs"]
+mod denied;
 
 /// Where the driver binds the helper's bytes in a run's view.
 const GATE: &str = "/.substrate-exec-gate";
@@ -99,17 +104,19 @@ struct Lane {
     workspace: PathBuf,
 }
 
-/// The adapter opened with the lane's helper, having proved `exec_subpaths`, and one workspace;
-/// or `None` after printing `<name>: ABSENT (<reason>)`.
+/// The adapter opened with the lane's helper, having proved both executable-list facts, and
+/// one workspace; or `None` after printing `<name>: ABSENT (<reason>)`.
 fn lane(name: &str) -> Option<Lane> {
     let cgroup_root = delegated(name)?;
     let host = tempfile::tempdir().expect("host root");
     let adapter = open_with(host.path(), &cgroup_root, Some(helper())).expect("linux opens");
-    assert!(
-        adapter.facts().proves(&Fact::ExecSubpaths),
-        "{name}: linux opened with the helper did not prove exec_subpaths: {:?}",
-        adapter.facts()
-    );
+    for fact in [Fact::ExecSubpaths, Fact::ExecDeniedPaths] {
+        assert!(
+            adapter.facts().proves(&fact),
+            "{name}: linux opened with the helper did not prove {fact:?}: {:?}",
+            adapter.facts()
+        );
+    }
     let workspace = workspace(host.path());
     Some(Lane {
         host,
@@ -593,6 +600,7 @@ async fn a_link_in_a_read_only_root_inside_the_workspace_root_is_refused() {
 fn gate_in_a_view(ro: &Path, workspace: &Path, allow: Located) -> std::process::Output {
     let sh = tool("sh");
     let lists = Lists {
+        deny: Vec::new(),
         program: Located::new(
             Class::Follow,
             sh.parent().and_then(Path::to_str).expect("a directory"),
@@ -751,6 +759,20 @@ async fn a_root_whose_place_cannot_be_established_refuses_a_listed_start_only() 
     ] {
         assert!(message.contains(holds), "{message}");
     }
+    // The root listed and a file of it denied (`story:executable-deny-list`): the same refusal,
+    // and never a comparison of the two paths' text.
+    assert_start_refused(
+        &lane.adapter,
+        ConfinementProfile {
+            read_only_roots: roots.clone(),
+            ..listed_and_denied(&lane.workspace, &["/opt/p"], &["/opt/p/kernel/ostype"])
+        },
+        &text(&tool("sh")),
+        ("exec.sandbox-place-unserved", 501),
+        &lane.workspace.join("ran"),
+        "a root on procfs, listed, with a deny entry in it",
+    )
+    .await;
     // No list, no place asked: the run starts and reads the root.
     let (code, stdout) = run(
         &lane.adapter,
@@ -801,10 +823,21 @@ async fn the_helper_replaced_and_removed_after_the_open_changes_no_later_start()
 /// The refusal of a listed profile on an adapter that did not prove the fact: status 501, naming
 /// `exec_subpaths`, with its `profile_refused` record.
 fn assert_fact_unserved(adapter: &Arc<dyn ConfinementAdapter>, workspace: &Path, what: &str) {
+    for fact in [Fact::ExecSubpaths, Fact::ExecDeniedPaths] {
+        assert!(
+            !adapter.facts().proves(&fact),
+            "{what}: {fact:?}: {:?}",
+            adapter.facts()
+        );
+    }
+    // Both lists name the first fact of the order, as one list does (D10).
+    let both = listed_and_denied(workspace, &["bin"], &["bin/tool"]);
     assert!(
-        !adapter.facts().proves(&Fact::ExecSubpaths),
-        "{what}: {:?}",
-        adapter.facts()
+        matches!(
+            adapter.admit(&both),
+            Err(ConfinementError::FactUnserved { fact, .. }) if fact == Fact::ExecSubpaths
+        ),
+        "{what}: both lists"
     );
     let (profile, records) = audited(listed(workspace, &["bin"]));
     let error = adapter.admit(&profile).expect_err(what);
@@ -1125,7 +1158,15 @@ async fn a_writable_root_on_an_unlisted_file_system_withholds_the_lists_and_says
         path: "/proc/sys".to_owned(),
         file_system: Some("proc".to_owned()),
     };
-    // Visible by default: the open wrote one `warn` line for the entry, with its fields.
+    let entries = [
+        entry.clone(),
+        FactWithheld {
+            fact: Fact::ExecDeniedPaths,
+            ..entry.clone()
+        },
+    ];
+    // Visible by default: the open wrote one `warn` line per entry, one entry per fact, with
+    // its fields.
     let withheld: Vec<_> = warnings
         .iter()
         .filter(|fields| {
@@ -1134,23 +1175,26 @@ async fn a_writable_root_on_an_unlisted_file_system_withholds_the_lists_and_says
                 .is_some_and(|message| message.contains("executable lists withheld"))
         })
         .collect();
-    assert_eq!(withheld.len(), 1, "one line per entry: {warnings:?}");
-    for (field, value) in [
-        ("fact", "ExecSubpaths"),
-        ("cause", "file-system-unlisted"),
-        ("address", "config.writable_roots"),
-        ("path", "/proc/sys"),
-        ("file_system", "proc"),
-    ] {
-        assert_eq!(
-            withheld[0].get(field).map(String::as_str),
-            Some(value),
-            "{field}: {withheld:?}"
-        );
+    assert_eq!(withheld.len(), 2, "one line per entry: {warnings:?}");
+    for (line, fact) in withheld.iter().zip(["ExecSubpaths", "ExecDeniedPaths"]) {
+        for (field, value) in [
+            ("fact", fact),
+            ("cause", "file-system-unlisted"),
+            ("address", "config.writable_roots"),
+            ("path", "/proc/sys"),
+            ("file_system", "proc"),
+        ] {
+            assert_eq!(
+                line.get(field).map(String::as_str),
+                Some(value),
+                "{field}: {withheld:?}"
+            );
+        }
     }
     let facts = adapter.facts();
     assert!(!facts.proves(&Fact::ExecSubpaths), "{facts:?}");
-    assert_eq!(facts.withheld, std::slice::from_ref(&entry), "{facts:?}");
+    assert!(!facts.proves(&Fact::ExecDeniedPaths), "{facts:?}");
+    assert_eq!(facts.withheld, entries, "{facts:?}");
     // The floor itself is proved: only the lists are withheld.
     assert!(facts.proves(&Fact::WholeTreeKill), "{facts:?}");
 
@@ -1716,4 +1760,97 @@ async fn limit_a_declared_preload_file_is_read_by_every_allowed_dynamic_program(
         "the object was loaded in the helper or in a program outside the list: {loaded:?}"
     );
     println!("{NAME}: executed, loaded in {loaded:?}");
+}
+
+/// [`tools`], with `bin/other` beside `bin/tool`: a second program of the directory a case
+/// denies one program of.
+fn tools_with_a_neighbour(host: &Path) -> PathBuf {
+    let tools = tools(host);
+    std::fs::copy(tool("true"), tools.join("bin/other")).expect("copy true");
+    tools
+}
+
+/// [`listed`], with `denied` as the deny-list.
+fn listed_and_denied(workspace: &Path, entries: &[&str], denied: &[&str]) -> ConfinementProfile {
+    ConfinementProfile {
+        exec_denied_paths: denied.iter().map(|entry| (*entry).to_owned()).collect(),
+        ..listed(workspace, entries)
+    }
+}
+
+/// **Probe K2, through the driver** (design 35 D25, § 16; the story's first failing test). One
+/// directory is the read-only root `/opt/t` and its `bin` is the root `/opt/x`. The profile
+/// lists `/opt/t` and denies `/opt/x/tool`: the deny entry names the file only through the
+/// second mount, which shows a part of the listed directory. The file is denied under both
+/// names and its neighbour runs. The text of the two paths, and the ancestors of `/opt/x/tool`
+/// in the view, both miss it; the place does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_program_denied_through_a_second_mount_of_a_part_of_a_listed_directory_is_denied() {
+    const NAME: &str = "ESS confinement linux exec deny K2";
+    let Some(lane) = lane(NAME) else {
+        return;
+    };
+    let tools = tools_with_a_neighbour(lane.host.path());
+    let mut entries = base_directories();
+    entries.push("/opt/t".to_owned());
+    let entries: Vec<&str> = entries.iter().map(String::as_str).collect();
+    let profile = ConfinementProfile {
+        read_only_roots: vec![root(&tools, "/opt/t"), root(&tools.join("bin"), "/opt/x")],
+        ..listed_and_denied(&lane.workspace, &entries, &["/opt/x/tool"])
+    };
+    let (code, stdout) = run(
+        &lane.adapter,
+        &profile,
+        "/opt/t/bin/tool 2>/dev/null; echo $?; /opt/x/tool 2>/dev/null; echo $?; \
+         /opt/t/bin/other; echo $?",
+    )
+    .await;
+    assert_eq!(
+        stdout, "126\n126\n0\n",
+        "the denied file under its listed name, under the name the entry wrote, and its neighbour"
+    );
+    assert_eq!(code, Some(0));
+    println!("{NAME}: executed");
+}
+
+/// **Probe K8, through the driver** (design 35 D11 step 1, § 16; the story's first failing
+/// test). The same two roots; the profile lists `/opt/t/bin` and denies `/opt/t`, so the listed
+/// directory lies inside a denied one and gets no rule. A program beneath `/opt/t` is refused
+/// before dispatch, `exec.sandbox-program-unlisted`; with a program elsewhere the run starts
+/// and its execution of `/opt/t/bin/other` fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listed_directory_inside_a_denied_one_is_denied() {
+    const NAME: &str = "ESS confinement linux exec deny K8";
+    let Some(lane) = lane(NAME) else {
+        return;
+    };
+    let tools = tools_with_a_neighbour(lane.host.path());
+    let mut entries = base_directories();
+    entries.push("/opt/t/bin".to_owned());
+    let entries: Vec<&str> = entries.iter().map(String::as_str).collect();
+    let profile = ConfinementProfile {
+        read_only_roots: vec![root(&tools, "/opt/t"), root(&tools.join("bin"), "/opt/x")],
+        ..listed_and_denied(&lane.workspace, &entries, &["/opt/t"])
+    };
+    assert_start_refused(
+        &lane.adapter,
+        profile.clone(),
+        "/opt/t/bin/tool",
+        ("exec.sandbox-program-unlisted", 422),
+        &lane.workspace.join("ran"),
+        "a program beneath the denied directory",
+    )
+    .await;
+    let (code, stdout) = run(
+        &lane.adapter,
+        &profile,
+        "/opt/t/bin/other 2>/dev/null; echo $?; /opt/x/other 2>/dev/null; echo $?",
+    )
+    .await;
+    assert_eq!(
+        stdout, "126\n126\n",
+        "no program of the listed directory inside the denied one runs, under either mount"
+    );
+    assert_eq!(code, Some(0));
+    println!("{NAME}: executed");
 }

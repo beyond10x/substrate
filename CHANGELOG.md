@@ -62,6 +62,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     `tmpfs`. With `exec_gate` set and a path of the open on another file-system type, the
     adapter opens without the fact; `AdapterFacts::withheld` and the `confinement.fact-unserved`
     refusal name the cause, the path and the type.
+- `ConfinementProfile` carries an executable deny-list, `exec_denied_paths`, beside
+  `exec_subpaths` (design 35 § 8). `linux`, `systemd` around it and `macos` enforce it and prove
+  the new fact `exec_denied_paths`, which stands directly after `exec_subpaths`; `local`, `oci`,
+  `pod` and `systemd` around `local` refuse the profile `confinement.fact-unserved`. The wire,
+  the bundle and the daemon are unchanged, and the fact has no wire property.
+  - An entry has the form of an `exec_subpaths` entry, and a denied path wins: over a listed
+    directory that holds it, over the loader and over the program. A start whose program is
+    denied is `exec.sandbox-program-unlisted` (422) before dispatch. On `linux` an entry may be
+    absent at the start.
+  - On `linux` a denied program is found by where its file lies. It is denied under a symbolic
+    link, under a second mount of its directory (`/bin/id` for `/usr/bin/id`) and under a hard
+    link in the same directory. `substrate-exec-gate` takes the new option `--deny`.
+  - New refusals at admission, on every adapter and before any fact is read:
+    `confinement.exec-denied-paths-without-subpaths` (422) for a deny-list beside an empty
+    `exec_subpaths`, and `confinement.exec-denied-paths-exceeded` (422) for more than
+    `MAX_EXEC_DENIED_PATHS` (64) entries.
+  - Limits: a deny entry fails `execve` of a path, so the loader given a denied program runs
+    it and `sh` given a denied script runs it. A run that can write a listed directory copies
+    a denied program there and runs the copy. A hard link that existed before the start in
+    another listed directory runs. A file created during the run in a listed directory that
+    holds a deny entry is not executable, and a program rebuilt there loses the right.
+    **Never list a lower directory of an overlay that is also in the view**: a program denied
+    in the overlay runs from the layer.
+  - On `macos` the entries are Seatbelt deny rules after every allow.
 
 ### Changed
 
@@ -70,6 +94,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   field `withheld`, serialized only when it is not empty; both hold the new
   `confinement::FactWithheld`. An embedder that builds the variant, or names both of its fields
   in a pattern, changes one line.
+- **Breaking (`substrate-host` public API, design 35):** `FACT_ORDER` changes type from
+  `[Fact; 13]` to `[Fact; 14]`; code that names the array type or relies on its length breaks.
+  `ConfinementError` gains the variants `ExecDeniedPathsWithoutSubpaths` and
+  `ExecDeniedPathsExceeded`, so an exhaustive match gains two arms. `ConfinementProfile` gains
+  `exec_denied_paths`, `ExecListProof` gains `denied_paths`, `seatbelt::BuildProof` gains
+  `exec_denied_paths` and `substrate_exec_gate::Lists` gains `deny`, so a literal of each that
+  names every field gains one.
 
 ## [0.22.0] — 2026-11-20
 
