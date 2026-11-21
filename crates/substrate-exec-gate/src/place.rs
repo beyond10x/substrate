@@ -381,7 +381,7 @@ impl MountTable {
     /// # Errors
     ///
     /// As [`Self::read`].
-    pub fn read_from(path: &std::path::Path) -> Result<Self, Cause> {
+    fn read_from(path: &std::path::Path) -> Result<Self, Cause> {
         // Read as bytes: a table that was read and is not text is unparsable, not unreadable.
         let bytes = std::fs::read(path).map_err(|_| Cause::MountTableUnreadable)?;
         let text = String::from_utf8(bytes).map_err(|_| Cause::MountTableUnparsable)?;
@@ -393,6 +393,9 @@ impl MountTable {
     /// # Errors
     ///
     /// The first cause of D26 that holds, from `mount-id-unreported` on.
+    // Public for the cases on tables written as text, in this crate's `tests/`. A caller of
+    // the library places what the kernel reported for a path: `place_of`.
+    #[doc(hidden)]
     pub fn place(
         &self,
         mount_id: Option<u64>,

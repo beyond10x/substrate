@@ -398,6 +398,16 @@ require_staged security6_view_mounts \
   'security6 view mounts link on a mount beneath a root only' \
   '?security6 view mounts root with mounts this user cannot open|this host has no mount beneath' \
   '=security6 view mounts trusted link through the workspace'
+# The third review's roots: a chain of roots classed alike in either order, a base directory
+# that shows a workspace, an entry's end in a mount a run can write, and the driver's walk and
+# the helper's ending at the same file.
+require_staged adversary7_view_mounts \
+  'adversary7 exec view mounts chain of roots' \
+  '?adversary7 exec view mounts base directory|no /usr/local on this host' \
+  'adversary7 exec view mounts ends' \
+  'adversary7 exec view mounts walks'
+require_staged security7_view_mounts \
+  '?security7 view mounts base directory that holds the workspace root|this host has no /usr/local/src'
 require_staged -p b10x-substrate-exec-gate view_mounts_gate \
   'exec gate view mounts follow into a mount beneath a writable mount' \
   'exec gate view mounts links of a followed path' \
@@ -410,6 +420,10 @@ require_staged -p b10x-substrate-exec-gate adversary6_links_gate \
   'adversary6 exec gate links magic links' \
   'adversary6 exec gate links walk' \
   'adversary6 exec gate links no writable mount'
+require_staged -p b10x-substrate-exec-gate adversary7_walk_gate \
+  'adversary7 exec gate walk dot dot' \
+  'adversary7 exec gate walk passed directory' \
+  'adversary7 exec gate walk beneath ends'
 require_staged -p b10x-substrate-exec-gate adversary5_view_mounts_gate \
   'adversary5 exec gate view mounts file bind' \
   'adversary5 exec gate view mounts chain and escapes' \
@@ -441,6 +455,10 @@ require_executed -p b10x-substrate-exec-gate security6_gate \
   'security6 exec gate links: absolute targets: executed' \
   'security6 exec gate links: a writable directory on the way: executed' \
   'security6 exec gate links: a directory moved during the walk: executed'
+# A directory moved under the shipped helper's walk, held under `/usr/bin/strace` where its
+# open returns: absent, so refused here, without `strace` or where it may not trace.
+require_executed -p b10x-substrate-exec-gate security7_gate \
+  'security7 exec gate walk: no `..` asked of the kernel: executed'
 require_executed -p b10x-substrate-exec-gate adversary_gate \
   'adversary landlock failures: executed'
 require_executed -p b10x-substrate-exec-gate security2_gate \

@@ -257,6 +257,17 @@ fn adversary6_a_magic_link_is_a_link_without_a_place() {
 /// place a writable location reaches is refused, by the helper with status 125, because a
 /// run that can write the directory can move it while the path is resolved through it. The
 /// row expects the refusal now.
+///
+/// **Changed by the implementor in the closing round.** The row `forty links` had the shell
+/// execute `fs/ro/c1/tool`, a path on which the kernel itself follows 40 links in one walk.
+/// That failed once in the suite's parallel run, status 126 with `Too many levels of symbolic
+/// links` from the shell, after the helper had admitted the entry. The kernel counts the
+/// links of a walk in a field it sets once and does not reset when it abandons its lockless
+/// attempt and walks again (`total_link_count`, `fs/namei.c`); a mount made meanwhile, as
+/// the cases beside this one make, abandons it, and a walk of exactly 40 links then ends
+/// `ELOOP`. The row executes `fs/ro/dir/tool` now, the file the entry admits by the
+/// directory the chain ends at, so it holds what the helper answers for 40 links and asks the
+/// kernel to follow none.
 #[test]
 fn adversary6_the_walk_follows_what_the_kernel_follows() {
     const NAME: &str = "walk";
@@ -269,7 +280,7 @@ fn adversary6_the_walk_follows_what_the_kernel_follows() {
             "forty links",
             chain.to_owned(),
             "fs/ro/c1",
-            "fs/ro/c1/tool; echo $?",
+            "fs/ro/dir/tool; echo $?",
             (Some(0), "0\n"),
         ),
         (
