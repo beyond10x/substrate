@@ -20,6 +20,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     Landlock ABI 2 (Linux 5.19). Cargo does not build a dependency's binary: build the helper
     from the revision you pin, and install a copy, because cargo's own output has a second hard
     link and is refused.
+  - On a start with a list the run's variables reach the run's program and no program before
+    it: the driver gives them to the helper as `--env <name> <value>` operands and gives
+    bubblewrap no `--setenv`, and the helper refuses to run when a variable other than `PWD`
+    is in its own environment. No variable is refused by name. An object that `LD_PRELOAD`
+    names is still loaded into every allowed dynamic program; an `execve` it makes of an
+    unlisted path fails.
   - **An empty list differs by adapter.** On `linux` it runs every program of the run's view, as
     before; on `macos` it runs only the program.
   - An entry is a path of the run's view, not a host path: relative beneath `/workspace`,
@@ -32,7 +38,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   - New refusals: `config.exec-gate-invalid` (422) and `config.exec-gate-unserved` (501) at the
     open, and `exec.sandbox-place-unserved` (501) at the start of a profile with a list.
     `exec.sandbox-path-unrepresentable` and `exec.sandbox-exec-subpath-undeclared` are new on
-    `linux`.
+    `linux`; the first also answers a program, a loader, an entry or a writable mount whose
+    path in the run's view is longer than 4095 bytes.
+  - Write `workspace_root` and every `writable_roots` path without `..` and `.`: with
+    `exec_gate` set, such a path that does not exist yet is refused at the open,
+    `config.exec-gate-unserved` with the cause `path-unopenable`.
   - Whether one path lies in another is decided from the mount table, on `ext4`, `overlay` and
     `tmpfs`. With `exec_gate` set and a path of the open on another file-system type, the
     adapter opens without the fact; `AdapterFacts::withheld` and the `confinement.fact-unserved`

@@ -287,8 +287,41 @@ impl ExecLists {
 pub(crate) struct GateStart {
     /// Above the secret-slot range and close-on-exec, as every descriptor bubblewrap consumes.
     descriptor: OwnedFd,
-    /// The helper's options, ending with the `--` the program follows.
-    options: Vec<String>,
+    /// What the run is held to: the helper's options once the start's variables are known.
+    lists: substrate_exec_gate::Lists,
+}
+
+/// The program's whole environment on a start with a list (design 35 D28), which the helper is
+/// given as operands: one value per name, and the same variables a start without a list gets
+/// from bubblewrap's `--setenv` options and the `env` stage after them. Later sources replace
+/// earlier ones in that order (the baseline, the request, the slot mapping, the trust anchor),
+/// and `PWD` is the request's own or absent, never the directory bubblewrap changed to.
+fn listed_environment(
+    environment: &substrate_wire::ExecEnvironment,
+    slot_mapping: Option<String>,
+    ca_bundle: bool,
+) -> Vec<(String, String)> {
+    let mut variables = std::collections::BTreeMap::new();
+    for name in &environment.allow {
+        variables.insert(name.as_str().to_owned(), baseline_value(*name).to_owned());
+    }
+    for (name, value) in &environment.set {
+        variables.insert(name.clone(), value.clone());
+    }
+    if let Some(mapping) = slot_mapping {
+        variables.insert(substrate_wire::SECRET_SLOTS_ENV.to_owned(), mapping);
+    }
+    if ca_bundle {
+        variables.insert(
+            "SSL_CERT_FILE".to_owned(),
+            substrate_wire::APERTURE_CA_BUNDLE_PATH.to_owned(),
+        );
+    }
+    match environment.set.get("PWD") {
+        Some(value) => variables.insert("PWD".to_owned(), value.clone()),
+        None => variables.remove("PWD"),
+    };
+    variables.into_iter().collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1108,7 +1141,7 @@ impl ProcessRuntime {
             .and_then(|descriptor| bubblewrap_descriptor(descriptor, "executable gate"))?;
         Ok(Some(GateStart {
             descriptor,
-            options: planned.options(),
+            lists: planned,
         }))
     }
 
@@ -3008,26 +3041,33 @@ impl ProcessRuntime {
         if let Some(info_fd) = info_fd {
             command.arg("--info-fd").arg(info_fd.to_string());
         }
-        for name in &input.env.allow {
-            command.args(["--setenv", name.as_str(), baseline_value(*name)]);
-        }
-        for (name, value) in &input.env.set {
-            command.args(["--setenv", name, value]);
-        }
         // The mapping and nothing else: names and descriptors, sorted, ASCII. Absent when this
         // start named no slot, so a child can tell "no slots" from "an empty list".
-        if let Some(mapping) = slots.environment() {
-            command.args(["--setenv", substrate_wire::SECRET_SLOTS_ENV, &mapping]);
-        }
+        let slot_mapping = slots.environment();
         // Where the generated anchor is, because the conventional path is not a convention every
         // TLS stack follows. Absent when no anchor was generated: a child that cannot verify must
         // find out by failing to verify, never by being pointed at an empty file.
-        if resolution.is_some_and(crate::egress::GeneratedResolution::has_ca_bundle) {
-            command.args([
-                "--setenv",
-                "SSL_CERT_FILE",
-                substrate_wire::APERTURE_CA_BUNDLE_PATH,
-            ]);
+        let ca_bundle = resolution.is_some_and(crate::egress::GeneratedResolution::has_ca_bundle);
+        // Design 35 D28: on a start with a list bubblewrap sets no variable of the run. Every
+        // process bubblewrap starts before the helper applied the ruleset would have it, and a
+        // loader acts on `LD_PRELOAD` and its like before the first instruction of its program.
+        if gate.is_none() {
+            for name in &input.env.allow {
+                command.args(["--setenv", name.as_str(), baseline_value(*name)]);
+            }
+            for (name, value) in &input.env.set {
+                command.args(["--setenv", name, value]);
+            }
+            if let Some(mapping) = &slot_mapping {
+                command.args(["--setenv", substrate_wire::SECRET_SLOTS_ENV, mapping]);
+            }
+            if ca_bundle {
+                command.args([
+                    "--setenv",
+                    "SSL_CERT_FILE",
+                    substrate_wire::APERTURE_CA_BUNDLE_PATH,
+                ]);
+            }
         }
         command.arg("--");
         // Design 13: after bubblewrap's own `setsid`, and never instead of it. `--new-session`
@@ -3037,20 +3077,24 @@ impl ProcessRuntime {
         if terminal {
             command.args(crate::pty::CONTROLLING_TERMINAL_ARGV);
         }
-        // Bubblewrap injects PWD after `--clearenv`; remove that implementation detail before
-        // exec, then restore it only when the closed request explicitly supplied PWD.
-        command.args(["/usr/bin/env", "-u", "PWD", "--"]);
-        if let Some(value) = input.env.set.get("PWD") {
-            command.args(["/usr/bin/env", "--"]);
-            command.arg(format!("PWD={value}"));
-        }
-        // Design 35 D4: the helper is the last program before the run's own. Everything
-        // bubblewrap, `setsid` and `env` execute happens before the ruleset exists, and the only
-        // `execve` after it is the program's.
         if let Some(gate) = gate {
-            command
-                .arg(crate::exec_gate::GATE_MOUNT)
-                .args(&gate.options);
+            // Design 35 D4 and D28: the helper is the last program before the run's own, and
+            // the first that is given the run's variables, as operands. It starts with `PWD`
+            // alone, which bubblewrap sets, and hands the operands to the program's `execve`
+            // only, after the ruleset. So no `env` stage runs here: what the two stages below
+            // do to `PWD` is in [`listed_environment`].
+            command.arg(crate::exec_gate::GATE_MOUNT).args(
+                gate.lists
+                    .options_with(&listed_environment(&input.env, slot_mapping, ca_bundle)),
+            );
+        } else {
+            // Bubblewrap injects PWD after `--clearenv`; remove that implementation detail
+            // before exec, then restore it only when the closed request explicitly supplied PWD.
+            command.args(["/usr/bin/env", "-u", "PWD", "--"]);
+            if let Some(value) = input.env.set.get("PWD") {
+                command.args(["/usr/bin/env", "--"]);
+                command.arg(format!("PWD={value}"));
+            }
         }
         command.args(&input.argv);
         Ok((command, seccomp))
@@ -4728,7 +4772,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{AdapterStart, ExecGate, ExecLists, GateStart, PreparedWorkspaceAccess};
-    use super::{CPU_PERIOD_MICROS, exec_cpu_quota};
+    use super::{CPU_PERIOD_MICROS, baseline_value, exec_cpu_quota, listed_environment};
     use super::{
         Cgroup, ChildChannel, ExecObservation, Execution, PipeState, PipeStream, ProcessRuntime,
         USER_NAMESPACE_ARGV, assert_recorded_posture, close_live_output,
@@ -8336,17 +8380,33 @@ mod tests {
         .expect("read-write access")
     }
 
+    /// `input` running `/usr/bin/env true` with two baseline names and two variables of the
+    /// run, one of them a baseline name and one a name a loader acts on.
+    fn with_variables(mut input: ExecStartInput) -> ExecStartInput {
+        input.argv = vec!["/usr/bin/env".to_owned(), "true".to_owned()];
+        input.env.allow = vec![
+            substrate_wire::BaselineEnvironment::Lang,
+            substrate_wire::BaselineEnvironment::Path,
+        ];
+        input.env.set = BTreeMap::from([
+            ("LD_PRELOAD".to_owned(), "/workspace/pre.so".to_owned()),
+            ("PATH".to_owned(), "/workspace/bin".to_owned()),
+        ]);
+        input
+    }
+
     /// **A start with a list runs the helper directly before the program** (design 35 D4, D20,
-    /// D24): its bytes bound with `--perms 0555 --ro-bind-data` after every other mount, and in
-    /// the argv after `env`, with the program, one `--allow` per entry and the mounts the run can
-    /// write. Portable: `command` builds an argv and spawns nothing.
+    /// D24, D28): its bytes bound with `--perms 0555 --ro-bind-data` after every other mount, and
+    /// in the argv directly after bubblewrap's own options, with the program, one `--allow` per
+    /// entry, the mounts the run can write and the run's variables as operands. Bubblewrap sets
+    /// none of those variables and no `env` stage runs. Portable: `command` builds an argv and
+    /// spawns nothing.
     #[test]
     fn a_listed_start_binds_the_helper_and_runs_it_directly_before_the_program() {
         let root = tempfile::tempdir().expect("a root");
         let (runtime, workspace, snapshot) = gated_runtime(root.path(), Some(true));
         let access = read_write(&workspace);
-        let mut input = pty_exec_input(&snapshot);
-        input.argv = vec!["/usr/bin/env".to_owned(), "true".to_owned()];
+        let input = with_variables(pty_exec_input(&snapshot));
         let lists = ExecLists::listing(&["bin", "/usr/bin"]);
         let gate = match runtime.gate_start(&lists, &input, &access, &[], &[], &[]) {
             Ok(gate) => gate.expect("a start with a list has a gate"),
@@ -8387,10 +8447,25 @@ mod tests {
             .rposition(|argument| argument == "/.substrate-exec-gate")
             .expect("the helper in the argv");
         assert!(helper > bind + 2, "{argv:?}");
+        // D28: bubblewrap sets no variable of the run, and nothing of the run's making runs
+        // between bubblewrap's own `--` and the helper.
+        assert!(
+            !argv.iter().any(|part| part == "--setenv"),
+            "a listed start sets a variable for bubblewrap: {argv:?}"
+        );
         assert_eq!(
-            argv[helper - 4..helper],
-            ["/usr/bin/env", "-u", "PWD", "--"],
-            "directly after env: {argv:?}"
+            argv[helper - 1],
+            "--",
+            "directly after bubblewrap: {argv:?}"
+        );
+        assert_eq!(
+            argv.iter().filter(|part| *part == "/usr/bin/env").count(),
+            1,
+            "the one env in the argv is the run's program: {argv:?}"
+        );
+        assert!(
+            !argv[..helper].iter().any(|part| part.contains("pre.so")),
+            "a value of the run stands before the helper: {argv:?}"
         );
         assert_eq!(
             argv[helper + 1..],
@@ -8413,13 +8488,121 @@ mod tests {
                 "/tmp",
                 "--writable",
                 "/dev",
+                "--env",
+                "LANG",
+                baseline_value(substrate_wire::BaselineEnvironment::Lang),
+                "--env",
+                "LD_PRELOAD",
+                "/workspace/pre.so",
+                "--env",
+                "PATH",
+                "/workspace/bin",
                 "--",
                 "/usr/bin/env",
                 "true"
             ],
-            "the options of D24, then the program: {argv:?}"
+            "the options of D24, the run's variables as operands, then the program: {argv:?}"
         );
         println!("exec gate argv: executed");
+    }
+
+    /// **The same input without a list is what it was** (design 35 D5, D28): bubblewrap sets
+    /// each variable, the baseline's before the run's, and the `env -u PWD --` stage follows.
+    /// What those leave is the listed start's operands, in the case above.
+    #[test]
+    fn an_unlisted_start_sets_its_variables_for_bubblewrap_and_keeps_the_env_stage() {
+        let root = tempfile::tempdir().expect("a root");
+        let (runtime, workspace, snapshot) = gated_runtime(root.path(), Some(true));
+        let access = read_write(&workspace);
+        let input = with_variables(pty_exec_input(&snapshot));
+        let unlisted = argv_with(&runtime, &input, &access, None);
+        let set: Vec<(&str, &str)> = unlisted
+            .windows(3)
+            .filter(|window| window[0] == "--setenv")
+            .map(|window| (window[1].as_str(), window[2].as_str()))
+            .collect();
+        assert_eq!(
+            set,
+            [
+                (
+                    "LANG",
+                    baseline_value(substrate_wire::BaselineEnvironment::Lang)
+                ),
+                (
+                    "PATH",
+                    baseline_value(substrate_wire::BaselineEnvironment::Path)
+                ),
+                ("LD_PRELOAD", "/workspace/pre.so"),
+                ("PATH", "/workspace/bin"),
+            ],
+            "{unlisted:?}"
+        );
+        assert_eq!(
+            unlisted[unlisted.len() - 6..],
+            ["/usr/bin/env", "-u", "PWD", "--", "/usr/bin/env", "true"],
+            "{unlisted:?}"
+        );
+    }
+
+    /// Design 35 D28: the operands of a listed start are the variables a start without a list
+    /// ends with. A later source replaces an earlier one, as the last `--setenv` of a name
+    /// does, and `PWD` is the request's own or absent, as after `env -u PWD`.
+    #[test]
+    fn the_listed_environment_is_what_setenv_and_the_env_stage_leave() {
+        use substrate_wire::BaselineEnvironment::{Lang, Path as BaselinePath};
+        let environment = |set: &[(&str, &str)]| substrate_wire::ExecEnvironment {
+            allow: vec![Lang, BaselinePath],
+            set: set
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+        };
+        let pairs = |variables: Vec<(String, String)>| -> Vec<String> {
+            variables
+                .into_iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect()
+        };
+        assert_eq!(
+            pairs(listed_environment(&environment(&[]), None, false)),
+            [
+                format!("LANG={}", baseline_value(Lang)),
+                format!("PATH={}", baseline_value(BaselinePath)),
+            ]
+        );
+        assert_eq!(
+            pairs(listed_environment(
+                &environment(&[
+                    ("PATH", "/custom"),
+                    ("PWD", "/workspace/sub"),
+                    ("SSL_CERT_FILE", "/workspace/mine.pem"),
+                    ("ZED", ""),
+                ]),
+                Some("TOKEN=7".to_owned()),
+                true,
+            )),
+            [
+                format!("LANG={}", baseline_value(Lang)),
+                "PATH=/custom".to_owned(),
+                "PWD=/workspace/sub".to_owned(),
+                format!("SSL_CERT_FILE={}", substrate_wire::APERTURE_CA_BUNDLE_PATH),
+                format!("{}=TOKEN=7", substrate_wire::SECRET_SLOTS_ENV),
+                "ZED=".to_owned(),
+            ],
+            "the request replaces the baseline, the driver's two replace the request"
+        );
+        assert!(
+            listed_environment(
+                &substrate_wire::ExecEnvironment {
+                    allow: Vec::new(),
+                    set: BTreeMap::new(),
+                },
+                None,
+                false
+            )
+            .is_empty(),
+            "no variable, and no PWD of bubblewrap's"
+        );
     }
 
     /// **A start without a list is what it was** (design 35 D5): no helper, no bind, no place

@@ -7,7 +7,8 @@
 //!   mount point: a mount hidden by a later one keeps its row.
 //! - **The place** is that row's device, and its root joined with the rest of the descriptor's
 //!   path below the row's mount point. A path that does not exist has the place of its nearest
-//!   existing ancestor, joined with the remaining names.
+//!   existing ancestor, joined with the remaining names. Only a name is ever joined: `.` and
+//!   `..` are resolved by the kernel where the path exists, and are no place where it does not.
 //! - **One path lies in another** when both places have the same device and the first place is
 //!   the second or lies beneath it. So `/bin/id` lies in `/usr` where `/bin` is a mount of
 //!   `/usr/bin`, and a directory the host mounts at a second path is found under both.
@@ -18,8 +19,8 @@
 //! | cause | when |
 //! |---|---|
 //! | `mount-table-unreadable` | `/proc/self/mountinfo` cannot be opened or read |
-//! | `mount-table-unparsable` | a row lacks its ID, device, root or mount point, has no ` - ` separator or no type after it, or holds an escape that is not three octal digits |
-//! | `path-unopenable` | the path cannot be opened for a reason other than not existing, or no ancestor of it exists |
+//! | `mount-table-unparsable` | a row lacks its ID, device, root or mount point, has no ` - ` separator or no type after it, or holds an escape that is not three octal digits; or the table was read and is not UTF-8 text, as with a mount point that holds other bytes |
+//! | `path-unopenable` | the path cannot be opened for a reason other than not existing, no ancestor of it exists, or a name of it that does not exist yet is `.` or `..` |
 //! | `mount-id-unreported` | `statx` fails, or its result does not have `STATX_MNT_ID` set |
 //! | `mount-row-missing` | no row has the reported ID |
 //! | `mount-row-repeated` | more than one row has it |
@@ -258,7 +259,9 @@ impl MountTable {
     ///
     /// As [`Self::read`].
     pub fn read_from(path: &std::path::Path) -> Result<Self, Cause> {
-        let text = std::fs::read_to_string(path).map_err(|_| Cause::MountTableUnreadable)?;
+        // Read as bytes: a table that was read and is not text is unparsable, not unreadable.
+        let bytes = std::fs::read(path).map_err(|_| Cause::MountTableUnreadable)?;
+        let text = String::from_utf8(bytes).map_err(|_| Cause::MountTableUnparsable)?;
         Self::parse(&text)
     }
 
@@ -359,6 +362,30 @@ struct Statx {
     _after: [u8; 104],
 }
 
+/// The mount ID of a `statx` result: reported only where the call succeeded and its mask says
+/// the kernel filled the field in. A kernel before Linux 5.8 returns success with the bit clear
+/// and whatever the buffer held, which is no mount ID.
+#[cfg(target_os = "linux")]
+fn reported_mount_id(succeeded: bool, mask: u32, mount_id: u64) -> Option<u64> {
+    (succeeded && mask & STATX_MNT_ID != 0).then_some(mount_id)
+}
+
+/// The names of `path` below its nearest existing ancestor, from those collected walking up:
+/// each is a name. `None` where one is `.` or `..`, which only the kernel resolves and which
+/// does not exist here to be resolved; an empty name, between two separators, is no name.
+#[cfg(any(target_os = "linux", test))]
+fn remaining_names(mut collected: Vec<String>) -> Option<Vec<String>> {
+    if collected
+        .iter()
+        .any(|name| matches!(name.as_str(), "." | ".."))
+    {
+        return None;
+    }
+    collected.retain(|name| !name.is_empty());
+    collected.reverse();
+    Some(collected)
+}
+
 #[cfg(target_os = "linux")]
 impl Opened {
     /// What the kernel reports for the open `descriptor`, which `path` names.
@@ -383,7 +410,7 @@ impl Opened {
         };
         Self {
             path: path.to_owned(),
-            mount_id: (reported == 0 && status.mask & STATX_MNT_ID != 0).then_some(status.mount_id),
+            mount_id: reported_mount_id(reported == 0, status.mask, status.mount_id),
             descriptor_path: std::fs::read_link(format!("/proc/self/fd/{descriptor}"))
                 .ok()
                 .and_then(|link| link.to_str().map(str::to_owned)),
@@ -398,7 +425,8 @@ impl Opened {
     /// # Errors
     ///
     /// [`Cause::PathUnopenable`] when the path is not absolute, cannot be opened for a reason
-    /// other than not existing, or has no ancestor that exists.
+    /// other than not existing, has no ancestor that exists, or has `.` or `..` among the names
+    /// that do not exist yet: the text of such a path is not where it will be.
     pub fn of_path(path: &str) -> Result<Self, Unestablished> {
         use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
         let unopenable = || Unestablished {
@@ -419,8 +447,7 @@ impl Opened {
                 // SAFETY: `open` returned a descriptor nothing else owns.
                 let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
                 let mut opened = Self::of_descriptor(descriptor.as_raw_fd(), path);
-                remaining.reverse();
-                opened.remaining = remaining;
+                opened.remaining = remaining_names(remaining).ok_or_else(unopenable)?;
                 return Ok(opened);
             }
             let absent = matches!(
@@ -442,6 +469,105 @@ impl Opened {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D26, `mount-id-unreported`: "`statx` fails, or its result does not have `STATX_MNT_ID`
+    /// set". A result without the bit carries no mount ID, whatever the field holds.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_statx_result_without_the_mount_id_bit_reports_none() {
+        assert_eq!(reported_mount_id(true, STATX_MNT_ID, 31), Some(31));
+        assert_eq!(reported_mount_id(true, STATX_MNT_ID | 0x7ff, 0), Some(0));
+        assert_eq!(reported_mount_id(true, 0, 31), None, "the bit is clear");
+        assert_eq!(
+            reported_mount_id(true, 0x7ff, 31),
+            None,
+            "the basic fields alone, as a kernel before 5.8 reports them"
+        );
+        assert_eq!(
+            reported_mount_id(false, STATX_MNT_ID, 31),
+            None,
+            "statx failed"
+        );
+        // And so no place: the cause is the one D26 names, not a row that happens to have ID 0.
+        assert_eq!(
+            place(reported_mount_id(true, 0x7ff, 500), Some("/"), VIEW),
+            Err(Cause::MountIdUnreported)
+        );
+    }
+
+    /// Only a name is joined below the nearest existing ancestor. `new/..` beneath a directory
+    /// is that directory once `new` exists, and is not the text `new/..` before.
+    #[test]
+    fn a_dot_or_dot_dot_that_does_not_exist_yet_is_no_name() {
+        let names = |collected: &[&str]| {
+            remaining_names(collected.iter().map(|name| (*name).to_owned()).collect())
+        };
+        // Collected walking up, so last name first.
+        assert_eq!(
+            names(&["b", "a"]),
+            Some(vec!["a".to_owned(), "b".to_owned()])
+        );
+        assert_eq!(names(&[]), Some(Vec::new()));
+        assert_eq!(names(&["b", "", "a"]), names(&["b", "a"]), "a//b is a/b");
+        assert_eq!(names(&["..", "new"]), None);
+        assert_eq!(names(&["b", "..", "new"]), None);
+        assert_eq!(names(&[".", "new"]), None);
+        assert_eq!(names(&["..."]), Some(vec!["...".to_owned()]), "a name");
+    }
+
+    /// The same through a real directory: a root spelled `<existing>/new/..` before `new`
+    /// exists is `path-unopenable`, and the directory itself once it does.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_path_through_a_missing_name_and_dot_dot_is_unopenable_until_it_exists() {
+        let directory = tempfile::tempdir().expect("scratch");
+        let root = directory.path().canonicalize().expect("canonical scratch");
+        let root = root.to_str().expect("UTF-8");
+        for rest in ["new/..", "new/.", "new/./deeper", "a/../b"] {
+            let spelled = format!("{root}/{rest}");
+            assert_eq!(
+                Opened::of_path(&spelled).map(|opened| opened.remaining),
+                Err(Unestablished {
+                    path: spelled.clone(),
+                    cause: Cause::PathUnopenable,
+                }),
+                "{spelled}"
+            );
+        }
+        // A missing name is joined as a name, as before.
+        let missing = Opened::of_path(&format!("{root}/new/deeper")).expect("an ancestor exists");
+        assert_eq!(missing.remaining, ["new", "deeper"]);
+        assert_eq!(missing.descriptor_path.as_deref(), Some(root));
+        // Once `new` exists the kernel resolves the whole path, and nothing remains.
+        std::fs::create_dir(format!("{root}/new")).expect("new");
+        let resolved = Opened::of_path(&format!("{root}/new/..")).expect("it exists");
+        assert!(resolved.remaining.is_empty());
+        assert_eq!(resolved.descriptor_path.as_deref(), Some(root));
+    }
+
+    /// D26: `mount-table-unreadable` is a table that "cannot be opened or read". One that was
+    /// read and holds a mount point that is not UTF-8 is `mount-table-unparsable`.
+    #[test]
+    fn a_table_with_a_mount_point_that_is_not_utf8_is_unparsable() {
+        let directory = tempfile::tempdir().expect("scratch");
+        let table = directory.path().join("mountinfo");
+        let mut bytes = b"31 1 259:2 / / rw - ext4 /dev/a rw\n40 31 8:1 / /mnt/caf".to_vec();
+        bytes.push(0xe9);
+        bytes.extend_from_slice(b" rw - ext4 /dev/b rw\n");
+        std::fs::write(&table, &bytes).expect("the table");
+        assert_eq!(
+            MountTable::read_from(&table).map(drop),
+            Err(Cause::MountTableUnparsable)
+        );
+        // The control: the same rows as text parse, and a file that is not there is unreadable.
+        bytes.retain(|byte| *byte != 0xe9);
+        std::fs::write(&table, &bytes).expect("the table");
+        MountTable::read_from(&table).expect("the same table as text");
+        assert_eq!(
+            MountTable::read_from(&directory.path().join("absent")).map(drop),
+            Err(Cause::MountTableUnreadable)
+        );
+    }
 
     /// The view of design 35's probe host: `/bin` is a mount of `/usr/bin`, the workspace is a
     /// directory of the same device, `/tmp` is a file system of its own.

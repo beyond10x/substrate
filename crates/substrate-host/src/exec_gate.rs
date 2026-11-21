@@ -87,6 +87,8 @@ const WRITABLE_ROOTS: &str = "config.writable_roots";
 const ENTRY: &str = "exec_subpaths";
 /// The address of a refused program.
 const PROGRAM: &str = "argv";
+/// The address of a refused mount a run can write.
+const WRITABLE_MOUNT: &str = "writable_roots";
 /// The address of a start whose workspace has no place.
 const WORKSPACE: &str = "workspace";
 
@@ -330,7 +332,16 @@ fn opened_path(path: &Path) -> Result<Opened, Unestablished> {
         path: path.display().to_string(),
         cause: Cause::PathUnopenable,
     };
-    let absolute = std::path::absolute(path).map_err(|_| unopenable())?;
+    // The configured text as it is, made absolute and not normalized: `std::path::absolute`
+    // would remove a `.` as text, and a `.` or `..` among names that do not exist yet is the
+    // place function's to refuse (D25).
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| unopenable())?
+            .join(path)
+    };
     Opened::of_path(absolute.to_str().ok_or_else(unopenable)?)
 }
 
@@ -573,8 +584,8 @@ pub(crate) fn check_protocol(
     ))
 }
 
-/// The loader the host's base programs name: the `PT_INTERP` of `/usr/bin/env`, which the driver
-/// executes in every sandbox. Never a loader read from a run's program (D7).
+/// The loader the host's base programs name: the `PT_INTERP` of `/usr/bin/env`, a base program
+/// of every view. Never a loader read from a run's program (D7).
 fn host_loader() -> Option<String> {
     let mut image = Vec::new();
     std::fs::File::open("/usr/bin/env")
@@ -626,6 +637,12 @@ impl Opening {
 
 /// Checks `HostConfig.exec_gate` and reads it once (D19 to D21, D26, D27), in the order of the
 /// module's table.
+///
+/// **The driver calls this before it creates `workspace_root`**, so a refusal leaves nothing
+/// written. A root that does not exist yet has the place of its nearest existing ancestor
+/// joined with the names after it; where one of those names is `..` or `.` there is no place
+/// (D25, `path-unopenable`) and the open is refused [`EXEC_GATE_UNSERVED`]: the driver does not
+/// create a directory beneath a path it has not checked in order to place it.
 ///
 /// # Errors
 ///
@@ -1196,11 +1213,7 @@ impl<'a> Mounts<'a> {
             .table
             .place_of(&object)
             .map_err(|why| start_unplaced(address, &why))?;
-        match self
-            .locations
-            .iter()
-            .find(|location| place.lies_in(&location.place))
-        {
+        match shown_location(&place, &self.locations) {
             Some(location) => Err(refuse(format!(
                 "resolves to {}, which shows {}, a location a run can write",
                 reached.view, location.path
@@ -1262,9 +1275,45 @@ impl<'a> Mounts<'a> {
         } else {
             rel.join("/")
         };
-        Located::new(mount.class, &mount.path, &rel)
-            .map_err(|why| refuse(format!("is not a path of the gate: {why}")))
+        let located = Located::new(mount.class, &mount.path, &rel)
+            .map_err(|why| refuse(format!("is not a path of the gate: {why}")))?;
+        check_openable(&located).map_err(refuse)?;
+        Ok(located)
     }
+}
+
+/// The location a run can write that `place` lies in, if any: where a followed path ends on the
+/// host, asked of every writable location by place and never by text (D24, D25). A host mount
+/// beneath a read-only root, and a second mount of the workspace root, are found this way.
+fn shown_location<'l>(place: &Place, locations: &'l [Location]) -> Option<&'l Location> {
+    locations
+        .iter()
+        .find(|location| place.lies_in(&location.place))
+}
+
+/// The longest path the kernel takes: `PATH_MAX` less its terminator.
+const MAX_PATH_BYTES: usize = 4095;
+
+/// Whether the kernel takes `path`, a path of the run's view the helper is given (design 35
+/// § 5, *A view path the kernel takes*). No bound below the kernel's is set.
+fn check_length(path: &str) -> Result<(), String> {
+    let bytes = path.len();
+    if bytes > MAX_PATH_BYTES {
+        return Err(format!(
+            "is {bytes} bytes long in the run's view, over the {MAX_PATH_BYTES} bytes of a path \
+             the kernel takes"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the helper can open what `located` names in the run's view: the text of
+/// `<root>/<rel>`, which it opens for a `follow` path and executes the program by. The driver
+/// checked the entry through the descriptor of its mount, which a longer view path does not
+/// hinder, so an entry over the limit would be dispatched and end the run with the helper's
+/// status; it is refused here by name. One measure for both classes, as § 5 writes the rule.
+fn check_openable(located: &Located) -> Result<(), String> {
+    check_length(&located.path())
 }
 
 /// One start's allow-list as the helper takes it: the program, the host's loader, every entry
@@ -1301,13 +1350,18 @@ pub(crate) fn plan(
     // The helper opens the loader as a `follow` path and refuses one in a writable mount; the
     // same answer here, before dispatch, instead of exit status 125 after it.
     if let Some(loader) = gate.loader() {
+        check_length(loader).map_err(|why| unrepresentable(loader, why, ENTRY))?;
         mounts.check_followed(loader, loader, ENTRY)?;
+    }
+    let writable = mounts.writable();
+    for root in &writable {
+        check_length(root).map_err(|why| unrepresentable(root, why, WRITABLE_MOUNT))?;
     }
     Ok(Lists {
         program,
         loader: gate.loader().map(str::to_owned),
         allow,
-        writable: mounts.writable(),
+        writable,
     })
 }
 

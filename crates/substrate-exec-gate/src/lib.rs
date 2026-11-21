@@ -22,11 +22,26 @@
 //!           | --loader   <path>
 //!           | --allow    <class> <root> <rel>
 //!           | --writable <root>
+//!           | --env      <name> <value>
 //! <class>   = follow | beneath
 //! <root>    = the absolute path of a mount in the run's view
 //! <rel>     = a normal relative path beneath <root>, or "." for <root> itself
 //! <program> = the text of <root>/<rel> of --program
 //! ```
+//!
+//! **The program's environment is the `--env` operands and nothing else** (D28). A variable of
+//! the run must reach no process that runs before the ruleset is applied: the loader of such a
+//! process would act on `LD_PRELOAD` and its like, and what it then starts is held to no list.
+//! So the driver sets no variable of the run for bubblewrap, and hands each to the helper as an
+//! operand, which only the `execve` of the program receives.
+//!
+//! - The helper never passes its own environment on.
+//! - The helper refuses to run when it was started with any variable but `PWD`, which
+//!   bubblewrap sets after `--clearenv`. A caller that leaks the run's variables into the
+//!   helper's environment is thereby refused at every start, not trusted.
+//! - What the helper cannot do is undo what a loader did before its first instruction: a
+//!   dynamically linked build started with `LD_PRELOAD` naming a loadable object has already
+//!   run that object. The driver never starts it so; a static build has no loader to ask.
 //!
 //! A `beneath` path is opened beneath its `<root>` without following any symbolic link, so a
 //! link swapped in after the driver's check is refused by the kernel. A `follow` path, the loader
@@ -168,8 +183,15 @@ pub struct Lists {
 }
 
 impl Lists {
-    /// The options that carry these lists, ending with the `--` the program follows.
+    /// The options that carry these lists and no variable, ending with the `--` the program
+    /// follows: the program then starts with an empty environment.
     pub fn options(&self) -> Vec<String> {
+        self.options_with(&[])
+    }
+
+    /// The options that carry these lists and the program's whole environment (D28), ending
+    /// with the `--` the program follows.
+    pub fn options_with(&self, environment: &[(String, String)]) -> Vec<String> {
         let mut options = self.program.options("--program").to_vec();
         if let Some(loader) = &self.loader {
             options.extend(["--loader".to_owned(), loader.clone()]);
@@ -180,9 +202,27 @@ impl Lists {
         for root in &self.writable {
             options.extend(["--writable".to_owned(), root.clone()]);
         }
+        for (name, value) in environment {
+            options.extend(["--env".to_owned(), name.clone(), value.clone()]);
+        }
         options.push("--".to_owned());
         options
     }
+}
+
+/// The one variable the helper may be started with: bubblewrap sets it after `--clearenv`, and
+/// no loader reads it.
+const OWN_VARIABLE: &str = "PWD";
+
+/// The variable the helper was started with that it must not have (D28): any but
+/// [`OWN_VARIABLE`]. Decided on the names it is given.
+pub fn foreign_variable<N: AsRef<std::ffi::OsStr>>(
+    names: impl IntoIterator<Item = N>,
+) -> Option<String> {
+    names
+        .into_iter()
+        .find(|name| name.as_ref() != OWN_VARIABLE)
+        .map(|name| name.as_ref().to_string_lossy().into_owned())
 }
 
 /// One parsed argument list.
@@ -190,9 +230,10 @@ impl Lists {
 pub enum Invocation {
     /// `--version`, alone.
     Version,
-    /// The lists, and the program with its arguments.
+    /// The lists, the program's whole environment, and the program with its arguments.
     Run {
         lists: Lists,
+        environment: Vec<(String, String)>,
         command: Vec<OsString>,
     },
 }
@@ -204,7 +245,8 @@ pub enum Invocation {
 /// What the argument list breaks, as the text of the diagnostic line: an unknown option, a
 /// missing operand, a class other than the two words, a root or loader that is not an absolute
 /// normal path, a `<rel>` that is absolute or not normal, no `--program` or a second one, a
-/// second `--loader`, no `--`, no program, or a program that differs from its option.
+/// second `--loader`, a variable name that is empty or holds `=`, a variable named twice, a NUL
+/// byte in a name or value, no `--`, no program, or a program that differs from its option.
 pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation, String> {
     let mut arguments = arguments.into_iter();
     let mut operand = |option: &str| -> Result<String, String> {
@@ -218,6 +260,7 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
     let mut loader = None;
     let mut allow = Vec::new();
     let mut writable = Vec::new();
+    let mut environment: Vec<(String, String)> = Vec::new();
     let mut first = true;
     loop {
         let Ok(option) = operand("the option list") else {
@@ -264,6 +307,18 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
                     return Err("--loader occurs twice".to_owned());
                 }
             }
+            "--env" => {
+                let name = operand(&option)?;
+                let value = operand(&option)?;
+                if name.is_empty() || name.contains(['=', '\0']) || value.contains('\0') {
+                    return Err(format!("{name:?} does not name a variable of --env"));
+                }
+                // The driver hands over one value per name; a second is not chosen between.
+                if environment.iter().any(|(known, _)| *known == name) {
+                    return Err(format!("--env names {name:?} twice"));
+                }
+                environment.push((name, value));
+            }
             other => return Err(format!("{other:?} is not an option of this helper")),
         }
         first = false;
@@ -286,6 +341,7 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
             allow,
             writable,
         },
+        environment,
         command,
     })
 }
@@ -338,16 +394,27 @@ fn refuse(reason: &str) -> i32 {
 
 /// Applies the ruleset and executes the program. Returns only when it executed nothing.
 #[cfg(target_os = "linux")]
-fn run(lists: &Lists, command: &[OsString]) -> i32 {
+fn run(lists: &Lists, environment: &[(String, String)], command: &[OsString]) -> i32 {
     use std::os::unix::process::CommandExt as _;
 
+    // D28: a variable of the run in this process's own environment reached a process that runs
+    // before the ruleset, this one at the least. Nothing is executed.
+    if let Some(name) = foreign_variable(std::env::vars_os().map(|(name, _)| name)) {
+        return refuse(&format!(
+            "was started with the variable {name:?}; the run's variables are passed with --env, \
+             so that none reaches a process that runs before the ruleset"
+        ));
+    }
     if let Err(reason) = landlock::restrict(lists) {
         return refuse(&reason);
     }
-    // In this process, with its environment and descriptors: the program takes the helper's
-    // place. `exec` restores the signal mask and `SIGPIPE`, which this runtime ignores.
+    // In this process, with its descriptors: the program takes the helper's place. Its
+    // environment is the `--env` operands and nothing of the helper's own. `exec` restores the
+    // signal mask and `SIGPIPE`, which this runtime ignores.
     let error = std::process::Command::new(&command[0])
         .args(&command[1..])
+        .env_clear()
+        .envs(environment.iter().map(|(name, value)| (name, value)))
         .exec();
     eprintln!(
         "substrate-exec-gate: cannot execute {:?}: {error}",
@@ -361,7 +428,7 @@ fn run(lists: &Lists, command: &[OsString]) -> i32 {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run(_lists: &Lists, _command: &[OsString]) -> i32 {
+fn run(_lists: &Lists, _environment: &[(String, String)], _command: &[OsString]) -> i32 {
     refuse("the executable gate needs Linux")
 }
 
@@ -375,7 +442,11 @@ pub fn main(arguments: impl IntoIterator<Item = OsString>) -> i32 {
             Ok(()) => 0,
             Err(error) => refuse(&format!("cannot write the protocol line: {error}")),
         },
-        Ok(Invocation::Run { lists, command }) => run(&lists, &command),
+        Ok(Invocation::Run {
+            lists,
+            environment,
+            command,
+        }) => run(&lists, &environment, &command),
         Err(reason) => refuse(&reason),
     }
 }
@@ -398,6 +469,98 @@ mod tests {
         for list in [&["--version", "--"][..], &["--version", "x"], &[]] {
             parse(arguments(list)).expect_err("not the version form");
         }
+    }
+
+    /// `--version` is the first argument or it is not the version form: after any option it is
+    /// an unknown option, so a list that ends in it runs nothing and prints no protocol line.
+    #[test]
+    fn version_after_an_option_is_refused() {
+        for list in [
+            &["--writable", "/workspace", "--version"][..],
+            &["--program", "follow", "/usr", "bin/sh", "--version"],
+            &["--loader", "/lib/ld.so", "--version"],
+            &["--env", "A", "b", "--version"],
+        ] {
+            let refused = parse(arguments(list)).expect_err("--version after an option");
+            assert!(
+                refused.contains("--version"),
+                "{list:?} is refused for its --version: {refused}"
+            );
+        }
+    }
+
+    /// D28: the program's environment is the `--env` operands, in the order given; each is a
+    /// name and a value of its own, so no byte of a value reads as an option or a separator.
+    #[test]
+    fn the_environment_is_the_env_operands_and_nothing_else() {
+        let lists = Lists {
+            program: located(Class::Follow, "/usr", "bin/sh"),
+            loader: None,
+            allow: Vec::new(),
+            writable: Vec::new(),
+        };
+        let environment = vec![
+            ("LD_PRELOAD".to_owned(), "/workspace/pre.so".to_owned()),
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("EMPTY".to_owned(), String::new()),
+            ("OPTION".to_owned(), "--".to_owned()),
+            ("NAMED".to_owned(), "--env".to_owned()),
+            ("SPACED".to_owned(), "two words".to_owned()),
+            ("EQUALS".to_owned(), "a=b --env X y".to_owned()),
+        ];
+        let mut list = lists.options_with(&environment);
+        assert_eq!(list.last().map(String::as_str), Some("--"));
+        assert_eq!(
+            list.len(),
+            lists.options().len() + 3 * environment.len(),
+            "one --env with a name and a value per variable: {list:?}"
+        );
+        list.push("/usr/bin/sh".to_owned());
+        assert_eq!(
+            parse(list.iter().map(OsString::from)),
+            Ok(Invocation::Run {
+                lists: lists.clone(),
+                environment,
+                command: arguments(&["/usr/bin/sh"]),
+            })
+        );
+        // Without a variable the options are what they were, and the environment is empty.
+        assert_eq!(lists.options(), lists.options_with(&[]));
+        assert!(!lists.options().iter().any(|part| part == "--env"));
+    }
+
+    #[test]
+    fn a_malformed_variable_is_refused() {
+        const PROGRAM: [&str; 4] = ["--program", "follow", "/usr", "bin/sh"];
+        for (what, extra) in [
+            ("an empty name", &["--env", "", "value"][..]),
+            ("a name with =", &["--env", "A=B", "value"]),
+            ("a name twice", &["--env", "A", "1", "--env", "A", "2"]),
+            ("a name without its value", &["--env", "A"]),
+        ] {
+            let mut list = PROGRAM.to_vec();
+            list.extend_from_slice(extra);
+            list.extend_from_slice(&["--", "/usr/bin/sh"]);
+            assert!(parse(arguments(&list)).is_err(), "{what} was accepted");
+        }
+        // `--env A --` reads `--` as the value: then nothing ends the options.
+        let mut list = PROGRAM.to_vec();
+        list.extend_from_slice(&["--env", "A", "--", "/usr/bin/sh"]);
+        assert!(parse(arguments(&list)).is_err());
+    }
+
+    /// D28: the helper may be started with `PWD`, which bubblewrap sets after `--clearenv`, and
+    /// with nothing else.
+    #[test]
+    fn a_variable_of_its_own_other_than_pwd_is_foreign() {
+        assert_eq!(foreign_variable::<&str>([]), None);
+        assert_eq!(foreign_variable(["PWD"]), None);
+        assert_eq!(
+            foreign_variable(["PWD", "LD_PRELOAD"]).as_deref(),
+            Some("LD_PRELOAD")
+        );
+        assert_eq!(foreign_variable(["PATH"]).as_deref(), Some("PATH"));
+        assert_eq!(foreign_variable(["pwd"]).as_deref(), Some("pwd"));
     }
 
     #[test]
@@ -440,6 +603,7 @@ mod tests {
             parsed,
             Invocation::Run {
                 lists,
+                environment: Vec::new(),
                 command: arguments(&["/usr/bin/sh", "-c", "--allow"]),
             },
             "everything after -- is the program's, an option word included"
@@ -500,6 +664,7 @@ mod tests {
                 parse(list.iter().map(OsString::from)),
                 Ok(Invocation::Run {
                     lists,
+                    environment: Vec::new(),
                     command: arguments(&["/workspace/bin/tool", "argument"]),
                 })
             );

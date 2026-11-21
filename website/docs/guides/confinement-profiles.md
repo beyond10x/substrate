@@ -198,6 +198,11 @@ An entry names a directory, which admits every file beneath it, or one file:
 - Create `target` or `node_modules` before the start: an entry must exist.
 - The list limits which files are executed. An allowed interpreter still runs any script it can
   read, and the loader run as a program loads any file.
+- The run's variables are not filtered. An object that `LD_PRELOAD` names is loaded into every
+  allowed dynamic program and runs its code there; an execution it makes of an unlisted path
+  still fails. Leave such names out of `Command.env` where that is not wanted.
+- An entry, or the program, whose path in the run's view is longer than 4095 bytes is refused
+  `exec.sandbox-path-unrepresentable` (422).
 
 Whether one path lies in another is decided from the host's mount table, on `ext4`, `overlay`
 and `tmpfs`. Where that cannot be established the answer names one of nine causes:

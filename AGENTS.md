@@ -372,6 +372,26 @@ child group so the delegation root stays process-free, and sets the variable. Do
 delegated lane cannot run here: a user session's own scope is root-owned, so `mkdir` in it fails,
 and an absent lane looks identical to a green one if you only read `cargo test`.
 
+**The delegated lane also proves the executable allow-list** (design 35). The helper is the
+workspace member `crates/substrate-exec-gate` (package `b10x-substrate-exec-gate`, binary
+`substrate-exec-gate`, no dependency but `libc`), and the `linux` adapter uses it only where
+`HostConfig.exec_gate` names it; unset, `exec_subpaths` is not proved and a profile with a list is
+refused `confinement.fact-unserved`. `scripts/delegated-lane.sh` builds the helper, copies it to
+`substrate-exec-gate.lane` beside cargo's output and exports that path as `SUBSTRATE_EXEC_GATE`:
+cargo's own file has a second hard link under `deps/`, which the driver refuses
+(`config.exec-gate-invalid`). The lane then requires, by each case's own `executed` line and with
+no `ABSENT` line, the `exec` cases of `ess_confinement_linux` and `ess_confinement_systemd`, the
+adversary and security-review roots `adversary_exec_lists` and `security_exec_gate`, and the
+helper package's `gate`, `adversary_gate` and `security_gate`. Those cases need Landlock ABI 2
+(Linux 5.19) and the workspace root, `/usr`, `/bin`, `/lib`, `/lib64` and the temporary directory
+on `ext4`, `overlay` or `tmpfs`; the preload cases also need a C compiler named `cc`. Without the
+delegated root the host cases print `ABSENT`; the helper's own cases need no delegated root and
+run under `cargo test --workspace` wherever the kernel has Landlock, absent otherwise. On a start
+with a list the run's variables are operands of the helper (`--env <name> <value>`) and bubblewrap
+gets no `--setenv` (D28); a start without a list keeps its argv, which
+`a_start_without_a_list_builds_the_argv_it_built_before` in `crates/substrate-host/src/process.rs`
+holds.
+
 **The runner has a third lane, the namespace lane.** It runs only when
 `SUBSTRATE_VECTORS_KUBERNETES_CONFIG` names a namespace driver's kubeconfig. It starts the shipped
 daemon with `--driver kubernetes` on its Unix socket, as deployment `dep_namespace_vectors`, and

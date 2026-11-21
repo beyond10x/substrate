@@ -434,6 +434,7 @@ fn a_program_that_cannot_be_executed_exits_126() {
     let output = gate()
         .args(lists.options())
         .arg(root.join("allowed"))
+        .env_clear()
         .output()
         .expect("the gate starts");
     if absent(NAME, &output) {
@@ -468,6 +469,215 @@ fn the_program_inherits_no_descriptor_of_the_helper() {
         text(&control.stdout),
         "{}",
         text(&output.stderr)
+    );
+    println!("exec gate {NAME}: executed");
+}
+
+/// The gate about to run `program` in `root`, held to it alone, with `environment` as `--env`
+/// operands and an empty environment of its own.
+fn gate_with(root: &Path, program: &Path, environment: &[(&str, &str)]) -> Command {
+    let lists = Lists {
+        program: base(program),
+        loader: loader(),
+        allow: Vec::new(),
+        writable: Vec::new(),
+    };
+    let environment: Vec<(String, String)> = environment
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect();
+    let mut command = gate();
+    command
+        .args(lists.options_with(&environment))
+        .arg(program)
+        .current_dir(root)
+        .env_clear();
+    command
+}
+
+/// D28: the program's environment is the `--env` operands and nothing else. Nothing of the
+/// helper's own environment reaches it, `PWD` included, which bubblewrap sets for the helper;
+/// a value is passed byte for byte, and without an operand the environment is empty.
+#[test]
+fn the_program_starts_with_the_env_operands_and_nothing_of_the_helpers_own() {
+    const NAME: &str = "environment";
+    let (_directory, root) = scratch();
+    let env = tool("env");
+    let output = gate_with(
+        &root,
+        &env,
+        &[
+            ("B", "two words --env C d"),
+            ("A", "1"),
+            ("LD_LIBRARY_PATH", ""),
+        ],
+    )
+    .env("PWD", "/where/bubblewrap/changed/to")
+    .output()
+    .expect("the gate starts");
+    if absent(NAME, &output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let printed = text(&output.stdout);
+    let mut variables: Vec<&str> = printed.lines().collect();
+    variables.sort_unstable();
+    assert_eq!(
+        variables,
+        ["A=1", "B=two words --env C d", "LD_LIBRARY_PATH="],
+        "the program's environment is the operands"
+    );
+
+    let empty = gate_with(&root, &env, &[])
+        .env("PWD", "/where/bubblewrap/changed/to")
+        .output()
+        .expect("the gate starts");
+    assert!(empty.status.success(), "{}", text(&empty.stderr));
+    assert!(
+        empty.stdout.is_empty(),
+        "without an operand the program has no variable: {}",
+        text(&empty.stdout)
+    );
+    println!("exec gate {NAME}: executed");
+}
+
+/// D28: a helper started with a variable of its own other than `PWD` executes nothing. A
+/// variable of the run in the helper's environment is one that reached a process before the
+/// ruleset, so the caller that put it there is refused, at every start.
+#[test]
+fn a_helper_started_with_a_variable_of_its_own_executes_nothing() {
+    let (_directory, root) = scratch();
+    let sh = tool("sh");
+    for (name, value) in [
+        ("PATH", "/usr/bin:/bin"),
+        ("LD_LIBRARY_PATH", "/workspace/lib"),
+        ("LANG", "C"),
+    ] {
+        let marker = root.join(format!("ran-{name}"));
+        let output = gate_with(&root, &sh, &[(name, value)])
+            .args(["-c", &format!(": > '{}'; echo ran", marker.display())])
+            .env(name, value)
+            .output()
+            .expect("the gate starts");
+        assert_refused(&output, name);
+        assert!(!marker.exists(), "{name}: the program ran");
+        let diagnostic = text(&output.stderr);
+        assert!(
+            diagnostic.contains(&format!("was started with the variable {name:?}")),
+            "{diagnostic}"
+        );
+    }
+    // The control: the same start with the variable as an operand only runs the program, on a
+    // kernel that applies the ruleset.
+    let marker = root.join("ran-control");
+    let output = gate_with(&root, &sh, &[("PATH", "/usr/bin:/bin")])
+        .args(["-c", &format!(": > '{}'; echo ran", marker.display())])
+        .output()
+        .expect("the gate starts");
+    if absent("own environment", &output) {
+        return;
+    }
+    assert_eq!(text(&output.stdout), "ran\n", "{}", text(&output.stderr));
+    assert!(marker.exists());
+    println!("exec gate own environment: executed");
+}
+
+/// A shared object whose constructor executes the file `GATE_PRELOAD_TARGET` names, once, in
+/// whatever process loads it first: in a process that is held to no list this replaces it.
+const HOSTILE_PRELOAD: &str = r#"
+#include <stdlib.h>
+#include <unistd.h>
+
+extern char **environ;
+
+static void __attribute__((constructor)) start(void) {
+    char *target = getenv("GATE_PRELOAD_TARGET");
+    if (target != NULL) {
+        char *argv[] = { target, NULL };
+        unsetenv("GATE_PRELOAD_TARGET");
+        execve(target, argv, environ);
+    }
+}
+"#;
+
+/// D28, with an object that does what the rule is about: `LD_PRELOAD` handed to the helper as
+/// an operand names an object that executes a program outside the list wherever it is loaded.
+/// It is loaded only in the program, after the ruleset, where that execution is refused; the
+/// helper's own process never has the variable. So the list holds: the shell runs its script,
+/// the listed program runs, and the one outside the list ends with status 126.
+#[test]
+fn a_preload_among_the_env_operands_is_loaded_only_under_the_ruleset() {
+    const NAME: &str = "preload operand";
+    let (_directory, root) = scratch();
+    let sh = tool("sh");
+    let control = gate_with(&root, &sh, &[])
+        .args(["-c", "outside/true 2>/dev/null; echo $?"])
+        .output()
+        .expect("the gate starts");
+    if absent(NAME, &control) {
+        return;
+    }
+    let source = root.join("pre.c");
+    let object = root.join("pre.so");
+    std::fs::write(&source, HOSTILE_PRELOAD).expect("the source");
+    let built = Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&object)
+        .arg(&source)
+        .output();
+    match built {
+        Ok(output) if output.status.success() => {}
+        other => {
+            println!("exec gate {NAME}: ABSENT (no shared object could be built: {other:?})");
+            return;
+        }
+    }
+    let outside = root.join("outside/true");
+    let lists = Lists {
+        program: base(&sh),
+        loader: loader(),
+        allow: vec![beneath(&root, "allowed")],
+        writable: Vec::new(),
+    };
+    let environment = [
+        (
+            "LD_PRELOAD".to_owned(),
+            object.to_str().expect("UTF-8").to_owned(),
+        ),
+        (
+            "GATE_PRELOAD_TARGET".to_owned(),
+            outside.to_str().expect("UTF-8").to_owned(),
+        ),
+    ];
+    let script = "echo started; allowed/true; echo allowed:$?; outside/true 2>/dev/null; \
+                  echo outside:$?";
+    let run = |options: Vec<String>| {
+        gate()
+            .args(options)
+            .arg(&sh)
+            .args(["-c", script])
+            .current_dir(&root)
+            .env_clear()
+            .output()
+            .expect("the gate starts")
+    };
+    let output = run(lists.options_with(&environment));
+    assert_eq!(
+        text(&output.stdout),
+        "started\nallowed:0\noutside:126\n",
+        "the object executed a program outside the list: {}",
+        text(&output.stderr)
+    );
+    // The object is hostile where no list holds: the same start with the target listed lets
+    // its constructor replace the shell, and the script never starts.
+    let unheld = Lists {
+        allow: vec![beneath(&root, "allowed"), beneath(&root, "outside")],
+        ..lists
+    };
+    let output = run(unheld.options_with(&environment));
+    assert!(
+        output.status.success() && output.stdout.is_empty(),
+        "the control: with its target listed the object replaces the shell: {output:?}"
     );
     println!("exec gate {NAME}: executed");
 }

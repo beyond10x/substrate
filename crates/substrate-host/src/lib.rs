@@ -403,6 +403,17 @@ pub struct HostConfig {
     /// cause, the path and the type; a profile with a list is refused
     /// `confinement.fact-unserved` and the refusal's text repeats the first entry; and the
     /// driver writes one `warn` line per entry. Nothing runs with a list that is not enforced.
+    ///
+    /// That rests on one more rule (design 35 D28): on a start with a list the run's variables
+    /// reach the run's program and no program before it. The driver gives them to the helper as
+    /// operands and gives bubblewrap none, so an object that `LD_PRELOAD` names cannot start the
+    /// run without its list. Inside the run that object is still loaded into every allowed
+    /// dynamic program and runs its code there; an `execve` it makes of an unlisted path fails.
+    /// No variable is refused by name.
+    ///
+    /// Write `workspace_root` and every `writable_roots` path without `..` and `.`: with a
+    /// helper named here, such a path that does not exist yet has no place and refuses the open,
+    /// `config.exec-gate-unserved` with the cause `path-unopenable`.
     pub exec_gate: Option<PathBuf>,
 }
 
@@ -1154,6 +1165,8 @@ impl HostDriver {
         check_tmp_size_served(&config.bubblewrap, config.tmp_bytes)?;
         // Design 35 D19 to D21: a configured helper that cannot be the authority, or cannot be
         // read, refuses the open here; one that is not of the protocol refuses it in the probe.
+        // Before the workspace root is created: a root written through a name that does not
+        // exist yet has no place and refuses the open (D25), with nothing written beneath it.
         // D27: where a path of the open lies on a file-system type outside the list, the open
         // goes on without the helper, and says why once per entry at the default level.
         let (exec_gate, exec_withheld) = exec_gate::open(&config)?.announced();
@@ -1254,7 +1267,7 @@ impl HostDriver {
     /// What this driver's probe proved of the executable lists at open (design 35 D14): the
     /// second argument of [`confinement::linux::proof`]. Host-private: the capability snapshot
     /// publishes none of it.
-    pub fn exec_list_proof(&self) -> confinement::linux::ExecListProof {
+    pub(crate) fn exec_list_proof(&self) -> confinement::linux::ExecListProof {
         self.exec_lists.clone()
     }
 

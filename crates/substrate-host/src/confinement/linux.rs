@@ -44,7 +44,11 @@
 //!
 //! What the list does not stop: it restricts which files `execve` accepts, not what an allowed
 //! program does. An allowed interpreter runs a script outside the list, the loader run as a
-//! program loads one, and a program can map code it wrote. A listed directory does not reach
+//! program loads one, and a program can map code it wrote. The run's variables are not
+//! filtered: on a start with a list they reach the run's program and no program before it
+//! (D28), and an object that `LD_PRELOAD` names is loaded into every allowed dynamic program
+//! and runs its code there, while an `execve` it makes of an unlisted path fails. A listed
+//! directory does not reach
 //! through a second mount of a part of it: with `/usr` listed, `/bin/sh` is denied where `/bin`
 //! is a mount of `/usr/bin`, so a profile lists `/usr/bin`, the directory that holds the
 //! programs. A rename or link into a listed directory fails with `EXDEV`, and a listed directory

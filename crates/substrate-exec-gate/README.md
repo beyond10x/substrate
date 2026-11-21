@@ -15,6 +15,7 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
           | --loader   <path>
           | --allow    <class> <root> <rel>
           | --writable <root>
+          | --env      <name> <value>
 <class>   = follow | beneath
 ```
 
@@ -25,6 +26,14 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
   mount of the view the run can write. Where a path lies is read from the view's mount table
   (`/proc/self/mountinfo`), never from the text of two paths, and a place that cannot be
   established refuses as well.
+- `--env` carries one variable of the program's environment. **The program starts with the
+  `--env` operands as its whole environment, and nothing of the helper's own.** An empty name, a
+  name that holds `=` and a name given twice are refused.
+- **Started with a variable of its own other than `PWD`, the helper executes nothing** and names
+  the variable. The driver gives a run's variables as operands, so that none reaches a process
+  that runs before the ruleset: a loader acts on `LD_PRELOAD` and its like before a program's
+  first instruction, and a helper that found such a variable in its own environment was started
+  by a caller that let it reach that far. `PWD` is the one variable bubblewrap sets itself.
 - Every failure before the ruleset is applied exits 125 with one line on standard error that
   begins `substrate-exec-gate:`, and executes nothing. An option the grammar does not name is such
   a failure.
@@ -40,7 +49,8 @@ as an absolute path:
 cargo build --release -p b10x-substrate-exec-gate --target x86_64-unknown-linux-musl
 ```
 
-A static build starts in every sandbox. A default build needs the build host's loader and a
+A static build starts in every sandbox, and has no loader that could act on a variable before
+the helper's first instruction. A default build needs the build host's loader and a
 compatible `libc` beneath `/usr`, `/lib` or `/lib64` of every host it runs on. The file must lie
 outside the driver's workspace root and every declared writable root, and have one link:
 **install a copy, not cargo's own output**, which cargo hard-links to a second name under
@@ -63,7 +73,9 @@ through the view's second mount of `/usr/bin`. With `/usr/bin` listed both names
 
 The ruleset restricts which files `execve` accepts. It does not restrict what code an allowed
 program runs: an allowed interpreter runs any script it can read, the loader started directly
-runs any program file it can read, and a memfd copy of a program runs. The lists keep an honest
+runs any program file it can read, and a memfd copy of a program runs. The run's variables are
+not filtered: an object that `LD_PRELOAD` names is loaded into every allowed dynamic program and
+runs its code there, and an `execve` it makes of an unlisted path still fails. The lists keep an honest
 tool chain to the tools a step declares. Containment of hostile code stays with the namespaces,
 the seccomp program and the read-only view.
 

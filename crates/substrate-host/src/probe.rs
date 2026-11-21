@@ -475,8 +475,35 @@ fn base_tool(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Proves the allow-list in one throwaway run, as a start applies it (design 35 D15): the helper
-/// bound from the sealed bytes and given the arguments of D24, with `allowed` as the list.
+/// What the allow-list probe names as the run's `LD_PRELOAD`: a path in the workspace that names
+/// no file, so a loader that reads the variable loads nothing.
+const PROBE_PRELOAD: &str = "/workspace/no-such-preload";
+
+/// What the two runs of the allow-list probe showed (design 35 § 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ListProbe {
+    /// The exit status of the run whose variable was an operand of the helper.
+    operand: Option<i32>,
+    /// Whether that run's link exists on the host.
+    linked: bool,
+    /// The exit status of the run whose variable was set for the helper's own start.
+    own: Option<i32>,
+    /// Whether that run's link exists on the host: whether anything was executed.
+    own_linked: bool,
+}
+
+impl ListProbe {
+    /// Every half held. The first run ended 0 and linked: the list allowed and refused what it
+    /// must, with the variable in the program's environment. The second ended with the
+    /// helper's own status 125 and linked nothing: a variable in the helper's own process
+    /// started no program.
+    fn held(self) -> bool {
+        self.operand == Some(0) && self.linked && self.own == Some(125) && !self.own_linked
+    }
+}
+
+/// Proves the allow-list in two throwaway runs, as a start applies it (design 35 D15): the
+/// helper bound from the sealed bytes and given the arguments of D24, with `allowed` as the list.
 ///
 /// Each half must hold. What the list allows happened: `allowed/true` ran, and `allowed/ln`
 /// linked a file between two unlisted directories, which needs the refer rule and so Landlock
@@ -484,6 +511,21 @@ fn base_tool(name: &str) -> Option<PathBuf> {
 /// ended the shell's attempt with status 126. The link is then read on the host. A kernel
 /// without Landlock, a helper that does not restrict and a bubblewrap that cannot bind the bytes
 /// all answer `false`; no kernel version or ABI number is read.
+///
+/// **The preload half** (D28, § 9).
+///
+/// - The first run is given `LD_PRELOAD` as a variable, the way a start gives its variables: as
+///   an `--env` operand of the helper, with none set for bubblewrap. Both halves above are
+///   decided with that variable named, and the shell must find it in its own environment.
+/// - The second run sets the same variable for the helper's own start, with bubblewrap's
+///   `--setenv`, which is what a start did before D28. The helper must execute nothing: exit
+///   status 125, and the name its script would link does not exist on the host.
+///
+/// This proves the helper's part of D28 with the binary this host was configured with. It does
+/// not prove a constructor: the driver has no compiler at open, the value names no object, and a
+/// loader given it reports that and goes on, so standard error is discarded. An object that acts
+/// is the lane's case. Nor does it prove the driver's part, that a start gives bubblewrap no
+/// `--setenv`: the probe builds its own arguments, and a unit test holds the start's.
 pub(crate) fn probe_exec_subpaths(config: &HostConfig, gate: &ExecGate) -> bool {
     let (Some(host_true), Some(host_ln)) = (base_tool("true"), base_tool("ln")) else {
         return false;
@@ -526,25 +568,47 @@ pub(crate) fn probe_exec_subpaths(config: &HostConfig, gate: &ExecGate) -> bool 
     ) else {
         return false;
     };
-    let Ok(descriptor) = gate.reopen() else {
-        return false;
-    };
     let script = format!(
         "allowed/true || exit 11; \
          outside/true 2>/dev/null; [ $? -eq 126 ] || exit 12; \
          {} 2>/dev/null; [ $? -eq 126 ] || exit 13; \
-         allowed/ln outside/true elsewhere/linked || exit 14",
+         allowed/ln outside/true elsewhere/linked || exit 14; \
+         [ \"$LD_PRELOAD\" = {PROBE_PRELOAD} ] || exit 15",
         host_true.display()
     );
-    let status = exec_gate_sandbox(config, &descriptor, &access.bind_args())
-        .args(["--chdir", "/workspace", "--", crate::exec_gate::GATE_MOUNT])
-        .args(lists.options())
-        .args(["/bin/sh", "-c"])
-        .arg(script)
-        .stdout(Stdio::null())
-        .status();
+    let variables = [("LD_PRELOAD".to_owned(), PROBE_PRELOAD.to_owned())];
+    // One run: `before` is what bubblewrap is given ahead of its own `--`. Each run opens the
+    // sealed bytes anew, as a start does: bubblewrap reads the descriptor to its end.
+    let run = |before: &[&str], options: Vec<String>, script: &str| {
+        let descriptor = gate.reopen().ok()?;
+        exec_gate_sandbox(config, &descriptor, &access.bind_args())
+            .args(before)
+            .args(["--chdir", "/workspace", "--", crate::exec_gate::GATE_MOUNT])
+            .args(options)
+            .args(["/bin/sh", "-c", script])
+            .stdout(Stdio::null())
+            .status()
+            .ok()
+            .and_then(|status| status.code())
+    };
+    let operand = run(&[], lists.options_with(&variables), &script);
+    let linked = workspace.join("elsewhere/linked").is_file();
+    let own = run(
+        &["--setenv", "LD_PRELOAD", PROBE_PRELOAD],
+        lists.options(),
+        "allowed/ln outside/true elsewhere/second",
+    );
+    let seen = ListProbe {
+        operand,
+        linked,
+        own,
+        own_linked: workspace
+            .join("elsewhere/second")
+            .symlink_metadata()
+            .is_ok(),
+    };
     drop(access);
-    status.is_ok_and(|status| status.success()) && workspace.join("elsewhere/linked").is_file()
+    seen.held()
 }
 
 /// Proves ADR 0023's mount ordering in a disposable tree rather than publishing it from a
@@ -2079,7 +2143,11 @@ exit 1
                 })
         });
         if placed {
-            assert_eq!(listed, 1, "the allow-list probe opened no sandbox");
+            assert_eq!(
+                listed, 2,
+                "the allow-list probe opens two sandboxes: the list with the variable as an \
+                 operand, and the helper started with the variable (D28)"
+            );
         } else {
             println!("exec gate probe posture: ABSENT (a place of the plan is not established)");
         }
@@ -2089,6 +2157,79 @@ exit 1
             &crate::process::recorded_sandboxes(&log),
             3 + usize::from(socat) + listed,
         );
+    }
+
+    /// Design 35 § 9, the verdict of the allow-list probe on what its two runs showed. The fact
+    /// is proved by one observation only; each defect of a helper leaves it absent: one that
+    /// does not restrict, one that does not hand the operand's variable to the program (the
+    /// script ends 15), and one that starts the program although a variable reached its own
+    /// process, whether it then ends 0 or with another status. The lane runs the last two
+    /// through real helpers with that one defect.
+    #[test]
+    fn the_allow_list_probe_holds_only_where_both_runs_show_what_they_must() {
+        let held = ListProbe {
+            operand: Some(0),
+            linked: true,
+            own: Some(125),
+            own_linked: false,
+        };
+        assert!(held.held());
+        for (what, seen) in [
+            (
+                "the refused half happened",
+                ListProbe {
+                    operand: Some(12),
+                    linked: false,
+                    ..held
+                },
+            ),
+            (
+                "the variable did not reach the program",
+                ListProbe {
+                    operand: Some(15),
+                    ..held
+                },
+            ),
+            (
+                "the link was not made",
+                ListProbe {
+                    linked: false,
+                    ..held
+                },
+            ),
+            (
+                "no first run",
+                ListProbe {
+                    operand: None,
+                    ..held
+                },
+            ),
+            (
+                "the helper ran the program with a variable of its own",
+                ListProbe {
+                    own: Some(0),
+                    own_linked: true,
+                    ..held
+                },
+            ),
+            (
+                "the helper executed something and reported its own status",
+                ListProbe {
+                    own_linked: true,
+                    ..held
+                },
+            ),
+            (
+                "the helper started the program, which failed",
+                ListProbe {
+                    own: Some(1),
+                    ..held
+                },
+            ),
+            ("the second run was killed", ListProbe { own: None, ..held }),
+        ] {
+            assert!(!seen.held(), "{what}: {seen:?}");
+        }
     }
 
     /// Design 35 D19: with no helper configured the probe refuses nothing and proves no

@@ -192,7 +192,11 @@ require_executed ess_confinement_linux \
   'ESS confinement linux exec helper unrestricting: executed' \
   'ESS confinement linux exec helper protocol: executed' \
   'ESS confinement linux exec helper writable: executed' \
-  'ESS confinement linux exec withheld: executed'
+  'ESS confinement linux exec withheld: executed' \
+  'ESS confinement linux exec limit preload: executed' \
+  'ESS confinement linux exec variables: executed' \
+  'ESS confinement linux exec helper preload half: executed' \
+  'ESS confinement linux exec path limit: executed'
 require_executed ess_confinement_systemd \
   'ESS confinement systemd local scoped write: executed' \
   'ESS confinement systemd linux scoped write: executed' \
@@ -205,7 +209,54 @@ require_executed ess_confinement_systemd \
   'ESS confinement systemd linux live stall: executed' \
   'ESS confinement systemd linux exec_subpaths admission: executed' \
   'ESS confinement systemd linux exec allow-list: executed' \
+  'ESS confinement systemd linux exec preload: executed' \
   'ESS confinement systemd linux exec withheld: executed'
+
+# Design 35, the adversary pass and the security review of the allow-list: runs held to a list
+# against a preload object named by the run's own environment (D28), other names of an unlisted
+# program, the kernel's path limit, and the floor of an unlisted start. The preload cases build
+# a shared object with the host's `cc`, and are absent, so refused here, without one.
+require_executed adversary_exec_lists \
+  'adversary exec list preload: executed' \
+  'adversary exec list aliases: executed' \
+  'adversary exec list entry names: executed' \
+  'adversary exec list link cycle: executed' \
+  'adversary exec list read-only file: executed' \
+  'adversary exec list writable root: executed' \
+  'adversary exec list path limit: executed, refused before dispatch' \
+  'adversary exec list unmounted writable root: executed'
+require_executed security_exec_gate \
+  'security exec gate floor argv: executed' \
+  'security exec gate floor run: executed' \
+  'security exec gate preload: executed' \
+  'security exec gate preload before the helper: executed' \
+  'security exec gate without landlock: executed' \
+  'security exec gate root spelling: executed' \
+  'security exec gate published facts: executed'
+
+# The helper's own cases start `substrate-exec-gate` with no sandbox around it. They need no
+# delegated root, only a kernel with Landlock ABI 2 and a scratch directory on a listed file
+# system (`ext4`, `overlay`, `tmpfs`), and are absent, exit 0, without either; so each is
+# required by its line here, where the lists are proved.
+require_executed -p b10x-substrate-exec-gate gate \
+  'exec gate listed directory: executed' \
+  'exec gate file entry: executed' \
+  'exec gate refer: executed' \
+  'exec gate follow into a writable mount: executed' \
+  'exec gate unestablished place: executed' \
+  'exec gate program exec failure: executed' \
+  'exec gate descriptors: executed' \
+  'exec gate environment: executed' \
+  'exec gate own environment: executed' \
+  'exec gate preload operand: executed'
+require_executed -p b10x-substrate-exec-gate adversary_gate \
+  'adversary landlock failures: executed'
+require_executed -p b10x-substrate-exec-gate security_gate \
+  'security exec gate landlock refused: executed' \
+  'security exec gate preload: executed' \
+  'security exec gate option-like operands: executed' \
+  'security exec gate long list: executed' \
+  'security exec gate no_new_privs: executed'
 
 # `b10x-substrate confine run` opens the linux adapter on a private group beneath the delegated
 # root; its delegated cases are absent, exit 0, without it, so each is required by its line.

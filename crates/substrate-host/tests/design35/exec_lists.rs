@@ -253,7 +253,7 @@ async fn a_listed_directory_runs_its_program_and_a_program_outside_it_fails_insi
         .iter()
         .rposition(|part| part == GATE)
         .expect("the helper");
-    assert_eq!(args[gate - 1], "--", "after env: {args:?}");
+    assert_eq!(args[gate - 1], "--", "directly after bubblewrap: {args:?}");
     assert_eq!(args[gate + 1], "--program", "{args:?}");
     let allow = args
         .windows(4)
@@ -1116,5 +1116,373 @@ async fn a_writable_root_on_an_unlisted_file_system_withholds_the_lists_and_says
     .await;
     assert_eq!(stdout, "0\n0\n", "a run without a list runs every program");
     assert_eq!(code, Some(0));
+    println!("{NAME}: executed");
+}
+
+/// Admits `profile`, runs `script` under the shell with `environment` as the run's variables
+/// and nothing else, and returns its exit code and its stdout.
+async fn run_with(
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    script: &str,
+    environment: &[(&str, &str)],
+) -> (Option<i32>, String) {
+    let admitted = adapter.admit(profile).expect("admitted");
+    let command = Command {
+        argv: vec![text(&tool("sh")), "-c".into(), script.to_owned()],
+        env: environment
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+    };
+    let run = adapter.start(&admitted, &command).await.expect("started");
+    let ended = adapter.wait(&run).await.expect("waited");
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    let output = adapter.output(&run).await.expect("output");
+    (
+        ended.exit.as_ref().and_then(|exit| exit.code),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+/// Builds `source` as the shared object `pre.so` in `directory` with the host's `cc`, or prints
+/// `<name>: ABSENT (<reason>)` where no object can be built.
+fn shared_object(name: &str, directory: &Path, source: &str) -> Option<PathBuf> {
+    let code = directory.join("pre.c");
+    let object = directory.join("pre.so");
+    std::fs::write(&code, source).expect("the source");
+    let built = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&object)
+        .arg(&code)
+        .output();
+    match built {
+        Ok(output) if output.status.success() => Some(object),
+        Ok(output) => {
+            println!(
+                "{name}: ABSENT (cc built no shared object: {})",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            None
+        }
+        Err(error) => {
+            println!("{name}: ABSENT (no C compiler named cc: {error})");
+            None
+        }
+    }
+}
+
+/// What the limit's object does wherever it is loaded: it appends one byte to
+/// `/workspace/loaded`, and once per run it executes `/workspace/other/tool`, a program outside
+/// the list, and writes the error number of that `execve` to `/workspace/refused`. The one
+/// attempt is marked by the file `/workspace/tried`, not by a variable: a shell may define
+/// `setenv` and `getenv` of its own, which a preloaded object's calls bind to.
+const LIMIT_PRELOAD: &str = r#"
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <unistd.h>
+
+extern char **environ;
+
+static void __attribute__((constructor)) loaded(void) {
+    int file = open("/workspace/loaded", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (file >= 0) {
+        (void)!write(file, "x", 1);
+        close(file);
+    }
+    file = open("/workspace/tried", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (file >= 0) {
+        char *argv[] = { "/workspace/other/tool", NULL };
+        close(file);
+        execve(argv[0], argv, environ);
+        file = open("/workspace/refused", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (file >= 0) {
+            dprintf(file, "%d", errno);
+            close(file);
+        }
+    }
+}
+"#;
+
+/// The limit of design 35 § 7, stated since D28: **inside the domain, a preload object is
+/// loaded into every allowed dynamic program and can run code, as an allowed interpreter can;
+/// `execve` of an unlisted path still fails.**
+///
+/// The run's `LD_PRELOAD` names an object in the workspace. With the profile listing `bin`, the
+/// object's constructor runs in the shell and in the shell it starts, and writes a file from
+/// inside each; its own `execve` of `other/tool` fails with `EACCES`, and the script's attempt
+/// ends with status 126. The control is the same start without a list: there the constructor's
+/// `execve` succeeds and replaces the shell, so the script never starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn limit_a_preload_object_runs_its_code_in_every_allowed_dynamic_program() {
+    const NAME: &str = "ESS confinement linux exec limit preload";
+    let Some(lane) = lane(NAME) else {
+        return;
+    };
+    if shared_object(NAME, &lane.workspace, LIMIT_PRELOAD).is_none() {
+        return;
+    }
+    let script = format!(
+        "echo started; {} -c :; bin/tool; echo $?; other/tool 2>/dev/null; echo $?",
+        tool("sh").display()
+    );
+    let variables = [("LD_PRELOAD", "/workspace/pre.so")];
+    let (code, stdout) = run_with(
+        &lane.adapter,
+        &listed(&lane.workspace, &["bin"]),
+        &script,
+        &variables,
+    )
+    .await;
+    assert_eq!(
+        (stdout.as_str(), code),
+        ("started\n0\n126\n", Some(0)),
+        "the list holds the run with the object loaded"
+    );
+    let loaded = std::fs::read_to_string(lane.workspace.join("loaded")).unwrap_or_default();
+    assert!(
+        loaded.len() >= 2 && loaded.bytes().all(|byte| byte == b'x'),
+        "the object ran its code in the shell and in the shell that one started: {loaded:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(lane.workspace.join("refused")).ok(),
+        Some(libc::EACCES.to_string()),
+        "the object's own execve of a program outside the list"
+    );
+
+    // The control: without a list the same object executes the program and replaces the shell.
+    for file in ["loaded", "refused", "tried"] {
+        std::fs::remove_file(lane.workspace.join(file)).expect(file);
+    }
+    let (code, stdout) = run_with(
+        &lane.adapter,
+        &listed(&lane.workspace, &[]),
+        &script,
+        &variables,
+    )
+    .await;
+    assert_eq!(
+        (stdout.as_str(), code),
+        ("", Some(0)),
+        "without a list the object's execve replaces the shell, as before the story"
+    );
+    assert!(!lane.workspace.join("refused").exists());
+    println!("{NAME}: executed");
+}
+
+/// D28: the run's variables reach the run's program as they were given, and are its whole
+/// environment. Read from `/proc/<shell>/environ`, which is what the shell was started with and
+/// not what it exports: each value byte for byte, an empty one, one with a space, with `=`, one
+/// that is `--` and one that is `--env`; `PWD` where the run set it and no `PWD` where it did
+/// not; and the driver's bound, 64 variables of 4096 bytes each. A start without a list has
+/// the same environment.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_runs_variables_reach_the_program_as_they_were_given() {
+    const NAME: &str = "ESS confinement linux exec variables";
+    let Some(lane) = lane(NAME) else {
+        return;
+    };
+    let cat = text(&tool("cat"));
+    let wc = text(&tool("wc"));
+    let mut directories = base_directories();
+    for name in ["cat", "wc"] {
+        let directory = text(tool(name).parent().expect("a directory"));
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
+    }
+    let entries: Vec<&str> = directories.iter().map(String::as_str).collect();
+    let profile = listed(&lane.workspace, &entries);
+    let unlisted = listed(&lane.workspace, &[]);
+    // `; :` keeps a shell from replacing itself with `cat`, whose environment is the shell's
+    // exported one.
+    let environ = format!("{cat} /proc/$$/environ; :");
+    let sorted = |stdout: &str| {
+        let mut variables: Vec<String> = stdout.split_terminator('\0').map(str::to_owned).collect();
+        variables.sort();
+        variables
+    };
+
+    let given = [
+        ("A", "b"),
+        ("DASHES", "--"),
+        ("EMPTY", ""),
+        ("EQUALS", "a=b"),
+        ("LD_PRELOAD", "/workspace/no-such-object"),
+        ("NAMED", "--env"),
+        ("PWD", "/workspace/bin"),
+        ("SPACED", "two words"),
+    ];
+    let expected: Vec<String> = given
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
+    for (what, profile) in [("with a list", &profile), ("without a list", &unlisted)] {
+        let (code, stdout) = run_with(&lane.adapter, profile, &environ, &given).await;
+        assert_eq!(code, Some(0), "{what}");
+        assert_eq!(sorted(&stdout), expected, "{what}");
+    }
+
+    // No `PWD` of bubblewrap's, and nothing of the helper's: one variable is the environment.
+    for (what, profile) in [("with a list", &profile), ("without a list", &unlisted)] {
+        let (code, stdout) = run_with(&lane.adapter, profile, &environ, &[("A", "b")]).await;
+        assert_eq!((stdout.as_str(), code), ("A=b\0", Some(0)), "{what}");
+        let (code, stdout) = run_with(&lane.adapter, profile, &environ, &[]).await;
+        assert_eq!(
+            (stdout.as_str(), code),
+            ("", Some(0)),
+            "{what}: no variable"
+        );
+    }
+
+    // The driver's bound for a run's variables, as operands of the helper.
+    let names: Vec<String> = (0..64).map(|index| format!("V{index:02}")).collect();
+    let value = "v".repeat(4096);
+    let many: Vec<(&str, &str)> = names
+        .iter()
+        .map(|name| (name.as_str(), value.as_str()))
+        .collect();
+    let bytes: usize = many
+        .iter()
+        .map(|(name, value)| name.len() + 1 + value.len() + 1)
+        .sum();
+    let (code, stdout) = run_with(
+        &lane.adapter,
+        &profile,
+        &format!("{wc} -c < /proc/$$/environ; :"),
+        &many,
+    )
+    .await;
+    assert_eq!(
+        (stdout.trim(), code),
+        (bytes.to_string().as_str(), Some(0)),
+        "64 variables of 4096 bytes each reach the program"
+    );
+    println!("{NAME}: executed");
+}
+
+/// A helper with one defect, for the probe of design 35 § 9: a shell script that carries the
+/// lane's helper after its last line, writes it to `/tmp/gate` of the view and starts it with
+/// an empty environment of its own, after `before` rewrote the arguments. It restricts as the
+/// real helper does.
+fn defective(host: &Path, name: &str, before: &str) -> PathBuf {
+    let tail = text(&tool("tail"));
+    let chmod = text(&tool("chmod"));
+    let env = text(&tool("env"));
+    let script = |offset: usize| {
+        format!(
+            "#!/bin/sh\n\
+             {tail} -c +{offset:08} /.substrate-exec-gate > /tmp/gate || exit 99\n\
+             {chmod} 0755 /tmp/gate || exit 99\n\
+             {before}\n\
+             exec {env} -i /tmp/gate \"$@\"\n\
+             exit 98\n"
+        )
+    };
+    // `tail -c +N` starts at byte N, counted from one: the first byte after the script.
+    let mut bytes = script(script(0).len() + 1).into_bytes();
+    bytes.extend_from_slice(&std::fs::read(helper()).expect("the lane's helper"));
+    let path = host.join(name);
+    std::fs::write(&path, bytes).expect("the defective helper");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    path
+}
+
+/// D15, the preload half (§ 9): `exec_subpaths` is proved only where a variable given as an
+/// operand reached the program and a helper started with that variable in its own environment
+/// executed nothing. Two helpers that restrict as the real one does and have one defect each
+/// leave the fact absent, and the adapter refuses a listed profile by the fact's name:
+///
+/// - one that drops the `--env` operands, so the program starts without the run's variable;
+/// - one that clears its own environment and runs the program, where the real helper refuses.
+///
+/// The control is the same wrapper with neither defect in the first run: it is the second
+/// helper, which passes the first run and fails only the second. The lane's own helper proves
+/// the fact in every other case of this file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_helper_that_fails_the_preload_half_withholds_the_fact() {
+    const NAME: &str = "ESS confinement linux exec helper preload half";
+    /// Drops every `--env <name> <value>` before the helper's own `--`.
+    const DROPS_THE_OPERANDS: &str = "count=$#\n\
+        options=1\n\
+        while [ \"$count\" -gt 0 ]; do\n\
+        \x20 argument=$1; shift; count=$((count - 1))\n\
+        \x20 if [ \"$options\" = 1 ] && [ \"$argument\" = --env ]; then\n\
+        \x20   shift 2; count=$((count - 2))\n\
+        \x20 else\n\
+        \x20   [ \"$argument\" = -- ] && options=0\n\
+        \x20   set -- \"$@\" \"$argument\"\n\
+        \x20 fi\n\
+        done";
+    let Some(cgroup_root) = delegated(NAME) else {
+        return;
+    };
+    for (name, before, what) in [
+        (
+            "gate-drops-operands",
+            DROPS_THE_OPERANDS,
+            "a helper that does not hand the operand's variable to the program",
+        ),
+        (
+            "gate-clears-its-own",
+            ":",
+            "a helper that starts the program although a variable reached its own process",
+        ),
+    ] {
+        let host = tempfile::tempdir().expect("host root");
+        let gate = defective(host.path(), name, before);
+        let adapter = open_with(host.path(), &cgroup_root, Some(gate)).expect("linux opens");
+        let workspace = workspace(host.path());
+        assert_fact_unserved(&adapter, &workspace, what);
+    }
+    println!("{NAME}: executed");
+}
+
+/// Design 35 § 5, *A view path the kernel takes* (E4): an entry whose path in the view is
+/// longer than 4095 bytes is refused before dispatch, `exec.sandbox-path-unrepresentable`, with
+/// its audit record and nothing run; the same directory through a mount whose path is one byte
+/// shorter is exactly 4095 bytes, and that start runs. The driver opens both through the
+/// mount's descriptor, where the path is shorter than either.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entry_over_the_kernels_path_limit_is_refused_and_one_at_it_runs() {
+    const NAME: &str = "ESS confinement linux exec path limit";
+    let Some(lane) = lane(NAME) else {
+        return;
+    };
+    // Fifteen names of 255 bytes with their separators: 3839 bytes beneath the mount.
+    let rel = vec!["d".repeat(255); 15].join("/");
+    let deep = lane.host.path().join("deep");
+    std::fs::create_dir_all(deep.join(&rel)).expect("the deep directory");
+    let at_the_limit = format!("/opt/{}", "m".repeat(250));
+    let over_it = format!("/opt/{}", "m".repeat(251));
+    let profile = |mount: &str| ConfinementProfile {
+        read_only_roots: vec![root(&deep, mount)],
+        ..listed(&lane.workspace, &[&format!("{mount}/{rel}")])
+    };
+    assert_eq!(format!("{at_the_limit}/{rel}").len(), 4095);
+    assert_eq!(format!("{over_it}/{rel}").len(), 4096);
+
+    let marker = lane.workspace.join("ran");
+    let error = assert_start_refused(
+        &lane.adapter,
+        profile(&over_it),
+        &text(&tool("sh")),
+        (PATH_UNREPRESENTABLE, 422),
+        &marker,
+        "an entry of 4096 bytes in the view",
+    )
+    .await;
+    assert!(
+        error.to_string().contains("is 4096 bytes long"),
+        "the refusal names the length: {error}"
+    );
+
+    let (code, stdout) = run(&lane.adapter, &profile(&at_the_limit), "echo ran").await;
+    assert_eq!(
+        (stdout.as_str(), code),
+        ("ran\n", Some(0)),
+        "an entry of 4095 bytes in the view is one the helper opens"
+    );
     println!("{NAME}: executed");
 }

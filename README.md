@@ -632,6 +632,7 @@ workspace backup/restore snapshots remain absent.
 | `crates/substrate-wire` | the closed Rust representation of the wire; **subordinate to the contract bundle**, never the other way round |
 | `crates/substrate-store` | durable operation and resource state |
 | `crates/substrate-host` | the Linux host driver |
+| `crates/substrate-exec-gate` | `substrate-exec-gate`, the helper the `linux` confinement adapter runs inside a sandbox to hold a run to its executable allow-list with Landlock; named by `HostConfig.exec_gate`, built and installed by the embedder ([its README](crates/substrate-exec-gate/README.md)) |
 | `crates/substrate-guarded` | guarded workspace file access (`openat2` beneath a pinned root), the driver error type and the exec environment rule, shared by every driver and by a binary that must not link the host driver |
 | `crates/substrate-kubernetes-client` | the bounded Kubernetes API client the `pod` confinement adapter and the namespace driver share: kubeconfig loading, HTTPS requests, watches, `pods/exec` and the gone-Pod rule |
 | `crates/substrate-kubernetes` | the Kubernetes namespace driver (ADR 0047): its settings, object names and labels, the ownership rule, the namespace `Lease`, the startup refusals and the snapshot binding |

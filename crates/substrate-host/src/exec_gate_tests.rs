@@ -14,15 +14,15 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 use substrate_exec_gate::place::{Cause, MountTable, Opened, Unestablished};
-use substrate_exec_gate::{Class, Invocation, Lists};
+use substrate_exec_gate::{Class, Invocation, Lists, Located};
 use substrate_guarded::DriverErrorClass;
 use substrate_wire::ReadOnlyRoot;
 
 use super::{
     EXEC_GATE_INVALID, EXEC_GATE_UNSERVED, ExecGate, FileFacts, Location, OpenDecision,
     OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, View,
-    check_file, check_links, check_location, check_protocol, classed, decide_open, open,
-    place_open, plan, start_unplaced, withheld_facts,
+    check_file, check_length, check_links, check_location, check_openable, check_protocol, classed,
+    decide_open, open, place_open, plan, shown_location, start_unplaced, withheld_facts,
 };
 use crate::confinement::{Fact, FactWithheld};
 use crate::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
@@ -799,6 +799,17 @@ impl Staged {
         entries: &[&str],
         program: &str,
     ) -> Result<Lists, DriverError> {
+        self.plan_with_loader(roots, entries, program, None)
+    }
+
+    /// [`Self::plan`], for a helper that read `loader` as the host's ELF loader at open.
+    fn plan_with_loader(
+        &self,
+        roots: &[(&Path, &str)],
+        entries: &[&str],
+        program: &str,
+        loader: Option<&str>,
+    ) -> Result<Lists, DriverError> {
         let workspace = OwnedFd::from(std::fs::File::open(&self.workspace).expect("workspace"));
         let declared: Vec<ReadOnlyRoot> = roots
             .iter()
@@ -810,7 +821,7 @@ impl Staged {
         let pinned = crate::read_only_roots::pin(&declared).expect("pinned roots");
         let entries: Vec<String> = entries.iter().map(|entry| (*entry).to_owned()).collect();
         plan(
-            &ExecGate::seal(b"gate", None).expect("sealed"),
+            &ExecGate::seal(b"gate", loader.map(str::to_owned)).expect("sealed"),
             &entries,
             program,
             &View {
@@ -878,9 +889,11 @@ fn a_list_becomes_the_arguments_the_helper_parses() {
     match substrate_exec_gate::parse(arguments).expect("the helper parses the options") {
         Invocation::Run {
             lists: parsed,
+            environment,
             command,
         } => {
             assert_eq!(parsed, lists);
+            assert!(environment.is_empty(), "the lists alone carry no variable");
             assert_eq!(command, ["/usr/bin/env", "true"]);
         }
         other @ Invocation::Version => panic!("parsed as {other:?}"),
@@ -1069,4 +1082,189 @@ fn a_declared_root_on_an_unlisted_file_system_refuses_the_plan() {
         assert!(error.message.contains(holds), "{error}");
     }
     println!("exec gate root on an unlisted file system: executed");
+}
+
+/// D24 and D25, where a followed path ends on the host: the location a run can write that it
+/// lies in is found by place. The text of a path under the host's second mount of the
+/// workspace root is beside that root, and its place is inside it; a path beside every
+/// location, and one on another device, lie in none.
+#[test]
+fn a_followed_object_in_a_writable_location_is_found_by_place() {
+    let table = host();
+    let locations = writable();
+    let shown = |path: &str, mount_id: u64| {
+        let place = table.place_of(&seen(path, mount_id)).expect("placed");
+        shown_location(&place, &locations).map(|location| location.path.clone())
+    };
+    assert_eq!(
+        shown("/work/u/workspaces/ws_1/tools/bin", 31).as_deref(),
+        Some("/work/u/workspaces")
+    );
+    assert_eq!(
+        shown("/mnt/second/ws_1/tools/bin", 60).as_deref(),
+        Some("/work/u/workspaces"),
+        "the second mount of the workspace root"
+    );
+    assert_eq!(shown("/srv/out", 31).as_deref(), Some("/srv/out"));
+    assert_eq!(shown("/srv/out/a/b", 31).as_deref(), Some("/srv/out"));
+    assert_eq!(shown("/usr/bin", 31), None);
+    assert_eq!(
+        shown("/srv/outside", 31),
+        None,
+        "a name that only begins alike"
+    );
+    assert_eq!(
+        shown("/work/u", 31),
+        None,
+        "what holds a location is not in it"
+    );
+    assert_eq!(shown("/tmp/tools", 61), None, "another device");
+    // With no writable location there is nothing to lie in.
+    let place = table
+        .place_of(&seen("/work/u/workspaces/ws_1", 31))
+        .expect("placed");
+    assert!(shown_location(&place, &[]).is_none());
+}
+
+/// Design 35 § 5, the kernel's path limit: an entry whose text `<root>/<rel>` in the view is
+/// longer than 4095 bytes is refused by the driver, whatever its class, and one of 4095 is not:
+/// no bound below the kernel's.
+#[test]
+fn an_entry_the_helper_could_not_open_for_its_length_is_refused() {
+    // A first name that fills the length, then names of 255 bytes with their separators.
+    let names = |bytes: usize| {
+        let first = bytes % 256;
+        assert!((1..=255).contains(&first), "a length this case can spell");
+        let rel = format!(
+            "{}{}",
+            "e".repeat(first),
+            format!("/{}", "d".repeat(255)).repeat(bytes / 256)
+        );
+        assert_eq!(rel.len(), bytes);
+        rel
+    };
+    let follow = |rel: &str| Located::new(Class::Follow, "/opt/t", rel).expect("a path");
+    let beneath = |rel: &str| Located::new(Class::Beneath, "/workspace", rel).expect("a path");
+    // "/opt/t/" is seven bytes: 4088 more are the limit, and one more is over it.
+    check_openable(&follow(&names(4088))).expect("4095 bytes of path");
+    let refused = check_openable(&follow(&names(4089))).expect_err("4096 bytes of path");
+    assert!(
+        refused.contains("is 4096 bytes long") && refused.contains("4095"),
+        "{refused}"
+    );
+    // "/workspace/" is eleven bytes: the same measure for a path opened beneath its root.
+    check_openable(&beneath(&names(4084))).expect("4095 bytes of path");
+    let refused = check_openable(&beneath(&names(4085))).expect_err("4096 bytes of path");
+    assert!(refused.contains("is 4096 bytes long"), "{refused}");
+    check_openable(&follow("bin")).expect("a short path");
+    check_openable(&Located::new(Class::Follow, "/usr", ".").expect("a root")).expect("a root");
+    // The loader and a mount the run can write are measured as the text the helper is given.
+    check_length(&format!("/{}", "l".repeat(4094))).expect("4095 bytes");
+    check_length(&format!("/{}", "l".repeat(4095))).expect_err("4096 bytes");
+}
+
+/// D7 and D24, the loader before dispatch: the helper opens the host's loader as a `follow`
+/// path and refuses one that resolves into a mount the run can write. The driver gives the same
+/// answer before anything is dispatched, and not exit status 125 after it.
+#[test]
+fn a_loader_that_resolves_into_a_writable_mount_is_refused_before_dispatch() {
+    let staged = Staged::new();
+    if !placed("loader into a writable mount", staged.root.path()) {
+        return;
+    }
+    std::fs::create_dir_all(staged.workspace.join("lib")).expect("lib");
+    std::fs::write(staged.workspace.join("lib/ld.so"), b"loader").expect("a file");
+    let tools = staged.root.path().join("tools");
+    std::fs::create_dir_all(&tools).expect("a root");
+    std::os::unix::fs::symlink("/workspace/lib/ld.so", tools.join("ld.so")).expect("a link");
+    let plan = |loader: &str| {
+        staged.plan_with_loader(
+            &[(&tools, "/opt/ro")],
+            &["/usr/bin"],
+            "/usr/bin/env",
+            Some(loader),
+        )
+    };
+    assert_refused(
+        plan("/opt/ro/ld.so"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "resolves to /workspace/lib/ld.so, in the writable mount /workspace",
+    );
+    assert_refused(
+        plan("/workspace/lib/ld.so"),
+        PATH_UNREPRESENTABLE,
+        "exec_subpaths",
+        "in the writable mount /workspace",
+    );
+    // The control: a loader of the base system is carried to the helper as it was read.
+    let lists = plan("/usr/bin/env").expect("a loader in the base system");
+    assert_eq!(lists.loader.as_deref(), Some("/usr/bin/env"));
+    println!("exec gate loader into a writable mount: executed");
+}
+
+/// D25, sixth revision, and § 16 *The root's spelling*: a workspace root written through a name
+/// that does not exist yet has no place. `<ws>` holds a workspace with a file in it and the
+/// helper names that file; with the root written `<ws>/new/..` or `<ws>/new/.` the open is
+/// `config.exec-gate-unserved`, address `config.workspace_root`, cause `path-unopenable`, and
+/// creates nothing. The control, the root written `<ws>`, is `config.exec-gate-invalid`. The
+/// same holds for a declared writable root written that way.
+#[test]
+fn a_root_written_through_a_missing_name_and_dot_dot_refuses_the_open() {
+    let root = staged();
+    if !placed("root spelling", root.path()) {
+        return;
+    }
+    let workspaces = root.path().join("workspaces");
+    let inside = workspaces.join("ws_earlier/gate");
+    write(&inside, b"what an earlier run left");
+    let rooted = |workspace_root: PathBuf| {
+        let mut config = config(root.path(), &inside);
+        config.workspace_root = workspace_root;
+        config
+    };
+    assert_invalid(
+        &open(&rooted(workspaces.clone())).expect_err("the root as it is"),
+        "which a run can write",
+    );
+    for last in ["..", "."] {
+        let spelled = workspaces.join("new").join(last);
+        let error = open(&rooted(spelled.clone())).expect_err("a root with no place");
+        assert_eq!(
+            (error.code, error.address.as_deref()),
+            (EXEC_GATE_UNSERVED, Some("config.workspace_root")),
+            "{error}"
+        );
+        assert!(
+            error.message.contains("path-unopenable")
+                && error.message.contains(spelled.to_str().expect("UTF-8")),
+            "{error}"
+        );
+        assert!(
+            !workspaces.join("new").exists(),
+            "the open created {last:?}"
+        );
+    }
+    // A declared writable root written the same way is not compared either.
+    let outside = root.path().join("install/gate");
+    write(&outside, b"gate");
+    let mut declared = config(root.path(), &outside);
+    declared.writable_roots = vec![crate::DeclaredWritableRoot {
+        name: "out".to_owned(),
+        path: root.path().join("install/new/.."),
+    }];
+    let error = open(&declared).expect_err("a writable root with no place");
+    assert_eq!(
+        (error.code, error.address.as_deref()),
+        (EXEC_GATE_UNSERVED, Some("config.writable_roots")),
+        "{error}"
+    );
+    assert!(error.message.contains("path-unopenable"), "{error}");
+    // The control: the same roots written through names that exist, or through none, open.
+    std::fs::create_dir_all(workspaces.join("new")).expect("new");
+    assert_invalid(
+        &open(&rooted(workspaces.join("new/.."))).expect_err("the root, once it resolves"),
+        "which a run can write",
+    );
+    println!("exec gate root spelling: executed");
 }

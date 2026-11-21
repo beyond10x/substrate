@@ -232,6 +232,91 @@ async fn a_systemd_linux_run_is_held_to_its_executable_list() {
     println!("{NAME}: executed");
 }
 
+/// Design 35 D28, `systemd` around `linux` (E1 once through it): the scope starts the inner
+/// adapter's argv, so the run's variables reach the run's program and nothing before it. The
+/// run's `LD_PRELOAD` names an object in the workspace whose constructor executes the run's
+/// script in the first process that loads it; the script prints what the same start prints
+/// without the variable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_linux_run_with_a_preload_in_its_environment_is_held_to_its_list() {
+    const NAME: &str = "ESS confinement systemd linux exec preload";
+    const SCRIPT: &str = "bin/tool; echo $?; other/tool 2>/dev/null; echo $?";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    if exec_gate().is_none() {
+        println!("{NAME}: ABSENT (SUBSTRATE_EXEC_GATE is unset)");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let workspace = host.path().join("workspaces").join("ws_exec");
+    let tool = ["/usr/bin/true", "/bin/true"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .expect("the host's true");
+    for directory in ["bin", "other"] {
+        std::fs::create_dir_all(workspace.join(directory)).expect(directory);
+        std::fs::copy(tool, workspace.join(directory).join("tool")).expect("copy true");
+    }
+    let source = workspace.join("pre.c");
+    std::fs::write(
+        &source,
+        "#include <stdlib.h>\n\
+         #include <string.h>\n\
+         #include <unistd.h>\n\
+         extern char **environ;\n\
+         __attribute__((constructor)) static void first(void) {\n\
+         \x20   const char *script = getenv(\"PRELOAD_SCRIPT\");\n\
+         \x20   char **from = environ, **to = environ;\n\
+         \x20   if (!getenv(\"LD_PRELOAD\") || !script) return;\n\
+         \x20   /* Not unsetenv: bash has one of its own that leaves environ as it is. */\n\
+         \x20   for (; *from; from++)\n\
+         \x20       if (strncmp(*from, \"LD_PRELOAD=\", 11) != 0) *to++ = *from;\n\
+         \x20   *to = 0;\n\
+         \x20   execl(\"/bin/sh\", \"sh\", \"-c\", script, (char *)0);\n\
+         }\n",
+    )
+    .expect("the source");
+    let built = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(workspace.join("pre.so"))
+        .arg(&source)
+        .output();
+    if !built.as_ref().is_ok_and(|output| output.status.success()) {
+        println!("{NAME}: ABSENT (cc built no shared object: {built:?})");
+        return;
+    }
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            inner: Some(InnerAdapter::Linux),
+            workspace: Some(workspace),
+            exec_subpaths: vec!["bin".to_owned()],
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let mut command = shell(SCRIPT);
+    command
+        .env
+        .insert("LD_PRELOAD".to_owned(), "/workspace/pre.so".to_owned());
+    command
+        .env
+        .insert("PRELOAD_SCRIPT".to_owned(), SCRIPT.to_owned());
+    let run = adapter.start(&admitted, &command).await.expect("started");
+    let ended = adapter.wait(&run).await.expect("waited");
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    let output = adapter.output(&run).await.expect("output");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "0\n126\n",
+        "the object executed a program outside the list"
+    );
+    drop(adapter);
+    println!("{NAME}: executed");
+}
+
 /// Design 35 D27, `systemd` around `linux`: an inner adapter whose open withheld the allow-list
 /// fact, here for a declared writable root at `/proc/sys`, which lies on the type `proc`. The
 /// scope's proof carries the same entry, and a profile with a list is refused with it.

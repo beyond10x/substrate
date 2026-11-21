@@ -80,12 +80,15 @@ pub struct ConfinementProfile {
     /// `/workspace`, absolute beneath `/usr`, `/bin`, `/lib`, `/lib64`, `/workspace` or the mount
     /// of a declared root or file; anywhere else is `exec.sandbox-exec-subpath-undeclared`. It
     /// must exist when the run starts, has no symbolic link in a mount that shows something a
-    /// run can write, and does not resolve into a mount the run can write; each is
-    /// `exec.sandbox-path-unrepresentable`. The program is then an absolute path. A place the
-    /// host cannot establish is `exec.sandbox-place-unserved` (501).
+    /// run can write, does not resolve into a mount the run can write, and is at most 4095
+    /// bytes long in the view; each is `exec.sandbox-path-unrepresentable`. The program is then
+    /// an absolute path. A place the host cannot establish is `exec.sandbox-place-unserved` (501).
     ///
     /// The list restricts which files are executed, not what an allowed program does: an allowed
     /// interpreter runs any script it can read, and the loader run as a program loads any file.
+    /// The run's variables are not filtered: an object that `LD_PRELOAD` names is loaded into
+    /// every allowed dynamic program and runs its code there, and an `execve` it makes of an
+    /// unlisted path still fails (D28).
     /// A listed directory does not reach through a second mount of a part of it, so list
     /// `/usr/bin`, the directory that holds the programs, and not `/usr`.
     pub exec_subpaths: Vec<String>,
