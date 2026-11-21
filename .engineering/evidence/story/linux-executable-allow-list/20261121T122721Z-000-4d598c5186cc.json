@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-21T12:27:21Z",
+  "actor": "human:timo",
+  "artifact": "story:linux-executable-allow-list",
+  "kind": "story",
+  "revision": 18,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:linux-executable-allow-list-security",
+    "review": "review-result:linux-executable-allow-list-security",
+    "outcome": "fixed"
+  }
+}
