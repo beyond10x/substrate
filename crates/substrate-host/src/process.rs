@@ -245,6 +245,7 @@ pub(crate) struct AdapterStart {
 #[derive(Debug)]
 pub(crate) struct ExecLists {
     subpaths: Vec<String>,
+    denied: Vec<String>,
 }
 
 impl ExecLists {
@@ -252,6 +253,7 @@ impl ExecLists {
     pub(crate) fn of(admitted: &AdmittedProfile) -> Self {
         Self {
             subpaths: admitted.profile().exec_subpaths.clone(),
+            denied: admitted.profile().exec_denied_paths.clone(),
         }
     }
 
@@ -259,6 +261,7 @@ impl ExecLists {
     fn wire() -> Self {
         Self {
             subpaths: Vec::new(),
+            denied: Vec::new(),
         }
     }
 
@@ -267,12 +270,27 @@ impl ExecLists {
     pub(crate) fn listing(entries: &[&str]) -> Self {
         Self {
             subpaths: entries.iter().map(|entry| (*entry).to_owned()).collect(),
+            denied: Vec::new(),
+        }
+    }
+
+    /// [`Self::listing`], with `denied` as the deny-list.
+    #[cfg(test)]
+    pub(crate) fn listing_and_denying(entries: &[&str], denied: &[&str]) -> Self {
+        Self {
+            denied: denied.iter().map(|entry| (*entry).to_owned()).collect(),
+            ..Self::listing(entries)
         }
     }
 
     /// Whether the start carries no list, and so runs as it did before the lists existed.
     pub(crate) fn is_empty(&self) -> bool {
-        self.subpaths.is_empty()
+        self.subpaths.is_empty() && self.denied.is_empty()
+    }
+
+    /// The deny-list entries, as the profile wrote them.
+    pub(crate) fn denied(&self) -> &[String] {
+        &self.denied
     }
 
     /// The allow-list entries, as the profile wrote them.
@@ -640,6 +658,8 @@ pub struct ProcessRuntime {
     /// a weaker list (invariant 3).
     exec_gate: Option<Arc<ExecGate>>,
     exec_subpaths_proved: bool,
+    /// Whether the probe proved the deny-list with the helper (design 35 § 9).
+    exec_denied_paths_proved: bool,
 }
 
 impl ProcessRuntime {
@@ -659,6 +679,7 @@ impl ProcessRuntime {
         exec_gate: Option<Arc<ExecGate>>,
         exec_subpaths_proved: bool,
     ) -> Result<Self, DriverError> {
+        // The deny-list's proof is given afterwards, by [`Self::proving_exec_denied_paths`].
         let backend_binding =
             crate::probe::probe_backend(&config, exec_gate.as_deref().map(ExecGate::sha256));
         let runtime = Self {
@@ -667,6 +688,7 @@ impl ProcessRuntime {
             backend_binding,
             exec_gate,
             exec_subpaths_proved,
+            exec_denied_paths_proved: false,
             executions: Arc::new(Mutex::new(HashMap::new())),
             reservations: Arc::new(Mutex::new(HashSet::new())),
             unproven: Arc::new(Mutex::new(HashMap::new())),
@@ -1158,15 +1180,43 @@ impl ProcessRuntime {
     /// The adapter's admission refuses such a profile first; this is the driver's own answer, so
     /// no caller starts a listed run without its list.
     fn exec_lists_served(&self, lists: &ExecLists) -> Result<(), DriverError> {
-        if lists.is_empty() || (self.exec_gate.is_some() && self.exec_subpaths_proved) {
+        if lists.is_empty() {
             return Ok(());
         }
-        Err(DriverError::unserved(
-            crate::confinement::FACT_UNSERVED,
-            "This host did not prove an executable allow-list, so a run that carries one is not \
-             started.",
-            "exec_subpaths",
-        ))
+        // Admission refuses a deny-list beside no allow-list (D13); this is the driver's own
+        // answer, because on `linux` an empty allow-list runs every program of the view.
+        if lists.subpaths().is_empty() {
+            return Err(DriverError::refused(
+                crate::confinement::EXEC_DENIED_PATHS_WITHOUT_SUBPATHS,
+                "A run with an executable deny-list needs an allow-list beside it.",
+                "exec_denied_paths",
+            ));
+        }
+        if !(self.exec_gate.is_some() && self.exec_subpaths_proved) {
+            return Err(DriverError::unserved(
+                crate::confinement::FACT_UNSERVED,
+                "This host did not prove an executable allow-list, so a run that carries one is \
+                 not started.",
+                "exec_subpaths",
+            ));
+        }
+        if !lists.denied().is_empty() && !self.exec_denied_paths_proved {
+            return Err(DriverError::unserved(
+                crate::confinement::FACT_UNSERVED,
+                "This host did not prove an executable deny-list, so a run that carries one is \
+                 not started.",
+                "exec_denied_paths",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Records what the driver's probe proved of the deny-list (design 35 § 9): without it a
+    /// start that carries one is refused before dispatch.
+    #[must_use]
+    pub(crate) fn proving_exec_denied_paths(mut self, proved: bool) -> Self {
+        self.exec_denied_paths_proved = proved;
+        self
     }
 
     /// This start's executable gate, or `None` for a start without a list, whose argv is then
@@ -1196,6 +1246,7 @@ impl ProcessRuntime {
         let planned = crate::exec_gate::plan(
             gate,
             lists.subpaths(),
+            lists.denied(),
             program,
             &crate::exec_gate::View {
                 workspace: workspace_access.root(),
@@ -9023,6 +9074,59 @@ mod tests {
                 assert_eq!(error.address.as_deref(), Some(kind.address), "{error}");
             }
         }
+    }
+
+    /// **A deny-list never runs without its proof, nor without an allow-list** (design 35 § 9,
+    /// D13): a start that carries one on a driver whose probe proved the allow-list alone is
+    /// refused before dispatch naming `exec_denied_paths`, a render of it by the same name, and
+    /// a deny-list beside no allow-list by D13's code. With the proof the lists are served.
+    #[tokio::test]
+    async fn a_start_with_a_deny_list_needs_its_proof_and_an_allow_list() {
+        let root = tempfile::tempdir().expect("a root");
+        let (runtime, workspace, snapshot) = gated_runtime(root.path(), Some(true));
+        let input = pty_exec_input(&snapshot);
+        let both = || ExecLists::listing_and_denying(&["bin"], &["bin/tool"]);
+        let outcome = runtime
+            .start_for_adapter(
+                "ex_denied",
+                &workspace,
+                &input,
+                AdapterStart::default(),
+                both(),
+            )
+            .await;
+        let DispatchOutcome::NotDispatched(error) = outcome else {
+            panic!("a deny-list without its proof was dispatched");
+        };
+        for error in [
+            error,
+            runtime
+                .render(&workspace, &input, &both())
+                .expect_err("a render"),
+        ] {
+            assert_eq!(error.code, crate::confinement::FACT_UNSERVED, "{error}");
+            assert_eq!(error.class, crate::DriverErrorClass::Unserved, "{error}");
+            assert_eq!(
+                error.address.as_deref(),
+                Some("exec_denied_paths"),
+                "{error}"
+            );
+        }
+        assert!(!both().is_empty());
+        assert!(!ExecLists::listing_and_denying(&[], &["bin/tool"]).is_empty());
+
+        let runtime = runtime.proving_exec_denied_paths(true);
+        runtime
+            .exec_lists_served(&both())
+            .expect("both lists are proved");
+        let error = runtime
+            .exec_lists_served(&ExecLists::listing_and_denying(&[], &["bin/tool"]))
+            .expect_err("a deny-list alone");
+        assert_eq!(
+            error.code,
+            crate::confinement::EXEC_DENIED_PATHS_WITHOUT_SUBPATHS
+        );
+        assert_eq!(error.class, crate::DriverErrorClass::Refused, "{error}");
     }
 
     /// **The wire constructor is named at exactly the three wire sites** (design 35 D22): a wire

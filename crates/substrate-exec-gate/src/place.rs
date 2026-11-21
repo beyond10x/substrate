@@ -142,6 +142,18 @@ impl Place {
     pub fn lies_in(&self, other: &Self) -> bool {
         self.relation(other) == Relation::Within
     }
+
+    /// The place of the entry `name` of the directory at this place, in the same mount: the
+    /// directory's place and the entry's own name.
+    #[must_use]
+    pub fn entry(&self, name: &str) -> Self {
+        let mut names = self.names.clone();
+        names.push(name.to_owned());
+        Self {
+            device: self.device.clone(),
+            names,
+        }
+    }
 }
 
 /// What the kernel reported for an opened path: the inputs of [`place`] beside the table.
@@ -386,31 +398,37 @@ fn remaining_names(mut collected: Vec<String>) -> Option<Vec<String>> {
     Some(collected)
 }
 
+/// The mount ID the kernel reports for the open `descriptor`, where it reports one.
+#[cfg(target_os = "linux")]
+pub fn mount_id_of(descriptor: std::os::fd::RawFd) -> Option<u64> {
+    let mut status = Statx {
+        mask: 0,
+        _before: [0; 140],
+        mount_id: 0,
+        _after: [0; 104],
+    };
+    // SAFETY: the empty path with `AT_EMPTY_PATH` names the descriptor itself, and `status`
+    // is a live buffer of the 256 bytes `statx` writes.
+    let reported = unsafe {
+        libc::syscall(
+            libc::SYS_statx,
+            descriptor,
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            STATX_MNT_ID,
+            &raw mut status,
+        )
+    };
+    reported_mount_id(reported == 0, status.mask, status.mount_id)
+}
+
 #[cfg(target_os = "linux")]
 impl Opened {
     /// What the kernel reports for the open `descriptor`, which `path` names.
     pub fn of_descriptor(descriptor: std::os::fd::RawFd, path: &str) -> Self {
-        let mut status = Statx {
-            mask: 0,
-            _before: [0; 140],
-            mount_id: 0,
-            _after: [0; 104],
-        };
-        // SAFETY: the empty path with `AT_EMPTY_PATH` names the descriptor itself, and `status`
-        // is a live buffer of the 256 bytes `statx` writes.
-        let reported = unsafe {
-            libc::syscall(
-                libc::SYS_statx,
-                descriptor,
-                c"".as_ptr(),
-                libc::AT_EMPTY_PATH,
-                STATX_MNT_ID,
-                &raw mut status,
-            )
-        };
         Self {
             path: path.to_owned(),
-            mount_id: reported_mount_id(reported == 0, status.mask, status.mount_id),
+            mount_id: mount_id_of(descriptor),
             descriptor_path: std::fs::read_link(format!("/proc/self/fd/{descriptor}"))
                 .ok()
                 .and_then(|link| link.to_str().map(str::to_owned)),

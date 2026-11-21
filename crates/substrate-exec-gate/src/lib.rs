@@ -10,6 +10,22 @@
 //! | the program | execute | the literal program, as a file rule |
 //! | the loader | execute | the kernel opens a dynamically linked program's loader with the execute right (D7) |
 //! | each `--allow` path | execute | an entry of the run's allow-list: a directory and everything beneath it, or one file (D2) |
+//! | each `--deny` path | none | an entry of the run's deny-list: no rule reaches it from any of the rows above (D11, D23) |
+//!
+//! **Landlock has no deny rule**, and a rule on a directory grants everything beneath it. So a
+//! path that would receive the execute right is granted as follows (D11), where "lies in"
+//! compares [place]s and never the text of two paths (D25):
+//!
+//! 1. it lies in a denied path, or is a file with the device and inode of a denied file: no
+//!    rule;
+//! 2. no denied path lies in it: one rule on it;
+//! 3. it is a directory and a denied path lies in it: no rule on it, and the same three steps
+//!    for each of its entries. A symbolic link gets no rule.
+//!
+//! The program and the loader go through the same steps, so a denied program is not executed
+//! (status 126) and a denied loader starts no dynamically linked program. A directory that was
+//! expanded has no rule of its own: a file created in it during the run is not executable, and
+//! a program replaced in it by a rename loses the right. The walk stops at 65536 rules.
 //!
 //! The ruleset handles the execute and refer rights and nothing else: reading, writing and the
 //! network behave as before.
@@ -21,6 +37,7 @@
 //! <option>  = --program  <class> <root> <rel>
 //!           | --loader   <path>
 //!           | --allow    <class> <root> <rel>
+//!           | --deny     <class> <root> <rel>
 //!           | --writable <root>
 //!           | --env      <name> <value>
 //! <class>   = follow | beneath
@@ -178,6 +195,9 @@ pub struct Lists {
     pub loader: Option<String>,
     /// The entries of the allow-list.
     pub allow: Vec<Located>,
+    /// The entries of the deny-list. One that does not exist is kept as a name: the place of
+    /// its nearest existing ancestor, and the names after it.
+    pub deny: Vec<Located>,
     /// The mounts of the view the run can write, which no `follow` path may resolve into.
     pub writable: Vec<String>,
 }
@@ -198,6 +218,9 @@ impl Lists {
         }
         for entry in &self.allow {
             options.extend(entry.options("--allow"));
+        }
+        for entry in &self.deny {
+            options.extend(entry.options("--deny"));
         }
         for root in &self.writable {
             options.extend(["--writable".to_owned(), root.clone()]);
@@ -259,6 +282,7 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
     let mut program = None;
     let mut loader = None;
     let mut allow = Vec::new();
+    let mut deny = Vec::new();
     let mut writable = Vec::new();
     let mut environment: Vec<(String, String)> = Vec::new();
     let mut first = true;
@@ -274,7 +298,7 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
                 };
             }
             "--" => break,
-            "--program" | "--allow" => {
+            "--program" | "--allow" | "--deny" => {
                 let class = match operand(&option)?.as_str() {
                     "follow" => Class::Follow,
                     "beneath" => Class::Beneath,
@@ -283,6 +307,8 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
                 let located = Located::new(class, &operand(&option)?, &operand(&option)?)?;
                 if option == "--allow" {
                     allow.push(located);
+                } else if option == "--deny" {
+                    deny.push(located);
                 } else if program.replace(located).is_some() {
                     return Err("--program occurs twice".to_owned());
                 }
@@ -339,6 +365,7 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
             program,
             loader,
             allow,
+            deny,
             writable,
         },
         environment,
@@ -679,6 +706,7 @@ mod tests {
     #[test]
     fn the_environment_is_the_env_operands_and_nothing_else() {
         let lists = Lists {
+            deny: Vec::new(),
             program: located(Class::Follow, "/usr", "bin/sh"),
             loader: None,
             allow: Vec::new(),
@@ -776,6 +804,7 @@ mod tests {
         ]))
         .expect("parsed");
         let lists = Lists {
+            deny: Vec::new(),
             program: located(Class::Follow, "/usr", "bin/sh"),
             loader: Some("/lib64/ld-linux-x86-64.so.2".to_owned()),
             allow: vec![
@@ -832,6 +861,7 @@ mod tests {
     fn the_options_of_a_list_parse_back_to_it() {
         for loader in [None, Some("/lib/ld-musl-x86_64.so.1".to_owned())] {
             let lists = Lists {
+                deny: Vec::new(),
                 program: located(Class::Beneath, "/workspace", "bin/tool"),
                 loader,
                 allow: vec![
@@ -917,11 +947,19 @@ mod tests {
                 arguments(&list)
             }),
             ("an unknown option", with(&["--bogus"], &["/usr/bin/sh"])),
-            // The deny-list is `story:executable-deny-list`: this helper refuses its options.
             (
-                "--deny",
-                with(&["--deny", "follow", "/usr", "bin/id"], &["/usr/bin/sh"]),
+                "a deny entry of no class",
+                with(&["--deny", "under", "/usr", "bin/id"], &["/usr/bin/sh"]),
             ),
+            (
+                "a deny entry that leaves its root",
+                with(&["--deny", "follow", "/usr", "../etc"], &["/usr/bin/sh"]),
+            ),
+            ("a deny entry without its operands", {
+                let mut list = PROGRAM.to_vec();
+                list.extend(["--deny", "follow", "/usr"]);
+                arguments(&list)
+            }),
             (
                 "--alias",
                 with(&["--alias", "/usr/bin", "/bin"], &["/usr/bin/sh"]),

@@ -6,7 +6,10 @@
 //! lacks is refused by name, in the order of the domain `substrate.confinement`
 //! (`spec/confinement/confinement.yaml`):
 //!
-//! 1. a reserved field (`confinement.reserved-field-unserved`, 501);
+//! 1. a reserved field (`confinement.reserved-field-unserved`, 501), then a deny-list beside an
+//!    empty allow-list (`confinement.exec-denied-paths-without-subpaths`, 422) or over its bound
+//!    (`confinement.exec-denied-paths-exceeded`, 422): both read the profile alone (design 35
+//!    D13, D10);
 //! 2. an adapter that did not open, an `inner` it does not wrap, or no `inner` on an adapter opened
 //!    around one (`confinement.adapter-unserved`, 501);
 //! 3. on a declared-insecure adapter, a missing or blank reason (`confinement.local-reason-missing`,
@@ -88,6 +91,15 @@ pub const LOCAL_REFUSED: &str = "confinement.local-refused";
 pub const LOCAL_REASON_MISSING: &str = "confinement.local-reason-missing";
 pub const IMAGE_UNPINNED: &str = "confinement.image-unpinned";
 pub const RESERVED_FIELD_UNSERVED: &str = "confinement.reserved-field-unserved";
+/// A profile sets `exec_denied_paths` beside an empty `exec_subpaths` (design 35 D13).
+pub const EXEC_DENIED_PATHS_WITHOUT_SUBPATHS: &str =
+    "confinement.exec-denied-paths-without-subpaths";
+/// A profile sets more than [`MAX_EXEC_DENIED_PATHS`] deny entries (design 35 D10).
+pub const EXEC_DENIED_PATHS_EXCEEDED: &str = "confinement.exec-denied-paths-exceeded";
+/// The most entries `ConfinementProfile.exec_denied_paths` holds (design 35 D10). It bounds
+/// the size of a profile and of the helper's argument list, not a start's cost, which
+/// follows the size of the directories that hold a denied path.
+pub const MAX_EXEC_DENIED_PATHS: usize = 64;
 /// A start whose profile names no workspace: a run needs a directory to start in.
 pub const WORKSPACE_REQUIRED: &str = "confinement.workspace-required";
 /// A `render` the adapter cannot reproduce faithfully without acquiring run-time material.
@@ -200,9 +212,11 @@ pub fn check_open(facts: &AdapterFacts) -> Result<(), ConfinementError> {
 }
 
 /// The contract's answer to a profile addressed to an adapter that did not open: a reserved field
-/// first, then `confinement.adapter-unserved`. It is audited like every refusal.
+/// first, then the shape of the deny-list, then `confinement.adapter-unserved`. It is audited
+/// like every refusal.
 pub fn admit_unopened(adapter: &AdapterName, profile: &ConfinementProfile) -> ConfinementError {
     let error = reserved(profile)
+        .and_then(|()| denied_paths_shape(adapter, profile))
         .err()
         .unwrap_or(ConfinementError::AdapterUnserved {
             adapter: adapter.clone(),
@@ -275,6 +289,16 @@ pub enum ConfinementError {
     ImageUnpinned { adapter: AdapterName },
     #[error("confinement.reserved-field-unserved: {field:?} is reserved")]
     ReservedFieldUnserved { field: ReservedField },
+    #[error(
+        "confinement.exec-denied-paths-without-subpaths: the profile for {adapter:?} denies \
+         executables and lists none; a deny-list holds only beside a non-empty exec_subpaths"
+    )]
+    ExecDeniedPathsWithoutSubpaths { adapter: AdapterName },
+    #[error(
+        "confinement.exec-denied-paths-exceeded: the profile for {adapter:?} denies more than \
+         {MAX_EXEC_DENIED_PATHS} paths"
+    )]
+    ExecDeniedPathsExceeded { adapter: AdapterName },
     #[error(transparent)]
     Driver(#[from] DriverError),
 }
@@ -289,6 +313,8 @@ impl ConfinementError {
             Self::LocalReasonMissing { .. } => LOCAL_REASON_MISSING,
             Self::ImageUnpinned { .. } => IMAGE_UNPINNED,
             Self::ReservedFieldUnserved { .. } => RESERVED_FIELD_UNSERVED,
+            Self::ExecDeniedPathsWithoutSubpaths { .. } => EXEC_DENIED_PATHS_WITHOUT_SUBPATHS,
+            Self::ExecDeniedPathsExceeded { .. } => EXEC_DENIED_PATHS_EXCEEDED,
             Self::Driver(error) => error.code,
         }
     }
@@ -297,7 +323,10 @@ impl ConfinementError {
     pub fn status(&self) -> u16 {
         match self {
             Self::LocalRefused { .. } => 403,
-            Self::LocalReasonMissing { .. } | Self::ImageUnpinned { .. } => 422,
+            Self::LocalReasonMissing { .. }
+            | Self::ImageUnpinned { .. }
+            | Self::ExecDeniedPathsWithoutSubpaths { .. }
+            | Self::ExecDeniedPathsExceeded { .. } => 422,
             Self::AdapterUnserved { .. }
             | Self::FamilyUnserved { .. }
             | Self::FactUnserved { .. }
@@ -600,6 +629,26 @@ fn reserved(profile: &ConfinementProfile) -> Result<(), ConfinementError> {
     Ok(())
 }
 
+/// Design 35 D13 and D10: a deny-list beside an empty allow-list, and one over its bound. Both
+/// read the profile's two lists and no adapter fact, so every adapter answers them alike, before
+/// `confinement.fact-unserved`.
+fn denied_paths_shape(
+    adapter: &AdapterName,
+    profile: &ConfinementProfile,
+) -> Result<(), ConfinementError> {
+    if !profile.exec_denied_paths.is_empty() && profile.exec_subpaths.is_empty() {
+        return Err(ConfinementError::ExecDeniedPathsWithoutSubpaths {
+            adapter: adapter.clone(),
+        });
+    }
+    if profile.exec_denied_paths.len() > MAX_EXEC_DENIED_PATHS {
+        return Err(ConfinementError::ExecDeniedPathsExceeded {
+            adapter: adapter.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// The contract's admission order against an opened adapter's proof, then the adapter's own
 /// `check`, with exactly one audit record either way.
 fn admission(
@@ -627,6 +676,7 @@ fn decide(
 ) -> Result<AdmittedProfile, ConfinementError> {
     let adapter = || facts.adapter.clone();
     reserved(profile)?;
+    denied_paths_shape(&facts.adapter, profile)?;
     // Both ways: an `inner` this adapter does not wrap, and an adapter opened around an `inner`
     // the profile does not name (`confinement.yaml`, `AdmitProfile` outcome `adapter-unserved`).
     if profile.inner != facts.inner {
@@ -1230,6 +1280,160 @@ mod tests {
         let admitted = admission(facts, &profile, |_| Ok(()));
         let records = records.lock().clone();
         (admitted, records)
+    }
+
+    /// Admits a profile with both lists against `facts`, with the audit records it wrote.
+    fn admit_with_lists(
+        facts: &AdapterFacts,
+        entries: &[&str],
+        denied: &[String],
+    ) -> (
+        Result<AdmittedProfile, ConfinementError>,
+        Vec<serde_json::Value>,
+    ) {
+        let records = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink_records = Arc::clone(&records);
+        let profile = ConfinementProfile {
+            workspace: Some(std::path::PathBuf::from("/srv/workspaces/ws_1")),
+            local_reason: facts
+                .declared_insecure()
+                .then(|| "a developer's own machine".to_owned()),
+            exec_subpaths: entries.iter().map(|entry| (*entry).to_owned()).collect(),
+            exec_denied_paths: denied.to_vec(),
+            audit: Some(AuditSink::new(move |record: &AuditRecord| {
+                sink_records
+                    .lock()
+                    .push(serde_json::to_value(record).expect("record"));
+            })),
+            ..ConfinementProfile::default()
+        };
+        let admitted = admission(facts, &profile, |_| Ok(()));
+        let records = records.lock().clone();
+        (admitted, records)
+    }
+
+    /// The proof of a `linux` that proves `exec_subpaths`, and `exec_denied_paths` where asked.
+    fn linux_with_lists(denied_paths: bool) -> AdapterFacts {
+        AdapterFacts::new(
+            AdapterName::Linux,
+            None,
+            &FAMILY_ORDER
+                .iter()
+                .map(|family| (family.clone(), true))
+                .collect::<Vec<_>>(),
+            &[
+                (Fact::WholeTreeKill, true),
+                (Fact::ExecSubpaths, true),
+                (Fact::ExecDeniedPaths, denied_paths),
+            ],
+        )
+    }
+
+    /// Design 35 D13: a deny-list beside an empty allow-list is refused by name on every
+    /// adapter, before any fact is read: on `local`, which proves neither list fact, and on a
+    /// `linux` that proves both. Each refusal is one `profile_refused` record with the code.
+    #[test]
+    fn a_deny_list_without_an_allow_list_is_refused_on_every_adapter() {
+        let denied = ["/usr/bin/id".to_owned()];
+        for facts in [local::proof(true), linux_with_lists(true)] {
+            let (refused, records) = admit_with_lists(&facts, &[], &denied);
+            let error = refused.expect_err("a deny-list alone");
+            assert!(
+                matches!(
+                    &error,
+                    ConfinementError::ExecDeniedPathsWithoutSubpaths { adapter }
+                        if *adapter == facts.adapter
+                ),
+                "{error:?}"
+            );
+            assert_eq!(
+                (error.code(), error.status()),
+                ("confinement.exec-denied-paths-without-subpaths", 422)
+            );
+            assert_eq!(records.len(), 1, "{records:?}");
+            assert_eq!(records[0]["event"], "profile_refused");
+            assert_eq!(records[0]["code"], error.code());
+            assert!(records[0].get("fact").is_none(), "{records:?}");
+        }
+        // An adapter that did not open answers the same before `adapter-unserved`.
+        let profile = ConfinementProfile {
+            exec_denied_paths: denied.to_vec(),
+            ..ConfinementProfile::default()
+        };
+        assert_eq!(
+            admit_unopened(&AdapterName::Macos, &profile).code(),
+            EXEC_DENIED_PATHS_WITHOUT_SUBPATHS
+        );
+    }
+
+    /// Design 35 D10: the fact of the deny-list stands directly after the allow-list's. `local`
+    /// proves neither and names `exec_subpaths` for a profile with both lists, with the record;
+    /// an adapter that proves `exec_subpaths` alone names `exec_denied_paths`; one that proves
+    /// both admits, and the admitted profile requires both. A profile without a deny-list is
+    /// admitted on either as before.
+    #[test]
+    fn both_lists_name_the_first_fact_the_adapter_did_not_prove() {
+        let denied = ["bin/tool".to_owned()];
+        let named = |facts: &AdapterFacts| {
+            let (refused, records) = admit_with_lists(facts, &["bin"], &denied);
+            let error = refused.expect_err("an unproved list fact");
+            assert_eq!((error.code(), error.status()), (FACT_UNSERVED, 501));
+            assert_eq!(records.len(), 1, "{records:?}");
+            assert_eq!(records[0]["event"], "profile_refused");
+            assert_eq!(records[0]["code"], FACT_UNSERVED);
+            match error {
+                ConfinementError::FactUnserved { fact, .. } => {
+                    assert_eq!(
+                        records[0]["fact"],
+                        serde_json::to_value(&fact).expect("a fact")
+                    );
+                    fact
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(named(&local::proof(true)), Fact::ExecSubpaths);
+        assert_eq!(named(&linux_with_lists(false)), Fact::ExecDeniedPaths);
+
+        let (admitted, records) = admit_with_lists(&linux_with_lists(true), &["bin"], &denied);
+        let admitted = admitted.expect("both facts are proved");
+        assert_eq!(
+            admitted.profile().required_facts(),
+            [Fact::ExecSubpaths, Fact::ExecDeniedPaths]
+        );
+        assert_eq!(records[0]["event"], "profile_admitted");
+        for facts in [linux_with_lists(false), linux_with_lists(true)] {
+            let (admitted, _) = admit_with_lists(&facts, &["bin"], &[]);
+            let admitted = admitted.expect("no deny-list, as before this story");
+            assert_eq!(admitted.profile().required_facts(), [Fact::ExecSubpaths]);
+        }
+    }
+
+    /// Design 35 D10: the deny-list holds at most `MAX_EXEC_DENIED_PATHS` entries. 64 are
+    /// admitted and 65 are refused by name, on an adapter that proves the fact and on `local`.
+    #[test]
+    fn a_deny_list_over_its_bound_is_refused_by_name() {
+        assert_eq!(MAX_EXEC_DENIED_PATHS, 64);
+        let entries = |count: usize| -> Vec<String> {
+            (0..count)
+                .map(|index| format!("bin/tool-{index}"))
+                .collect()
+        };
+        let (admitted, _) = admit_with_lists(&linux_with_lists(true), &["bin"], &entries(64));
+        admitted.expect("64 entries");
+        for facts in [linux_with_lists(true), local::proof(true)] {
+            let (refused, records) = admit_with_lists(&facts, &["bin"], &entries(65));
+            let error = refused.expect_err("65 entries");
+            assert!(
+                matches!(&error, ConfinementError::ExecDeniedPathsExceeded { .. }),
+                "{error:?}"
+            );
+            assert_eq!(
+                (error.code(), error.status()),
+                ("confinement.exec-denied-paths-exceeded", 422)
+            );
+            assert_eq!(records[0]["code"], error.code());
+        }
     }
 
     /// Design 35 D27: a profile with a list on an adapter whose open withheld the fact is

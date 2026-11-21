@@ -5,7 +5,9 @@ inside a sandbox, as the last program before the run's own, when the run's profi
 executable allow-list (`ConfinementProfile.exec_subpaths`). It applies one Landlock ruleset to
 itself and executes the run's program, so every process of the run inherits the ruleset:
 `execve` succeeds only for the program, the host's ELF loader and files that are, or lie beneath,
-a listed path. Any other execution fails inside the run with `EACCES`.
+a listed path. Any other execution fails inside the run with `EACCES`. Where the profile also
+carries a deny-list (`ConfinementProfile.exec_denied_paths`), a denied path gets no execute
+right from any of the three.
 
 ```text
 substrate-exec-gate --version
@@ -14,6 +16,7 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
 <option>  = --program  <class> <root> <rel>
           | --loader   <path>
           | --allow    <class> <root> <rel>
+          | --deny     <class> <root> <rel>
           | --writable <root>
           | --env      <name> <value>
 <class>   = follow | beneath
@@ -26,6 +29,10 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
   mount of the view the run can write. Where a path lies is read from the view's mount table
   (`/proc/self/mountinfo`), never from the text of two paths, and a place that cannot be
   established refuses as well.
+- `--deny` names a path that gets no execute right, from an `--allow` entry, as the program or
+  as the loader. Landlock has no deny rule, so where a listed directory holds a denied path the
+  helper grants each of its entries on its own, and the directory itself gets no rule. A
+  `--deny` path need not exist. The helper stops at 65536 rules and exits 125.
 - `--env` carries one variable of the program's environment. **The program starts with the
   `--env` operands as its whole environment, and nothing of the helper's own.** An empty name, a
   name that holds `=` and a name given twice are refused.
@@ -85,6 +92,25 @@ The kernel decides on the file a path resolves to. On a distribution that keeps 
 26.04, `/usr/bin/ln` is a link to `/usr/lib/cargo/bin/coreutils/ln`. List the tool by its own
 path, which puts the rule on the file the link resolves to, or list the directory the links
 point into as well.
+
+## Denying a program
+
+A deny entry fails `execve` of that path, and of every mount of it: with `/usr/bin` listed and
+`/bin/id` denied, `id` is denied under both names on a host whose `/bin` is a link into `/usr`.
+A symbolic link to a denied program is denied wherever it lies, and so is a hard link in the
+same directory.
+
+- **A deny-list needs an allow-list that admits no directory the run can write.** A run that
+  writes a listed directory copies a denied program there and runs the copy.
+- A hard link to a denied program that existed before the start in another listed directory
+  runs: a deny entry denies a path, not every link to the file.
+- A listed directory that holds a denied path has no rule of its own. A file created in it
+  during the run is not executable, and a program removed and written again loses the right, so
+  put no deny entry in a directory a build writes its programs into.
+- A layer of an overlay is another file system to the kernel, with another place, and a program
+  denied in the overlay runs from the layer. So never list a lower directory of an overlay that
+  is also in the view.
+- The loader given a denied program runs it, and `sh` given a denied script runs it.
 
 ## What the list does not stop
 

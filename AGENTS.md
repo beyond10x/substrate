@@ -427,6 +427,27 @@ gets no `--setenv` (D28); a start without a list keeps its argv, which
 `a_start_without_a_list_builds_the_argv_it_built_before` in `crates/substrate-host/src/process.rs`
 holds.
 
+**The same helper enforces the deny-list** (design 35 § 8). `ConfinementProfile.exec_denied_paths`
+holds at most `MAX_EXEC_DENIED_PATHS` (64) entries, and a denied path wins. Landlock has no deny
+rule, so `--deny` makes the helper grant each entry of a listed directory on its own where the
+directory holds a denied path (`grant` in `crates/substrate-exec-gate/src/landlock.rs`); whether
+one path holds another is decided by place, never by path text. The fact `exec_denied_paths`
+stands directly after `exec_subpaths`, is proved by a second open-time probe
+(`probe_exec_denied_paths`) only where the first held, and is not published: it has no wire
+property (`PROVED_WITHOUT_A_WIRE_PROPERTY` in `crates/substrate-host/src/probe.rs`). A deny-list
+beside an empty `exec_subpaths` is `confinement.exec-denied-paths-without-subpaths` (422) on
+every adapter, before any fact is read. The lane requires the `exec deny` lines of
+`ess_confinement_linux`: probes K2 and K8 through the driver, the acceptance, and the two cases
+kept at the stakeholder's request, a program that is a link to a denied program and one directory
+under two names. The base view's form of the second needs a host whose `/bin` is a link to
+`/usr/bin` and where `/usr/bin/id` is a file of that directory; elsewhere it is absent, so
+refused by the lane. The helper's `namespace_gate` root (a host bind mount, a tmpfs, an overlay,
+and the limit of an overlay listed beside its lower directory, each in
+`unshare --user --map-root-user --mount`) is in no required set: it is absent where a user
+namespace is granted no mount. `macos` renders the list as Seatbelt deny rules after every allow
+(`render_exec_denied` in `crates/substrate-host/src/seatbelt.rs`); its cases run only in the
+hosted macOS check.
+
 **The runner has a third lane, the namespace lane.** It runs only when
 `SUBSTRATE_VECTORS_KUBERNETES_CONFIG` names a namespace driver's kubeconfig. It starts the shipped
 daemon with `--driver kubernetes` on its Unix socket, as deployment `dep_namespace_vectors`, and

@@ -639,6 +639,17 @@ fn detail(error: &ConfinementError) -> (String, Option<String>) {
         ConfinementError::LocalRefused { .. } => {
             ("the host's policy forbids local".to_owned(), None)
         }
+        ConfinementError::ExecDeniedPathsWithoutSubpaths { .. } => (
+            "a deny-list of executables needs an allow-list beside it".to_owned(),
+            Some("exec_denied_paths".to_owned()),
+        ),
+        ConfinementError::ExecDeniedPathsExceeded { .. } => (
+            format!(
+                "at most {} paths are denied",
+                substrate_host::confinement::MAX_EXEC_DENIED_PATHS
+            ),
+            Some("exec_denied_paths".to_owned()),
+        ),
         ConfinementError::Driver(driver) => (driver.message.clone(), driver.address.clone()),
     }
 }

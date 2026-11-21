@@ -64,6 +64,7 @@ fn shell(root: &Path, allow: Vec<Located>, script: &str) -> Output {
 fn shell_in_view(root: &Path, allow: Vec<Located>, writable: &[&Path], script: &str) -> Output {
     let sh = tool("sh");
     let lists = Lists {
+        deny: Vec::new(),
         program: base(&sh),
         loader: loader(),
         allow,
@@ -149,7 +150,7 @@ fn each_malformed_argument_list_exits_125_and_executes_nothing() {
             vec!["--program", class, program.root(), program.rel(), "--bogus"],
         ),
         (
-            "--deny, which this helper does not implement",
+            "--deny without its operands",
             vec![
                 "--program",
                 class,
@@ -158,7 +159,6 @@ fn each_malformed_argument_list_exits_125_and_executes_nothing() {
                 "--deny",
                 "follow",
                 "/usr",
-                "bin/id",
             ],
         ),
         (
@@ -476,6 +476,7 @@ fn a_program_that_cannot_be_executed_exits_126() {
     const NAME: &str = "program exec failure";
     let (_directory, root) = scratch();
     let lists = Lists {
+        deny: Vec::new(),
         program: beneath(&root, "allowed"),
         loader: loader(),
         allow: Vec::new(),
@@ -527,6 +528,7 @@ fn the_program_inherits_no_descriptor_of_the_helper() {
 /// operands and an empty environment of its own.
 fn gate_with(root: &Path, program: &Path, environment: &[(&str, &str)]) -> Command {
     let lists = Lists {
+        deny: Vec::new(),
         program: base(program),
         loader: loader(),
         allow: Vec::new(),
@@ -684,6 +686,7 @@ fn a_preload_among_the_env_operands_is_loaded_only_under_the_ruleset() {
     }
     let outside = root.join("outside/true");
     let lists = Lists {
+        deny: Vec::new(),
         program: base(&sh),
         loader: loader(),
         allow: vec![beneath(&root, "allowed")],
@@ -721,6 +724,7 @@ fn a_preload_among_the_env_operands_is_loaded_only_under_the_ruleset() {
     // The object is hostile where no list holds: the same start with the target listed lets
     // its constructor replace the shell, and the script never starts.
     let unheld = Lists {
+        deny: Vec::new(),
         allow: vec![beneath(&root, "allowed"), beneath(&root, "outside")],
         ..lists
     };
@@ -728,6 +732,263 @@ fn a_preload_among_the_env_operands_is_loaded_only_under_the_ruleset() {
     assert!(
         output.status.success() && output.stdout.is_empty(),
         "the control: with its target listed the object replaces the shell: {output:?}"
+    );
+    println!("exec gate {NAME}: executed");
+}
+
+/// A scratch tree for the deny cases: `listed/tool` and `listed/other`, copies of `true`, and
+/// the lists that name `listed` with the shell as the program.
+fn deny_scratch() -> (tempfile::TempDir, PathBuf, Lists) {
+    let (directory, root) = scratch();
+    std::fs::create_dir_all(root.join("listed")).expect("listed");
+    for name in ["tool", "other"] {
+        std::fs::copy(tool("true"), root.join("listed").join(name)).expect("copy true");
+    }
+    let lists = Lists {
+        deny: Vec::new(),
+        program: base(&tool("sh")),
+        loader: loader(),
+        allow: vec![follow(&root, "listed")],
+        writable: Vec::new(),
+    };
+    (directory, root, lists)
+}
+
+/// Lists each base tool of `names` by its own path, which puts the rule on the file the name
+/// resolves to, and returns the paths a script calls them by.
+fn with_tools(lists: &mut Lists, names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .map(|name| {
+            let path = tool(name);
+            lists.allow.push(base(&path));
+            path.to_str().expect("UTF-8").to_owned()
+        })
+        .collect()
+}
+
+/// Whether the helper refused for want of Landlock or of a place on this host's file systems;
+/// prints the case as absent then.
+fn deny_absent(name: &str, output: &Output) -> bool {
+    let diagnostic = text(&output.stderr);
+    if output.status.code() == Some(REFUSED)
+        && (diagnostic.contains("Landlock is unavailable")
+            || diagnostic.contains("cannot establish the place"))
+    {
+        println!("exec gate {name}: ABSENT ({})", diagnostic.trim());
+        return true;
+    }
+    false
+}
+
+/// Runs `script` under `lists` with the shell, in `root`: its standard output, or `None` after
+/// printing the case as absent.
+fn deny_run(name: &str, root: &Path, lists: &Lists, script: &str) -> Option<String> {
+    let output = gate()
+        .current_dir(root)
+        .env_clear()
+        .args(lists.options())
+        .arg(tool("sh"))
+        .args(["-c", script])
+        .output()
+        .expect("the gate starts");
+    if deny_absent(name, &output) {
+        return None;
+    }
+    assert!(
+        output.status.code() != Some(REFUSED),
+        "the helper refused: {}",
+        text(&output.stderr)
+    );
+    Some(text(&output.stdout))
+}
+
+/// D11: a denied file beneath a listed directory is not executed and its neighbour is. The
+/// directory is expanded, so the denied file stays readable, a symbolic link to it is denied
+/// wherever the link lies (N1, N7), and another name of it in the same directory is denied by
+/// device and inode (N2). A file created in the expanded directory during the run is not
+/// executable (N2), and a deny entry that does not exist at the start denies the file once it
+/// is created (N6).
+#[test]
+fn a_denied_file_in_a_listed_directory_is_not_executed_under_any_name_there() {
+    const NAME: &str = "deny listed file";
+    let (_directory, root, mut lists) = deny_scratch();
+    std::fs::hard_link(root.join("listed/tool"), root.join("listed/again")).expect("a hard link");
+    std::os::unix::fs::symlink("tool", root.join("listed/link")).expect("a link");
+    std::os::unix::fs::symlink("../listed/tool", root.join("elsewhere/link")).expect("a link");
+    lists.allow.push(follow(&root, "elsewhere"));
+    lists.deny = vec![follow(&root, "listed/tool"), follow(&root, "listed/later")];
+    let tools = with_tools(&mut lists, &["cat", "chmod"]);
+    let (cat, chmod) = (&tools[0], &tools[1]);
+    let Some(stdout) = deny_run(
+        NAME,
+        &root,
+        &lists,
+        &format!(
+            "listed/other; echo $?; listed/tool 2>/dev/null; echo $?; \
+             listed/again 2>/dev/null; echo $?; listed/link 2>/dev/null; echo $?; \
+             elsewhere/link 2>/dev/null; echo $?; [ -r listed/tool ]; echo $?; \
+             {cat} listed/other > listed/new; {chmod} +x listed/new; \
+             listed/new 2>/dev/null; echo $?; \
+             {cat} listed/other > listed/later; {chmod} +x listed/later; \
+             listed/later 2>/dev/null; echo $?"
+        ),
+    ) else {
+        return;
+    };
+    assert_eq!(
+        stdout, "0\n126\n126\n126\n126\n0\n126\n126\n",
+        "the neighbour, the denied file, its hard link, a link to it beside it and one in \
+         another listed directory, that it is readable, a file created in the expanded \
+         directory, and a deny entry created during the run"
+    );
+    println!("exec gate {NAME}: executed");
+}
+
+/// D11 step 1 (K8) and N5: a denied directory denies everything beneath it, a listed directory
+/// inside a denied one gets no rule, and a deny entry that no listed path holds changes
+/// nothing.
+#[test]
+fn a_denied_directory_denies_what_lies_in_it_and_a_listed_directory_inside_it() {
+    const NAME: &str = "deny directory";
+    let (_directory, root, mut lists) = deny_scratch();
+    std::fs::create_dir_all(root.join("listed/inner")).expect("inner");
+    std::fs::copy(tool("true"), root.join("listed/inner/tool")).expect("copy true");
+    lists.deny = vec![follow(&root, "listed/inner"), follow(&root, "outside")];
+    let Some(stdout) = deny_run(
+        NAME,
+        &root,
+        &lists,
+        "listed/tool; echo $?; listed/inner/tool 2>/dev/null; echo $?",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        stdout, "0\n126\n",
+        "a denied directory beneath a listed one"
+    );
+    // K8: the listed directory lies inside the denied one.
+    lists.allow = vec![follow(&root, "listed/inner")];
+    lists.deny = vec![follow(&root, "listed")];
+    assert_eq!(
+        deny_run(
+            NAME,
+            &root,
+            &lists,
+            "listed/inner/tool 2>/dev/null; echo $?"
+        )
+        .as_deref(),
+        Some("126\n"),
+        "a listed directory inside a denied one"
+    );
+    println!("exec gate {NAME}: executed");
+}
+
+/// D23: the program and the loader go through the deny check. A program that is a link to a
+/// denied program gets no rule, and the helper's own execution of it fails with status 126
+/// (B2). A denied loader starts no dynamically linked program (B3).
+#[test]
+fn a_denied_program_and_a_denied_loader_get_no_rule() {
+    const NAME: &str = "deny program and loader";
+    let (_directory, root, mut lists) = deny_scratch();
+    std::os::unix::fs::symlink("tool", root.join("listed/sh")).expect("a link");
+    lists.program = follow(&root, "listed/sh");
+    lists.deny = vec![follow(&root, "listed/tool")];
+    let output = gate()
+        .current_dir(&root)
+        .env_clear()
+        .args(lists.options())
+        .arg(root.join("listed/sh"))
+        .output()
+        .expect("the gate starts");
+    if deny_absent(NAME, &output) {
+        return;
+    }
+    assert_eq!(
+        output.status.code(),
+        Some(126),
+        "a program that is a link to a denied program: {}",
+        text(&output.stderr)
+    );
+    let Some(loader) = loader() else {
+        println!("exec gate {NAME}: executed (the base programs name no loader here)");
+        return;
+    };
+    let (_directory, root, mut lists) = deny_scratch();
+    let (loader_root, loader_rel) = loader.rsplit_once('/').expect("an absolute loader");
+    lists.deny = vec![Located::new(Class::Follow, loader_root, loader_rel).expect("the loader")];
+    let output = gate()
+        .current_dir(&root)
+        .env_clear()
+        .args(lists.options())
+        .arg(tool("sh"))
+        .args(["-c", "listed/tool"])
+        .output()
+        .expect("the gate starts");
+    assert_eq!(
+        output.status.code(),
+        Some(126),
+        "a dynamically linked program under a denied loader: {}",
+        text(&output.stderr)
+    );
+    println!("exec gate {NAME}: executed");
+}
+
+/// The limit of design 35 § 8.5 (N4): a deny entry denies a path and every mount of it, not
+/// every hard link to the file. A hard link that existed before the start elsewhere beneath a
+/// listed path, in a directory the deny-list does not expand, runs.
+#[test]
+fn limit_a_hard_link_that_existed_in_another_listed_directory_runs() {
+    const NAME: &str = "deny limit hard link elsewhere";
+    let (_directory, root, mut lists) = deny_scratch();
+    std::fs::hard_link(root.join("listed/tool"), root.join("elsewhere/same")).expect("a hard link");
+    lists.allow.push(follow(&root, "elsewhere"));
+    lists.deny = vec![follow(&root, "listed/tool")];
+    let Some(stdout) = deny_run(
+        NAME,
+        &root,
+        &lists,
+        "listed/tool 2>/dev/null; echo $?; elsewhere/same; echo $?",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        stdout, "126\n0\n",
+        "the limit holds as stated: the denied file runs under its other name"
+    );
+    println!("exec gate {NAME}: executed");
+}
+
+/// Two limits of design 35 § 8 (B9, § 8.4). A program overwritten in place in an expanded
+/// directory keeps its rule; one removed and written again is a new file without a rule and
+/// no longer runs. And a copy of a denied program in a listed directory the deny-list does not
+/// expand runs: a deny-list means something only beside an allow-list that admits no directory
+/// the run can write.
+#[test]
+fn limit_a_replaced_program_loses_the_right_and_a_copy_elsewhere_runs() {
+    const NAME: &str = "deny limit replaced and copied";
+    let (_directory, root, mut lists) = deny_scratch();
+    lists.allow.push(follow(&root, "elsewhere"));
+    lists.deny = vec![follow(&root, "listed/tool")];
+    let tools = with_tools(&mut lists, &["cat", "chmod", "rm"]);
+    let (cat, chmod, rm) = (&tools[0], &tools[1], &tools[2]);
+    let Some(stdout) = deny_run(
+        NAME,
+        &root,
+        &lists,
+        &format!(
+            "{cat} outside/true > listed/other; listed/other; echo $?; \
+             {rm} listed/other; {cat} outside/true > listed/other; {chmod} +x listed/other; \
+             listed/other 2>/dev/null; echo $?; \
+             {cat} listed/tool > elsewhere/copy; {chmod} +x elsewhere/copy; \
+             elsewhere/copy; echo $?"
+        ),
+    ) else {
+        return;
+    };
+    assert_eq!(
+        stdout, "0\n126\n0\n",
+        "overwritten in place, removed and written again, and a copy of the denied program"
     );
     println!("exec gate {NAME}: executed");
 }

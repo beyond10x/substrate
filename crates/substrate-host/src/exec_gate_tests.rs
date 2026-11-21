@@ -22,8 +22,8 @@ use super::{
     EXEC_GATE_INVALID, EXEC_GATE_UNSERVED, ExecGate, FileFacts, Location, OpenDecision,
     OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, View,
     check_file, check_length, check_linkage, check_links, check_location, check_openable,
-    check_protocol, classed, decide_open, open, place_open, plan, shown_location, start_unplaced,
-    withheld_facts,
+    check_protocol, classed, decide_open, denied_unplaced, open, place_open, plan, shown_location,
+    start_unplaced, withheld_facts,
 };
 use crate::confinement::{Fact, FactWithheld};
 use crate::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
@@ -160,6 +160,21 @@ fn entry(address: &'static str, path: &str, file_system: Option<&str>) -> FactWi
     }
 }
 
+/// What an open records for `paths`: for each, in order, one entry per fact the helper would
+/// prove, the allow-list's and then the deny-list's.
+fn per_fact(paths: impl IntoIterator<Item = FactWithheld>) -> Vec<FactWithheld> {
+    paths
+        .into_iter()
+        .flat_map(|allowed| {
+            let denied = FactWithheld {
+                fact: Fact::ExecDeniedPaths,
+                ..allowed.clone()
+            };
+            [allowed, denied]
+        })
+        .collect()
+}
+
 /// D27: a path of the open on a file-system type outside the list withholds the facts. The
 /// open's decision is "withheld", not an error, and each entry names the cause, the address of
 /// the configuration field, the path and the type, once per fact the helper would prove.
@@ -199,10 +214,10 @@ fn an_unlisted_file_system_at_the_open_withholds_the_facts() {
                 }],
                 "{file_system} at {address}"
             );
-            // One entry per fact the helper would prove; this story has the allow-list fact.
+            // One entry per fact the helper would prove: the two list facts.
             assert_eq!(
                 withheld_facts(&unplaced),
-                [entry(address, path, Some(file_system))],
+                per_fact([entry(address, path, Some(file_system))]),
                 "{file_system} at {address}"
             );
         }
@@ -217,7 +232,7 @@ fn an_unreported_mount_id_at_the_open_withholds_the_facts() {
     let unplaced = withheld(place_open(&unreported, &host()));
     assert_eq!(
         withheld_facts(&unplaced),
-        [entry("config.workspace_root", "/work/u/workspaces", None)]
+        per_fact([entry("config.workspace_root", "/work/u/workspaces", None)])
     );
     assert_eq!(unplaced[0].why.cause, Cause::MountIdUnreported);
 }
@@ -232,10 +247,10 @@ fn every_path_of_the_open_is_placed_before_the_answer() {
     two.temporary = seen("/data/tmp", 62);
     assert_eq!(
         withheld_facts(&withheld(place_open(&two, &table))),
-        [
+        per_fact([
             entry("config.exec_gate", "/data/substrate-exec-gate", Some("xfs")),
             entry("config.exec_gate", "/data/tmp", Some("xfs")),
-        ]
+        ])
     );
     // The refusing cause is on the last path the open places, after a withholding one.
     let mut mixed = sightings(seen("/data/substrate-exec-gate", 62));
@@ -330,11 +345,11 @@ fn a_withheld_open_never_reaches_the_trust_check() {
     {
         OpenDecision::Withheld(entries) => assert_eq!(
             entries,
-            [entry(
+            per_fact([entry(
                 "config.workspace_root",
                 "/data/workspaces",
                 Some("xfs")
-            )]
+            )])
         ),
         OpenDecision::Use => panic!("a helper on a host that withholds is used"),
     }
@@ -760,7 +775,9 @@ fn an_open_with_a_path_on_an_unlisted_file_system_withholds_on_a_real_host() {
                 .expect("a second link");
         }
         match open(&on_proc(&helper)).expect("the adapter opens") {
-            Opening::Withheld(entries) => assert_eq!(entries, expected, "{links} links"),
+            Opening::Withheld(entries) => {
+                assert_eq!(entries, per_fact(expected.clone()), "{links} links");
+            }
             Opening::Unset | Opening::Gate(_) => {
                 panic!("a writable root on proc did not withhold the facts ({links} links)")
             }
@@ -812,6 +829,29 @@ impl Staged {
         program: &str,
         loader: Option<&str>,
     ) -> Result<Lists, DriverError> {
+        self.plan_all(roots, entries, &[], program, loader)
+    }
+
+    /// [`Self::plan`], with `denied` as the deny-list.
+    fn plan_denying(
+        &self,
+        roots: &[(&Path, &str)],
+        entries: &[&str],
+        denied: &[&str],
+        program: &str,
+    ) -> Result<Lists, DriverError> {
+        self.plan_all(roots, entries, denied, program, None)
+    }
+
+    fn plan_all(
+        &self,
+        roots: &[(&Path, &str)],
+        entries: &[&str],
+        denied: &[&str],
+        program: &str,
+        loader: Option<&str>,
+    ) -> Result<Lists, DriverError> {
+        let denied: Vec<String> = denied.iter().map(|entry| (*entry).to_owned()).collect();
         let workspace = OwnedFd::from(std::fs::File::open(&self.workspace).expect("workspace"));
         let declared: Vec<ReadOnlyRoot> = roots
             .iter()
@@ -825,6 +865,7 @@ impl Staged {
         plan(
             &ExecGate::seal(b"gate", loader.map(str::to_owned)).expect("sealed"),
             &entries,
+            &denied,
             program,
             &View {
                 workspace: &workspace,
@@ -1466,4 +1507,196 @@ fn the_open_refuses_a_dynamically_linked_helper_and_takes_a_static_one() {
         "which a run can write",
     );
     println!("exec gate helper linkage: executed");
+}
+
+/// Story 2's acceptance, D26 at a start: where the place of a deny entry cannot be established
+/// the start is `exec.sandbox-place-unserved`, 501, address `exec_denied_paths`, and no code
+/// path compares the text of two paths in its stead. One case per cause, each from synthetic
+/// mount-table text or from what the kernel would report for the path.
+#[test]
+fn a_deny_entry_without_a_place_refuses_the_start_for_each_of_the_nine_causes() {
+    const REPEATED: &str = "70 31 259:2 /opt /opt rw - ext4 /dev/sda rw\n\
+                            70 31 259:2 /opt /opt rw - ext4 /dev/sda rw\n";
+    const DELETED: &str = "71 31 259:2 /gone//deleted /opt/gone rw - ext4 /dev/sda rw\n";
+    let table = |more: &str| MountTable::parse(&format!("{HOST}{more}")).expect("the table");
+    let on = |table: &MountTable, opened: &Opened| table.place_of(opened).expect_err("no place");
+    let of_table = |cause: Cause| Unestablished {
+        path: "/opt/t/tool".to_owned(),
+        cause,
+    };
+    let mut unreported = seen("/opt/t/tool", 31);
+    unreported.mount_id = None;
+    let cases = [
+        (
+            of_table(
+                MountTable::read_from(Path::new("/proc/self/no-such-mount-table"))
+                    .expect_err("no file"),
+            ),
+            "mount-table-unreadable",
+        ),
+        (
+            of_table(MountTable::parse("31 1 259:2 / / rw\n").expect_err("no separator")),
+            "mount-table-unparsable",
+        ),
+        (
+            Opened::of_path("relative/tool").expect_err("not absolute"),
+            "path-unopenable",
+        ),
+        (on(&host(), &unreported), "mount-id-unreported"),
+        (on(&host(), &seen("/opt/t/tool", 999)), "mount-row-missing"),
+        (
+            on(&table(REPEATED), &seen("/opt/t/tool", 70)),
+            "mount-row-repeated",
+        ),
+        (
+            on(&table(DELETED), &seen("/opt/gone/tool", 71)),
+            "mount-root-deleted",
+        ),
+        (
+            on(&host(), &seen("/opt/t/tool", 61)),
+            "mount-point-mismatch",
+        ),
+        (
+            on(&host(), &seen("/data/tool", 62)),
+            "file-system-unlisted xfs",
+        ),
+    ];
+    assert_eq!(cases.len(), 9, "D26 names nine causes");
+    for (why, cause) in cases {
+        let error = denied_unplaced(&why);
+        assert_eq!(
+            error.code, "exec.sandbox-place-unserved",
+            "{cause}: {error}"
+        );
+        assert_eq!(error.class, DriverErrorClass::Unserved, "{cause}: {error}");
+        assert_eq!(
+            error.address.as_deref(),
+            Some("exec_denied_paths"),
+            "{cause}"
+        );
+        assert!(
+            error.message.contains(&format!(": {cause}")),
+            "{cause}: {error}"
+        );
+    }
+}
+
+/// A read-only root with `bin/real`, `bin/other`, the link `bin/sh` to `real` and the hard link
+/// `bin/again` to it: what the deny cases of the plan declare.
+fn deny_tools(staged: &Staged) -> PathBuf {
+    let tools = staged.root.path().join("tools");
+    std::fs::create_dir_all(tools.join("bin")).expect("bin");
+    for name in ["real", "other"] {
+        write(&tools.join("bin").join(name), b"a program");
+    }
+    std::os::unix::fs::symlink("real", tools.join("bin/sh")).expect("a link");
+    std::fs::hard_link(tools.join("bin/real"), tools.join("bin/again")).expect("a hard link");
+    tools
+}
+
+/// Design 35 D10, D23: a denied program is refused before dispatch,
+/// `exec.sandbox-program-unlisted`, address `argv`. The driver asks by place on its own mount
+/// table (D25) and by device and inode: the program itself, a symbolic link to it (`sh` to a
+/// denied `bash`, B1), a hard link beside it, a program in a denied directory (K8), and a
+/// program denied only through a second mount of a part of the listed directory (K2). A
+/// program the deny-list does not reach is planned, with one `--deny` per entry.
+#[test]
+fn a_denied_program_is_refused_before_dispatch_by_place() {
+    let staged = Staged::new();
+    if !placed("denied program", staged.root.path()) {
+        return;
+    }
+    let tools = deny_tools(&staged);
+    let bin = tools.join("bin");
+    let one = [(tools.as_path(), "/opt/t")];
+    let two = [(tools.as_path(), "/opt/t"), (bin.as_path(), "/opt/x")];
+    let denied = |roots: &[(&Path, &str)], entries: &[&str], deny: &[&str], program: &str| {
+        assert_refused(
+            staged.plan_denying(roots, entries, deny, program),
+            "exec.sandbox-program-unlisted",
+            "argv",
+            "is denied by the deny-list entry",
+        );
+    };
+    denied(&one, &["/opt/t"], &["/opt/t/bin/real"], "/opt/t/bin/real");
+    denied(&one, &["/opt/t"], &["/opt/t/bin/real"], "/opt/t/bin/sh");
+    denied(&one, &["/opt/t"], &["/opt/t/bin/real"], "/opt/t/bin/again");
+    denied(&one, &["/opt/t/bin"], &["/opt/t"], "/opt/t/bin/other");
+    denied(&two, &["/opt/t"], &["/opt/x/real"], "/opt/t/bin/real");
+    denied(&two, &["/opt/t"], &["/opt/x"], "/opt/t/bin/other");
+    denied(&two, &["/opt/x"], &["/opt/t/bin/real"], "/opt/x/sh");
+
+    let lists = staged
+        .plan_denying(
+            &two,
+            &["/opt/t"],
+            &["/opt/x/real", "/opt/t/bin/later"],
+            "/opt/t/bin/other",
+        )
+        .expect("a program the deny-list does not reach");
+    assert_eq!(
+        lists.deny,
+        [
+            Located::new(Class::Follow, "/opt/x", "real").expect("a path"),
+            Located::new(Class::Follow, "/opt/t", "bin/later").expect("a path"),
+        ]
+    );
+    let options = lists.options();
+    assert_eq!(options.iter().filter(|part| *part == "--deny").count(), 2);
+    println!("exec gate denied program: executed");
+}
+
+/// Design 35 § 8.1, § 12: an entry of the deny-list has the form of an allow entry and is held
+/// to its rules, each refusal with the address `exec_denied_paths`; but it need not exist at
+/// the start, in a mount classed `follow` or `beneath`, and is then kept as a name.
+#[test]
+fn a_deny_entry_is_held_to_the_rules_of_an_entry_and_need_not_exist() {
+    let staged = Staged::new();
+    if !placed("deny entries", staged.root.path()) {
+        return;
+    }
+    let tools = deny_tools(&staged);
+    std::fs::create_dir_all(staged.workspace.join("bin")).expect("bin");
+    std::os::unix::fs::symlink("/usr/bin", staged.workspace.join("planted")).expect("a link");
+    let roots = [(tools.as_path(), "/opt/t")];
+    let plan = |deny: &[&str]| staged.plan_denying(&roots, &["bin"], deny, "/opt/t/bin/other");
+    let lists = plan(&[
+        "later/tool",
+        "bin/later",
+        "/opt/t/absent/tool",
+        "/opt/t/bin/real",
+    ])
+    .expect("entries that do not exist yet");
+    assert_eq!(
+        lists
+            .deny
+            .iter()
+            .map(|entry| (entry.class(), entry.path()))
+            .collect::<Vec<_>>(),
+        [
+            (Class::Beneath, "/workspace/later/tool".to_owned()),
+            (Class::Beneath, "/workspace/bin/later".to_owned()),
+            (Class::Follow, "/opt/t/absent/tool".to_owned()),
+            (Class::Follow, "/opt/t/bin/real".to_owned()),
+        ]
+    );
+    assert_refused(
+        plan(&["/tmp/tool"]),
+        EXEC_SUBPATH_UNDECLARED,
+        "exec_denied_paths",
+        "lies outside",
+    );
+    assert_refused(
+        plan(&["planted/sh"]),
+        PATH_UNREPRESENTABLE,
+        "exec_denied_paths",
+        "has a symbolic link in it",
+    );
+    assert_refused(
+        plan(&["bin/../bin"]),
+        PATH_UNREPRESENTABLE,
+        "exec_denied_paths",
+        "",
+    );
+    println!("exec gate deny entries: executed");
 }

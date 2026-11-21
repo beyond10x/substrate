@@ -191,7 +191,12 @@ require_executed sandbox_parity \
 # Design 29: scoped workspace write and output retention, each case by its own line. Design 35:
 # the `exec` lines, runs held to an executable allow-list by the helper built above. The first
 # of them is the acceptance: a program beneath a listed directory runs, and one outside it fails
-# inside the run with status 126.
+# inside the run with status 126. The `exec deny` lines are the deny-list beside it
+# (`story:executable-deny-list`): probes K2 and K8 through the driver, the acceptance (`/usr/bin`
+# allowed, one program beneath it denied), and the two cases kept at the stakeholder's request,
+# a program that is a link to a denied program and one directory under two names, the second in
+# the base view's form (`/usr/bin` listed, `/bin/id` denied) and from two declared roots. The
+# base view's form is absent, so refused here, on a host whose `/bin` is not a link to `/usr/bin`.
 require_executed ess_confinement_linux \
   'ESS confinement linux scoped write: executed' \
   'ESS confinement linux scoped git: executed' \
@@ -241,7 +246,21 @@ require_executed ess_confinement_linux \
   'ESS confinement linux exec helper preload half: executed' \
   'ESS confinement linux exec path limit: executed' \
   'ESS confinement linux exec helper dynamic: executed' \
-  'ESS confinement linux exec limit preload file: executed'
+  'ESS confinement linux exec limit preload file: executed' \
+  'ESS confinement linux exec deny K2: executed' \
+  'ESS confinement linux exec deny K8: executed' \
+  'ESS confinement linux exec deny-list: executed' \
+  'ESS confinement linux exec deny link to denied: executed' \
+  'ESS confinement linux exec deny two names base view: executed' \
+  'ESS confinement linux exec deny two names declared roots: executed' \
+  'ESS confinement linux exec deny-only: executed' \
+  'ESS confinement linux exec deny shapes: executed' \
+  'ESS confinement linux exec deny loader: executed' \
+  'ESS confinement linux exec deny limit hard link: executed' \
+  'ESS confinement linux exec deny limit copy: executed' \
+  'ESS confinement linux exec deny limit loader: executed' \
+  'ESS confinement linux exec deny limit script: executed' \
+  'ESS confinement linux exec deny limit replaced: executed'
 require_executed ess_confinement_systemd \
   'ESS confinement systemd local scoped write: executed' \
   'ESS confinement systemd linux scoped write: executed' \
@@ -253,7 +272,9 @@ require_executed ess_confinement_systemd \
   'ESS confinement systemd linux live natural end: executed' \
   'ESS confinement systemd linux live stall: executed' \
   'ESS confinement systemd linux exec_subpaths admission: executed' \
+  'ESS confinement systemd linux exec_denied_paths admission: executed' \
   'ESS confinement systemd linux exec allow-list: executed' \
+  'ESS confinement systemd linux exec deny-list: executed' \
   'ESS confinement systemd linux exec preload: executed' \
   'ESS confinement systemd linux exec withheld: executed'
 
@@ -315,7 +336,12 @@ require_executed -p b10x-substrate-exec-gate gate \
   'exec gate descriptors: executed' \
   'exec gate environment: executed' \
   'exec gate own environment: executed' \
-  'exec gate preload operand: executed'
+  'exec gate preload operand: executed' \
+  'exec gate deny listed file: executed' \
+  'exec gate deny directory: executed' \
+  'exec gate deny program and loader: executed' \
+  'exec gate deny limit hard link elsewhere: executed' \
+  'exec gate deny limit replaced and copied: executed'
 require_executed -p b10x-substrate-exec-gate adversary_gate \
   'adversary landlock failures: executed'
 require_executed -p b10x-substrate-exec-gate security2_gate \
