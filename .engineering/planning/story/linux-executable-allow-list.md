@@ -12,14 +12,22 @@ tags:
 relations:
 - decomposes: epic:runs-are-governed-and-limit-hits-are-events
 scope:
+- confidence: inferred
+  path: crates/substrate-exec-gate
 - confidence: cited
   path: crates/substrate-host/src/confinement/linux.rs
+- confidence: inferred
+  path: crates/substrate-host/src/lib.rs
 - confidence: cited
   path: crates/substrate-host/src/probe.rs
 - confidence: inferred
   path: crates/substrate-host/src/process.rs
 - confidence: inferred
+  path: crates/substrate-host/tests/confinement-public-items.txt
+- confidence: inferred
   path: docs/design/35-executable-lists.md
+- confidence: inferred
+  path: scripts/delegated-lane.sh
 - confidence: inferred
   path: spec/confinement-suite.json
 - confidence: cited
@@ -28,7 +36,7 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 8
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
@@ -37,9 +45,16 @@ transitions:
 
 ## Outcome
 
-A profile opened on the `linux` adapter with a non-empty `exec_subpaths` runs only its literal
-program and programs beneath the listed paths. Executing anything else fails inside the run. The
+A profile opened on the `linux` adapter with a non-empty `exec_subpaths` is held to it: `execve`
+of a path that is neither the literal program nor beneath a listed path fails inside the run. The
 adapter proves the fact `exec_subpaths` only where its probe saw such an execution denied.
+
+The list restricts which files `execve` accepts. It does not restrict what code an allowed program
+runs: an allowed interpreter runs any script it can read, the dynamic loader started directly runs
+any program file the run can read, and a memfd copy of a program runs. The draft of
+`docs/design/35-executable-lists.md` records each as a probe result of 2026-11-21. The list holds
+a run that starts programs by path; it is not containment of a program that sets out to run other
+code.
 
 ## Why
 
@@ -73,8 +88,15 @@ adapter proves the fact `exec_subpaths` only where its probe saw such an executi
      of the epic promises a record of one;
    - `systemd` around `linux` takes `linux`'s set (`spec/confinement/confinement.yaml:211`);
      `systemd` around `local` stays without the fact.
-2. `spec/confinement/confinement.yaml` declares `exec_subpaths` for `linux`, with a scenario for an
-   allowed and a denied execution; `cargo xtask check-ess` regenerates the suite.
+   Probes of 2026-11-21 on this workstation (kernel 6.18, Landlock ABI 7, bubblewrap 0.13.0),
+   recorded in the draft document, already rule two candidates out: Landlock applied before
+   bubblewrap makes bubblewrap's first mount fail, and no bubblewrap version has a `noexec`
+   option. The draft's mechanism is Landlock's execute right applied inside the sandbox by a
+   helper that runs last before the program; it needs Landlock ABI 2 (Linux 5.19).
+2. `spec/confinement/confinement.yaml` declares `exec_subpaths` for `linux`, with a scenario for
+   the admission of a profile that sets the list. The confinement model has only `OpenAdapter`
+   and `AdmitProfile`, so the allowed and the denied execution are delegated-lane cases, not
+   scenarios. `cargo xtask check-ess` regenerates the suite.
 3. The `linux` adapter applies the list and publishes the fact from its probe
    (`linux::proof`, `crates/substrate-host/src/confinement/linux.rs:166`).
 4. **The daemon does not publish the fact yet.** `publish_confinement`
@@ -101,7 +123,12 @@ Checks:
 - `the_published_set_is_the_linux_adapters_proof` passes with `exec_subpaths` proved by the
   adapter and absent from the published set, and the runtime vectors' delegated lane still lists
   `whole-tree-kill`, `ipc-socket-allowlist` and `ipc-signals-contained` (`AGENTS.md` § The gate).
-- `cargo xtask check-ess` and `bash scripts/delegated-lane.sh` pass.
+- A delegated-lane case holds each stated limit as it is: with `/usr/bin` listed, `sh script` runs
+  a script outside the list, and a `#!` script outside the list is refused.
+- A run with a list can still rename a file within one directory and across two unlisted
+  directories.
+- `cargo xtask check-ess` and `bash scripts/delegated-lane.sh` pass, and the lane builds and
+  names the helper.
 
 ## Boundaries
 
@@ -121,3 +148,8 @@ First story of `epic:runs-are-governed-and-limit-hits-are-events`. It depends on
 - `crates/substrate-host/src/confinement/linux.rs`. Cited: `:29-31`, `:166`, `:200-206`.
 - `crates/substrate-host/src/probe.rs`. Cited: `:269`, `:1146-1218`.
 - `crates/substrate-host/src/process.rs`. Inferred: the bubblewrap argv is built there.
+- The helper's source (a new binary of this repository), `crates/substrate-host/src/lib.rs`
+  (`HostConfig`), `scripts/delegated-lane.sh`. Inferred from the draft design document.
+- `crates/substrate-host/tests/confinement-public-items.txt`. Inferred: the public `linux::proof`
+  gains an argument in the draft design.
+- `website/docs`. Inferred.

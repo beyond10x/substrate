@@ -41,7 +41,7 @@ scope:
   path: spec/generated
 - confidence: inferred
   path: website/docs
-revision: 11
+revision: 12
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
@@ -77,7 +77,10 @@ a deny-list without an allow-list is refused by name on every adapter.
    - precedence: a denied entry wins over an allowed subpath;
    - the name and status of the refusal for a deny-list beside an empty `exec_subpaths`, and the
      sentence that states the copy-into-the-workspace limit;
-   - whether a denied program reached through a symbolic link or a hard link is denied;
+   - whether a denied program reached through a symbolic link or a hard link is denied. Probed on
+     2026-11-21 for the draft's Landlock mechanism: a symbolic link to a denied program is denied,
+     a hard link in the same directory is denied, and a hard link that already exists elsewhere
+     beneath a listed path runs. The document states that limit or names a refusal for it;
    - the mechanism on `linux` and on `macos` (Seatbelt has `deny` rules,
      `crates/substrate-host/src/confinement/macos.rs:1414-1416` shows the form for writes).
 2. `spec/confinement/confinement.yaml` gains the field, the fact, the refusal and scenarios;
