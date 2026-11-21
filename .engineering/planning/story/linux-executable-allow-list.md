@@ -13,9 +13,17 @@ relations:
 - decomposes: epic:runs-are-governed-and-limit-hits-are-events
 scope:
 - confidence: inferred
+  path: crates/substrate-cli
+- confidence: inferred
   path: crates/substrate-exec-gate
+- confidence: inferred
+  path: crates/substrate-host/src/confinement/facts.rs
 - confidence: cited
   path: crates/substrate-host/src/confinement/linux.rs
+- confidence: inferred
+  path: crates/substrate-host/src/confinement/mod.rs
+- confidence: inferred
+  path: crates/substrate-host/src/confinement/systemd.rs
 - confidence: inferred
   path: crates/substrate-host/src/lib.rs
 - confidence: cited
@@ -24,8 +32,6 @@ scope:
   path: crates/substrate-host/src/process.rs
 - confidence: inferred
   path: crates/substrate-host/tests/confinement-public-items.txt
-- confidence: inferred
-  path: deploy/helm/substrate
 - confidence: inferred
   path: docs/design/35-executable-lists.md
 - confidence: inferred
@@ -38,7 +44,7 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 14
+revision: 17
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
@@ -134,11 +140,11 @@ Checks:
   (`ext4`, `overlay`, `tmpfs`), the open succeeds, the adapter proves neither list fact, and a
   profile with a list is refused `confinement.fact-unserved`; nothing runs with a list that is
   not enforced. The open's result, the adapter's capability report and that refusal each name the
-  cause, the file-system type and the path
-  (`approval-record:sdc-accepts-d26-and-withheld-facts-2026-11-21`; the design's fifth revision
-  names the items).
-- The chart's documentation says that the executable lists are served only on ext4, overlay and
-  tmpfs volumes today.
+  cause, the file-system type and the path: `AdapterFacts.withheld` and `FactUnserved.withheld`
+  of design 35's D27 (`approval-record:sdc-accepts-d26-and-withheld-facts-2026-11-21`,
+  `approval-record:sdc-accepts-d27-2026-11-21`). The helper's own file is among those paths, and
+  the cause `mount-id-unreported` withholds in the same way; the other seven causes refuse the
+  open `config.exec-gate-unserved`.
 - With `/usr` listed, `/bin/id` is not executable; with `/usr/bin` listed it is. A lane case
   holds that limit.
 - A delegated-lane case holds each stated limit as it is: with `/usr/bin` listed, `sh script` runs
@@ -171,4 +177,7 @@ First story of `epic:runs-are-governed-and-limit-hits-are-events`. It depends on
 - `crates/substrate-host/tests/confinement-public-items.txt`. Inferred: the public `linux::proof`
   gains an argument in the draft design.
 - `website/docs`. Inferred.
-- `deploy/helm/substrate`. Inferred: the chart's sentence about the served file systems.
+- `crates/substrate-host/src/confinement/mod.rs`, `crates/substrate-host/src/confinement/facts.rs`,
+  `crates/substrate-host/src/confinement/systemd.rs`, `crates/substrate-cli`. Inferred from
+  design 35's D27: `FactUnserved` and `AdapterFacts` gain `withheld`, `systemd` copies it, and the
+  CLI has one construction site of `FactUnserved`.

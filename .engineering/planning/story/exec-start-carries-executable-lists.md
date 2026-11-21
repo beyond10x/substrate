@@ -45,12 +45,14 @@ scope:
 - confidence: inferred
   path: website/docs
 - confidence: inferred
+  path: website/docs/guides/deployment.md
+- confidence: inferred
   path: xtask/bundle-source
 - confidence: inferred
   path: xtask/src/bundle
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 15
+revision: 17
 ---
 # Story: An exec start carries the executable lists on the wire
 
@@ -84,7 +86,10 @@ dispatch.
    `story:explicitly-empty-exec-subpaths-means-the-program-only` can later retype the profile
    field without changing a wire byte. Session `sdc` decides that story when this one is planned.
    Already decided by the stakeholder: a start whose allow-list member is present and empty is
-   refused by a named refusal, published with its vector, until that story lands.
+   refused by a named refusal, published with its vector, until that story lands. An input from
+   the stakeholder (`approval-record:sdc-accepts-d27-2026-11-21`): the daemon's capability
+   snapshot should be able to name why a fact is absent. A wire fact is `const true` or absent
+   today, so the document decides the form.
 2. A successor bundle under `contracts/substrate-wire`, at the next free version when the story
    starts (`main` advertises `substrate-wire/0.27.0` at `638a7d70c`,
    `crates/substrate-wire/src/lib.rs:18`, so `0.28.0` or later). It is cut with
@@ -121,6 +126,9 @@ Checks:
   dispatch, on both lanes, and the bundle publishes that refusal with a vector. Decided by the
   stakeholder on 2026-11-21 (`approval-record:sdc-accepts-design-35-2026-11-21`): no accepted
   byte means "runs as today" now and "the program only" later.
+- `website/docs/guides/deployment.md`, § *Before you install*, says: "The executable lists are
+  served only on ext4, overlay and tmpfs volumes today.", with the list as it stands when this
+  story merges (`approval-record:sdc-accepts-d27-2026-11-21`).
 - A unit test on the Kubernetes namespace driver's snapshot holds both properties absent. The
   refusal of the fields there is the daemon's driver-independent one the portable lane asserts.
 - `cargo xtask check-bundles` from `0.5.0` through the new version and `cargo xtask check-json`
