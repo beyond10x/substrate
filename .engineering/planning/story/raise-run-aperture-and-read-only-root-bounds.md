@@ -4,7 +4,7 @@ id: story:raise-run-aperture-and-read-only-root-bounds
 kind: story
 status: active
 title: A run selects up to eight apertures and binds up to eight read-only roots (#236)
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-20T06:56:37Z", actor: "human:unknown", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-20T06:56:38Z", actor: "human:unknown", revision: 4}
@@ -37,3 +37,13 @@ and `adr/0010-declared-host-roots-are-mounted-read-only.md` and published by bun
 - Every released bundle stays the fixed point of its own source (`check-bundles 0.5.0 .. 0.27.0`).
 - Spec: the ESS projections model no numeric bound on apertures or roots; `spec/` is unchanged.
 - Full gate green; the pull request closes #236; a release is cut.
+
+## Delivery (2026-11-21)
+
+- Done: PR #237 merged as `638a7d70` (Closes #236, closed); the CI fix `e9136ecc` derives the
+  driver test's too-many aperture list from `MAX_EGRESS_APERTURES`. Tag `0.22.0` (annotated, bot
+  tagger) pushed on `638a7d70`; Release run 44859846927 was in progress at the hand-off.
+- Open: verify release 0.22.0 (run success, GitHub release with its four files, daemon, MCP and
+  executor images, bundle `substrate-wire:0.27.0`, chart); then move this story to `implemented`;
+  then tell the conductor controller 0.22.0 so it raises `APERTURES_BOUND` (placement.rs) to 8
+  together with its substrate pin.
