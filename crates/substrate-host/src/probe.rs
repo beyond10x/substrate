@@ -616,6 +616,19 @@ pub(crate) fn probe_exec_subpaths(config: &HostConfig, gate: &ExecGate) -> bool 
     seen.held()
 }
 
+/// Where the deny probe binds a directory no entry lists, beneath its listed `apart`: the
+/// mount beneath a listed directory of D30, relative to the workspace.
+const PROBE_HELD_MOUNT: &str = "apart/held";
+
+/// What the deny probe's run executes: each line ends the shell with a status of its own
+/// where what the lists allow did not happen, or what they refuse did.
+const PROBE_DENY_SCRIPT: &str = "allowed/true || exit 21; \
+     /second/true 2>/dev/null; [ $? -eq 126 ] || exit 22; \
+     allowed/sub/true 2>/dev/null; [ $? -eq 126 ] || exit 23; \
+     allowed/sub/again 2>/dev/null; [ $? -eq 126 ] || exit 24; \
+     apart/held/tool 2>/dev/null; [ $? -eq 126 ] || exit 25; \
+     apart/held/other || exit 26";
+
 /// Proves the deny-list in one throwaway run, as a start applies it (design 35 D15, § 9).
 ///
 /// The workspace holds `allowed/true` and `allowed/sub/true`, with `allowed/sub/again` a hard
@@ -625,10 +638,20 @@ pub(crate) fn probe_exec_subpaths(config: &HostConfig, gate: &ExecGate) -> bool 
 /// two paths and the ancestors of the entry in the view both get wrong (K2, K5), so the run
 /// proves the helper's place handling (D25) and does not assume it.
 ///
-/// Each half must hold. `allowed/true` ran. `/second/true`, `allowed/sub/true`, which is the
-/// same file under its listed name, and `allowed/sub/again`, another name of it, each ended
-/// the shell's attempt with status 126. Any other outcome, a helper that takes no `--deny`
-/// among them, answers `false`.
+/// **A mount beneath a listed directory** (D30). `outside/held` holds `tool` and `other`
+/// and is bound at `apart/held`, beneath a second listed directory, `apart`, and the
+/// deny-list also names `apart/held/tool`. By place that file is in `outside/held`, which no
+/// entry lists, and the kernel grants what is mounted beneath a directory that has a rule. So
+/// a helper that compares places alone writes one rule on `apart`, and the denied file runs:
+/// the run proves that the helper found the mount in the table this bubblewrap writes and
+/// expanded the directory. The mount is beneath a listed directory of its own because
+/// `allowed` is expanded for `/second/true` in any case, and the expansion already gave a
+/// mount point among its entries the place of its own row.
+///
+/// Each half must hold. `allowed/true` and `apart/held/other` ran. `/second/true`,
+/// `allowed/sub/true`, which is the same file under its listed name, `allowed/sub/again`,
+/// another name of it, and `apart/held/tool` each ended the shell's attempt with status 126.
+/// Any other outcome, a helper that takes no `--deny` among them, answers `false`.
 pub(crate) fn probe_exec_denied_paths(config: &HostConfig, gate: &ExecGate) -> bool {
     const SECOND: &str = "/second";
     let Some(host_true) = base_tool("true") else {
@@ -639,11 +662,19 @@ pub(crate) fn probe_exec_denied_paths(config: &HostConfig, gate: &ExecGate) -> b
     };
     let workspace = root.path().join("workspace");
     let sub = workspace.join("allowed/sub");
+    let held = workspace.join("outside/held");
     let staged = std::fs::create_dir_all(&sub).is_ok()
+        && std::fs::create_dir_all(&held).is_ok()
+        && std::fs::create_dir_all(workspace.join(PROBE_HELD_MOUNT)).is_ok()
         && std::fs::copy(&host_true, workspace.join("allowed/true")).is_ok()
         && std::fs::copy(&host_true, sub.join("true")).is_ok()
-        && std::fs::hard_link(sub.join("true"), sub.join("again")).is_ok();
-    let Some(sub) = sub.to_str().filter(|_| staged) else {
+        && std::fs::hard_link(sub.join("true"), sub.join("again")).is_ok()
+        && std::fs::copy(&host_true, held.join("tool")).is_ok()
+        && std::fs::copy(&host_true, held.join("other")).is_ok();
+    let (Some(sub), Some(held)) = (
+        sub.to_str().filter(|_| staged),
+        held.to_str().filter(|_| staged),
+    ) else {
         return false;
     };
     let Ok(pinned) = crate::fs::pin_workspace_directory(&workspace) else {
@@ -658,7 +689,7 @@ pub(crate) fn probe_exec_denied_paths(config: &HostConfig, gate: &ExecGate) -> b
     drop(pinned);
     let Ok(mut lists) = crate::exec_gate::plan(
         gate,
-        &["allowed".to_owned()],
+        &["allowed".to_owned(), "apart".to_owned()],
         &[],
         "/bin/sh",
         &crate::exec_gate::View {
@@ -672,31 +703,39 @@ pub(crate) fn probe_exec_denied_paths(config: &HostConfig, gate: &ExecGate) -> b
     ) else {
         return false;
     };
-    // The second mount is the probe's own, not a mount a profile can declare, so its entry is
-    // written here: a mount that shows something a run can write, opened `beneath`.
-    let Ok(denied) =
-        substrate_exec_gate::Located::new(substrate_exec_gate::Class::Beneath, SECOND, "true")
-    else {
+    // The two mounts are the probe's own, not mounts a profile can declare, so their entries
+    // are written here: each shows something a run can write, and is opened `beneath`.
+    let beneath = |root: &str, rel: &str| {
+        substrate_exec_gate::Located::new(substrate_exec_gate::Class::Beneath, root, rel)
+    };
+    let (Ok(second), Ok(held_tool)) = (
+        beneath(SECOND, "true"),
+        beneath(
+            substrate_wire::EXEC_WORKSPACE_MOUNT,
+            &format!("{PROBE_HELD_MOUNT}/tool"),
+        ),
+    ) else {
         return false;
     };
-    lists.deny.push(denied);
+    lists.deny.extend([second, held_tool]);
     lists.writable.push(SECOND.to_owned());
     let mut binds = access.bind_args();
     binds.extend(["--ro-bind".to_owned(), sub.to_owned(), SECOND.to_owned()]);
+    binds.extend([
+        "--ro-bind".to_owned(),
+        held.to_owned(),
+        format!(
+            "{}/{PROBE_HELD_MOUNT}",
+            substrate_wire::EXEC_WORKSPACE_MOUNT
+        ),
+    ]);
     let Ok(descriptor) = gate.reopen() else {
         return false;
     };
     let status = exec_gate_sandbox(config, &descriptor, &binds)
         .args(["--chdir", "/workspace", "--", crate::exec_gate::GATE_MOUNT])
         .args(lists.options())
-        .args([
-            "/bin/sh",
-            "-c",
-            "allowed/true || exit 21; \
-             /second/true 2>/dev/null; [ $? -eq 126 ] || exit 22; \
-             allowed/sub/true 2>/dev/null; [ $? -eq 126 ] || exit 23; \
-             allowed/sub/again 2>/dev/null; [ $? -eq 126 ] || exit 24",
-        ])
+        .args(["/bin/sh", "-c", PROBE_DENY_SCRIPT])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -2291,6 +2330,68 @@ exit 1
             &crate::process::recorded_sandboxes(&log),
             3 + usize::from(socat) + listed,
         );
+    }
+
+    /// Design 35 § 9, D30: **the deny probe's arguments hold the bind beneath a listed
+    /// directory and the deny entry in it.** `apart` is listed, `outside/held` is bound at
+    /// `/workspace/apart/held`, no entry lists `outside`, and the deny-list names
+    /// `apart/held/tool` beside `/second/true`. The script requires status 126 of the denied
+    /// file and a run of its neighbour. Read from what a backend that records was given, so
+    /// the arguments are asserted as built. That a helper which compares places alone fails
+    /// this run is the lane's case with a helper that drops the entry.
+    ///
+    /// Portable: nothing here spawns a real sandbox.
+    #[test]
+    fn the_deny_probe_stages_a_mount_beneath_a_listed_directory() {
+        let directory = tempfile::tempdir().expect("a scratch root");
+        let (backend, log) = crate::process::recording_backend(directory.path());
+        let mut config = HostConfig::minimum(directory.path());
+        config.bubblewrap = backend;
+        let gate = ExecGate::seal(b"a stand-in for the helper", None).expect("sealed bytes");
+        assert!(
+            !probe_exec_denied_paths(&config, &gate),
+            "a backend that records and refuses cannot prove the deny-list"
+        );
+        let sandboxes = crate::process::recorded_sandboxes(&log);
+        let [argv] = sandboxes.as_slice() else {
+            // The probe plans its lists before it spawns, as a start does: a host whose `/usr`
+            // or temporary directory lies on a file-system type outside the list plans none.
+            assert!(sandboxes.is_empty(), "one run: {sandboxes:?}");
+            println!(
+                "exec gate deny probe arguments: ABSENT (a place of the plan is not established)"
+            );
+            return;
+        };
+        let holds = |part: &[&str]| argv.windows(part.len()).any(|window| window == part);
+        let bind = argv
+            .windows(3)
+            .find(|window| window[0] == "--ro-bind" && window[2] == "/workspace/apart/held")
+            .expect("the bind beneath the listed directory");
+        assert!(
+            bind[1].ends_with("/workspace/outside/held"),
+            "the source is a directory no entry lists: {bind:?}"
+        );
+        for entry in [
+            ["--allow", "beneath", "/workspace", "allowed"],
+            ["--allow", "beneath", "/workspace", "apart"],
+            ["--deny", "beneath", "/second", "true"],
+            ["--deny", "beneath", "/workspace", "apart/held/tool"],
+        ] {
+            assert!(holds(&entry), "{entry:?} in {argv:?}");
+        }
+        assert_eq!(
+            argv.iter().filter(|part| *part == "--allow").count(),
+            2,
+            "`outside` is not listed: {argv:?}"
+        );
+        assert_eq!(argv.last().map(String::as_str), Some(PROBE_DENY_SCRIPT));
+        assert!(
+            PROBE_DENY_SCRIPT.contains("apart/held/tool 2>/dev/null; [ $? -eq 126 ] || exit 25")
+                && PROBE_DENY_SCRIPT.contains("apart/held/other || exit 26"),
+            "{PROBE_DENY_SCRIPT}"
+        );
+        crate::process::assert_recorded_posture("the deny probe", &sandboxes, 1);
+        println!("exec gate deny probe arguments: executed");
     }
 
     /// Design 35 § 9, the verdict of the allow-list probe on what its two runs showed. The fact

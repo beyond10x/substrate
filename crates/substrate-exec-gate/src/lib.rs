@@ -14,13 +14,19 @@
 //!
 //! **Landlock has no deny rule**, and a rule on a directory grants everything beneath it. So a
 //! path that would receive the execute right is granted as follows (D11), where "lies in"
-//! compares [place]s and never the text of two paths (D25):
+//! compares [place]s and never the text of two paths (D25), through the mounts of the view
+//! (D30): a directory reaches its own place and the root of every mount beneath it, because
+//! the kernel grants a file in such a mount by a rule on the directory.
 //!
-//! 1. it lies in a denied path, or is a file with the device and inode of a denied file: no
-//!    rule;
-//! 2. no denied path lies in it: one rule on it;
-//! 3. it is a directory and a denied path lies in it: no rule on it, and the same three steps
-//!    for each of its entries. A symbolic link gets no rule.
+//! 1. its place lies in a place a deny entry reaches, or it is a file with the device and
+//!    inode of a denied file: no rule;
+//! 2. it is a file, or no place it reaches overlaps a place a deny entry reaches: one rule on
+//!    it;
+//! 3. otherwise: no rule on it, and the same three steps for each of its entries, into the
+//!    mounts beneath it. A symbolic link gets no rule.
+//!
+//! Where what a denied directory, or a listed directory beside a deny entry, reaches cannot
+//! be established, the helper exits 125 and names the mount point and the cause.
 //!
 //! The program and the loader go through the same steps, so a denied program is not executed
 //! (status 126) and a denied loader starts no dynamically linked program. A directory that was

@@ -20,11 +20,11 @@ use substrate_wire::ReadOnlyRoot;
 
 use super::{
     EXEC_GATE_INVALID, EXEC_GATE_UNSERVED, ExecGate, FileFacts, Location, Mounts, OpenDecision,
-    OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, Shown, Source,
-    Unfollowed, View, check_file, check_length, check_linkage, check_links, check_location,
-    check_openable, check_protocol, class_together, classed, decide_open, denied_unplaced,
-    judge_link, judge_passed, open, place_open, plan, shown_location, start_unplaced,
-    withheld_facts, writable_source,
+    OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, Shown,
+    Sighted, Source, Unfollowed, View, check_file, check_length, check_linkage, check_links,
+    check_location, check_openable, check_protocol, class_together, classed, decide_open,
+    denied_unplaced, judge_denied, judge_link, judge_passed, open, place_open, plan,
+    shown_location, start_unplaced, withheld_facts, writable_source,
 };
 use crate::confinement::{Fact, FactWithheld};
 use crate::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
@@ -2597,4 +2597,270 @@ fn a_deny_entry_is_held_to_the_rules_of_an_entry_and_need_not_exist() {
         "",
     );
     println!("exec gate deny entries: executed");
+}
+
+/// A host with what the reviews of the deny-list staged (design 35 § 3.13, E19 to E22). A
+/// second file system at `/usr/local/src` (E20), mounted again at `/srv/again`. `/opt/t/bin`
+/// bound a second time at `/opt/one/deep` (E21 (a)). Beneath `/boot` a `vfat` mount, beneath
+/// `/stack` two mounts on one mount point, as beneath `/srv/again/x`, and beneath `/gone` a
+/// mount whose root was removed.
+const HOST_WITH_DENIED_MOUNTS: &str = "\
+31 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw
+70 31 8:33 / /usr/local/src rw - ext4 /dev/sdc1 rw
+71 31 8:33 / /srv/again rw - ext4 /dev/sdc1 rw
+72 31 259:2 /opt/t/bin /opt/one/deep rw - ext4 /dev/nvme0n1p2 rw
+73 31 0:50 / /boot/efi rw - vfat /dev/sda1 rw
+74 31 8:49 / /stack/m rw - ext4 /dev/sdd1 rw
+75 74 8:50 / /stack/m rw - ext4 /dev/sdd2 rw
+76 31 259:2 /lost//deleted /gone/m rw - ext4 /dev/nvme0n1p2 rw
+77 71 8:65 / /srv/again/x/m rw - ext4 /dev/sde1 rw
+78 77 8:66 / /srv/again/x/m rw - ext4 /dev/sde2 rw
+";
+
+/// What the driver sighted at `path`, on the mount `mount_id` of `tree`: a directory, or the
+/// file `file`.
+fn sighted_at(
+    tree: &MountTree,
+    mount_id: u64,
+    path: &str,
+    file: Option<(libc::dev_t, libc::ino_t)>,
+) -> Sighted {
+    Sighted {
+        place: tree
+            .table()
+            .place_of(&seen(path, mount_id))
+            .expect("the place of a path of the table"),
+        file,
+    }
+}
+
+/// **D23 with D30, the program against the deny entries, on a table written as text**
+/// (design 35 § 16, *the six checks*): a program in a host mount beneath a denied directory
+/// is `exec.sandbox-program-unlisted`, address `argv`, and so is one in a second mount of
+/// that file system elsewhere, a program reached through a second mount of a denied file's
+/// directory, and another name of a denied file. A comparison of places alone refuses none
+/// of the first two: the mount at `/usr/local/src` is on another device than `/usr/local`.
+#[test]
+fn a_program_in_a_mount_beneath_a_denied_directory_is_refused_by_what_the_entry_reaches() {
+    let tree = tree(HOST_WITH_DENIED_MOUNTS);
+    let at = |mount_id: u64, path: &str| sighted_at(&tree, mount_id, path, None);
+    let file = |mount_id: u64, path: &str, inode: libc::ino_t| {
+        sighted_at(&tree, mount_id, path, Some((7, inode)))
+    };
+    let judged = |program: &Sighted, denied: Sighted| {
+        judge_denied(&tree, "/program", program, &[("the entry", denied)], &[])
+    };
+    let refused = |program: &Sighted, denied: Sighted, what: &str| {
+        let error = judged(program, denied).expect_err(what);
+        assert_eq!(
+            error.code, "exec.sandbox-program-unlisted",
+            "{what}: {error}"
+        );
+        assert_eq!(error.class, DriverErrorClass::Refused, "{what}: {error}");
+        assert_eq!(error.address.as_deref(), Some("argv"), "{what}");
+        assert!(
+            error
+                .message
+                .contains("\"/program\" is denied by the deny-list entry"),
+            "{what}: {error}"
+        );
+    };
+
+    // E20: `/usr/local` denied, the program in the host mount at `/usr/local/src`.
+    let tool = file(70, "/usr/local/src/tool", 1);
+    refused(&tool, at(31, "/usr/local"), "a program in a mount beneath");
+    refused(
+        &file(71, "/srv/again/tool", 1),
+        at(31, "/usr/local"),
+        "the same file system mounted a second time elsewhere (D23)",
+    );
+    // The entry's own place, as before D30, and a directory above the mount.
+    refused(
+        &file(70, "/usr/local/src/sub/tool", 1),
+        at(70, "/usr/local/src/sub"),
+        "a directory of the mount",
+    );
+    refused(&tool, at(31, "/usr"), "a directory above the mount");
+    // The mount itself, denied: by place it holds what is attached in its file system
+    // wherever that shows, the stack beneath `/srv/again/x` among it, and the stack cannot
+    // be compared. The start is refused for that, and the program is not looked at.
+    let error = judged(&tool, at(70, "/usr/local/src")).expect_err("the stack");
+    assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+    assert!(
+        error
+            .message
+            .contains("cannot establish where /srv/again/x/m is attached: mount-covered"),
+        "{error}"
+    );
+    // E21 (a): `/opt/t/bin/tool` denied, the program its name through the second mount.
+    refused(
+        &file(72, "/opt/one/deep/tool", 2),
+        file(31, "/opt/t/bin/tool", 2),
+        "a second mount of the denied file's directory",
+    );
+    // Another name of the denied file, by device and inode, wherever it lies.
+    refused(
+        &file(31, "/bin/alias", 3),
+        file(70, "/usr/local/src/tool", 3),
+        "another name",
+    );
+
+    // What no deny entry reaches is planned.
+    judged(&tool, at(31, "/usr/local/bin")).expect("a directory beside the mount");
+    judged(
+        &file(31, "/usr/local/bin/tool", 4),
+        at(70, "/usr/local/src/sub"),
+    )
+    .expect("a directory of the mount denied, a program beside the mount");
+    judged(
+        &file(31, "/usr/bin/sh", 5),
+        file(70, "/usr/local/src/tool", 6),
+    )
+    .expect("another file on another file system");
+    // A directory is no file: two of them are not "the same file".
+    judged(&at(31, "/usr/bin"), at(31, "/usr/local")).expect("two directories");
+}
+
+/// **Failing closed before dispatch, by D30's table.** What a denied directory reaches and
+/// what a listed directory of a start with a deny-list reaches must be established on the
+/// driver's table: the start is `exec.sandbox-place-unserved`, 501, with the cause and the
+/// line of an attachment, address `exec_denied_paths` for the first and `exec_subpaths` for
+/// the second. A type outside the list refuses beneath a denied directory only. A listed
+/// file, and a listed directory that lies in a denied place, are asked nothing: the helper
+/// writes no rule for the second and asks nothing of the first.
+#[test]
+fn a_reach_the_deny_list_needs_and_cannot_have_refuses_the_start() {
+    let tree = tree(HOST_WITH_DENIED_MOUNTS);
+    let at = |path: &str| sighted_at(&tree, 31, path, None);
+    let program = sighted_at(&tree, 31, "/usr/bin/sh", Some((7, 5)));
+    let unserved = |denied: &[(&str, Sighted)], listed: &[Sighted], address: &str, line: &str| {
+        let error = judge_denied(&tree, "/usr/bin/sh", &program, denied, listed)
+            .expect_err("a reach that cannot be established");
+        assert_eq!(error.code, PLACE_UNSERVED, "{line}: {error}");
+        assert_eq!(error.class, DriverErrorClass::Unserved, "{line}: {error}");
+        assert_eq!(error.address.as_deref(), Some(address), "{line}: {error}");
+        assert!(error.message.contains(line), "{line}: {error}");
+    };
+    for (directory, line) in [
+        (
+            "/boot",
+            "cannot establish where /boot/efi is attached: file-system-unlisted vfat",
+        ),
+        (
+            "/stack",
+            "cannot establish where /stack/m is attached: mount-covered",
+        ),
+        (
+            "/gone",
+            "cannot establish where /gone/m is attached: mount-root-deleted",
+        ),
+    ] {
+        unserved(&[("denied", at(directory))], &[], "exec_denied_paths", line);
+    }
+    let denied = || [("denied", at("/opt/t/bin"))];
+    for (directory, line) in [
+        (
+            "/stack",
+            "cannot establish where /stack/m is attached: mount-covered",
+        ),
+        (
+            "/gone",
+            "cannot establish where /gone/m is attached: mount-root-deleted",
+        ),
+    ] {
+        unserved(&denied(), &[at(directory)], "exec_subpaths", line);
+    }
+    let planned = |denied: &[(&str, Sighted)], listed: &[Sighted]| {
+        judge_denied(&tree, "/usr/bin/sh", &program, denied, listed)
+    };
+    planned(&denied(), &[at("/boot")])
+        .expect("a type outside the list beneath a listed directory is compared with nothing");
+    planned(
+        &denied(),
+        &[sighted_at(&tree, 31, "/stack/file", Some((7, 8)))],
+    )
+    .expect("a listed file reaches nothing");
+    // `/srv/again/x` shows a directory of the file system at `/usr/local/src`, and holds a
+    // stack. Listed beside a denied `/usr/local` it lies in a denied place: no rule, and
+    // nothing asked. Beside another deny entry it is asked, and refuses.
+    let again = || [sighted_at(&tree, 71, "/srv/again/x", None)];
+    planned(&[("denied", at("/usr/local"))], &again())
+        .expect("a listed directory in a denied place gets no rule and is asked nothing");
+    unserved(
+        &denied(),
+        &again(),
+        "exec_subpaths",
+        "cannot establish where /srv/again/x/m is attached: mount-covered",
+    );
+    planned(
+        &denied(),
+        &[at("/usr/local"), at("/opt/one"), at("/usr/bin")],
+    )
+    .expect("listed directories whose mounts beneath can be compared");
+}
+
+/// The three guards of a deny entry's sighting, each on real directories.
+///
+/// - **Only an absent name is absent.** A deny entry whose path fails for another reason, a
+///   link that never ends or one that leaves the view, refuses the start; it is not kept as
+///   a name beneath the directory above it. Read as absent it would deny nothing.
+/// - **An entry that does not exist is sighted nowhere.** Its nearest ancestor is placed,
+///   and the ancestor is not what the entry denies: a program beside the absent name, in a
+///   mount classed `beneath` and in the workspace itself, is planned.
+/// - **A deny entry is measured like an entry**: one whose path in the view is longer than
+///   the kernel takes is refused by name, because the helper could not open it.
+#[test]
+fn a_deny_entry_is_absent_only_where_its_name_is_and_then_denies_no_ancestor() {
+    let staged = Staged::new();
+    if !placed("deny entry guards", staged.root.path()) {
+        return;
+    }
+    let tools = deny_tools(&staged);
+    std::os::unix::fs::symlink("loop", tools.join("bin/loop")).expect("a link to itself");
+    std::os::unix::fs::symlink("/nowhere/tool", tools.join("bin/out")).expect("a link out");
+    std::fs::create_dir_all(staged.workspace.join("bin")).expect("bin");
+    write(&staged.workspace.join("bin/tool"), b"a program");
+    write(&staged.workspace.join("top"), b"a program");
+    let roots = [(tools.as_path(), "/opt/t")];
+    let plan = |deny: &[&str], program: &str| {
+        staged.plan_denying(&roots, &["bin", "/opt/t"], deny, program)
+    };
+
+    assert_refused(
+        plan(&["/opt/t/bin/loop"], "/opt/t/bin/other"),
+        PATH_UNREPRESENTABLE,
+        "exec_denied_paths",
+        "resolves through more than 40 symbolic links",
+    );
+    assert_refused(
+        plan(&["/opt/t/bin/out"], "/opt/t/bin/other"),
+        PATH_UNREPRESENTABLE,
+        "exec_denied_paths",
+        "which the view does not have",
+    );
+
+    let lists = plan(
+        &["bin/later", "later", "bin/tool/beneath"],
+        "/workspace/bin/tool",
+    )
+    .expect("a program beside names that do not exist");
+    assert_eq!(lists.deny.len(), 3);
+    plan(&["later"], "/workspace/top").expect("a program of the workspace beside an absent name");
+    assert_refused(
+        plan(&["bin"], "/workspace/bin/tool"),
+        "exec.sandbox-program-unlisted",
+        "argv",
+        "is denied by the deny-list entry",
+    );
+
+    // "/workspace/" is eleven bytes; sixteen names of 255 bytes with their separators more.
+    let long = vec!["d".repeat(255); 16].join("/");
+    assert_eq!(format!("/workspace/{long}").len(), 4106);
+    assert_refused(
+        plan(&[long.as_str()], "/opt/t/bin/other"),
+        PATH_UNREPRESENTABLE,
+        "exec_denied_paths",
+        "is 4106 bytes long",
+    );
+    println!("exec gate deny entry guards: executed");
 }

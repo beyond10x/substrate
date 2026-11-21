@@ -1469,7 +1469,9 @@ async fn the_runs_variables_reach_the_program_as_they_were_given() {
 /// requires (D29). The file is this program, then the lane's helper, then that helper's length
 /// in eight bytes. It writes the helper to `/tmp/gate` of the view and starts it with an empty
 /// environment of its own, so it restricts as the real helper does; built with
-/// `-DDROP_OPERANDS` it first drops every `--env <name> <value>` before the helper's own `--`.
+/// `-DDROP_OPERANDS` it first drops every `--env <name> <value>` before the helper's own `--`,
+/// and built with `-DDROP_HELD_DENY` the deny entry `apart/held/tool` of the deny probe; that
+/// build starts the helper with the environment it was started with itself.
 const DEFECTIVE: &str = r#"
 #include <fcntl.h>
 #include <stdint.h>
@@ -1510,10 +1512,34 @@ int main(int argc, char **argv) {
         }
         argv[kept] = NULL;
     }
-#else
-    (void)argc;
 #endif
+#ifdef DROP_HELD_DENY
+    {
+        int kept = 1, options = 1;
+        for (int index = 1; index < argc; index++) {
+            if (options && strcmp(argv[index], "--deny") == 0 && index + 3 < argc
+                && strcmp(argv[index + 3], "apart/held/tool") == 0) {
+                index += 3;
+                continue;
+            }
+            if (strcmp(argv[index], "--") == 0) options = 0;
+            argv[kept++] = argv[index];
+        }
+        argv[kept] = NULL;
+    }
+#endif
+    (void)argc;
+#ifdef DROP_HELD_DENY
+    {
+        /* This defect is the deny-list's alone: the helper keeps the environment it was
+           started with, so the allow-list's probe holds as it does for the real helper. */
+        extern char **environ;
+        (void)empty;
+        execve("/tmp/gate", argv, environ);
+    }
+#else
     execve("/tmp/gate", argv, empty);
+#endif
     return 98;
 }
 "#;

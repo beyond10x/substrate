@@ -1745,17 +1745,17 @@ impl<'a> Mounts<'a> {
         Ok((located, sighted))
     }
 
-    /// Where the program is on the host, after [`Self::located`] accepted it: what the deny
-    /// check compares (D23).
-    fn program_sighted(&self, text: &str) -> Result<Sighted, DriverError> {
-        let (mount, path, rel) = self.eligible(text, PROGRAM)?;
-        let refuse = |why: String| unrepresentable(text, why, PROGRAM);
+    /// Where the program or an entry of the allow-list is on the host, after
+    /// [`Self::located`] accepted it: what the deny check compares (D23, D30).
+    fn sighted(&self, text: &str, address: &str) -> Result<Sighted, DriverError> {
+        let (mount, path, rel) = self.eligible(text, address)?;
+        let refuse = |why: String| unrepresentable(text, why, address);
         match mount.class {
             Class::Follow => {
                 let reached = self
                     .follow(&path, text)
-                    .map_err(|unfollowed| unfollowed.refusal(text, PROGRAM))?;
-                self.check_reached(text, reached, PROGRAM)
+                    .map_err(|unfollowed| unfollowed.refusal(text, address))?;
+                self.check_reached(text, reached, address)
             }
             Class::Beneath => {
                 let directory = mount.descriptor().expect("an eligible mount is walked");
@@ -1773,7 +1773,7 @@ impl<'a> Mounts<'a> {
                         .tree
                         .table()
                         .place_of(&Opened::of_descriptor(descriptor.as_raw_fd(), text))
-                        .map_err(|why| start_unplaced(PROGRAM, &why))?,
+                        .map_err(|why| start_unplaced(address, &why))?,
                     file: file_identity(descriptor),
                 })
             }
@@ -1853,14 +1853,70 @@ fn check_openable(located: &Located) -> Result<(), String> {
     check_length(&located.path())
 }
 
+/// **What a deny-list asks of the driver's own table before dispatch** (D10, D11, D23, D30),
+/// with where the program, each deny entry that exists and each entry of the allow-list is on
+/// the host.
+///
+/// - **A denied program is refused**: its place lies in a place a deny entry reaches, which
+///   is the entry's own place or the root of a host mount beneath a denied directory, or it
+///   is the same file, by device and inode, as a denied file. A program that is a link to a
+///   denied program is that case. The helper is the second line: it writes no rule for such
+///   a program.
+/// - **What a denied directory reaches must be established**: a mount beneath it that is
+///   covered, whose root was removed, that cannot be asked or that is of a file-system type
+///   outside the list refuses the start. The helper would end the run for it after dispatch.
+/// - **So must what a listed directory reaches**, because the helper asks it of every listed
+///   directory of a start with a deny-list, to see whether a denied place lies in a mount
+///   beneath it. A mount of a type outside the list is compared with nothing there and does
+///   not refuse. A listed entry that is a file, or lies in a denied place, is asked nothing.
+///
+/// # Errors
+///
+/// [`PROGRAM_UNLISTED`] (address `argv`) for a denied program, and [`PLACE_UNSERVED`] with
+/// D30's cause where a reach cannot be established: address `exec_denied_paths` for a denied
+/// directory, `exec_subpaths` for a listed one.
+fn judge_denied(
+    tree: &MountTree,
+    asked: &str,
+    program: &Sighted,
+    denied: &[(&str, Sighted)],
+    listed: &[Sighted],
+) -> Result<(), DriverError> {
+    let mut reaches = Vec::with_capacity(denied.len());
+    for (entry, denied) in denied {
+        let reach = tree
+            .reaches(&denied.place, Unlisted::Refused)
+            .map_err(|why| denied_unplaced(&why))?;
+        if reach.holds(&program.place) || (program.file.is_some() && program.file == denied.file) {
+            return Err(DriverError::refused(
+                PROGRAM_UNLISTED,
+                format!(
+                    "{asked:?} is denied by the deny-list entry {entry:?}: it lies in it, or is \
+                     another name of the same file"
+                ),
+                PROGRAM,
+            ));
+        }
+        reaches.push(reach);
+    }
+    for entry in listed {
+        if entry.file.is_some() || reaches.iter().any(|reach| reach.holds(&entry.place)) {
+            continue;
+        }
+        tree.reaches(&entry.place, Unlisted::Skipped)
+            .map_err(|why| start_unplaced(ENTRY, &why))?;
+    }
+    Ok(())
+}
+
 /// One start's lists as the helper takes them: the program, the host's loader, every entry of
 /// the allow-list and of the deny-list, and the mounts the run can write, each located in `view`
 /// (D24).
 ///
 /// **A denied program is refused here** (D10, D23): `exec.sandbox-program-unlisted` when the
-/// program lies in a denied path, by place (D25) on the driver's own mount table, or is the
-/// same file, by device and inode, as a denied file. A program that is a link to a denied
-/// program is that case. The helper is the second line: it writes no rule for such a program.
+/// program lies in a denied path, by place (D25) through what the deny entry reaches on the
+/// driver's own mount table (D30), or is the same file, by device and inode, as a denied
+/// file ([`judge_denied`]).
 ///
 /// # Errors
 ///
@@ -1871,7 +1927,8 @@ fn check_openable(located: &Located) -> Result<(), String> {
 /// `exec.sandbox-exec-subpath-undeclared` for an absolute entry outside the eligible locations;
 /// [`PROGRAM_UNLISTED`] for a denied program; and [`PLACE_UNSERVED`] where a place cannot be
 /// established, of the program, of an entry of either list or of a deny entry's nearest
-/// existing ancestor.
+/// existing ancestor, or, on a start with a deny-list, what a denied or a listed directory
+/// reaches.
 pub(crate) fn plan(
     gate: &ExecGate,
     entries: &[String],
@@ -1899,31 +1956,15 @@ pub(crate) fn plan(
     for entry in denied {
         let (located, existing) = mounts.denied(entry)?;
         deny.push(located);
-        sighted.extend(existing.map(|existing| (entry, existing)));
+        sighted.extend(existing.map(|existing| (entry.as_str(), existing)));
     }
-    if !sighted.is_empty() {
-        let program = mounts.program_sighted(asked)?;
-        for (entry, denied) in &sighted {
-            // What a denied directory holds is what it reaches (D30): its own place and the
-            // root of every mount beneath it. Asked as of a directory that must not be
-            // missed: a mount beneath it that cannot be compared refuses the start.
-            let reaches = mounts
-                .tree
-                .reaches(&denied.place, Unlisted::Refused)
-                .map_err(|why| denied_unplaced(&why))?;
-            if reaches.holds(&program.place)
-                || (program.file.is_some() && program.file == denied.file)
-            {
-                return Err(DriverError::refused(
-                    PROGRAM_UNLISTED,
-                    format!(
-                        "{asked:?} is denied by the deny-list entry {entry:?}: it lies in it, \
-                         or is another name of the same file"
-                    ),
-                    PROGRAM,
-                ));
-            }
-        }
+    if !denied.is_empty() {
+        let program = mounts.sighted(asked, PROGRAM)?;
+        let listed = entries
+            .iter()
+            .map(|entry| mounts.sighted(entry, ENTRY))
+            .collect::<Result<Vec<_>, _>>()?;
+        judge_denied(&mounts.tree, asked, &program, &sighted, &listed)?;
     }
     // The helper opens the loader as a `follow` path and refuses one in a writable mount; the
     // same answer here, before dispatch, instead of exit status 125 after it.

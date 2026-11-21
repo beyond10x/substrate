@@ -10,9 +10,10 @@
 //!
 //! Where the namespace cannot be created, a mount is refused there, the kernel has no Landlock
 //! or the scratch directory is on a file-system type outside the list, a case prints
-//! `ABSENT` and the reason and is **not passed**. That is why these cases are in no required
-//! set of `scripts/delegated-lane.sh`: a hosted runner's `AppArmor` policy grants a user
-//! namespace no mount.
+//! `ABSENT` and the reason and is **not passed**. `scripts/delegated-lane.sh` requires each
+//! case by name: its `executed` line where a user namespace is granted a mount, and its own
+//! `ABSENT` line where it is not, as on a hosted runner, whose `AppArmor` policy grants a
+//! user namespace none. There these cases are workstation evidence.
 
 #![cfg(target_os = "linux")]
 
@@ -225,9 +226,9 @@ fn run(
     Some((output, stdout))
 }
 
-/// The lists of design 35 § 3.9 that end in a run (F1 to F6, and the control of F7): what each
-/// states, its entries, its script and what the script prints.
-fn lists_that_run() -> [(&'static str, Entries<'static>, String, &'static str); 8] {
+/// The lists of design 35 § 3.9 that end in a run (F1 to F6, and the control of F7), and one
+/// of D30: what each states, its entries, its script and what the script prints.
+fn lists_that_run() -> [(&'static str, Entries<'static>, String, &'static str); 9] {
     let both = "fs/tree/bin/tool 2>/dev/null; echo $?; fs/x/tool 2>/dev/null; echo $?; \
                 fs/tree/bin/other; echo $?";
     let copied_up = "fs/tree/bin/cup 2>/dev/null; echo $?; fs/x/cup 2>/dev/null; echo $?; \
@@ -279,6 +280,18 @@ fn lists_that_run() -> [(&'static str, Entries<'static>, String, &'static str); 
             (&["fs/tree/bin"], &[], &[]),
             "fs/tree/bin/other; echo $?".to_owned(),
             "0\n",
+        ),
+        (
+            // The walk of D11 meets `fs/x` as an entry of the expanded `fs`. It is a mount
+            // point, and its place is the one its own row gives it, which is the denied
+            // directory: with the directory's place and its name it would be `fs/x`, which
+            // nothing denies, and the programs in it would get a rule each.
+            "D30, a denied directory that is a mount point among the entries of a listed one",
+            (&["fs"], &["fs/x"], &[]),
+            "fs/x/tool 2>/dev/null; echo $?; fs/tree/bin/other 2>/dev/null; echo $?; \
+             fs/one/tool; echo $?"
+                .to_owned(),
+            "126\n126\n0\n",
         ),
         (
             "F7, the control: a followed link whose target no writable mount holds",

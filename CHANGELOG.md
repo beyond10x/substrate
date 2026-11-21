@@ -21,6 +21,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   - On `linux` a denied program is found by where its file lies. It is denied under a symbolic
     link, under a second mount of its directory (`/bin/id` for `/usr/bin/id`) and under a hard
     link in the same directory. `substrate-exec-gate` takes the new option `--deny`.
+  - A deny entry holds across the mounts of the view: what is mounted beneath a denied
+    directory is denied with it, and a program denied in a file system mounted beneath a
+    listed directory is denied there. Where such a mount cannot be compared, a start with a
+    deny-list is `exec.sandbox-place-unserved` (501) before dispatch: `mount-covered` or
+    `mount-root-deleted` beneath a denied or a listed directory, and `file-system-unlisted`
+    beneath a denied one. An allow-list alone is unchanged.
   - New refusals at admission, on every adapter and before any fact is read:
     `confinement.exec-denied-paths-without-subpaths` (422) for a deny-list beside an empty
     `exec_subpaths`, and `confinement.exec-denied-paths-exceeded` (422) for more than
@@ -30,9 +36,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     a denied program there and runs the copy. A hard link that existed before the start in
     another listed directory runs. A file created during the run in a listed directory that
     holds a deny entry is not executable, and a program rebuilt there loses the right.
+    A deny entry that does not exist at the start denies a new file under its name, not the
+    name: in a listed directory the run can write, a copy to that name ended with status 126
+    (`copied 126`), and a listed program of the directory hard-linked or renamed to it ran
+    (`linked 0`, `renamed 0`).
     **Never list a lower directory of an overlay that is also in the view**: a program denied
     in the overlay runs from the layer.
-  - On `macos` the entries are Seatbelt deny rules after every allow.
+  - On `macos` the entries are Seatbelt deny rules after every allow. They were read and run
+    only in the hosted macOS check; how Seatbelt matches a deny entry in another letter case
+    on a case-insensitive volume is not verified.
 
 ### Changed
 

@@ -21,7 +21,7 @@
 //! | `ipc_signals_contained` | the floor with a pid namespace |
 //! | `stdin_pipe`, `output_live` | the floor: the session path's pipes, through bubblewrap |
 //! | `exec_subpaths` | the floor, and the driver's probe held a run to an allow-list with the helper `HostConfig.exec_gate` names ([`ExecListProof`], design 35). Not where the open withheld it for a path on a file-system type other than `ext4`, `overlay` and `tmpfs`: the proof's `withheld` then says which path and type (D27) |
-//! | `exec_denied_paths` | `exec_subpaths`, and a second probe held a run to both lists, with the deny entry naming its file only through a second mount (design 35 § 9) |
+//! | `exec_denied_paths` | `exec_subpaths`, and a second probe held a run to both lists, with one deny entry naming its file only through a second mount and one naming a file in a mount beneath a listed directory (design 35 § 9, D30) |
 //!
 //! **`exec_denied_paths` on `linux`** (design 35 § 8). A denied path gets no execute right: not
 //! from a listed directory that holds it, not as the loader and not as the program, and a start
@@ -30,8 +30,19 @@
 //! path holds another is decided by place, so the file is denied under every mount of its
 //! directory and under a symbolic link; a hard link that existed before the start in another
 //! listed directory runs, and so does a copy in a listed directory the run can write. An entry
-//! may be absent at the start. A deny-list beside an empty `exec_subpaths` is refused at
-//! admission, `confinement.exec-denied-paths-without-subpaths`, on every adapter.
+//! may be absent at the start: a new file under its name is then denied, and a listed program
+//! of the same directory that the run links or renames to that name runs. A deny-list beside
+//! an empty `exec_subpaths` is refused at admission,
+//! `confinement.exec-denied-paths-without-subpaths`, on every adapter.
+//!
+//! **A deny entry holds across the mounts** (D30). What is mounted beneath a denied directory
+//! is denied with it, and a listed directory with a denied place in a mount beneath it is
+//! expanded. The driver refuses a program that lies in what a deny entry reaches on its own
+//! mount table. Where a mount beneath a denied directory, or beneath a listed directory of a
+//! start with a deny-list, cannot be compared (it is covered, or its root was removed), the
+//! start is refused `exec.sandbox-place-unserved` before dispatch; so it is for a mount of a
+//! type outside `ext4`, `overlay` and `tmpfs` beneath a denied directory. A start with an
+//! allow-list alone asks none of this.
 //!
 //! **`exec_subpaths` on `linux`** (design 35). A profile with a non-empty list is held to its
 //! literal program and the list: a Landlock ruleset, applied inside the sandbox by
@@ -143,8 +154,9 @@ pub struct ExecListProof {
     pub subpaths: bool,
     /// A second throwaway run, with a deny entry that names a file only through a second mount
     /// of a part of the listed directory, executed what the list allowed and not the denied
-    /// file, under its listed name and under a hard link beside it (design 35 § 9). Proved
-    /// only where `subpaths` was.
+    /// file, under its listed name and under a hard link beside it; and, with a second deny
+    /// entry in a mount beneath another listed directory, not that file and its neighbour
+    /// there (design 35 § 9, D30). Proved only where `subpaths` was.
     pub denied_paths: bool,
     /// Why the open withheld the executable-list facts, where it did (design 35 D27): one
     /// entry per fact and path. Empty where no helper is configured, where every place of
@@ -1118,6 +1130,108 @@ mod imp {
                 &listing(&["bin", "target/debug", "/usr/bin", "/opt/t/bin/tool"]),
             )
             .expect("entries every adapter can carry; what needs the view is the start's");
+        }
+
+        /// The same rule for an entry of the deny-list (design 35 D10: "an entry has the form
+        /// of an `exec_subpaths` entry"), at admission and with its own address. An entry
+        /// that does not exist is no fault of its form.
+        #[test]
+        fn a_deny_entry_no_adapter_can_carry_is_refused_at_admission() {
+            let denying = |denied: &[&str]| ConfinementProfile {
+                exec_denied_paths: denied.iter().map(|entry| (*entry).to_owned()).collect(),
+                ..listing(&["bin", "/usr/bin"])
+            };
+            for entry in [
+                "bin/../other",
+                "/usr/./bin",
+                "a//b",
+                "it\"s",
+                "",
+                "back\\slash",
+            ] {
+                let error = check_snapshot(&CapabilityFacts::default(), &denying(&[entry]))
+                    .expect_err(entry);
+                assert_eq!(
+                    error.code(),
+                    crate::seatbelt::PATH_UNREPRESENTABLE,
+                    "{entry:?}: {error}"
+                );
+                assert_eq!(error.status(), 422, "{entry:?}");
+                let ConfinementError::Driver(driver) = &error else {
+                    panic!("{entry:?}: the driver's refusal: {error}");
+                };
+                assert_eq!(
+                    driver.address.as_deref(),
+                    Some("exec_denied_paths"),
+                    "{entry:?}"
+                );
+            }
+            check_snapshot(
+                &CapabilityFacts::default(),
+                &denying(&["bin/tool", "/usr/bin/id", "later/absent", "/opt/t"]),
+            )
+            .expect("deny entries every adapter can carry; what needs the view is the start's");
+        }
+
+        /// Design 35 D14, D15: **`exec_denied_paths` is proved by its own probe, beside the
+        /// allow-list's, and withheld by its own entry.** A host whose second probe failed
+        /// proves `exec_subpaths` alone. A record that names only the deny-list as withheld
+        /// leaves the allow-list proved and the deny-list not, whatever its probe says.
+        #[test]
+        fn exec_denied_paths_is_proved_by_its_own_probe_and_withheld_by_its_own_entry() {
+            let both = ExecListProof {
+                subpaths: true,
+                denied_paths: true,
+                ..ExecListProof::default()
+            };
+            let proved = proof(&floor(), &both);
+            assert!(proved.proves(&Fact::ExecSubpaths));
+            assert!(proved.proves(&Fact::ExecDeniedPaths));
+
+            let first_only = proof(
+                &floor(),
+                &ExecListProof {
+                    denied_paths: false,
+                    ..both.clone()
+                },
+            );
+            assert!(first_only.proves(&Fact::ExecSubpaths));
+            assert!(
+                !first_only.proves(&Fact::ExecDeniedPaths),
+                "the second probe failed, and the fact is proved by nothing else"
+            );
+            let second_only = proof(
+                &floor(),
+                &ExecListProof {
+                    subpaths: false,
+                    ..both.clone()
+                },
+            );
+            assert!(!second_only.proves(&Fact::ExecDeniedPaths));
+            let mut without_floor = floor();
+            without_floor.facts.exec_namespaces = None;
+            assert!(!proof(&without_floor, &both).proves(&Fact::ExecDeniedPaths));
+
+            let entries = vec![crate::confinement::FactWithheld {
+                fact: Fact::ExecDeniedPaths,
+                cause: "mount-id-unreported",
+                address: "config.workspace_root",
+                path: "/data/workspaces".to_owned(),
+                file_system: None,
+            }];
+            let own = proof(
+                &floor(),
+                &ExecListProof {
+                    withheld: entries.clone(),
+                    ..both
+                },
+            );
+            assert!(own.proves(&Fact::ExecSubpaths));
+            assert!(
+                !own.proves(&Fact::ExecDeniedPaths),
+                "a fact an entry names is never proved"
+            );
+            assert_eq!(own.withheld, entries);
         }
     }
 }

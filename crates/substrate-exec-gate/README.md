@@ -38,7 +38,14 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
 - `--deny` names a path that gets no execute right, from an `--allow` entry, as the program or
   as the loader. Landlock has no deny rule, so where a listed directory holds a denied path the
   helper grants each of its entries on its own, and the directory itself gets no rule. A
-  `--deny` path need not exist. The helper stops at 65536 rules and exits 125.
+  `--deny` path need not exist. The helper stops at 65536 rules and exits 125. What is mounted
+  beneath a denied directory is denied with it, and a listed directory with a denied path in
+  a mount beneath it is expanded, into that mount: the helper reads from the view's mount
+  table what each directory reaches. Where a mount beneath a denied directory, or beneath a
+  listed directory of a run with a `--deny`, is hidden by a later mount or has a removed root,
+  the helper exits 125 with `cannot establish where <mount point> is attached: <cause>`; so
+  it does for a mount of another file-system type beneath a denied directory. A name in an
+  expanded directory that is not UTF-8 is taken as bytes and gets its rule like any other.
 - `--env` carries one variable of the program's environment. **The program starts with the
   `--env` operands as its whole environment, and nothing of the helper's own.** An empty name, a
   name that holds `=` and a name given twice are refused.
@@ -120,6 +127,11 @@ same directory.
   writes a listed directory copies a denied program there and runs the copy.
 - A hard link to a denied program that existed before the start in another listed directory
   runs: a deny entry denies a path, not every link to the file.
+- **A deny entry that does not exist at the start denies a new file under its name, not the
+  name.** The rules are on files. In a listed directory the run can write, a copy to the
+  entry's name ended with status 126 (`copied 126`), and a listed program of that directory
+  hard-linked or renamed to it ran (`linked 0`, `renamed 0`). No program outside the list and
+  none denied at the start runs this way.
 - A listed directory that holds a denied path has no rule of its own. A file created in it
   during the run is not executable, and a program removed and written again loses the right, so
   put no deny entry in a directory a build writes its programs into.
@@ -127,6 +139,10 @@ same directory.
   denied in the overlay runs from the layer. So never list a lower directory of an overlay that
   is also in the view.
 - The loader given a denied program runs it, and `sh` given a denied script runs it.
+- On `macos` no helper is involved: the driver renders the entries as Seatbelt deny rules.
+  Those rules were read and run only in the hosted macOS check, never on a workstation, and
+  how Seatbelt matches a deny entry in another letter case on a case-insensitive volume is
+  not verified.
 
 ## What the list does not stop
 

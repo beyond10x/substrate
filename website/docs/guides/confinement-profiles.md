@@ -262,17 +262,27 @@ refuses the profile `confinement.fact-unserved` (501).
 - A run that can write a listed directory copies a denied program there and runs the copy. List
   no directory the run can write beside a deny-list.
 
-On `linux` a denied program is found by where its file lies, not by the text of a path:
+On `linux` a denied program is found by where its file lies, not by the text of a path, and
+across mounts. Where a mount beneath a denied directory, or beneath a listed directory of a
+profile with a deny-list, cannot be compared, the start is `exec.sandbox-place-unserved` (501):
+`mount-covered`, `mount-root-deleted`, and beneath a denied directory `file-system-unlisted`.
 
 | A denied program reached through | Answer |
 |---|---|
 | a symbolic link, anywhere | denied |
 | a second mount of its directory, such as `/bin/id` for `/usr/bin/id` | denied |
+| a file system mounted beneath a listed directory, or a listed mount beneath a denied directory | denied |
 | a hard link in the same directory | denied |
 | a hard link that existed before the start in another listed directory | runs |
 | a copy in a listed directory the run can write | runs |
+| the name of an entry that was absent at the start, as a new file: `copied 126` | denied |
+| that name, given to a listed program of the same writable directory by a hard link (`linked 0`) or a rename (`renamed 0`) | runs |
 
-- An entry may be absent when the run starts. The file is denied once it exists.
+- An entry may be absent when the run starts. **The rules are on files, not on names**: a new
+  file under that name is denied, and a listed program of the same directory that the run
+  links or renames to it runs. The three figures in the table are statuses measured in a
+  listed directory the run can write. No program outside the list runs this way, and none
+  that was denied at the start.
 - A listed directory that holds a denied path gets one rule per file. A file created there
   during the run is not executable, and a program removed and written again no longer runs. Put
   no deny entry in a directory a build writes its programs into.
@@ -282,7 +292,9 @@ On `linux` a denied program is found by where its file lies, not by the text of 
 - A start writes at most 65536 rules. Beyond that the run ends with status 125.
 
 On `macos` the entries are Seatbelt deny rules after every allow. A hard link to a denied
-program under another path runs.
+program under another path runs. **A limit on `macos`:** the deny rules were read and run only
+in the hosted macOS check, never on a workstation, and how Seatbelt matches a deny entry
+written in another letter case on a case-insensitive volume is not verified.
 
 ## Build with the macOS developer tools
 

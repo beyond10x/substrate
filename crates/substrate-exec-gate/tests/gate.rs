@@ -992,3 +992,155 @@ fn limit_a_replaced_program_loses_the_right_and_a_copy_elsewhere_runs() {
     );
     println!("exec gate {NAME}: executed");
 }
+
+/// D24 for an entry of the deny-list: **a `follow` deny entry is opened as every followed
+/// path is.** One that resolves into a mount the run can write is refused with the line of
+/// D24, naming `--deny`; so is one that does not exist beneath a link into such a mount,
+/// where the link is what was opened. The run could replace what such an entry names, and
+/// with it what the entry denies. The control denies a file no writable mount holds.
+#[test]
+fn a_follow_deny_entry_that_resolves_into_a_writable_mount_is_refused() {
+    const NAME: &str = "deny entry into a writable mount";
+    let Some((_directory, root)) = placed_scratch(NAME) else {
+        return;
+    };
+    let writable = root.join("writable");
+    let read_only = root.join("read-only");
+    for name in ["tool", "other"] {
+        std::fs::copy(tool("true"), read_only.join(name)).expect("copy true");
+    }
+    let run = |deny: Located, script: &str| {
+        let lists = Lists {
+            program: base(&tool("sh")),
+            loader: loader(),
+            allow: vec![follow(&read_only, "tool"), follow(&read_only, "other")],
+            deny: vec![deny],
+            writable: vec![writable.to_str().expect("UTF-8").to_owned()],
+        };
+        gate()
+            .args(lists.options())
+            .arg(tool("sh"))
+            .args(["-c", script])
+            .current_dir(&root)
+            .env_clear()
+            .output()
+            .expect("the gate starts")
+    };
+    let control = run(
+        follow(&read_only, "tool"),
+        "read-only/tool 2>/dev/null; echo $?; read-only/other; echo $?",
+    );
+    if absent(NAME, &control) {
+        return;
+    }
+    assert_eq!(
+        (control.status.code(), text(&control.stdout).as_str()),
+        (Some(0), "126\n0\n"),
+        "the control: {}",
+        text(&control.stderr)
+    );
+    for (rel, entry, target) in [
+        ("file", "file", "true"),
+        ("directory", "directory/absent", "deep"),
+    ] {
+        let target = writable.join(target).canonicalize().expect("the target");
+        std::os::unix::fs::symlink(&target, read_only.join(rel)).expect("link");
+        let output = run(follow(&read_only, entry), "echo ran");
+        assert_refused(&output, &format!("deny entry {entry}"));
+        assert_eq!(
+            text(&output.stderr),
+            format!(
+                "substrate-exec-gate: --deny {} resolves to {}, in the writable mount {}\n",
+                read_only.join(rel).display(),
+                target.display(),
+                writable.display()
+            ),
+            "the line of D24, for what of {entry} exists"
+        );
+    }
+    println!("exec gate {NAME}: executed");
+}
+
+/// Design 35 § 8.2: **a deny entry that does not exist is a name, and denies nothing above
+/// it.** `listed/tool/beneath` and `listed/other/beneath` name something beneath a file:
+/// the kernel answers `ENOTDIR`, the entry is absent like one whose name is missing, and
+/// the file above it, which is what the helper opened, keeps its rule and runs. One entry is
+/// a `follow` path and one a `beneath` path. An absent name in a directory is the same: the
+/// directory is expanded and its files run.
+#[test]
+fn a_deny_entry_beneath_a_file_is_absent_and_denies_nothing_above_it() {
+    const NAME: &str = "deny entry beneath a file";
+    let (_directory, root, mut lists) = deny_scratch();
+    lists.deny = vec![
+        follow(&root, "listed/tool/beneath"),
+        beneath(&root, "listed/other/beneath"),
+        follow(&root, "listed/later"),
+    ];
+    let Some(stdout) = deny_run(
+        NAME,
+        &root,
+        &lists,
+        "listed/tool; echo $?; listed/other; echo $?",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        stdout, "0\n0\n",
+        "the file above an absent deny entry is not what the entry denies"
+    );
+    println!("exec gate {NAME}: executed");
+}
+
+/// Design 35 § 8.2, a name that is not UTF-8 in an expanded directory: **the entry is
+/// handled as bytes and gets its rule like any other file.** A file of its own under such a
+/// name runs; a hard link to the denied file under such a name stays denied, by device and
+/// inode; a directory under such a name gets one rule, and a program in it runs. Before, the
+/// walk built a path as text for every entry, and one such name ended every start with a
+/// deny entry in that directory with status 125 and a cause that was not true of it.
+#[test]
+fn a_name_that_is_not_utf8_in_an_expanded_directory_gets_its_rule() {
+    use std::os::unix::ffi::OsStrExt as _;
+    const NAME: &str = "deny beside a name that is not UTF-8";
+    let (_directory, root, mut lists) = deny_scratch();
+    let listed = root.join("listed");
+    let named = |bytes: &[u8]| listed.join(std::ffi::OsStr::from_bytes(bytes));
+    let staged = std::fs::copy(tool("true"), named(b"own\xff"))
+        .and_then(|_| std::fs::hard_link(listed.join("tool"), named(b"same\xfe")))
+        .and_then(|()| std::fs::create_dir(named(b"dir\xfd")))
+        .and_then(|()| std::fs::copy(tool("true"), named(b"dir\xfd").join("inner")));
+    if let Err(error) = staged {
+        println!("exec gate {NAME}: ABSENT (this file system takes no such name: {error})");
+        return;
+    }
+    lists.deny = vec![follow(&root, "listed/tool")];
+    let output = gate()
+        .current_dir(&root)
+        .env_clear()
+        .args(lists.options())
+        .arg(tool("sh"))
+        .args([
+            "-c",
+            "listed/tool 2>/dev/null; echo $?; listed/own*; echo $?; \
+             listed/same* 2>/dev/null; echo $?; listed/dir*/inner; echo $?; listed/other; echo $?",
+        ])
+        .output()
+        .expect("the gate starts");
+    // A place that cannot be established is this host's only for a file-system type outside
+    // the list: any other cause is the walk's own answer to such a name, and fails the case.
+    let diagnostic = text(&output.stderr);
+    if absent(NAME, &output) {
+        return;
+    }
+    if diagnostic.contains("file-system-unlisted") {
+        println!("exec gate {NAME}: ABSENT ({})", diagnostic.trim());
+        return;
+    }
+    assert_eq!(
+        (output.status.code(), text(&output.stdout).as_str()),
+        (Some(0), "126\n0\n126\n0\n0\n"),
+        "the denied file, a file of its own under a name that is not text, another name of \
+         the denied file, a program in a directory with such a name, and the neighbour: \
+         {diagnostic}"
+    );
+    println!("exec gate {NAME}: executed");
+}

@@ -550,3 +550,57 @@ async fn limit_a_program_replaced_in_an_expanded_directory_no_longer_runs() {
     assert_eq!(code, Some(0));
     println!("{NAME}: executed, a replaced program is no longer executable");
 }
+
+/// D15 with D30 (§ 9): **`exec_denied_paths` is proved only where the helper held a deny
+/// entry in a mount beneath a listed directory.** The deny probe binds a directory no entry
+/// lists at `apart/held`, beneath its listed `apart`, and denies `apart/held/tool`. By place
+/// that file lies in no listed directory, so a helper that compares places alone writes one
+/// rule on `apart` and the file runs. The helper here restricts as the lane's does and has
+/// that one defect in the form the probe can see: it holds every deny entry but that one.
+/// The open proves `exec_subpaths` and not `exec_denied_paths`; a profile with both lists is
+/// refused by the second fact's name, and one with an allow-list alone is admitted. The
+/// lane's own helper proves both facts in every other case of this file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_helper_that_misses_a_mount_beneath_a_listed_directory_proves_the_allow_list_alone() {
+    const NAME: &str = "ESS confinement linux exec deny probe held mount";
+    let Some(cgroup_root) = delegated(NAME) else {
+        return;
+    };
+    let host = tempfile::tempdir().expect("host root");
+    let Some(gate) = defective(
+        NAME,
+        host.path(),
+        "gate-drops-held-deny",
+        &["-DDROP_HELD_DENY"],
+    ) else {
+        return;
+    };
+    let adapter = open_with(host.path(), &cgroup_root, Some(gate)).expect("linux opens");
+    assert!(
+        adapter.facts().proves(&Fact::ExecSubpaths),
+        "the allow-list is proved by its own probe: {:?}",
+        adapter.facts()
+    );
+    assert!(
+        !adapter.facts().proves(&Fact::ExecDeniedPaths),
+        "a helper that does not hold the deny entry in the mount beneath `apart` proved the \
+         deny-list: {:?}",
+        adapter.facts()
+    );
+    let workspace = workspace(host.path());
+    let error = adapter
+        .admit(&listed_and_denied(&workspace, &["bin"], &["bin/tool"]))
+        .expect_err("both lists on a host that proved the allow-list alone");
+    assert!(
+        matches!(
+            &error,
+            ConfinementError::FactUnserved { fact, .. } if *fact == Fact::ExecDeniedPaths
+        ),
+        "{error}"
+    );
+    assert_eq!(error.status(), 501);
+    adapter
+        .admit(&listed(&workspace, &["bin"]))
+        .expect("an allow-list alone on a host that proved it");
+    println!("{NAME}: executed");
+}

@@ -260,7 +260,8 @@ require_executed ess_confinement_linux \
   'ESS confinement linux exec deny limit copy: executed' \
   'ESS confinement linux exec deny limit loader: executed' \
   'ESS confinement linux exec deny limit script: executed' \
-  'ESS confinement linux exec deny limit replaced: executed'
+  'ESS confinement linux exec deny limit replaced: executed' \
+  'ESS confinement linux exec deny probe held mount: executed'
 require_executed ess_confinement_systemd \
   'ESS confinement systemd local scoped write: executed' \
   'ESS confinement systemd linux scoped write: executed' \
@@ -341,7 +342,10 @@ require_executed -p b10x-substrate-exec-gate gate \
   'exec gate deny directory: executed' \
   'exec gate deny program and loader: executed' \
   'exec gate deny limit hard link elsewhere: executed' \
-  'exec gate deny limit replaced and copied: executed'
+  'exec gate deny limit replaced and copied: executed' \
+  'exec gate deny entry into a writable mount: executed' \
+  'exec gate deny entry beneath a file: executed' \
+  'exec gate deny beside a name that is not UTF-8: executed'
 
 # Design 35 D30, what is mounted beneath a location a run can write, and the symbolic links a
 # followed entry reads: these roots make their own mounts, each case in a user and mount
@@ -458,6 +462,46 @@ require_staged -p b10x-substrate-exec-gate adversary5_view_mounts_gate \
   'adversary5 exec gate view mounts planted link on an unlisted type' \
   'adversary5 exec gate view mounts covered mounts' \
   '?adversary5 exec gate view mounts limit: overlay upper|no overlay mount in a user namespace on this host'
+# The deny-list across the view's mounts (`story:executable-deny-list`, D30): a program denied
+# in a mount beneath a listed directory, a listed mount beneath a denied directory, a program
+# in a mount beneath a denied directory, and the mounts that cannot be compared. The same
+# rule: each staged case by name, its `executed` line where a user namespace is granted a
+# mount and its own `ABSENT (` line where it is not. The cases of these roots that make no
+# mount are written `=<name>` and are required on every host. The adversary's nested host
+# mount mounts in the test process itself, which no lane lets it: it is absent everywhere,
+# named below, and `exec_denied_view_mounts` stages its shape in a namespace of its own.
+require_staged exec_denied_view_mounts \
+  'ESS confinement linux exec deny view mounts'
+require_staged security4_exec_denied \
+  '?security4 exec denied host mount|this host has no /usr/local/src' \
+  '?security4 exec denied unplaced|this host' \
+  '=security4 exec denied trace'
+require_staged adversary4_exec_denied \
+  '=adversary4 exec deny other names' \
+  '=adversary4 exec deny limit created later' \
+  '=adversary4 exec deny directory renamed' \
+  '=adversary4 exec deny spellings' \
+  '=adversary4 exec deny option names' \
+  '=adversary4 exec deny program refused' \
+  '=adversary4 exec deny equals allow' \
+  '=adversary4 exec deny link entry' \
+  '=adversary4 exec deny rule stop' \
+  '?adversary4 exec deny nested host mount|this process may not mount'
+require_staged -p b10x-substrate-exec-gate namespace_gate \
+  'exec gate namespace host bind mount' \
+  'exec gate namespace tmpfs' \
+  '?exec gate namespace overlay|the stage failed' \
+  '?exec gate namespace limit overlay lower directory|the stage failed'
+require_staged -p b10x-substrate-exec-gate adversary4_namespace_gate \
+  'adversary4 exec gate namespace second mount nested in a listed directory' \
+  'adversary4 exec gate namespace deny entry beneath a nested mount' \
+  'adversary4 exec gate namespace deny entry on a nested tmpfs' \
+  'adversary4 exec gate namespace listed mount inside a denied directory' \
+  'adversary4 exec gate namespace control without a nested mount'
+require_staged -p b10x-substrate-exec-gate security4_gate \
+  'security4 exec gate deny in a mount beneath a listed directory' \
+  'security4 exec gate listed mount beneath a denied directory' \
+  '=security4 exec gate rule bound'
 if (( ${#unstaged[@]} > 0 )); then
   if (( mounts_granted )); then
     why="this host lacks what they need"
@@ -487,6 +531,14 @@ require_executed -p b10x-substrate-exec-gate security7_gate \
   'security7 exec gate walk: no `..` asked of the kernel: executed'
 require_executed -p b10x-substrate-exec-gate adversary_gate \
   'adversary landlock failures: executed'
+# The helper's expansion at its edges, with no mount and no namespace: the stop of the walk at
+# its exact count, entries that are no regular file, a directory it cannot read, and a name
+# that is not UTF-8.
+require_executed -p b10x-substrate-exec-gate adversary4_gate \
+  'adversary4 exec gate rule stop: executed' \
+  'adversary4 exec gate special entries: executed' \
+  'adversary4 exec gate unreadable expanded directory: executed' \
+  'adversary4 exec gate non-UTF-8 name: executed'
 require_executed -p b10x-substrate-exec-gate security2_gate \
   'security2 exec gate refusals: executed'
 require_executed -p b10x-substrate-exec-gate security_gate \

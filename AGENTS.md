@@ -471,12 +471,33 @@ every adapter, before any fact is read. The lane requires the `exec deny` lines 
 kept at the stakeholder's request, a program that is a link to a denied program and one directory
 under two names. The base view's form of the second needs a host whose `/bin` is a link to
 `/usr/bin` and where `/usr/bin/id` is a file of that directory; elsewhere it is absent, so
-refused by the lane. The helper's `namespace_gate` root (a host bind mount, a tmpfs, an overlay,
-and the limit of an overlay listed beside its lower directory, each in
-`unshare --user --map-root-user --mount`) is in no required set: it is absent where a user
-namespace is granted no mount. `macos` renders the list as Seatbelt deny rules after every allow
-(`render_exec_denied` in `crates/substrate-host/src/seatbelt.rs`); its cases run only in the
-hosted macOS check.
+refused by the lane. **A deny entry holds across the view's mounts** (D30): what is mounted
+beneath a denied directory is denied with it, and a listed directory with a denied place in a
+mount beneath it is expanded. The helper's `step` and the driver's `judge_denied` ask
+`MountTree::reaches` for it; a mount beneath a denied directory, or beneath a listed directory
+of a start with a deny-list, that is covered or whose root was removed refuses the start
+`exec.sandbox-place-unserved` (the helper: status 125), and so does a type outside the list
+beneath a denied directory. The deny probe binds a directory no entry lists beneath a second
+listed directory (`PROBE_HELD_MOUNT`), and
+`ESS confinement linux exec deny probe held mount` holds that a helper which misses it proves
+the allow-list alone. Both functions are held on every host by cases on mount tables written
+as text (`landlock::tests`, `exec_gate::tests`). **Six more roots are required through
+`require_staged`**, by the rule of the eleven above: the helper package's `namespace_gate`
+(a host bind mount, a tmpfs, an overlay, and the limit of an overlay listed beside its lower
+directory), `adversary4_namespace_gate` and `security4_gate`, and the host crate's
+`security4_exec_denied`, `adversary4_exec_denied` and `exec_denied_view_mounts`. Their cases
+that mount do so in a user and mount namespace of their own. Where that is granted no mount
+they print `ABSENT (` and the lane names them in its one line: on `release-lanes.yml` and
+`gate.yml` they are workstation evidence, never a passed case. The cases of those roots that
+make no mount are required on every host, and so is `adversary4_gate`, with no `ABSENT` line.
+One case is absent on every host, `adversary4 exec deny nested host mount`, which mounts in
+the test process itself; `exec_denied_view_mounts` stages its shape. **A deny entry that does
+not exist at the start denies a new file under its name, not the name** (§ 8.5):
+`limit_a_deny_entry_the_run_creates_by_a_link_or_a_rename_runs` in `adversary4_exec_denied`
+holds `copied 126`, `linked 0`, `renamed 0`. `macos` renders the list as Seatbelt deny rules
+after every allow (`render_exec_denied` in `crates/substrate-host/src/seatbelt.rs`); its cases
+run only in the hosted macOS check, and how Seatbelt matches a deny entry in another letter
+case on a case-insensitive volume is not verified.
 
 **The runner has a third lane, the namespace lane.** It runs only when
 `SUBSTRATE_VECTORS_KUBERNETES_CONFIG` names a namespace driver's kubeconfig. It starts the shipped

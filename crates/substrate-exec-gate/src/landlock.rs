@@ -259,17 +259,6 @@ impl Writable<'_> {
         }
         Ok(self.placed.as_ref().expect("established above"))
     }
-
-    /// The `--writable` root `place` lies in, if any (D24, D25).
-    fn holding(&mut self, path: &str, place: &Place) -> Result<Option<&str>, Unestablished> {
-        let roots = self.roots;
-        let (_, places) = self.placed(path)?;
-        Ok(roots
-            .iter()
-            .zip(places)
-            .find(|(_, reach)| reach.holds(place))
-            .map(|(root, _)| root.as_str()))
-    }
 }
 
 /// The symbolic links one path may resolve through: the kernel's own bound.
@@ -474,11 +463,89 @@ fn open_follow(option: &str, path: &str, view: &mut Writable<'_>) -> Result<Owne
     through.map_or(Ok(descriptor), Err)
 }
 
-/// One entry of the deny-list, where it is: its place, and for a file that exists the device
-/// and inode another name of it has too (D11 step 1).
+/// A file by its device and inode: what another name of it has too.
+type FileId = (libc::dev_t, libc::ino_t);
+
+/// One entry of the deny-list, where it is: **every place it reaches** (D30), which is its own
+/// place and the root of every mount that is mounted beneath it, and for a file that exists
+/// the device and inode another name of it has too (D11 step 1).
+#[derive(Debug)]
 struct Denied {
-    place: Place,
-    file: Option<(libc::dev_t, libc::ino_t)>,
+    reaches: Reach,
+    file: Option<FileId>,
+}
+
+impl Denied {
+    /// The deny entry at `place`. What it reaches is asked as of a directory whose files the
+    /// profile denies wherever they show: a mount beneath it that cannot be compared refuses,
+    /// and so does one of a file-system type outside the list (D30's table).
+    fn at(tree: &MountTree, place: &Place, file: Option<FileId>) -> Result<Self, Unestablished> {
+        Ok(Self {
+            reaches: tree.reaches(place, Unlisted::Refused)?,
+            file,
+        })
+    }
+}
+
+/// Whether `file` is a denied file under another name: the same device and the same inode. A
+/// directory, and a deny entry that is a directory or does not exist, has no such identity.
+fn another_name(denied: &[Denied], file: Option<FileId>) -> bool {
+    file.is_some() && denied.iter().any(|entry| entry.file == file)
+}
+
+/// What D11 does with one path that is to receive the execute right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// Step 1: no rule.
+    Denied,
+    /// Step 2: one rule on the path.
+    Rule,
+    /// Step 3: no rule on the directory, and the same steps for each of its entries.
+    Expand,
+}
+
+/// **D11 with D30**: the step for the path at `place`, which is the file `file` or, with
+/// `None`, a directory.
+///
+/// 1. No rule where the place lies in a denied place, or the file is a denied file under
+///    another name. The denied places are what each deny entry reaches: a listed mount
+///    beneath a denied directory lies in one.
+/// 2. One rule for a file, and for a directory none of whose places overlaps a denied place.
+///    The places of a directory are what it reaches: its own, and the root of every mount
+///    beneath it, because the kernel's walk from a file in such a mount passes the directory.
+/// 3. Otherwise the directory is expanded.
+///
+/// With no deny entry every path gets its rule and nothing is asked of the table.
+///
+/// # Errors
+///
+/// [`Unestablished`] where what the directory reaches cannot be established (D30's table): a
+/// mount of a listed type beneath it that is covered, whose root was removed or whose mount
+/// point cannot be asked. A mount of a type outside the list beneath a listed directory is
+/// compared with nothing and refuses nothing.
+fn step(
+    tree: &MountTree,
+    denied: &[Denied],
+    place: &Place,
+    file: Option<FileId>,
+) -> Result<Step, Unestablished> {
+    if denied.is_empty() {
+        return Ok(Step::Rule);
+    }
+    if another_name(denied, file) || denied.iter().any(|entry| entry.reaches.holds(place)) {
+        return Ok(Step::Denied);
+    }
+    if file.is_some() {
+        return Ok(Step::Rule);
+    }
+    let reaches = tree.reaches(place, Unlisted::Skipped)?;
+    Ok(
+        if denied.iter().any(|entry| reaches.overlaps(&entry.reaches)) {
+            Step::Expand
+        } else {
+            Step::Rule
+        },
+    )
 }
 
 /// Opens a `beneath` deny path, or its nearest ancestor beneath `<root>` that exists, and
@@ -535,51 +602,65 @@ fn open_beneath_or_ancestor(located: &Located) -> Result<(OwnedFd, Vec<String>),
     }
 }
 
-/// Where every entry of the deny-list is (D11, D25). A `follow` entry that resolves into a
-/// mount the run can write is refused, as every followed path is (D24).
+/// Opens a `follow` deny path, or its nearest ancestor that exists, and returns the names
+/// after it. What exists is opened as every followed path is ([`open_follow`]): a path that
+/// resolves into a mount the run can write, reads a symbolic link there or passes through a
+/// directory there is refused, and so is a link or a directory without a place. A name is
+/// absent where the kernel says so, `ENOENT` or `ENOTDIR`; every other failure refuses.
+fn open_follow_or_ancestor(
+    path: &str,
+    view: &mut Writable<'_>,
+) -> Result<(OwnedFd, Vec<String>), String> {
+    let mut existing = path.trim_end_matches('/');
+    let mut remaining = Vec::new();
+    loop {
+        let name = if existing.is_empty() { "/" } else { existing };
+        let text = c_path(name)?;
+        // SAFETY: `stat` fills the zeroed struct for a NUL-terminated path.
+        let mut seen: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: as above; `seen` is a valid out pointer.
+        if unsafe { libc::stat(text.as_ptr(), &raw mut seen) } == 0 {
+            remaining.reverse();
+            return Ok((open_follow("--deny", name, view)?, remaining));
+        }
+        let error = io::Error::last_os_error();
+        let absent = matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR));
+        let Some((parent, last)) = existing.rsplit_once('/') else {
+            return Err(format!("cannot open {path:?}: {error}"));
+        };
+        if !absent || existing.is_empty() {
+            return Err(format!("cannot open {path:?}: {error}"));
+        }
+        remaining.push(last.to_owned());
+        existing = parent;
+    }
+}
+
+/// Where every entry of the deny-list is, and what it reaches (D11, D25, D30). A `follow`
+/// entry that resolves into a mount the run can write is refused, as every followed path is
+/// (D24).
 fn denied_paths(lists: &Lists, view: &mut Writable<'_>) -> Result<Vec<Denied>, String> {
     let mut denied = Vec::new();
     for entry in &lists.deny {
         let path = entry.path();
-        let (opened, file) = match entry.class() {
-            Class::Beneath => {
-                let (descriptor, remaining) = open_beneath_or_ancestor(entry)?;
-                let mut opened = Opened::of_descriptor(descriptor.as_raw_fd(), &path);
-                opened.remaining = remaining;
-                let status = status(&descriptor)
-                    .map_err(|error| format!("cannot stat {path:?}: {error}"))?;
-                (opened, (status.st_dev, status.st_ino, kind(&status)))
-            }
-            Class::Follow => {
-                let opened = Opened::of_path(&path).map_err(|why| why.to_string())?;
-                let c_text = c_path(&path)?;
-                // SAFETY: `stat` fills the zeroed struct for a NUL-terminated path.
-                let mut status: libc::stat = unsafe { std::mem::zeroed() };
-                // SAFETY: as above; `status` is a valid out pointer. A path that does not
-                // exist leaves it zeroed, and `opened.remaining` says so below.
-                unsafe { libc::stat(c_text.as_ptr(), &raw mut status) };
-                (opened, (status.st_dev, status.st_ino, kind(&status)))
-            }
+        let (descriptor, remaining) = match entry.class() {
+            Class::Beneath => open_beneath_or_ancestor(entry)?,
+            Class::Follow => open_follow_or_ancestor(&path, view)?,
         };
+        let status =
+            status(&descriptor).map_err(|error| format!("cannot stat {path:?}: {error}"))?;
+        // An entry that does not exist is a name: what was opened is its ancestor, another
+        // file, and a file of that ancestor's identity is not what the entry denies.
+        let file = (remaining.is_empty() && kind(&status) != libc::S_IFDIR)
+            .then_some((status.st_dev, status.st_ino));
+        let mut opened = Opened::of_descriptor(descriptor.as_raw_fd(), &path);
+        opened.remaining = remaining;
         let (tree, _) = view.placed(&path).map_err(|why| why.to_string())?;
         let place = tree
             .table()
             .place_of(&opened)
             .map_err(|why| why.to_string())?;
-        if entry.class() == Class::Follow
-            && let Some(root) = view.holding(&path, &place).map_err(|why| why.to_string())?
-        {
-            let resolved = opened.descriptor_path.as_deref().unwrap_or(&path);
-            return Err(format!(
-                "--deny {path} resolves to {resolved}, in the writable mount {root}"
-            ));
-        }
-        let (device, inode, kind) = file;
-        denied.push(Denied {
-            place,
-            file: (opened.remaining.is_empty() && kind != libc::S_IFDIR && kind != 0)
-                .then_some((device, inode)),
-        });
+        denied.push(Denied::at(tree, &place, file).map_err(|why| why.to_string())?);
     }
     Ok(denied)
 }
@@ -662,12 +743,13 @@ struct Granted {
     place: Place,
 }
 
-/// D11: the three steps for `granted`, each entry of an expanded directory going through them
-/// in turn. Every comparison is of places (D25), and of device and inode for another name of a
-/// denied file.
+/// D11: the three steps for `granted` ([`step`]), each entry of an expanded directory going
+/// through them in turn. Every comparison is of places (D25), through what a directory
+/// reaches in the view's mounts (D30), and of device and inode for another name of a denied
+/// file.
 fn grant(
     rules: &mut Rules<'_>,
-    table: &MountTable,
+    tree: &MountTree,
     denied: &[Denied],
     granted: &Granted,
 ) -> Result<(), String> {
@@ -677,21 +759,12 @@ fn grant(
         place,
     } = granted;
     let status = status(descriptor).map_err(|error| format!("cannot stat {path:?}: {error}"))?;
-    let directory = kind(&status) == libc::S_IFDIR;
-    // Step 1: it lies in a denied path, or is another name of a denied file.
-    let same_file =
-        |entry: &Denied| !directory && entry.file == Some((status.st_dev, status.st_ino));
-    if denied
-        .iter()
-        .any(|entry| place.lies_in(&entry.place) || same_file(entry))
-    {
-        return Ok(());
+    let file = (kind(&status) != libc::S_IFDIR).then_some((status.st_dev, status.st_ino));
+    match step(tree, denied, place, file).map_err(|why| why.to_string())? {
+        Step::Denied => return Ok(()),
+        Step::Rule => return rules.execute(descriptor, path),
+        Step::Expand => {}
     }
-    // Step 2: no denied path lies in it.
-    if !directory || !denied.iter().any(|entry| entry.place.lies_in(place)) {
-        return rules.execute(descriptor, path);
-    }
-    // Step 3: no rule on the directory, and the same steps for each entry.
     let mount = crate::place::mount_id_of(descriptor.as_raw_fd());
     for name in entries(descriptor, path)? {
         let child_path = format!("{}/{}", path.trim_end_matches('/'), name.to_string_lossy());
@@ -711,15 +784,30 @@ fn grant(
         // In the directory's own mount an entry has the directory's place and its own name;
         // a mount on the entry has the place its own row gives it.
         let child_mount = crate::place::mount_id_of(child.as_raw_fd());
-        let child_place = match (name.to_str(), child_mount) {
-            (Ok(name), Some(_)) if child_mount == mount => place.entry(name),
-            _ => table
+        let own = child_mount.is_some() && child_mount == mount;
+        let child_place = match name.to_str() {
+            Ok(name) if own => place.entry(name),
+            Err(_) if own => {
+                // **A name that is not text**, in the directory's own mount. No place has
+                // such a name: an entry of the deny-list is text, and so is every row of a
+                // table that was parsed. So nothing denied is this entry, lies in it or is
+                // mounted beneath it, and what is left of step 1 is the file itself under
+                // another name. It gets its rule like any other entry, a directory one rule.
+                let file = (kind(&child_status) != libc::S_IFDIR)
+                    .then_some((child_status.st_dev, child_status.st_ino));
+                if !another_name(denied, file) {
+                    rules.execute(&child, &child_path)?;
+                }
+                continue;
+            }
+            _ => tree
+                .table()
                 .place_of(&Opened::of_descriptor(child.as_raw_fd(), &child_path))
                 .map_err(|why| why.to_string())?,
         };
         grant(
             rules,
-            table,
+            tree,
             denied,
             &Granted {
                 path: child_path,
@@ -757,13 +845,13 @@ pub(crate) fn restrict(lists: &Lists) -> Result<(), String> {
         for (path, descriptor) in targets {
             // The table was read for the first deny entry.
             let (tree, _) = view.placed(&path).map_err(|why| why.to_string())?;
-            let table = tree.table();
-            let place = table
+            let place = tree
+                .table()
                 .place_of(&Opened::of_descriptor(descriptor.as_raw_fd(), &path))
                 .map_err(|why| why.to_string())?;
             grant(
                 &mut rules,
-                table,
+                tree,
                 &denied,
                 &Granted {
                     path,
@@ -795,7 +883,212 @@ mod tests {
     use std::os::fd::{AsRawFd as _, OwnedFd};
     use std::path::PathBuf;
 
-    use super::{Read, walk};
+    use super::{Denied, FileId, Read, Step, step, walk};
+    use crate::place::{Cause, MountTable, MountTree, Place, Unestablished};
+
+    /// A view with what the reviews of the deny-list staged (design 35 § 3.13, E18 to E22),
+    /// written as a mount table. Beneath the listed `/t`: another file system at `/t/held`
+    /// (E18) and `/t/bin` bound a second time at `/t/one/deep` (E21 (a)). Beneath `/d`: a
+    /// third file system at `/d/sub` (E19), mounted a second time at `/elsewhere`. A chain
+    /// of three at `/c`, `/c/b` and `/c/b/a`. Beneath `/u` a `vfat` mount, beneath `/s` two
+    /// mounts stacked on one mount point, and beneath `/g` a mount whose root was removed.
+    const VIEW: &str = "\
+10 1 8:1 / / rw - ext4 /dev/a rw
+20 10 8:2 / /t/held rw - tmpfs tmpfs rw
+21 10 8:1 /t/bin /t/one/deep rw - ext4 /dev/a rw
+22 10 8:3 / /d/sub rw - ext4 /dev/c rw
+23 10 8:3 / /elsewhere rw - ext4 /dev/c rw
+24 10 8:6 / /c rw - ext4 /dev/g rw
+25 24 8:7 / /c/b rw - ext4 /dev/h rw
+26 25 8:8 / /c/b/a rw - ext4 /dev/i rw
+27 10 0:40 / /u/boot rw - vfat /dev/d rw
+30 10 8:4 / /s/m rw - ext4 /dev/e rw
+31 30 8:5 / /s/m rw - ext4 /dev/f rw
+32 10 8:1 /gone//deleted /g/m rw - ext4 /dev/a rw
+";
+
+    fn view() -> MountTree {
+        MountTable::parse(VIEW)
+            .expect("the table")
+            .into_tree_as_written()
+            .expect("the tree")
+    }
+
+    /// The place of `path`, which lies on the mount `id`.
+    fn on(tree: &MountTree, id: u64, path: &str) -> Place {
+        tree.table()
+            .place(Some(id), Some(path))
+            .expect("the place of a path of the table")
+    }
+
+    /// A deny entry at `path` on the mount `id`: a directory, or the file `file`.
+    fn deny(tree: &MountTree, id: u64, path: &str, file: Option<FileId>) -> Denied {
+        Denied::at(tree, &on(tree, id, path), file).expect("what the deny entry reaches")
+    }
+
+    fn unreached(result: Result<Step, Unestablished>) -> (String, Cause) {
+        let why = result.expect_err("a directory whose reach cannot be established");
+        assert!(
+            why.to_string().starts_with("cannot establish where "),
+            "the line names an attachment: {why}"
+        );
+        (why.path, why.cause)
+    }
+
+    /// **D11 with D30, the three steps on a table written as text** (design 35 § 16, *the
+    /// six checks*): a listed directory with a denied path in a mount beneath it is expanded,
+    /// a listed mount beneath a denied directory gets no rule, and a listed directory with
+    /// no mount beneath it and no denied place in it gets one rule. A comparison of places
+    /// alone answers the first two with one rule: the place of a file in the mount at
+    /// `/t/held` is on another device than `/t`.
+    #[test]
+    fn the_three_steps_follow_the_views_mounts() {
+        let tree = view();
+        let file = Some((8, 1));
+        let directory = None;
+
+        // E18: `/t` listed, `/t/held/tool` denied, `/t/held` another file system.
+        let denied = [deny(&tree, 20, "/t/held/tool", file)];
+        let step_of = |id: u64, path: &str, file: Option<FileId>| {
+            step(&tree, &denied, &on(&tree, id, path), file)
+        };
+        assert_eq!(step_of(10, "/t", directory), Ok(Step::Expand));
+        // The mount point among the entries has the place its own row gives it.
+        assert_eq!(step_of(20, "/t/held", directory), Ok(Step::Expand));
+        assert_eq!(step_of(20, "/t/held/tool", file), Ok(Step::Denied));
+        assert_eq!(step_of(20, "/t/held/other", Some((8, 2))), Ok(Step::Rule));
+        // A directory of `/t` that holds no mount and no denied place: one rule.
+        assert_eq!(step_of(10, "/t/bin", directory), Ok(Step::Rule));
+        // And a listed directory beside it all.
+        assert_eq!(step_of(10, "/plain", directory), Ok(Step::Rule));
+
+        // E21 (a): `/t/one` listed, `/t/bin/tool` denied, `/t/bin` bound at `/t/one/deep`.
+        // The deny entry is not on the nested mount; the mount's root holds its place.
+        let denied = [deny(&tree, 10, "/t/bin/tool", file)];
+        let step_of = |id: u64, path: &str, file: Option<FileId>| {
+            step(&tree, &denied, &on(&tree, id, path), file)
+        };
+        assert_eq!(step_of(10, "/t/one", directory), Ok(Step::Expand));
+        assert_eq!(step_of(21, "/t/one/deep", directory), Ok(Step::Expand));
+        assert_eq!(step_of(21, "/t/one/deep/tool", file), Ok(Step::Denied));
+        assert_eq!(step_of(10, "/t/held", directory), Ok(Step::Rule));
+
+        // E19, K8 across a mount: `/d` denied, the mount at `/d/sub` listed. No rule, and
+        // none for a path in a second mount of that file system elsewhere (D23).
+        let denied = [deny(&tree, 10, "/d", directory)];
+        let step_of = |id: u64, path: &str, file: Option<FileId>| {
+            step(&tree, &denied, &on(&tree, id, path), file)
+        };
+        assert_eq!(step_of(22, "/d/sub", directory), Ok(Step::Denied));
+        assert_eq!(step_of(22, "/d/sub/tool", Some((8, 3))), Ok(Step::Denied));
+        assert_eq!(step_of(23, "/elsewhere/bin", directory), Ok(Step::Denied));
+        assert_eq!(step_of(10, "/t", directory), Ok(Step::Rule));
+        // And the reverse of it: the mount listed where it shows a second time, the deny
+        // entry a directory of it at the first. The listed root holds the denied place.
+        let denied = [deny(&tree, 22, "/d/sub/bin", directory)];
+        let step_of = |id: u64, path: &str| step(&tree, &denied, &on(&tree, id, path), directory);
+        assert_eq!(step_of(23, "/elsewhere"), Ok(Step::Expand));
+        assert_eq!(step_of(23, "/elsewhere/bin"), Ok(Step::Denied));
+        assert_eq!(step_of(23, "/elsewhere/lib"), Ok(Step::Rule));
+        assert_eq!(step_of(10, "/d"), Ok(Step::Expand));
+
+        // A chain of three mounts: a file denied in the third expands each directory above.
+        let denied = [deny(&tree, 26, "/c/b/a/tool", file)];
+        let step_of = |id: u64, path: &str| step(&tree, &denied, &on(&tree, id, path), directory);
+        assert_eq!(step_of(24, "/c"), Ok(Step::Expand));
+        assert_eq!(step_of(25, "/c/b"), Ok(Step::Expand));
+        assert_eq!(step_of(26, "/c/b/a"), Ok(Step::Expand));
+        assert_eq!(step_of(24, "/c/x"), Ok(Step::Rule));
+        assert_eq!(step_of(10, "/t"), Ok(Step::Rule));
+    }
+
+    /// **Another name of a denied file is the same device and the same inode** (D11 step 1).
+    /// Two files with one inode number on two devices are two files. A directory has no such
+    /// identity, and neither has a deny entry that is a directory or does not exist: `None`
+    /// is never "the same file" as `None`.
+    #[test]
+    fn another_name_of_a_denied_file_is_its_device_and_its_inode() {
+        let tree = view();
+        let denied = [
+            deny(&tree, 10, "/t/bin/tool", Some((8, 7))),
+            deny(&tree, 10, "/t/bin/absent", None),
+        ];
+        let beside = on(&tree, 10, "/plain/name");
+        let step_of = |file: Option<FileId>| step(&tree, &denied, &beside, file);
+        assert_eq!(step_of(Some((8, 7))), Ok(Step::Denied));
+        assert_eq!(step_of(Some((9, 7))), Ok(Step::Rule), "another device");
+        assert_eq!(step_of(Some((8, 9))), Ok(Step::Rule), "another inode");
+        assert_eq!(step_of(None), Ok(Step::Rule), "a directory");
+    }
+
+    /// **Failing closed, by D30's table.** What a denied directory reaches, and what a listed
+    /// directory of a start with a deny-list reaches, must be established: a covered mount
+    /// and a removed root beneath either refuse with their cause. A mount of a type outside
+    /// the list refuses beneath a denied directory only; beneath a listed directory it is
+    /// compared with nothing. An allow-list alone asks none of it.
+    #[test]
+    fn a_reach_that_cannot_be_established_is_a_cause_and_never_a_rule() {
+        let tree = view();
+        let at = |id: u64, path: &str| on(&tree, id, path);
+        let unlisted =
+            Denied::at(&tree, &at(10, "/u"), None).expect_err("a vfat mount in a denied directory");
+        assert_eq!(
+            (unlisted.path.as_str(), &unlisted.cause),
+            ("/u/boot", &Cause::FileSystemUnlisted("vfat".to_owned()))
+        );
+        assert_eq!(
+            unlisted.to_string(),
+            "cannot establish where /u/boot is attached: file-system-unlisted vfat"
+        );
+        let covered = Denied::at(&tree, &at(10, "/s"), None).expect_err("a stack beneath it");
+        assert_eq!(
+            (covered.path.as_str(), &covered.cause),
+            ("/s/m", &Cause::MountCovered)
+        );
+        let deleted = Denied::at(&tree, &at(10, "/g"), None).expect_err("a removed root");
+        assert_eq!(
+            (deleted.path.as_str(), &deleted.cause),
+            ("/g/m", &Cause::MountRootDeleted)
+        );
+
+        // A listed directory of a start with a deny-list, whatever the entry denies.
+        let denied = [deny(&tree, 10, "/t/bin/tool", Some((8, 7)))];
+        let listed = |path: &str| step(&tree, &denied, &at(10, path), None);
+        assert_eq!(
+            unreached(listed("/s")),
+            ("/s/m".to_owned(), Cause::MountCovered)
+        );
+        assert_eq!(
+            unreached(listed("/g")),
+            ("/g/m".to_owned(), Cause::MountRootDeleted)
+        );
+        assert_eq!(
+            listed("/u"),
+            Ok(Step::Rule),
+            "a type outside the list beneath a listed directory is not compared"
+        );
+        // A file is asked nothing of the table, and a path a deny entry reaches is refused
+        // its rule before anything else is asked.
+        assert_eq!(
+            step(&tree, &denied, &at(10, "/s/file"), Some((8, 1))),
+            Ok(Step::Rule)
+        );
+        // An allow-list alone: one rule per entry on the same table, and no attachment asked.
+        for path in ["/s", "/g", "/u", "/t"] {
+            assert_eq!(step(&tree, &[], &at(10, path), None), Ok(Step::Rule));
+        }
+
+        // A row whose parent no row has refuses the table as a whole, before any step.
+        let unattached =
+            MountTable::parse(&format!("{VIEW}40 99 8:9 / /lost rw - ext4 /dev/j rw\n"))
+                .expect("the table")
+                .into_tree_as_written()
+                .expect_err("a row without its parent row");
+        assert_eq!(
+            (unattached.path.as_str(), &unattached.cause),
+            ("/lost", &Cause::MountRowMissing)
+        );
+    }
 
     /// The path the kernel holds for `descriptor`.
     fn held(descriptor: &OwnedFd) -> PathBuf {
