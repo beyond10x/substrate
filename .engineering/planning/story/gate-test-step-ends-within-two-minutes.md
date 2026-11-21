@@ -8,7 +8,7 @@ summary: 'Hosted: 1126 s with compile, 354 s of tests, one test over 60 s; the r
 tags:
 - defect
 - gate
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T21:01:49Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-21T21:01:49Z", actor: "human:timo", revision: 4}
@@ -87,6 +87,10 @@ The operator session holds the story to this:
   compile time is counted and gives both numbers, with and without compile;
 - no test runs over 60 s, and the runner kills one that does: a test made to sleep 61 s is killed
   and fails the step;
+- the step itself fails when it runs over 120 s, locally and in CI (added on 2026-11-21 by the
+  operator's order to the collection, relayed by the operator session: the collection rule's
+  line "The step itself fails when it runs over 120 s"); the compile is outside that bound and
+  the gate's output shows both times;
 - the step prints its ten slowest tests;
 - `exec_memory_limit_refusal_is_named` finishes under 60 s, or is in a lane named `slow` with its
   reason;
