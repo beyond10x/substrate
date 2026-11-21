@@ -50,7 +50,7 @@ scope:
   path: xtask/src/bundle
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 10
+revision: 11
 ---
 # Story: An exec start carries the executable lists on the wire
 
@@ -81,7 +81,8 @@ dispatch.
    `ConfinementProperty`, and consumer compatibility. A start without the fields serializes and
    hashes as on the predecessor bundle.
 2. A successor bundle under `contracts/substrate-wire`, at the next free version when the story
-   starts (`0.27.0` if no other story has cut one; `0.26.0` is the newest today). It is cut with
+   starts (`main` advertises `substrate-wire/0.27.0` at `638a7d70c`,
+   `crates/substrate-wire/src/lib.rs:18`, so `0.28.0` or later). It is cut with
    `cargo xtask render-bundle` from its `xtask/bundle-source` directory, and its check is added to
    `scripts/gate.sh` (invariant 6). Each new constant is bound from `xtask/src/bundle.rs`, not
    from `xtask/src/render.rs`.
