@@ -2,3 +2,6 @@
 # (atlas AGENTS.md, section "Language": anything that runs is Rust).
 [alias]
 xtask = "run --quiet --package xtask --"
+
+[profile.dev]
+debug = false

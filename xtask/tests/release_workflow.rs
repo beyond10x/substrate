@@ -287,13 +287,52 @@ fn gate_job(id: &str) -> &'static str {
     &body[..end]
 }
 
-/// Runs `scripts/gate.sh` with `arguments` against `cargo` and `python3` stubs that only succeed,
-/// and returns its exit status and every `gate:` line it printed.
-fn gate_steps(arguments: &[&str]) -> (Option<i32>, Vec<String>) {
+/// A `cargo` that only succeeds, except that it stands in for the workspace's test run: there it
+/// writes the `JUnit` report cargo-nextest would write, unless `STUB_REPORT` is `none`, and exits
+/// with `STUB_TEST_RUN_STATUS`.
+const CARGO_STUB: &str = r#"#!/bin/sh
+case " $* " in
+  " nextest run --workspace "*" --no-run "*) ;;
+  " nextest run --workspace "*)
+    if [ "$STUB_REPORT" != none ]; then
+      mkdir -p "$CARGO_TARGET_DIR/nextest/default"
+      printf '%s\n' '<testsuites><testsuite name="stub::lane">' \
+        '<testcase name="quick" classname="stub::lane" time="0.250"/>' \
+        '<testcase name="slow" classname="stub::lane" time="12.500"/>' \
+        '</testsuite></testsuites>' > "$CARGO_TARGET_DIR/nextest/default/junit.xml"
+    fi
+    exit "$STUB_TEST_RUN_STATUS"
+    ;;
+esac
+exit 0
+"#;
+
+/// A stand-in target directory for one stubbed gate run: the `xtask` under test where the gate's
+/// build step leaves the release one, and nothing else.
+fn gate_target() -> tempfile::TempDir {
+    let target = tempfile::tempdir().expect("target directory");
+    fs::create_dir(target.path().join("release")).expect("release directory");
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_xtask"),
+        target.path().join("release/xtask"),
+    )
+    .expect("xtask link");
+    target
+}
+
+/// Runs `scripts/gate.sh` with `arguments` against a `python3` stub that only succeeds and
+/// [`CARGO_STUB`], in `target` as its target directory, and returns its exit status, what it
+/// printed and what it wrote to standard error, with the target directory written as `<target>`.
+fn gate_run(
+    arguments: &[&str],
+    target: &Path,
+    test_run_status: &str,
+    report: &str,
+) -> (Option<i32>, String, String) {
     let tools = tempfile::tempdir().expect("stub directory");
-    for tool in ["cargo", "python3"] {
+    for (tool, body) in [("cargo", CARGO_STUB), ("python3", "#!/bin/sh\nexit 0\n")] {
         let path = tools.path().join(tool);
-        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("stub");
+        fs::write(&path, body).expect("stub");
         let mut permissions = fs::metadata(&path).expect("stub metadata").permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
         fs::set_permissions(&path, permissions).expect("stub mode");
@@ -308,16 +347,41 @@ fn gate_steps(arguments: &[&str]) -> (Option<i32>, Vec<String>) {
         .args(arguments)
         .current_dir(repository_root())
         .env("PATH", path)
+        .env("CARGO_TARGET_DIR", target)
+        .env("STUB_TEST_RUN_STATUS", test_run_status)
+        .env("STUB_REPORT", report)
         .output()
         .expect("bash runs the gate");
-    let lines = String::from_utf8(output.stdout)
-        .expect("utf-8")
+    let shown = |bytes: Vec<u8>| {
+        String::from_utf8(bytes)
+            .expect("utf-8")
+            .replace(target.to_str().expect("utf-8 target"), "<target>")
+    };
+    (
+        output.status.code(),
+        shown(output.stdout),
+        shown(output.stderr),
+    )
+}
+
+/// Runs `scripts/gate.sh` with `arguments` against stubs that only succeed, and returns its exit
+/// status and every `gate:` line it printed.
+fn gate_steps(arguments: &[&str]) -> (Option<i32>, Vec<String>) {
+    let target = gate_target();
+    let (status, printed, _) = gate_run(arguments, target.path(), "0", "written");
+    let lines = printed
         .lines()
         .filter(|line| line.starts_with("gate: "))
         .map(str::to_owned)
         .collect();
-    (output.status.code(), lines)
+    (status, lines)
 }
+
+const TEST_BUILD_STEP: &str = "gate: cargo nextest run --workspace --release --locked --no-run";
+const TEST_RUN_STEP: &str = "gate: cargo nextest run --workspace --release --locked";
+const SLOWEST_STEP: &str =
+    "gate: <target>/release/xtask slowest-tests --junit <target>/nextest/default/junit.xml";
+const DOCTEST_STEP: &str = "gate: cargo test --workspace --release --locked --doc";
 
 /// `scripts/gate.sh` with no argument runs every step in its order; each phase runs a part of it,
 /// in the same order, and the two parts are disjoint and together the whole.
@@ -352,7 +416,16 @@ fn the_two_gate_phases_partition_every_gate_step() {
     let mut every: Vec<&String> = all.iter().collect();
     every.sort();
     assert_eq!(union, every, "the phases are not a partition of the gate");
-    assert!(phases[0].contains(&"gate: cargo test --workspace --release --locked".to_owned()));
+    for step in [TEST_BUILD_STEP, TEST_RUN_STEP, SLOWEST_STEP, DOCTEST_STEP] {
+        assert!(
+            phases[0].contains(&step.to_owned()),
+            "the tests phase does not run {step}"
+        );
+        assert!(
+            !phases[1].contains(&step.to_owned()),
+            "the static phase runs {step}"
+        );
+    }
     // The `tests` phase fetches every target's dependencies before it tests: the package-rule
     // cases run `cargo tree --target all` offline, and a cold runner cache holds only what the
     // host build downloaded, so they failed on `android_system_properties` (#231).
@@ -362,15 +435,224 @@ fn the_two_gate_phases_partition_every_gate_step() {
         .expect("the tests phase fetches every target's dependencies");
     let test = phases[0]
         .iter()
-        .position(|line| line == "gate: cargo test --workspace --release --locked")
-        .expect("the tests phase tests the workspace");
-    assert!(fetch < test, "the tests phase fetches after it tests");
+        .position(|line| line == TEST_BUILD_STEP)
+        .expect("the tests phase builds the workspace's tests");
+    assert!(
+        fetch < test,
+        "the tests phase fetches after it builds its tests"
+    );
     assert!(phases[1].contains(&"gate: cargo xtask check-secrets".to_owned()));
     for refused in [&["unit"][..], &["tests", "static"][..]] {
         let (status, lines) = gate_steps(refused);
         assert_eq!(status, Some(2), "{refused:?} was accepted");
         assert!(lines.is_empty(), "{refused:?} ran {lines:?}");
     }
+}
+
+/// The test step's budget (AGENTS.md, section *The gate*; `story:gate-test-step-ends-within-two-
+/// minutes`): the build and the run are two steps with their own times, the run is cargo-nextest's
+/// with the bound `.config/nextest.toml` holds, its ten slowest tests follow it, and the one
+/// `cargo test` left runs the doctests.
+#[test]
+fn the_gate_times_its_test_build_and_run_apart_and_names_the_slowest_tests() {
+    let target = gate_target();
+    let (status, printed, errors) = gate_run(&["tests"], target.path(), "0", "written");
+    assert_eq!(status, Some(0), "{printed}{errors}");
+    let mut from = 0;
+    for expected in [
+        "gate: cargo fetch --locked\n",
+        "gate: cargo nextest run --workspace --release --locked --no-run\n",
+        "gate-time: test build: ",
+        "gate: cargo nextest run --workspace --release --locked\n",
+        "gate-time: test run: ",
+        "gate: <target>/release/xtask slowest-tests --junit <target>/nextest/default/junit.xml\n",
+        "slowest 2 of 2 tests (the 2 test times sum to 12.750 s):\n",
+        "    12.500 s  stub::lane  slow\n",
+        "     0.250 s  stub::lane  quick\n",
+        "gate: cargo test --workspace --release --locked --doc\n",
+        "gate-time: doctests: ",
+        "gate: phase tests passed\n",
+    ] {
+        let at = printed[from..].find(expected).unwrap_or_else(|| {
+            panic!("the tests phase did not print {expected:?} in its place:\n{printed}")
+        });
+        from += at + expected.len();
+    }
+    for line in printed.lines().filter(|line| line.starts_with("gate: ")) {
+        assert!(
+            !line.contains("cargo test ") || line.ends_with(" --doc"),
+            "{line} runs tests under libtest, which kills none at the bound"
+        );
+        assert!(
+            !line.contains("--profile") && !line.contains("--test-threads"),
+            "{line} leaves the profile or the thread count .config/nextest.toml holds"
+        );
+    }
+
+    let config: toml::Value = toml::from_str(
+        &fs::read_to_string(repository_root().join(".config/nextest.toml"))
+            .expect("the nextest configuration is readable"),
+    )
+    .expect("the nextest configuration is TOML");
+    let profile = &config["profile"]["default"];
+    let period = profile["slow-timeout"]["period"]
+        .as_str()
+        .and_then(|period| period.strip_suffix('s'))
+        .and_then(|seconds| seconds.parse::<i64>().ok())
+        .expect("slow-timeout has a period in whole seconds");
+    let terminate_after = profile["slow-timeout"]["terminate-after"]
+        .as_integer()
+        .expect("slow-timeout terminates a test");
+    assert_eq!(
+        period * terminate_after,
+        60,
+        "a test is killed after {period} s x {terminate_after}, not after 60 s"
+    );
+    // The run itself is bound too, by the runner and so wherever it runs: it is cancelled and
+    // fails at 120 s. The build is another command and outside that bound.
+    assert_eq!(
+        profile["global-timeout"].as_str(),
+        Some("120s"),
+        "the test run is not failed at 120 s"
+    );
+    assert_eq!(profile["junit"]["path"].as_str(), Some("junit.xml"));
+    for group in config["test-groups"]
+        .as_table()
+        .expect("the test groups")
+        .values()
+    {
+        assert_eq!(group["max-threads"].as_integer(), Some(1));
+    }
+}
+
+/// A failed or killed test fails the gate with the runner's own status, after the slowest tests
+/// were printed and before any later step.
+#[test]
+fn a_failed_test_run_still_names_its_slowest_tests_and_fails_the_gate() {
+    let target = gate_target();
+    let (status, printed, errors) = gate_run(&["tests"], target.path(), "100", "written");
+    assert_eq!(status, Some(100), "{printed}{errors}");
+    let run = printed
+        .find("gate-time: test run: ")
+        .expect("the run's time");
+    let slowest = printed
+        .find("    12.500 s  stub::lane  slow\n")
+        .expect("the slowest tests of a failed run");
+    assert!(run < slowest, "{printed}");
+    assert!(
+        !printed.contains("--doc") && !printed.contains("clippy") && !printed.contains("passed"),
+        "the gate went on after a failed test run:\n{printed}"
+    );
+}
+
+/// The ranking is read from the run that just ended or not at all: a report an earlier run left
+/// is removed, and a run that wrote none fails the gate.
+#[test]
+fn a_test_run_that_wrote_no_report_fails_the_gate_and_an_earlier_report_is_not_read() {
+    let target = gate_target();
+    let report = target.path().join("nextest/default/junit.xml");
+    fs::create_dir_all(report.parent().expect("report directory")).expect("report directory");
+    fs::write(
+        &report,
+        r#"<testsuites><testcase name="earlier" classname="stub::lane" time="1"/></testsuites>"#,
+    )
+    .expect("an earlier report");
+    let (status, printed, errors) = gate_run(&["tests"], target.path(), "0", "none");
+    assert_eq!(status, Some(1), "{printed}{errors}");
+    assert!(errors.contains("no JUnit report at"), "{errors}");
+    assert!(
+        !printed.contains("earlier") && !errors.contains("earlier"),
+        "{printed}{errors}"
+    );
+    assert!(!printed.contains("--doc"), "{printed}");
+
+    // The static phase runs no test and leaves a report alone.
+    fs::write(&report, "<testsuites/>").expect("a report");
+    let (status, printed, errors) = gate_run(&["static"], target.path(), "0", "none");
+    assert_eq!(status, Some(0), "{printed}{errors}");
+    assert!(report.is_file(), "the static phase removed the test report");
+}
+
+/// One `NAME: value` pin of `gate.yml`'s tests job.
+fn gate_tests_pin(name: &str) -> &'static str {
+    gate_job("gate-tests")
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&format!("{name}: ")))
+        .unwrap_or_else(|| panic!("gate.yml's tests job has no {name}"))
+}
+
+/// The runner that enforces the bound is installed from its release archive, pinned by version
+/// and by the archive's SHA-256, before the gate runs; never built from an unpinned source.
+#[test]
+fn the_gate_tests_job_installs_cargo_nextest_pinned_by_version_and_digest() {
+    let tests = gate_job("gate-tests");
+    let version = gate_tests_pin("NEXTEST_VERSION");
+    assert!(
+        version.split('.').count() == 3
+            && version
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())),
+        "NEXTEST_VERSION {version:?} is not one exact release"
+    );
+    let digest = gate_tests_pin("NEXTEST_SHA256");
+    assert!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "NEXTEST_SHA256 {digest:?} is not a SHA-256"
+    );
+    let install = tests
+        .find("- name: Install the pinned cargo-nextest release\n")
+        .expect("the tests job installs cargo-nextest");
+    let gate = tests
+        .find("run: bash scripts/gate.sh tests\n")
+        .expect("the tests job runs the gate");
+    assert!(install < gate);
+    assert!(tests.contains(
+        "releases/download/cargo-nextest-$NEXTEST_VERSION/$archive\" --output \"$RUNNER_TEMP/$archive\"\n"
+    ));
+    assert!(tests.contains(
+        "echo \"$NEXTEST_SHA256  $RUNNER_TEMP/$archive\" | sha256sum --check --strict\n"
+    ));
+    assert!(!GATE_WORKFLOW.contains("cargo install cargo-nextest"));
+    assert!(!GATE_WORKFLOW.contains("cargo binstall"));
+    assert!(
+        !gate_job("gate-static").contains("nextest"),
+        "the static phase runs no test and needs no test runner"
+    );
+}
+
+/// The oci cases pull their image only when the runtime's store does not hold it, and the tests
+/// job pulls it before the gate, so the test step makes no registry request. The job pulls the
+/// reference the cases name.
+#[test]
+fn the_gate_tests_job_pulls_the_image_the_oci_cases_name_before_the_gate() {
+    let tests = gate_job("gate-tests");
+    let pulled = gate_tests_pin("OCI_LANE_IMAGE");
+    assert!(pulled.contains("@sha256:"), "{pulled} is not digest-pinned");
+    for source in [
+        "crates/substrate-host/tests/ess_confinement_oci.rs",
+        "crates/substrate-host/tests/adversary_oci.rs",
+    ] {
+        let text = fs::read_to_string(repository_root().join(source)).expect("the oci cases");
+        let named = text
+            .lines()
+            .find_map(|line| line.strip_prefix("const IMAGE: &str = \""))
+            .and_then(|rest| rest.strip_suffix("\";"));
+        assert_eq!(named, Some(pulled), "{source} names another image");
+        assert!(
+            text.contains(".args([\"image\", \"inspect\", "),
+            "{source} pulls without asking the runtime's store first"
+        );
+    }
+    let pull = tests
+        .find("run: docker pull \"$OCI_LANE_IMAGE\"\n")
+        .expect("the tests job pulls the image");
+    let gate = tests
+        .find("run: bash scripts/gate.sh tests\n")
+        .expect("the tests job runs the gate");
+    assert!(pull < gate);
 }
 
 /// `Full gate` is the status context `main`'s ruleset requires, and `release.yml` reads this

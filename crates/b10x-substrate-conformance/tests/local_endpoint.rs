@@ -9,7 +9,9 @@
 //! This target has its own `main` (`harness = false`), because the runner's token command and
 //! restart hook are this same executable started with `helper-token` or `helper-hook`, and a token
 //! command's standard output is its credential line, which libtest's own output would precede.
-//! The scenarios run one after another and the binary ends with libtest's summary line.
+//! The scenarios run one after another and the binary ends with libtest's summary line. It reads
+//! the part of libtest's command line a runner uses ([`Selection`]): cargo-nextest, which runs the
+//! gate's test step, lists the scenarios and then starts this binary once for each.
 
 #![cfg(unix)]
 
@@ -85,9 +87,23 @@ fn main() -> ExitCode {
             delegated,
         ),
     ];
-    println!("\nrunning {} tests", scenarios.len());
+    let selection = Selection::parse(arguments.get(1..).unwrap_or_default());
+    if selection.list {
+        // No scenario is ignored, so the list of ignored ones is empty.
+        if !selection.ignored {
+            for (name, _) in scenarios {
+                println!("{name}: test");
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    let selected: Vec<(&str, fn())> = scenarios
+        .into_iter()
+        .filter(|(name, _)| selection.selects(name))
+        .collect();
+    println!("\nrunning {} tests", selected.len());
     let mut failed = Vec::new();
-    for (name, scenario) in scenarios {
+    for &(name, scenario) in &selected {
         let started = Instant::now();
         let outcome = std::panic::catch_unwind(scenario);
         if outcome.is_ok() {
@@ -97,16 +113,66 @@ fn main() -> ExitCode {
             failed.push(name);
         }
     }
-    let passed = scenarios.len() - failed.len();
+    let passed = selected.len() - failed.len();
     println!(
-        "\ntest result: {}. {passed} passed; {} failed; 0 ignored; 0 measured; 0 filtered out\n",
+        "\ntest result: {}. {passed} passed; {} failed; 0 ignored; 0 measured; {} filtered out\n",
         if failed.is_empty() { "ok" } else { "FAILED" },
-        failed.len()
+        failed.len(),
+        scenarios.len() - selected.len()
     );
     if failed.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(101)
+    }
+}
+
+/// What libtest's command line asks of this binary, as far as a runner uses it. cargo-nextest
+/// lists with `--list --format terse`, once more with `--ignored`, and runs one scenario with
+/// `--exact <name> --nocapture`; `scripts/delegated-lane.sh` passes `--nocapture
+/// --test-threads=1` and no name, which selects every scenario.
+#[derive(Debug, Default)]
+struct Selection {
+    list: bool,
+    /// Only ignored scenarios are asked for, and there is none.
+    ignored: bool,
+    exact: bool,
+    names: Vec<String>,
+    skipped: Vec<String>,
+}
+
+impl Selection {
+    fn parse(arguments: &[String]) -> Self {
+        let mut selection = Self::default();
+        let mut arguments = arguments.iter();
+        while let Some(argument) = arguments.next() {
+            match argument.as_str() {
+                "--list" => selection.list = true,
+                "--ignored" => selection.ignored = true,
+                "--exact" => selection.exact = true,
+                "--skip" => selection.skipped.extend(arguments.next().cloned()),
+                // Options whose value is the next argument, which is therefore no scenario name.
+                "--format" | "--test-threads" | "--color" | "--logfile" | "-Z" => {
+                    arguments.next();
+                }
+                option if option.starts_with('-') => {}
+                name => selection.names.push(name.to_owned()),
+            }
+        }
+        selection
+    }
+
+    fn selects(&self, scenario: &str) -> bool {
+        let matches = |filter: &String| {
+            if self.exact {
+                filter == scenario
+            } else {
+                scenario.contains(filter.as_str())
+            }
+        };
+        !self.ignored
+            && (self.names.is_empty() || self.names.iter().any(matches))
+            && !self.skipped.iter().any(matches)
     }
 }
 

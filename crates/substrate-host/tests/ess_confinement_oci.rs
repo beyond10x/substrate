@@ -725,6 +725,8 @@ fn a_bind_holding_the_runtime_socket_is_refused_by_name() {
 // ---- the oci lane: a real container runtime ----
 
 /// Held while an adapter opens, so the orphan case's sweep is the only one in this process.
+/// cargo-nextest starts every case as its own process, which this lock does not order: there the
+/// `oci-runtime` test group in `.config/nextest.toml` runs the lane's cases one at a time.
 static OPENING: Mutex<()> = Mutex::new(());
 
 /// The runtime's program, or the reason the lane is absent.
@@ -755,10 +757,24 @@ fn open_lane(
     adapter
 }
 
-/// Pulls the test image once, so no run's bound is spent on the registry.
+/// Pulls the test image once, so no run's bound is spent on the registry. An image the runtime's
+/// store already holds is not pulled again: under cargo-nextest every case is its own process,
+/// and a pull per case would be a registry request per case
+/// (`story:gate-test-step-ends-within-two-minutes`).
 fn pull(runtime: &Path) {
     static PULLED: OnceLock<()> = OnceLock::new();
     PULLED.get_or_init(|| {
+        let held = std::process::Command::new(runtime)
+            .args(["image", "inspect", &image()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("the runtime runs")
+            .success();
+        if held {
+            return;
+        }
         let status = std::process::Command::new(runtime)
             .args(["pull", &image()])
             .stdin(std::process::Stdio::null())
