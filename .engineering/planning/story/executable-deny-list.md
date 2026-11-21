@@ -41,7 +41,7 @@ scope:
   path: spec/generated
 - confidence: inferred
   path: website/docs
-revision: 12
+revision: 13
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
@@ -109,6 +109,11 @@ Checks:
   `profile_refused` with that fact.
 - A unit test admits a profile with both lists against adapter facts that prove `exec_subpaths`
   and not the new fact, and the refusal names the new fact.
+- Two permanent delegated-lane cases, kept at the stakeholder's request
+  (`approval-record:sdc-accepts-design-35-2026-11-21`): a run whose program is a link to a denied
+  program (`sh` to a denied `bash`, built from a read-only root) is refused before dispatch; and
+  with one directory mounted under two names and the program denied under one of them
+  (`/usr/bin` listed, `/bin/id` denied), the program is denied under both names.
 - A profile without a deny-list is admitted, rendered and run as before this story.
 - `crates/substrate-host/tests/confinement-public-items.txt` is regenerated in the same change.
 

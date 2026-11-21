@@ -36,7 +36,7 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 10
+revision: 11
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
@@ -116,7 +116,9 @@ story the same profile is refused `confinement.fact-unserved`.
 
 Checks:
 
-- The design document is merged before any code of this story.
+- The design document is accepted before any code of this story
+  (`approval-record:sdc-accepts-design-35-2026-11-21`, at commit `ab22126ff`), and the story's
+  branch is stacked on the design branch, so its code reaches `main` only after the document.
 - On a host where the probe cannot prove the mechanism, the fact is absent and a profile that sets
   `exec_subpaths` is refused `confinement.fact-unserved`; nothing runs unrestricted (invariant 3).
 - A profile with an empty `exec_subpaths` renders and runs as before this story.
