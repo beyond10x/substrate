@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-21T11:30:00Z",
+  "actor": "human:timo",
+  "artifact": "story:linux-executable-allow-list",
+  "kind": "story",
+  "revision": 18,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/delegated-lane.sh at a84b27edf on a workstation: 1315 passed, 0 failed, 21 ignored"
+  }
+}

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:linux-executable-allow-list
 kind: story
-status: active
+status: implemented
 title: The linux adapter holds a run to an executable allow-list
 summary: 'The linux adapter proves exec_subpaths: a run executes only its program and programs beneath the listed paths. Design document first.'
 owner: substrate
@@ -44,10 +44,11 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 17
+revision: 19
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
+- {from: "active", to: "implemented", at: "2026-11-21T12:27:22Z", actor: "human:timo", revision: 19, decided_on: {"recorded":{"test_result":2,"approval":1,"review_outcome":2}}, executor: "agent:substrate", correlation: "sdc-accepts-story-1-2026-11-21"}
 ---
 # Story: The `linux` adapter holds a run to an executable allow-list
 
@@ -153,6 +154,36 @@ Checks:
   directories.
 - `cargo xtask check-ess` and `bash scripts/delegated-lane.sh` pass, and the lane builds and
   names the helper.
+
+## As merged
+
+Pull request 241, merge commit `fcf669ee1`, 2026-11-21. Three rounds of an adversary pass and a
+security review ran before the merge; their findings and outcomes are
+`review-result:linux-executable-allow-list-adversary` and
+`review-result:linux-executable-allow-list-security`.
+
+Beyond the checks above, the merged change holds two rules the reviews forced, both in design 35:
+
+- D28: on a start with a list no variable of the run reaches a process before the ruleset. The
+  helper takes every variable as an operand and refuses to start with one of its own.
+- D29: the helper is statically linked, the open refuses one that is not, and the helper is the
+  first process in the view. A start with a list and a controlling terminal is refused
+  `session.pty-unserved`.
+
+One limit was added to the stated ones: a symbolic link in a listed directory that points outside
+it is not admitted. On Ubuntu 26.04 `ln`, `env`, `cat`, `ls` and `mkdir` in `/usr/bin` are such
+links.
+
+Not run by anyone, kept here at the stakeholder's request
+(`approval-record:sdc-accepts-story-1-2026-11-21`):
+
+- a kernel with Landlock ABI 1 (a seccomp filter stood in for it at the helper only);
+- a host whose workspace root or base directories lie on xfs or btrfs;
+- the `macos` adapter with a list after this change;
+- a host with a registered `binfmt_misc` handler.
+
+The chart's sentence about the served file systems and the daemon's publication of the fact are
+`story:exec-start-carries-executable-lists`.
 
 ## Boundaries
 

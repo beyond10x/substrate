@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-21T12:20:00Z",
+  "actor": "human:timo",
+  "artifact": "story:linux-executable-allow-list",
+  "kind": "story",
+  "revision": 18,
+  "change": {
+    "change": "evidence",
+    "kind": "approval",
+    "source": "approval-record:sdc-accepts-story-1-2026-11-21"
+  }
+}
