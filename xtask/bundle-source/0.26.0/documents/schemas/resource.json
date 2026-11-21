@@ -209,9 +209,7 @@
               "items": {
                 "$ref": "common.json#/$defs/read-only-root"
               },
-              "maxItems": {
-                "$wire": "MAX_READ_ONLY_ROOTS"
-              },
+              "maxItems": 4,
               "minItems": 1,
               "type": "array",
               "x-b10x-applied-not-requested": "what-was-bound"
@@ -341,9 +339,7 @@
               "items": {
                 "$ref": "common.json#/$defs/read-only-root"
               },
-              "maxItems": {
-                "$wire": "MAX_READ_ONLY_ROOTS"
-              },
+              "maxItems": 4,
               "minItems": 1,
               "type": "array",
               "x-b10x-applied-not-requested": "what-was-bound"
@@ -636,9 +632,7 @@
                       "items": {
                         "$ref": "common.json#/$defs/read-only-root"
                       },
-                      "maxItems": {
-                        "$wire": "MAX_READ_ONLY_ROOTS"
-                      },
+                      "maxItems": 4,
                       "minItems": 1,
                       "type": "array",
                       "x-b10x-applied-not-requested": "what-was-bound"
@@ -768,9 +762,7 @@
                       "items": {
                         "$ref": "common.json#/$defs/read-only-root"
                       },
-                      "maxItems": {
-                        "$wire": "MAX_READ_ONLY_ROOTS"
-                      },
+                      "maxItems": 4,
                       "minItems": 1,
                       "type": "array",
                       "x-b10x-applied-not-requested": "what-was-bound"
@@ -1049,9 +1041,7 @@
                       "items": {
                         "$ref": "common.json#/$defs/read-only-root"
                       },
-                      "maxItems": {
-                        "$wire": "MAX_READ_ONLY_ROOTS"
-                      },
+                      "maxItems": 4,
                       "minItems": 1,
                       "type": "array",
                       "x-b10x-applied-not-requested": "what-was-bound"
@@ -1181,9 +1171,7 @@
                       "items": {
                         "$ref": "common.json#/$defs/read-only-root"
                       },
-                      "maxItems": {
-                        "$wire": "MAX_READ_ONLY_ROOTS"
-                      },
+                      "maxItems": 4,
                       "minItems": 1,
                       "type": "array",
                       "x-b10x-applied-not-requested": "what-was-bound"
@@ -1521,9 +1509,7 @@
                           "items": {
                             "$ref": "common.json#/$defs/read-only-root"
                           },
-                          "maxItems": {
-                            "$wire": "MAX_READ_ONLY_ROOTS"
-                          },
+                          "maxItems": 4,
                           "minItems": 1,
                           "type": "array",
                           "x-b10x-applied-not-requested": "what-was-bound"
@@ -1653,9 +1639,7 @@
                           "items": {
                             "$ref": "common.json#/$defs/read-only-root"
                           },
-                          "maxItems": {
-                            "$wire": "MAX_READ_ONLY_ROOTS"
-                          },
+                          "maxItems": 4,
                           "minItems": 1,
                           "type": "array",
                           "x-b10x-applied-not-requested": "what-was-bound"
@@ -1732,9 +1716,7 @@
                       "items": {
                         "$ref": "common.json#/$defs/read-only-root"
                       },
-                      "maxItems": {
-                        "$wire": "MAX_READ_ONLY_ROOTS"
-                      },
+                      "maxItems": 4,
                       "minItems": 1,
                       "type": "array",
                       "x-b10x-applied-not-requested": "what-was-bound"
@@ -1759,9 +1741,7 @@
                       "items": {
                         "$ref": "common.json#/$defs/read-only-root"
                       },
-                      "maxItems": {
-                        "$wire": "MAX_READ_ONLY_ROOTS"
-                      },
+                      "maxItems": 4,
                       "minItems": 1,
                       "type": "array",
                       "x-b10x-applied-not-requested": "what-was-bound"
@@ -2047,9 +2027,7 @@
                           "items": {
                             "$ref": "common.json#/$defs/read-only-root"
                           },
-                          "maxItems": {
-                            "$wire": "MAX_READ_ONLY_ROOTS"
-                          },
+                          "maxItems": 4,
                           "minItems": 1,
                           "type": "array",
                           "x-b10x-applied-not-requested": "what-was-bound"
@@ -2179,9 +2157,7 @@
                           "items": {
                             "$ref": "common.json#/$defs/read-only-root"
                           },
-                          "maxItems": {
-                            "$wire": "MAX_READ_ONLY_ROOTS"
-                          },
+                          "maxItems": 4,
                           "minItems": 1,
                           "type": "array",
                           "x-b10x-applied-not-requested": "what-was-bound"
@@ -2258,9 +2234,7 @@
                       "items": {
                         "$ref": "common.json#/$defs/read-only-root"
                       },
-                      "maxItems": {
-                        "$wire": "MAX_READ_ONLY_ROOTS"
-                      },
+                      "maxItems": 4,
                       "minItems": 1,
                       "type": "array",
                       "x-b10x-applied-not-requested": "what-was-bound"
@@ -2285,9 +2259,7 @@
                       "items": {
                         "$ref": "common.json#/$defs/read-only-root"
                       },
-                      "maxItems": {
-                        "$wire": "MAX_READ_ONLY_ROOTS"
-                      },
+                      "maxItems": 4,
                       "minItems": 1,
                       "type": "array",
                       "x-b10x-applied-not-requested": "what-was-bound"

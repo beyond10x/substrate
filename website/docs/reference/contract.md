@@ -151,10 +151,21 @@ Earlier bundle directories remain immutable. A source contract promotion is not 
 daemon release; consumers must pin and test the matching SDK/daemon revision. The SDK refuses an
 older daemon's contract before issuing mutations.
 
+### `0.27.0`
+
+Development source now advertises `substrate-wire/0.27.0`; no release advertises it yet. It adds
+no route and moves three bounds (issue #236). A sandbox's `apertures` list holds two to eight
+names, and the applied list's eighth aperture listens on `127.0.0.8`; a list of nine is
+`exec.apertures-too-many` (422). The `exec.egress-apertures` fact lists every aperture the
+deployment declared, up to twelve, where `0.26.0` and earlier bounded it by the run's four. A start
+may name up to eight `read_only_roots`, and a host publishes `exec.read-only-roots` as
+`{"max_roots": 8}`; nine are `exec.read-only-root-invalid` (422). Every request valid under
+`0.26.0` is answered the same way; a client that validates snapshots or records against `0.26.0`
+must move to `0.27.0` to accept the longer lists.
+
 ### `0.26.0`
 
-Development source now advertises `substrate-wire/0.26.0`; no release advertises it yet. It adds
-no route. A capability snapshot may state what the serving confinement adapter proved, never its
+`0.26.0` adds no route. A capability snapshot may state what the serving confinement adapter proved, never its
 name: one optional fact per family, `confinement.family.process-run` through
 `confinement.family.audit` in ADR 0044's order, and one per mechanism-neutral property, such as
 `confinement.whole-tree-kill` or `confinement.paths-are-host-paths`. Each is `true` or absent,

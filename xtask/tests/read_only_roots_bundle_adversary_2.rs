@@ -108,9 +108,13 @@ fn network(kind: &str) -> Value {
     }
 }
 
-/// Every optional member `AppliedConfinement` serializes, each at its wire bound.
+/// The read-only root bound `0.23.0` publishes. The wire constant has since moved to eight (ADR
+/// 0010, amended 2026-11-20); this bundle keeps its bytes and its four.
+const PUBLISHED_READ_ONLY_ROOTS: u32 = 4;
+
+/// Every optional member `AppliedConfinement` serializes, each at the bound `0.23.0` publishes.
 fn applied(capsule: bool, net: &str) -> Value {
-    let roots: Vec<Value> = (1..=substrate_wire::MAX_READ_ONLY_ROOTS)
+    let roots: Vec<Value> = (1..=PUBLISHED_READ_ONLY_ROOTS)
         .map(|i| json!({ "host_path": format!("/srv/root{i}"), "mount": format!("/opt/root{i}") }))
         .collect();
     let read_only_files: Vec<Value> = (1..=16)

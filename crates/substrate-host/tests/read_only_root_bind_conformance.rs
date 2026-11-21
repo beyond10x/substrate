@@ -373,12 +373,13 @@ fn lane(prefix: &str, slots: bool) -> Option<Lane> {
     })
 }
 
-/// Invariants 5 and 6: four roots, sixteen read-only files and eight secret slots at the top of
-/// the slot range, in one start. It dispatches; the program reads every root, every file and every
-/// slot at its declared descriptor; and it holds no descriptor beyond its stdio, its slots and
-/// `ls`'s own directory handle, so no root, file or workspace descriptor reached it.
+/// Invariants 5 and 6: `MAX_READ_ONLY_ROOTS` (eight) roots, sixteen read-only files and eight
+/// secret slots at the top of the slot range, in one start. It dispatches; the program reads every
+/// root, every file and every slot at its declared descriptor; and it holds no descriptor beyond its
+/// stdio, its slots and `ls`'s own directory handle, so no root, file or workspace descriptor
+/// reached it.
 #[tokio::test(flavor = "multi_thread")]
-async fn four_roots_sixteen_files_and_eight_slots_start_together() {
+async fn the_most_roots_sixteen_files_and_eight_slots_start_together() {
     let Some(lane) = lane("ro-root-max-", true) else {
         return;
     };
@@ -437,7 +438,7 @@ async fn four_roots_sixteen_files_and_eight_slots_start_together() {
         DispatchOutcome::NotDispatched(error)
         | DispatchOutcome::ContainedAbsent(error)
         | DispatchOutcome::OutcomeUnknown(error) => panic!(
-            "four roots, sixteen files and eight slots must dispatch: {} {}",
+            "the most roots, sixteen files and eight slots must dispatch: {} {}",
             error.code, error.message
         ),
     };

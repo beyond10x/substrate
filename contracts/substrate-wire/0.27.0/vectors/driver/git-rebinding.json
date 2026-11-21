@@ -1,0 +1,59 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "attack": "dns-rebinding",
+      "operation": "workspace.git-materialize",
+      "source": "source_vector"
+    },
+    "kind": "driver",
+    "port": "workspace"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "security.git.rebinding"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "code": "workspace.git-destination-refused",
+      "status": "refused"
+    }
+  },
+  "id": "git-dns-rebinding-refuses-before-connect",
+  "layer": "driver",
+  "phase": 6,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/credential_release_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/forbidden_connect_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "git-source",
+      "name": "dns-rebinding",
+      "state": {
+        "aperture": "public",
+        "credential_binding": "cred_vector",
+        "source": "source_vector"
+      }
+    }
+  ]
+}

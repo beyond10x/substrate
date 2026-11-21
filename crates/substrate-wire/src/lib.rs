@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.26.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.27.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "f6216ea867d743b8efbfddb86b7097ddcddd261a10dbca3f7a775ba1a6687403";
+    "b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -185,11 +185,12 @@ pub const EXEC_APERTURE_LISTED_TWICE: &str = "exec.aperture-listed-twice";
 /// An aperture list naming two apertures whose declared hosts are one host name, so the generated
 /// host mapping could reach only one of them by that name (design 26 § 2).
 pub const EXEC_APERTURE_HOST_LISTED_TWICE: &str = "exec.aperture-host-listed-twice";
-/// How many host directories one start may declare read-only (ADR 0010).
+/// How many host directories one start may declare read-only (ADR 0010, amended 2026-11-20).
 ///
 /// Small on purpose. A closure that needs many roots is a closure that should be assembled rather
-/// than enumerated, and a long list is a request nobody reviewed.
-pub const MAX_READ_ONLY_ROOTS: u32 = 4;
+/// than enumerated, and a long list is a request nobody reviewed. Eight from bundle `0.27.0`;
+/// bundles `0.23.0` to `0.26.0` publish four.
+pub const MAX_READ_ONLY_ROOTS: u32 = 8;
 /// The fact a host publishes with the served bound on declared read-only roots (ADR 0010, bundle
 /// `0.23.0`).
 pub const EXEC_READ_ONLY_ROOTS_FACT: &str = "exec.read-only-roots";
@@ -372,13 +373,22 @@ pub const MAX_SECRET_SLOT_BYTES: u64 = 65_536;
 /// A caller cannot collide with it: every caller-set name containing `secret` is already refused
 /// (`crates/substrate-daemon/src/app/operations.rs`, `crates/substrate-host/src/process.rs`).
 pub const SECRET_SLOTS_ENV: &str = "SUBSTRATE_SECRET_SLOTS";
-/// How many egress apertures one deployment may declare (ADR 0013).
+/// How many egress apertures one run may select (ADR 0013, amended 2026-11-20).
 ///
-/// An aperture is outbound authority. A deployment that needs many of them is a deployment whose
-/// reach nobody reviewed. The same number bounds one run: design 10 § 9 decision 5 limited the
-/// first slice to one aperture per run, and design 26 § 2 lets a run select up to this many by
-/// listing them in `apertures`.
-pub const MAX_EGRESS_APERTURES: u32 = 4;
+/// An aperture is outbound authority. Design 10 § 9 decision 5 limited the first slice to one
+/// aperture per run, and design 26 § 2 lets a run select up to this many by listing them in
+/// `apertures`; the n-th listens on `127.0.0.n`. Eight from bundle `0.27.0`, so a box selects two
+/// forge hosts, the model host, the control-plane dial-in and its package registries; bundles
+/// `0.21.0` to `0.26.0` publish four.
+pub const MAX_EGRESS_APERTURES: u32 = 8;
+/// How many egress apertures one deployment may declare (ADR 0013, amended 2026-11-18 and
+/// 2026-11-20), and so how many the `exec.egress-apertures` fact may list.
+///
+/// A deployment that needs many apertures is a deployment whose reach nobody reviewed, so the list
+/// stays short enough to read; it is above [`MAX_EGRESS_APERTURES`] because one host serves runs
+/// that each select a different few. Bundle `0.27.0` publishes it as the fact list's bound;
+/// bundles `0.6.0` to `0.26.0` bound that list by the run bound, four.
+pub const MAX_DEPLOYMENT_EGRESS_APERTURES: u32 = 12;
 /// The address the per-run forwarder listens on inside the run's own network namespace.
 ///
 /// Loopback in a namespace whose only interface is loopback: nothing outside the sandbox can reach
@@ -5233,7 +5243,7 @@ pub const APERTURE_LIST_REFUSALS: [ExecStartRefusal; 4] = [
         code: EXEC_APERTURES_TOO_MANY,
         status: 422,
         class: ErrorClass::Refused,
-        message: "An aperture list names at most 4 apertures.",
+        message: "An aperture list names at most 8 apertures.",
     },
     ExecStartRefusal {
         code: EXEC_APERTURE_LISTED_TWICE,
@@ -6445,8 +6455,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.26.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.26.0/bundle.json");
+        assert_eq!(version, "0.27.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.27.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
@@ -6674,6 +6684,20 @@ mod tests {
             ])
             .expect_err("refused"),
             WireValidationError::OverlappingReadOnlyRootMount
+        );
+    }
+
+    /// Issue #236 (ADR 0010, amended 2026-11-20): eight distinct roots are one start's
+    /// declaration, and a ninth is the bound's refusal.
+    #[test]
+    fn eight_read_only_roots_are_admitted_and_a_ninth_is_refused() {
+        let roots: Vec<ReadOnlyRoot> = (1..=9)
+            .map(|index| root(&format!("/srv/r{index}"), &format!("/opt/r{index}")))
+            .collect();
+        assert_eq!(validate_read_only_roots(&roots[..8]), Ok(()));
+        assert_eq!(
+            validate_read_only_roots(&roots).expect_err("refused"),
+            WireValidationError::InvalidReadOnlyRootBounds
         );
     }
 

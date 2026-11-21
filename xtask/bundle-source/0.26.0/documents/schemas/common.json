@@ -596,9 +596,7 @@
       "items": {
         "$ref": "#/$defs/read-only-root"
       },
-      "maxItems": {
-        "$wire": "MAX_READ_ONLY_ROOTS"
-      },
+      "maxItems": 4,
       "type": "array",
       "x-b10x-requires-capability": "exec.read-only-roots",
       "x-b10x-refusals": [
