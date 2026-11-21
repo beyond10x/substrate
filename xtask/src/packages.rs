@@ -7,11 +7,13 @@ use anyhow::{Context as _, Result};
 
 use crate::report::Report;
 
-const SOURCE_PACKAGES: [(&str, &str); 11] = [
+const SOURCE_PACKAGES: [(&str, &str); 12] = [
     ("crates/substrate-wire", "b10x-substrate-wire"),
     ("crates/substrate-store", "b10x-substrate-store"),
     ("crates/substrate-guarded", "b10x-substrate-guarded"),
     ("crates/substrate-executor", "b10x-substrate-executor"),
+    // The helper an embedder of the host driver builds from the revision it pins (design 35).
+    ("crates/substrate-exec-gate", "b10x-substrate-exec-gate"),
     ("crates/substrate-host", "b10x-substrate-host"),
     (
         "crates/substrate-kubernetes-client",

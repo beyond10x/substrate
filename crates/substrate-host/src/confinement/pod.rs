@@ -989,6 +989,7 @@ pub fn check_profile(
         return Err(ConfinementError::FactUnserved {
             adapter: AdapterName::Pod,
             fact: Fact::StdinPipe,
+            withheld: None,
         });
     }
     // The log endpoint merges stdout and stderr into one stream, so no chunk could name its true
@@ -997,6 +998,7 @@ pub fn check_profile(
         return Err(ConfinementError::FactUnserved {
             adapter: AdapterName::Pod,
             fact: Fact::OutputLive,
+            withheld: None,
         });
     }
     // Its workspace is an `emptyDir` the adapter creates, so no part of it can be held read-only.
@@ -1903,7 +1905,7 @@ mod tests {
         )
         .expect_err("refused");
         match &error {
-            ConfinementError::FactUnserved { adapter, fact } => {
+            ConfinementError::FactUnserved { adapter, fact, .. } => {
                 assert_eq!(*adapter, AdapterName::Pod);
                 assert_eq!(*fact, Fact::StdinPipe);
             }
@@ -1939,7 +1941,7 @@ mod tests {
         )
         .expect_err("refused");
         match &error {
-            ConfinementError::FactUnserved { adapter, fact } => {
+            ConfinementError::FactUnserved { adapter, fact, .. } => {
                 assert_eq!(*adapter, AdapterName::Pod);
                 assert_eq!(*fact, Fact::OutputLive);
             }

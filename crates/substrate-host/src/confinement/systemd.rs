@@ -572,14 +572,16 @@ mod imp {
         }
     }
 
-    /// The facts `systemd` around `inner` proves: `inner`'s, plus what the scope adds.
+    /// The facts `systemd` around `inner` proves: `inner`'s, plus what the scope adds. What the
+    /// inner adapter withheld at its open, the scope withholds for the same cause (design 35
+    /// D27).
     fn proof(
         inner: InnerAdapter,
         proved: &AdapterFacts,
         families: &[ContractFamily],
         facts: &[Fact],
     ) -> AdapterFacts {
-        AdapterFacts::new(
+        let mut around = AdapterFacts::new(
             AdapterName::Systemd,
             Some(inner),
             &FAMILY_ORDER
@@ -595,7 +597,9 @@ mod imp {
                 .iter()
                 .map(|fact| (fact.clone(), proved.proves(fact) || facts.contains(fact)))
                 .collect::<Vec<_>>(),
-        )
+        );
+        around.withheld.clone_from(&proved.withheld);
+        around
     }
 
     // ---- around `linux` ----
@@ -1457,6 +1461,46 @@ mod imp {
                 ]
             );
             assert!(super::super::super::check_open(&facts).is_ok());
+        }
+
+        /// Design 35 D27: `systemd` around a `linux` whose open withheld a fact carries the same
+        /// entries and proves no more than the inner adapter did.
+        #[test]
+        fn around_linux_the_proof_carries_what_the_inner_adapter_withheld() {
+            let entries = vec![
+                super::super::super::FactWithheld {
+                    fact: Fact::ExecSubpaths,
+                    cause: "file-system-unlisted",
+                    address: "config.workspace_root",
+                    path: "/data/workspaces".to_owned(),
+                    file_system: Some("xfs".to_owned()),
+                },
+                super::super::super::FactWithheld {
+                    fact: Fact::ExecSubpaths,
+                    cause: "mount-id-unreported",
+                    address: "config.exec_gate",
+                    path: "/usr".to_owned(),
+                    file_system: None,
+                },
+            ];
+            let mut inner = AdapterFacts::new(
+                AdapterName::Linux,
+                None,
+                &[(ContractFamily::ProcessRun, true)],
+                &[(Fact::StdinPipe, true)],
+            );
+            inner.withheld.clone_from(&entries);
+            let facts = proof(InnerAdapter::Linux, &inner, &[], &[]);
+            assert_eq!(facts.adapter, AdapterName::Systemd);
+            assert_eq!(facts.withheld, entries);
+            assert!(!facts.proves(&Fact::ExecSubpaths));
+            // An inner proof with no entry gives a proof with none.
+            inner.withheld.clear();
+            assert!(
+                proof(InnerAdapter::Linux, &inner, &[], &[])
+                    .withheld
+                    .is_empty()
+            );
         }
 
         #[test]

@@ -63,7 +63,7 @@ scenarios.
 | `ipc_socket_allowlist` | FALSE | UNKNOWN | FALSE | FALSE | UNKNOWN | FALSE | FALSE |
 | `ipc_signals_contained` | FALSE | UNKNOWN | TRUE | FALSE | UNKNOWN | FALSE | FALSE |
 | `sealed_paths` | FALSE | FALSE | UNKNOWN | FALSE | FALSE | FALSE | FALSE |
-| `exec_subpaths` | FALSE | FALSE | UNKNOWN | FALSE | FALSE | FALSE | FALSE |
+| `exec_subpaths` | FALSE | UNKNOWN | UNKNOWN | FALSE | UNKNOWN | FALSE | FALSE |
 | `private_tmpdir` | FALSE | FALSE | UNKNOWN | FALSE | FALSE | FALSE | FALSE |
 | `host_network` | TRUE | FALSE | FALSE | TRUE | FALSE | FALSE | FALSE |
 | `image_digest_pinned` | FALSE | FALSE | FALSE | FALSE | FALSE | TRUE | TRUE |
@@ -114,8 +114,16 @@ The host driver behind the contract: bubblewrap, namespaces, cgroup v2, seccomp 
   aperture, `limits` with cgroup limits on processes, memory and CPU, and `audit` always. Facts:
   `whole_tree_kill` with cgroup kill, `ipc_socket_allowlist` and `output_live` on the floor, and
   `ipc_signals_contained` on the floor with a pid namespace.
+- **Executable allow-list.** `exec_subpaths` is proved only where the embedder names the helper
+  `substrate-exec-gate` in `HostConfig.exec_gate` and the open-time probe held a run to a list
+  with it (Landlock, Linux 5.19). A profile with a non-empty list then executes only its
+  program and what the entries name. A profile with an empty list runs every program of its
+  view, where `macos` runs only the program.
+  [Executable allow-lists on linux](../guides/confinement-profiles.md#executable-allow-lists-on-linux)
+  has the entry rules.
 - **Refuses by name.** A profile that requires `paths_are_host_paths`, `sealed_paths`,
-  `exec_subpaths`, `private_tmpdir` or `host_network` (`confinement.fact-unserved`); a working
+  `private_tmpdir` or `host_network`, or `exec_subpaths` on a host that did not prove it
+  (`confinement.fact-unserved`); a working
   directory the host has not proved (`exec.workdir-unserved`); a writable root the operator did
   not declare (`exec.writable-roots-host-unserved`); an egress aperture the host did not declare
   (`exec.aperture-undeclared`); a workspace that is not a directory directly beneath the driver's

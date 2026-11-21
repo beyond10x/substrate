@@ -75,9 +75,38 @@ pub struct AdapterFacts {
     pub inner: Option<InnerAdapter>,
     pub served_families: Vec<ContractFamily>,
     pub facts: Vec<Fact>,
+    /// Why the adapter does not prove a fact its probe could have proved (design 35 D27): one
+    /// entry per fact and path, in the order the open placed the paths. Empty, and then not
+    /// serialized, unless the open withheld a fact for a named cause; a fact that is absent
+    /// because no helper is configured, or because its probe did not hold, has no entry.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub withheld: Vec<FactWithheld>,
     /// The opened adapter this proof belongs to: an admitted profile starts only there.
     #[serde(skip)]
     instance: u64,
+}
+
+/// Why an opened adapter does not prove a fact its probe could have proved (design 35 D27).
+///
+/// `linux` opened with `HostConfig.exec_gate` set proves no executable-list fact where a path
+/// of the open has no place the lists can be decided by, for one of two causes: the path lies
+/// on a file-system type outside `ext4`, `overlay` and `tmpfs` (`file-system-unlisted`), or the
+/// kernel reports no mount ID for it (`mount-id-unreported`). The adapter opens, a profile that
+/// carries a list is refused `confinement.fact-unserved`, and that refusal repeats the entry.
+/// Every other cause refuses the open `config.exec-gate-unserved` instead.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FactWithheld {
+    pub fact: Fact,
+    /// `file-system-unlisted` or `mount-id-unreported`.
+    pub cause: &'static str,
+    /// `config.exec_gate`, `config.workspace_root` or `config.writable_roots`: the
+    /// configuration field the path belongs to. `config.exec_gate` for the helper's own file,
+    /// a base directory of every view and the directory the probes build their workspace in.
+    pub address: &'static str,
+    pub path: String,
+    /// The type field of the path's mount row; absent for `mount-id-unreported`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_system: Option<String>,
 }
 
 impl AdapterFacts {
@@ -108,8 +137,14 @@ impl AdapterFacts {
                 .filter(|f| proved_fact(f))
                 .cloned()
                 .collect(),
+            withheld: Vec::new(),
             instance: super::next_instance(),
         }
+    }
+
+    /// The first entry that says why `fact` is withheld, which a refusal naming it repeats.
+    pub(crate) fn withheld_for(&self, fact: &Fact) -> Option<&FactWithheld> {
+        self.withheld.iter().find(|entry| entry.fact == *fact)
     }
 
     pub(crate) fn instance(&self) -> u64 {

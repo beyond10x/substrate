@@ -38,7 +38,10 @@ types:
   # - ipc_socket_allowlist: socket(2) families are an allowlist (ADR 0039).
   # - ipc_signals_contained: no signal reaches a process outside the tree.
   # - sealed_paths: paths inside a writable workspace that stay unwritable.
-  # - exec_subpaths: exec admitted by declared subpath, not only by literal program.
+  # - exec_subpaths: exec admitted by declared subpath, not only by literal program. An empty list
+  #   differs by adapter and the difference is stated, not removed (design 35 D1): on `linux` it
+  #   runs every program of the view and only a non-empty list holds the run to its program and
+  #   the list; on `macos` it runs only the program.
   # - private_tmpdir: a per-run TMPDIR, invisible to another run and gone after wait.
   # - host_network: the run uses the host's network directly.
   # - image_digest_pinned: the image runs by digest only.
@@ -194,11 +197,13 @@ commands:
   #   (`crates/substrate-host/src/probe.rs`); whole_tree_kill (cgroup kill), ipc_socket_allowlist
   #   (ADR 0039's seccomp socket filter), ipc_signals_contained (its own pid namespace),
   #   stdin_pipe and output_live (design 32: the host driver's pipe channel, with a live sender
-  #   for output_live, each proved with the floor). The S0
+  #   for output_live, each proved with the floor), exec_subpaths (design 35: the Landlock
+  #   execute right, applied inside the sandbox by the helper `HostConfig.exec_gate` names, and
+  #   proved by the driver's probe; the delegated lane opens its adapter with that helper). The S0
   #   story: paths_are_host_paths, sealed_paths and host_network are not proved.
-  #   UNMAPPED: exec_subpaths and private_tmpdir. The bwrap argv mounts a fresh `/tmp`
-  #   (`crates/substrate-host/src/process.rs`), but no story declares either fact for `linux`;
-  #   both are left out until one does.
+  #   UNMAPPED: private_tmpdir. The bwrap argv mounts a fresh `/tmp`
+  #   (`crates/substrate-host/src/process.rs`), but no story declares the fact for `linux`;
+  #   it is left out until one does.
   # - macos, final state after `story:macos-seatbelt-policy-runs-cargo-test`: process_run,
   #   process_watch, output_read, wait, workspace, filesystem_view, audit; paths_are_host_paths,
   #   ipc_signals_contained (the profile's `signal (target same-sandbox)` rule,

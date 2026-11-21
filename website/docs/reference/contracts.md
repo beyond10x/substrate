@@ -102,13 +102,13 @@ status.
 
 ### Scenarios and lanes
 
-The specification holds 65 authored scenarios. Each is named for its adapter and the lane it runs
+The specification holds 67 authored scenarios. Each is named for its adapter and the lane it runs
 in, and each adapter's test file runs its lane's scenarios against the real adapter.
 
 | Lane | Scenarios | Runs against |
 |---|---|---|
 | `portable` | 20 | `local`, and the open refusals and absences any host can check |
-| `delegated` | 20 | `linux` and `systemd` on a host with a delegated cgroup v2 root |
+| `delegated` | 22 | `linux` and `systemd` on a host with a delegated cgroup v2 root |
 | `macos` | 10 | `macos` on the `macos-15` CI job |
 | `oci` | 7 | `oci` against Docker in the gate workflow |
 | `pod` | 5 | `pod` against a pinned `kind` cluster in the gate workflow |

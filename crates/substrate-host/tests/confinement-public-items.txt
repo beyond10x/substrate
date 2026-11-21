@@ -15,7 +15,14 @@ confinement/facts.rs: struct AdapterFacts > pub adapter: AdapterName,
 confinement/facts.rs: struct AdapterFacts > #[serde(skip_serializing_if = "Option::is_none")] pub inner: Option<InnerAdapter>,
 confinement/facts.rs: struct AdapterFacts > pub served_families: Vec<ContractFamily>,
 confinement/facts.rs: struct AdapterFacts > pub facts: Vec<Fact>,
+confinement/facts.rs: struct AdapterFacts > #[serde(skip_serializing_if = "Vec::is_empty")] pub withheld: Vec<FactWithheld>,
 confinement/facts.rs: struct AdapterFacts > (private fields)
+confinement/facts.rs: #[derive(Debug, Clone, PartialEq, Serialize)] pub struct FactWithheld
+confinement/facts.rs: struct FactWithheld > pub fact: Fact,
+confinement/facts.rs: struct FactWithheld > pub cause: &'static str,
+confinement/facts.rs: struct FactWithheld > pub address: &'static str,
+confinement/facts.rs: struct FactWithheld > pub path: String,
+confinement/facts.rs: struct FactWithheld > #[serde(skip_serializing_if = "Option::is_none")] pub file_system: Option<String>,
 confinement/facts.rs: impl AdapterFacts > pub fn new(adapter: AdapterName, inner: Option<InnerAdapter>, served: &[(ContractFamily, bool)], proved: &[(Fact, bool)]) -> Self
 confinement/facts.rs: impl AdapterFacts > pub fn serves(&self, family: &ContractFamily) -> bool
 confinement/facts.rs: impl AdapterFacts > pub fn proves(&self, fact: &Fact) -> bool
@@ -24,9 +31,12 @@ confinement/linux.rs: #[derive(Debug, Clone)] pub struct LinuxRequest
 confinement/linux.rs: struct LinuxRequest > pub config: HostConfig,
 confinement/linux.rs: impl LinuxRequest > pub fn new(config: HostConfig) -> Self
 confinement/linux.rs: impl LinuxRequest > pub fn with_cgroup_root(mut self, cgroup_root: Option<PathBuf>) -> Self
+confinement/linux.rs: #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)] pub struct ExecListProof
+confinement/linux.rs: struct ExecListProof > pub subpaths: bool,
+confinement/linux.rs: struct ExecListProof > #[serde(skip_serializing_if = "Vec::is_empty")] pub withheld: Vec<super::FactWithheld>,
 confinement/linux.rs: #[cfg(target_os = "linux")] pub use imp::proof;
 confinement/linux.rs: mod imp > pub const DEFAULT_BOUNDS: ProcessBounds = ProcessBounds {timeout_ms: 600_000, processes: 256, memory_bytes: 1 << 30, cpu_millis: 600_000};
-confinement/linux.rs: mod imp > pub fn proof(machine: &CapabilitySnapshot) -> AdapterFacts
+confinement/linux.rs: mod imp > pub fn proof(machine: &CapabilitySnapshot, exec_lists: &ExecListProof) -> AdapterFacts
 confinement/linux.rs: mod imp > pub struct LinuxAdapter
 confinement/linux.rs: mod imp > struct LinuxAdapter > (private fields)
 confinement/linux.rs: mod imp > #[async_trait] impl StdinPipe for HostPipe
@@ -72,7 +82,7 @@ confinement/mod.rs: pub mod systemd;
 confinement/mod.rs: pub use crate::confinement_types::{AdapterName, ContractFamily, Fact};
 confinement/mod.rs: pub use crate::{DeclaredWritableRoot, HostConfig};
 confinement/mod.rs: pub use crate::output_retention::{KeptOutput, OutputRetention, Retention};
-confinement/mod.rs: pub use facts::{AdapterFacts, FACT_ORDER, FAMILY_ORDER, InnerAdapter, ReservedField};
+confinement/mod.rs: pub use facts::{AdapterFacts, FACT_ORDER, FAMILY_ORDER, FactWithheld, InnerAdapter, ReservedField};
 confinement/mod.rs: pub use profile::{ConfinementProfile, IoBounds, Ipc, Network, OutputDelivery, ProcessBounds, StdinMode, image_is_pinned};
 confinement/mod.rs: pub use stdin::{MAX_STDIN_BYTES, STDIN_CHUNK_BYTES, run_with_stdin};
 confinement/mod.rs: pub use crate::observation::PipeStream;
@@ -106,7 +116,7 @@ confinement/mod.rs: pub fn admit_unopened(adapter: &AdapterName, profile: &Confi
 confinement/mod.rs: #[derive(Debug, thiserror::Error)] pub enum ConfinementError
 confinement/mod.rs: enum ConfinementError > AdapterUnserved {adapter: AdapterName, detail: String},
 confinement/mod.rs: enum ConfinementError > FamilyUnserved {adapter: AdapterName, family: ContractFamily},
-confinement/mod.rs: enum ConfinementError > FactUnserved {adapter: AdapterName, fact: Fact},
+confinement/mod.rs: enum ConfinementError > FactUnserved {adapter: AdapterName, fact: Fact, withheld: Option<FactWithheld>},
 confinement/mod.rs: enum ConfinementError > LocalRefused {adapter: AdapterName},
 confinement/mod.rs: enum ConfinementError > LocalReasonMissing {adapter: AdapterName},
 confinement/mod.rs: enum ConfinementError > ImageUnpinned {adapter: AdapterName},
@@ -397,6 +407,7 @@ lib.rs: struct HostConfig > pub exec_cpu_cores: u32,
 lib.rs: struct HostConfig > pub host_processes: bool,
 lib.rs: struct HostConfig > pub writable_roots: Vec<DeclaredWritableRoot>,
 lib.rs: struct HostConfig > pub tmp_bytes: Option<u64>,
+lib.rs: struct HostConfig > pub exec_gate: Option<PathBuf>,
 lib.rs: impl HostConfig > pub fn minimum(workspace_root: impl Into<PathBuf>) -> Self
 observation.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum PipeStream
 observation.rs: enum PipeStream > Stdout,

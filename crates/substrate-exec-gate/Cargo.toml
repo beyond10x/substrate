@@ -1,0 +1,30 @@
+[package]
+name = "b10x-substrate-exec-gate"
+description = "The helper the substrate linux confinement adapter runs last before a run's program, holding the run to its executable allow-list"
+homepage = "https://beyond10x.github.io/substrate/"
+documentation = "https://beyond10x.github.io/substrate/docs/guides/confinement-profiles"
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+keywords = ["sandbox", "linux", "landlock"]
+categories = ["os::linux-apis"]
+
+[lib]
+name = "substrate_exec_gate"
+
+[[bin]]
+name = "substrate-exec-gate"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -22,7 +22,7 @@ use crate::output_retention::OutputRetention;
 /// | `output_retention` other than `Head` on both streams | `output_read` |
 /// | `writable_roots`, `read_only_roots`, `read_only_files` | `filesystem_view` |
 /// | `sealed_paths` | the fact `sealed_paths` |
-/// | `exec_subpaths` | the fact `exec_subpaths` |
+/// | `exec_subpaths` | the fact `exec_subpaths`. An empty list runs every program of the view on `linux` and only the program on `macos`; on `linux` an entry is a path of the run's view and must exist at the start (design 35) |
 /// | `private_tmpdir` | the fact `private_tmpdir` |
 /// | `network: Egress` | `network_egress` |
 /// | `network: Isolated` | `network_egress` on an adapter that proves `host_network` |
@@ -68,7 +68,40 @@ pub struct ConfinementProfile {
     pub read_only_files: Vec<ReadOnlyFile>,
     /// Paths inside the workspace that stay unwritable.
     pub sealed_paths: Vec<String>,
-    /// Subpaths exec is admitted beneath, beyond the literal program.
+    /// Subpaths exec is admitted beneath, beyond the literal program: each entry names a
+    /// directory, which admits every file beneath it, or one file.
+    ///
+    /// **An empty list differs by adapter, and the difference is stated, not removed** (design
+    /// 35 D1). On `linux` an empty list runs every program of the run's view, and only a
+    /// non-empty list holds the run to its literal program and the entries. On `macos` an empty
+    /// list runs only the program.
+    ///
+    /// On `linux` an entry is a path of the run's view, not a host path: relative beneath
+    /// `/workspace`, absolute beneath `/usr`, `/bin`, `/lib`, `/lib64`, `/workspace` or the mount
+    /// of a declared root or file; anywhere else is `exec.sandbox-exec-subpath-undeclared`. It
+    /// must exist when the run starts, has no symbolic link in a mount that shows something a
+    /// run can write, does not resolve into a mount the run can write, and is at most 4095
+    /// bytes long in the view; each is `exec.sandbox-path-unrepresentable`. The program is then
+    /// an absolute path. A place the host cannot establish is `exec.sandbox-place-unserved` (501).
+    ///
+    /// The list restricts which files are executed, not what an allowed program does: an allowed
+    /// interpreter runs any script it can read, and the loader run as a program loads any file.
+    /// The run's variables are not filtered: an object that `LD_PRELOAD` names is loaded into
+    /// every allowed dynamic program and runs its code there, and an `execve` it makes of an
+    /// unlisted path still fails (D28).
+    /// A listed directory does not reach through a second mount of a part of it, so list
+    /// `/usr/bin`, the directory that holds the programs, and not `/usr`.
+    ///
+    /// An entry admits a file by where the file itself lies: a symbolic link in a listed
+    /// directory that points outside it is not admitted. On Ubuntu 26.04, `ln`, `env`, `cat`,
+    /// `ls` and `mkdir` in `/usr/bin` are links into `/usr/lib/cargo/bin/coreutils` and are
+    /// denied with only `/usr/bin` listed, while `mv`, `cp`, `rm` and `true` are links to
+    /// `gnu*` names in `/usr/bin` and run. List the directory the tools really lie in as
+    /// well, or the tool itself.
+    ///
+    /// With a list, a declared root or file mounted at or beneath `/.substrate-exec-gate`,
+    /// where the helper is bound, is refused before dispatch by its kind's code for a mount
+    /// the driver owns (D29).
     pub exec_subpaths: Vec<String>,
     /// A per-run `TMPDIR`, invisible to another run and gone after `wait`.
     pub private_tmpdir: bool,

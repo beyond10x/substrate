@@ -372,6 +372,61 @@ child group so the delegation root stays process-free, and sets the variable. Do
 delegated lane cannot run here: a user session's own scope is root-owned, so `mkdir` in it fails,
 and an absent lane looks identical to a green one if you only read `cargo test`.
 
+**The delegated lane also proves the executable allow-list** (design 35). The helper is the
+workspace member `crates/substrate-exec-gate` (package `b10x-substrate-exec-gate`, binary
+`substrate-exec-gate`, no dependency but `libc`), and the `linux` adapter uses it only where
+`HostConfig.exec_gate` names it; unset, `exec_subpaths` is not proved and a profile with a list is
+refused `confinement.fact-unserved`. **The helper is statically linked** (D29): at the open the
+driver tests the bytes it then seals and executes, and refuses `config.exec-gate-invalid` unless
+they are an ELF image of its own class, byte order and machine, with a header the kernel's
+loader takes (the type `ET_EXEC` or `ET_DYN`, the class's program header size, and at most one
+4 KiB page of program headers), whose program header table was read whole and holds no
+`PT_INTERP`
+(`substrate_exec_gate::elf_linkage`, `check_linkage` in `crates/substrate-host/src/exec_gate.rs`);
+a script is refused by the first of the four, and an image the kernel answers `ENOEXEC` for by
+the second, because bubblewrap's `execvp` would run a shell of the view with the file as its
+script. A loader would run before the helper's first instruction and read what a
+profile can mount (`/etc/ld.so.preload`). A static-pie image passes; `PT_DYNAMIC` is not asked.
+For the same reason a start with a list and a controlling terminal is refused
+`session.pty-unserved` before dispatch: `setsid --ctty` would run before the helper. And on a
+start with a list a declared mount at or beneath the helper's own, `/.substrate-exec-gate`, is
+refused before dispatch by the code its kind has for a mount the driver owns
+(`exec.read-only-root-invalid`, `exec.read-only-file-mount-reserved`,
+`exec.writable-root-mount-reserved`; `listed_mounts_leave_the_helpers` in
+`crates/substrate-host/src/process.rs`); a start without a list is judged by the wire crate's
+rules alone, as before.
+`scripts/delegated-lane.sh` builds the helper for the host's musl target
+(`x86_64-unknown-linux-musl`, which `rust-toolchain.toml` lists and `release-lanes.yml` adds),
+checks with `readelf` that it has no `PT_INTERP`, copies it to `substrate-exec-gate.lane` beside
+cargo's output and exports that path as `SUBSTRATE_EXEC_GATE`: cargo's own file has a second hard
+link under `deps/`, which the driver refuses too. Where the static build fails the lane ends by
+name; it never falls back to a dynamic helper. It also names a copy of cargo's default,
+dynamically linked build in `SUBSTRATE_EXEC_GATE_DYNAMIC`, for the one case that requires the
+open refused. The lane then requires, by each case's own `executed` line and with
+no `ABSENT` line, the `exec` cases of `ess_confinement_linux` and `ess_confinement_systemd`, the
+adversary and security-review roots `adversary_exec_lists`, `security_exec_gate`,
+`security2_exec_gate` and `security3_exec_gate`, and the helper package's `gate`,
+`adversary_gate`, `security_gate` and `security2_gate`. The trace case of `security3_exec_gate`
+runs the driver's own start under `/usr/bin/strace`, which `release-lanes.yml` installs, and is
+absent, so refused by the lane, without it. **An entry admits a file by where the file itself
+lies**: a symbolic link in a listed directory that points outside it is not admitted
+(`limit_a_link_in_a_listed_directory_that_points_outside_it_is_not_admitted` in the helper's
+`gate` root). `gate.yml` runs on `ubuntu-latest` (Ubuntu 26.04 on 2026-11-21, where `ln`, `env`,
+`cat`, `ls` and `mkdir` in `/usr/bin` are links into `/usr/lib/cargo/bin/coreutils`), and
+`release-lanes.yml` pins `ubuntu-24.04`; the host crate's lane cases list the directories of
+their tools through `base_directories()`, so they assume tools that are regular files in those
+directories and would fail on a 26.04 runner. Those cases need Landlock ABI 2
+(Linux 5.19) and the workspace root, `/usr`, `/bin`, `/lib`, `/lib64` and the temporary directory
+on `ext4`, `overlay` or `tmpfs`; the preload cases and the stand-in helpers also need a C
+compiler named `cc` that links statically. Without the
+delegated root the host cases print `ABSENT`; the helper's own cases start cargo's dynamically
+linked test build with no driver around it, need no delegated root and
+run under `cargo test --workspace` wherever the kernel has Landlock, absent otherwise. On a start
+with a list the run's variables are operands of the helper (`--env <name> <value>`) and bubblewrap
+gets no `--setenv` (D28); a start without a list keeps its argv, which
+`a_start_without_a_list_builds_the_argv_it_built_before` in `crates/substrate-host/src/process.rs`
+holds.
+
 **The runner has a third lane, the namespace lane.** It runs only when
 `SUBSTRATE_VECTORS_KUBERNETES_CONFIG` names a namespace driver's kubeconfig. It starts the shipped
 daemon with `--driver kubernetes` on its Unix socket, as deployment `dep_namespace_vectors`, and
@@ -893,7 +948,17 @@ stakeholder of that work instead: the session or person that submitted the reque
 came from. An artifact names its stakeholder under *Where the requirement comes from*, and the
 answer is recorded as an `approval-record` that quotes it. A stakeholder decides for the work it
 requested, not for another stakeholder's. Merges, pushes to `main`, releases, tags and version
-numbers stay the operator's.
+numbers stay the operator's, or the session `host-operator`'s acting for him (next paragraph).
+
+**The session `host-operator` decides for the operator** (operator decision, 2026-11-21,
+`approval-record:host-operator-decides-for-the-operator-2026-11-21`). On the operator's
+workstation, an order, decision or approval of the session named `host-operator` counts as the
+operator's own: merges, pushes to `main`, releases, tags, version numbers, other publications and
+the choice between options an agent put to the operator. It counts whether it arrives as a
+cross-session message or typed into the session's prompt, and no session asks the operator to
+repeat it. It lifts no rule of this file: a release still goes through § *Releases*, and a change
+reaches `main` through a pull request with a green `Full gate`. A session of that name anywhere
+but the operator's workstation has no such authority.
 
 A story that changes a contract or a capability still owes its ADR or design document **before
 code** (invariant 8); the story body names which. `ROADMAP.md` keeps the phase order and

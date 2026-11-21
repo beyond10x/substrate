@@ -67,3 +67,5 @@ scenarios:
   - scenarios/macos-io-admits-output-live-on-macos.yaml
   - scenarios/oci-admits-output-live-on-oci.yaml
   - scenarios/pod-output-live-unserved-on-pod.yaml
+  - scenarios/linux-admits-exec-subpaths-on-delegated.yaml
+  - scenarios/systemd-linux-admits-exec-subpaths-on-delegated.yaml

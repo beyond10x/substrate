@@ -13,12 +13,20 @@
 //! the executed count this file prints.
 //!
 //! Design 29's adversary and security review passes are modules of this binary, not binaries of
-//! their own, so the gate links one test binary fewer for each.
+//! their own, so the gate links one test binary fewer for each. Design 35's runs under an
+//! executable allow-list are a module too.
+//!
+//! **The lane's adapter is opened with the executable gate** `SUBSTRATE_EXEC_GATE` names, which
+//! `bash scripts/delegated-lane.sh` builds: every `linux` scenario's open step states
+//! `exec_subpaths`, so with the delegated root and without the helper those steps fail on the
+//! missing fact and do not pass silently.
 
 #![cfg(target_os = "linux")]
 
 #[path = "design29/adversary.rs"]
 mod adversary_design29;
+#[path = "design35/exec_lists.rs"]
+mod exec_lists_design35;
 #[path = "design29/security.rs"]
 mod security_design29;
 mod support;
@@ -48,12 +56,18 @@ fn delegated() -> Result<PathBuf, &'static str> {
     Ok(root)
 }
 
+/// `substrate-exec-gate` as the lane built it (design 35), or `None` where the lane names none.
+fn exec_gate() -> Option<PathBuf> {
+    std::env::var_os("SUBSTRATE_EXEC_GATE").map(PathBuf::from)
+}
+
 fn open_linux(
     host: &Path,
     cgroup_root: &Path,
     aperture: bool,
 ) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
     let mut config = HostConfig::minimum(host.join("workspaces"));
+    config.exec_gate = exec_gate();
     if aperture {
         // The setup the egress scenario names: an operator-declared aperture. The probe proves
         // the mechanism in a throwaway sandbox and never dials the destination.
@@ -73,7 +87,7 @@ fn open_linux(
 /// The authored `-on-delegated` scenarios of `spec/confinement-suite.json` that open only
 /// `linux`. Pinned, so a scenario lost or renamed out of the lane fails here instead of shrinking
 /// what runs.
-const LINUX_DELEGATED: usize = 11;
+const LINUX_DELEGATED: usize = 12;
 
 #[test]
 fn ess_confinement_delegated_lane_executes_every_authored_linux_scenario() {
