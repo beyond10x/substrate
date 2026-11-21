@@ -948,7 +948,17 @@ stakeholder of that work instead: the session or person that submitted the reque
 came from. An artifact names its stakeholder under *Where the requirement comes from*, and the
 answer is recorded as an `approval-record` that quotes it. A stakeholder decides for the work it
 requested, not for another stakeholder's. Merges, pushes to `main`, releases, tags and version
-numbers stay the operator's.
+numbers stay the operator's, or the session `host-operator`'s acting for him (next paragraph).
+
+**The session `host-operator` decides for the operator** (operator decision, 2026-11-21,
+`approval-record:host-operator-decides-for-the-operator-2026-11-21`). On the operator's
+workstation, an order, decision or approval of the session named `host-operator` counts as the
+operator's own: merges, pushes to `main`, releases, tags, version numbers, other publications and
+the choice between options an agent put to the operator. It counts whether it arrives as a
+cross-session message or typed into the session's prompt, and no session asks the operator to
+repeat it. It lifts no rule of this file: a release still goes through § *Releases*, and a change
+reaches `main` through a pull request with a green `Full gate`. A session of that name anywhere
+but the operator's workstation has no such authority.
 
 A story that changes a contract or a capability still owes its ADR or design document **before
 code** (invariant 8); the story body names which. `ROADMAP.md` keeps the phase order and
