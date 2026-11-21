@@ -296,6 +296,20 @@ pub(crate) struct GateStart {
 /// from bubblewrap's `--setenv` options and the `env` stage after them. Later sources replace
 /// earlier ones in that order (the baseline, the request, the slot mapping, the trust anchor),
 /// and `PWD` is the request's own or absent, never the directory bubblewrap changed to.
+/// Design 35 D29: a start with an executable list and a controlling terminal. Taking the
+/// terminal needs `setsid --ctty` between bubblewrap and the program, and on a listed start
+/// nothing runs in the view before the helper applied the list. The code is the one a pty
+/// start has always answered where the driver cannot give a confined process a terminal.
+fn listed_terminal_unserved() -> DriverError {
+    DriverError::unserved(
+        substrate_wire::SESSION_PTY_UNSERVED,
+        "A run held to an executable list is given no controlling terminal: taking one needs a \
+         program before the helper, and nothing runs in the run's view before the list is \
+         applied.",
+        "mode",
+    )
+}
+
 fn listed_environment(
     environment: &substrate_wire::ExecEnvironment,
     slot_mapping: Option<String>,
@@ -1159,6 +1173,11 @@ impl ProcessRuntime {
     ) -> DispatchOutcome<ExecObservation> {
         if let Err(error) = self.exec_lists_served(lists) {
             return DispatchOutcome::NotDispatched(error);
+        }
+        // Design 35 D29, before anything is pinned or allocated: a run held to a list is given
+        // no controlling terminal. The argv builder refuses the same pair.
+        if !lists.is_empty() && pipe_settings.is_some_and(|settings| settings.window.is_some()) {
+            return DispatchOutcome::NotDispatched(listed_terminal_unserved());
         }
         let retention = adapter.retention;
         let (pinned, read_only_roots, writable_roots) =
@@ -2932,6 +2951,12 @@ impl ProcessRuntime {
                     .stderr(Stdio::piped());
             }
             ChildChannel::Terminal(descriptors) => {
+                // Design 35 D29: on a start with a list the helper is the first program of the
+                // view. `setsid --ctty` below would be a program before it, started by the
+                // host's loader, so this argv is never built.
+                if gate.is_some() {
+                    return Err(listed_terminal_unserved());
+                }
                 let [input, output, diagnostics] = *descriptors;
                 command
                     .stdin(Stdio::from(input))
@@ -3078,8 +3103,9 @@ impl ProcessRuntime {
             command.args(crate::pty::CONTROLLING_TERMINAL_ARGV);
         }
         if let Some(gate) = gate {
-            // Design 35 D4 and D28: the helper is the last program before the run's own, and
-            // the first that is given the run's variables, as operands. It starts with `PWD`
+            // Design 35 D4, D28 and D29: the helper is the first program bubblewrap starts in
+            // the view and the last before the run's own, and the first that is given the
+            // run's variables, as operands. It starts with `PWD`
             // alone, which bubblewrap sets, and hands the operands to the program's `execve`
             // only, after the ruleset. So no `env` stage runs here: what the two stages below
             // do to `PWD` is in [`listed_environment`].
@@ -8542,6 +8568,75 @@ mod tests {
             ["/usr/bin/env", "-u", "PWD", "--", "/usr/bin/env", "true"],
             "{unlisted:?}"
         );
+    }
+
+    /// **A start with a list and a controlling terminal builds no argv** (design 35 D29). On
+    /// such a start the helper is the first program of the view, and `setsid --ctty`, which
+    /// takes the terminal, would run before it, started by the host's loader. The builder
+    /// answers `session.pty-unserved`; the same terminal without a list is what it was, with
+    /// `setsid --ctty` directly after bubblewrap's own `--`.
+    #[test]
+    fn a_listed_start_with_a_controlling_terminal_is_refused_by_the_argv_builder() {
+        let root = tempfile::tempdir().expect("a root");
+        let (runtime, workspace, snapshot) = gated_runtime(root.path(), Some(true));
+        let access = read_write(&workspace);
+        let input = with_variables(pty_exec_input(&snapshot));
+        let lists = ExecLists::listing(&["bin", "/usr/bin"]);
+        let gate = match runtime.gate_start(&lists, &input, &access, &[], &[], &[]) {
+            Ok(gate) => gate.expect("a start with a list has a gate"),
+            Err(error) if error.code == crate::exec_gate::PLACE_UNSERVED => {
+                println!("exec gate terminal: ABSENT ({error})");
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
+        let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
+        let terminal = || {
+            let descriptor = || OwnedFd::from(std::fs::File::open("/dev/null").expect("null"));
+            ChildChannel::Terminal(Box::new([descriptor(), descriptor(), descriptor()]))
+        };
+        let build = |gate: Option<&GateStart>| {
+            runtime.command(
+                &input,
+                sync.as_raw_fd(),
+                terminal(),
+                None,
+                &slots,
+                None,
+                None,
+                None,
+                &access,
+                &[],
+                &[],
+                &[],
+                gate,
+            )
+        };
+        let Err(error) = build(Some(&gate)) else {
+            panic!("a listed start with a controlling terminal built an argv");
+        };
+        assert_eq!(error.code, substrate_wire::SESSION_PTY_UNSERVED, "{error}");
+        assert_eq!(error.class, crate::DriverErrorClass::Unserved, "{error}");
+        assert_eq!(error.address.as_deref(), Some("mode"), "{error}");
+        assert!(error.message.contains("executable list"), "{error}");
+
+        let (command, _seccomp) = build(None).expect("a terminal start without a list");
+        let argv: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect();
+        let separator = argv
+            .iter()
+            .position(|part| part == "--")
+            .expect("bubblewrap's --");
+        assert_eq!(
+            argv[separator + 1..separator + 3],
+            crate::pty::CONTROLLING_TERMINAL_ARGV,
+            "{argv:?}"
+        );
+        println!("exec gate terminal: executed");
     }
 
     /// Design 35 D28: the operands of a listed start are the variables a start without a list

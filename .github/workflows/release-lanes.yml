@@ -78,6 +78,10 @@ jobs:
           test -n "$channel"
           rustup toolchain install "$channel" --profile minimal
           rustup default "$channel"
+          # The lane builds the executable gate statically (design 35 D29) and refuses by name
+          # without this target; the toolchain file lists it, and this does not rest on rustup
+          # reading that list for a toolchain installed by name.
+          rustup target add --toolchain "$channel" x86_64-unknown-linux-musl
           cargo --version
 
       - name: Give the VM bubblewrap, its user-namespace grant and a user manager

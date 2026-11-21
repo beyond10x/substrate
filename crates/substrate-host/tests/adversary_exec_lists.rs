@@ -93,6 +93,101 @@ fn lane_with(name: &str, configure: impl FnOnce(&mut HostConfig, &Path)) -> Opti
     })
 }
 
+/// **D28 covers variables; `/etc/ld.so.preload` is a file, not a variable.** The lane's helper is
+/// dynamically linked (`interpreter /lib64/ld-linux-x86-64.so.2`), so its own loader reads
+/// `/etc/ld.so.preload` before the helper's `main` and before `landlock_restrict_self`. Design 35
+/// § 6 states this gap was not checked: "Whether a declared read-only file may be mounted at that
+/// path was not checked" (`docs/design/35-executable-lists.md:1311`). `validate_read_only_files`
+/// reserves only `RESERVED_MOUNTS` and the aperture/capsule/scratch mounts, not
+/// `/etc/ld.so.preload`, so a caller may declare one there, pointing the loader at an object in the
+/// workspace whose constructor runs with no list applied.
+///
+/// The object, on its first load, executes an unlisted base tool (`echo LEAKED`); a guard file
+/// lets later loads of it (by that `echo`) proceed. If the list held, the run's own script would
+/// print `0\n126\n126\n` (the base tool refused, 126). If the object ran before the ruleset,
+/// `LEAKED` reaches stdout and the run never reaches its own script.
+///
+/// **Two assertions were tightened by the implementor**, on the coordinator's word and by the
+/// design's seventh revision (D29, rule 2: "No list of loader files is kept. The driver does not
+/// refuse a declared mount at `/etc/ld.so.preload`"). The review took a start the adapter refuses
+/// as a pass, naming the refusal. The defence is a helper with no loader, so the profile must be
+/// admitted, the start must be dispatched, and the list must hold: a refusal for the path is now
+/// a failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary2_a_read_only_ld_so_preload_runs_before_the_ruleset() {
+    const NAME: &str = "adversary2 exec list ld.so.preload";
+    let Some(lane) = lane(NAME) else {
+        return;
+    };
+    let echo = tool("echo");
+    let source = lane.workspace.join("evil.c");
+    std::fs::write(
+        &source,
+        format!(
+            "#include <unistd.h>\n\
+             #include <fcntl.h>\n\
+             __attribute__((constructor)) static void before_the_ruleset(void) {{\n\
+             \x20   int fd = open(\"/workspace/.preload-ran\", O_WRONLY | O_CREAT | O_EXCL, 0644);\n\
+             \x20   if (fd < 0) return;\n\
+             \x20   close(fd);\n\
+             \x20   execl(\"{}\", \"echo\", \"LEAKED\", (char *)0);\n\
+             }}\n",
+            echo.display()
+        ),
+    )
+    .expect("the source");
+    let built = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(lane.workspace.join("evil.so"))
+        .arg(&source)
+        .output()
+        .expect("this case needs a C compiler named cc on the lane's host");
+    assert!(
+        built.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let conf = std::fs::canonicalize(&lane.workspace)
+        .expect("canonical workspace")
+        .join("preload.conf");
+    std::fs::write(&conf, "/workspace/evil.so\n").expect("the preload file");
+
+    let mut profile = listed(&lane.workspace, &["bin"]);
+    profile.read_only_files = vec![ReadOnlyFile {
+        host_path: text(&conf),
+        mount: "/etc/ld.so.preload".to_owned(),
+    }];
+    let script = three_executions();
+
+    let admitted = lane.adapter.admit(&profile).unwrap_or_else(|error| {
+        panic!("D29 refuses no declared mount for its path, and admission did: {error}")
+    });
+    let command = Command {
+        argv: vec![text(&tool("sh")), "-c".into(), script],
+        env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+    };
+    let run = lane
+        .adapter
+        .start(&admitted, &command)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("D29 refuses no declared mount for its path, and the start did: {error}")
+        });
+    let ended = lane.adapter.wait(&run).await.expect("waited");
+    let output = lane.adapter.output(&run).await.expect("output");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(
+        (
+            stdout.as_str(),
+            ended.exit.as_ref().and_then(|exit| exit.code)
+        ),
+        ("0\n126\n126\n", Some(0)),
+        "a run whose profile lists only `bin` loaded /workspace/evil.so through a read-only \
+         /etc/ld.so.preload and executed an unlisted base tool before the ruleset"
+    );
+    println!("{NAME}: executed");
+}
+
 fn listed(workspace: &Path, entries: &[&str]) -> ConfinementProfile {
     ConfinementProfile {
         workspace: Some(workspace.to_path_buf()),

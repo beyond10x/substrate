@@ -20,6 +20,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     Landlock ABI 2 (Linux 5.19). Cargo does not build a dependency's binary: build the helper
     from the revision you pin, and install a copy, because cargo's own output has a second hard
     link and is refused.
+  - **The helper must be statically linked**, for example
+    `cargo build --release -p b10x-substrate-exec-gate --target x86_64-unknown-linux-musl`. A
+    helper whose program headers hold `PT_INTERP`, which cargo's default build has, and a file
+    that is not an ELF image of the driver's own machine with a readable program header table,
+    are refused `config.exec-gate-invalid` at the open: a loader would
+    run before the helper and read files a profile can mount, `/etc/ld.so.preload` among them.
+    A start with a list and a controlling terminal is refused `session.pty-unserved`.
   - On a start with a list the run's variables reach the run's program and no program before
     it: the driver gives them to the helper as `--env <name> <value>` operands and gives
     bubblewrap no `--setenv`, and the helper refuses to run when a variable other than `PWD`

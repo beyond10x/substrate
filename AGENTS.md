@@ -376,16 +376,33 @@ and an absent lane looks identical to a green one if you only read `cargo test`.
 workspace member `crates/substrate-exec-gate` (package `b10x-substrate-exec-gate`, binary
 `substrate-exec-gate`, no dependency but `libc`), and the `linux` adapter uses it only where
 `HostConfig.exec_gate` names it; unset, `exec_subpaths` is not proved and a profile with a list is
-refused `confinement.fact-unserved`. `scripts/delegated-lane.sh` builds the helper, copies it to
-`substrate-exec-gate.lane` beside cargo's output and exports that path as `SUBSTRATE_EXEC_GATE`:
-cargo's own file has a second hard link under `deps/`, which the driver refuses
-(`config.exec-gate-invalid`). The lane then requires, by each case's own `executed` line and with
+refused `confinement.fact-unserved`. **The helper is statically linked** (D29): at the open the
+driver tests the bytes it then seals and executes, and refuses `config.exec-gate-invalid` unless
+they are an ELF image of its own class, byte order and machine, whose program header table was
+read whole and holds no `PT_INTERP`
+(`substrate_exec_gate::elf_linkage`, `check_linkage` in `crates/substrate-host/src/exec_gate.rs`);
+a script is refused by the first of the three. A loader would run before the helper's first
+instruction and read what a
+profile can mount (`/etc/ld.so.preload`). A static-pie image passes; `PT_DYNAMIC` is not asked.
+For the same reason a start with a list and a controlling terminal is refused
+`session.pty-unserved` before dispatch: `setsid --ctty` would run before the helper.
+`scripts/delegated-lane.sh` builds the helper for the host's musl target
+(`x86_64-unknown-linux-musl`, which `rust-toolchain.toml` lists and `release-lanes.yml` adds),
+checks with `readelf` that it has no `PT_INTERP`, copies it to `substrate-exec-gate.lane` beside
+cargo's output and exports that path as `SUBSTRATE_EXEC_GATE`: cargo's own file has a second hard
+link under `deps/`, which the driver refuses too. Where the static build fails the lane ends by
+name; it never falls back to a dynamic helper. It also names a copy of cargo's default,
+dynamically linked build in `SUBSTRATE_EXEC_GATE_DYNAMIC`, for the one case that requires the
+open refused. The lane then requires, by each case's own `executed` line and with
 no `ABSENT` line, the `exec` cases of `ess_confinement_linux` and `ess_confinement_systemd`, the
-adversary and security-review roots `adversary_exec_lists` and `security_exec_gate`, and the
-helper package's `gate`, `adversary_gate` and `security_gate`. Those cases need Landlock ABI 2
+adversary and security-review roots `adversary_exec_lists`, `security_exec_gate` and
+`security2_exec_gate`, and the helper package's `gate`, `adversary_gate`, `security_gate` and
+`security2_gate`. Those cases need Landlock ABI 2
 (Linux 5.19) and the workspace root, `/usr`, `/bin`, `/lib`, `/lib64` and the temporary directory
-on `ext4`, `overlay` or `tmpfs`; the preload cases also need a C compiler named `cc`. Without the
-delegated root the host cases print `ABSENT`; the helper's own cases need no delegated root and
+on `ext4`, `overlay` or `tmpfs`; the preload cases and the stand-in helpers also need a C
+compiler named `cc` that links statically. Without the
+delegated root the host cases print `ABSENT`; the helper's own cases start cargo's dynamically
+linked test build with no driver around it, need no delegated root and
 run under `cargo test --workspace` wherever the kernel has Landlock, absent otherwise. On a start
 with a list the run's variables are operands of the helper (`--env <name> <value>`) and bubblewrap
 gets no `--setenv` (D28); a start without a list keeps its argv, which

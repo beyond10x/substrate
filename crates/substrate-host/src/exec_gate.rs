@@ -16,7 +16,18 @@
 //! | 3 | a place the open needs cannot be established, for a cause that refuses (D26) | `config.exec-gate-unserved`, 501, with the cause and the path |
 //! | 3 | every such cause is `file-system-unlisted` or `mount-id-unreported` | **the adapter opens and the facts are withheld** (D27): the helper is not sealed, bound or executed, and no probe runs |
 //! | 4 | in the workspace root or a declared writable root, or a file with more than one link | `config.exec-gate-invalid`, 422 |
-//! | 5 | not of the driver's protocol | `config.exec-gate-unserved`, 501 |
+//! | 5 | not a statically linked ELF image of the driver's own class, byte order and machine: no such image, a program header table not read whole, or a `PT_INTERP` (D29) | `config.exec-gate-invalid`, 422 |
+//! | 6 | not of the driver's protocol | `config.exec-gate-unserved`, 501 |
+//!
+//! **Step 5 is asked of the bytes that are then sealed and executed**, read from the one
+//! descriptor of the open, so no file can be swapped between the check and a start. A helper
+//! with a `PT_INTERP` is started by a loader, which runs before the helper's first instruction
+//! and reads files a profile can mount into the view (`/etc/ld.so.preload`, the loader's
+//! cache, a library): an object named there would run before the ruleset exists. A static-pie
+//! image has a `PT_DYNAMIC` header and no `PT_INTERP`, and passes; `PT_DYNAMIC` is not asked.
+//! Bytes that are no ELF image of this machine, a `#!` script among them, and an image whose
+//! header table was not read whole are refused as well: what starts first there is another
+//! program, or is not known.
 //!
 //! After the open the file is never read again: every start binds the sealed bytes, so a file
 //! replaced or removed on disk changes nothing until the adapter is opened again.
@@ -47,7 +58,7 @@ use sha2::{Digest as _, Sha256};
 use substrate_exec_gate::place::{
     Cause, LISTED_FILE_SYSTEMS, MountTable, Opened, Place, Relation, Unestablished,
 };
-use substrate_exec_gate::{Class, Lists, Located, PROTOCOL};
+use substrate_exec_gate::{Class, Linkage, Lists, Located, PROTOCOL};
 
 use crate::confinement::{Fact, FactWithheld};
 use crate::read_only_files::PinnedFile;
@@ -683,6 +694,8 @@ pub(crate) fn open(config: &HostConfig) -> Result<Opening, DriverError> {
         .read_to_end(&mut bytes)
         .map_err(|error| unserved(path, format_args!("cannot be read ({error})")))?;
     check_file(path, true, u64::try_from(bytes.len()).unwrap_or(u64::MAX))?;
+    // Step 5, on the bytes about to be sealed: nothing is read from the name again.
+    check_linkage(path, &bytes)?;
     ExecGate::seal(&bytes, host_loader())
         .map(Opening::Gate)
         .map_err(|error| {
@@ -691,6 +704,37 @@ pub(crate) fn open(config: &HostConfig) -> Result<Opening, DriverError> {
                 format_args!("could not be sealed in memory ({error})"),
             )
         })
+}
+
+/// D29, rule 1: the helper is the first program of a listed run's view, so nothing may run
+/// before its first instruction. Decided on the bytes the driver will seal and execute, in this
+/// order: they are an ELF image of the driver's own class, byte order and machine; the whole
+/// program header table was read; and no header has the type `PT_INTERP`. A script's
+/// interpreter, a registered handler of another machine's images and a loader each run first.
+///
+/// # Errors
+///
+/// [`EXEC_GATE_INVALID`], naming the path and which of the three it is.
+pub(crate) fn check_linkage(path: &Path, image: &[u8]) -> Result<(), DriverError> {
+    match substrate_exec_gate::elf_linkage(image) {
+        Linkage::Static => Ok(()),
+        Linkage::Interpreted => Err(invalid(
+            path,
+            "is dynamically linked (its program headers hold PT_INTERP): a loader would run \
+             before the helper and read files a profile can mount, so the helper must be \
+             statically linked",
+        )),
+        Linkage::Foreign => Err(invalid(
+            path,
+            "is not an ELF image of the driver's class, byte order and machine: the helper must \
+             be a statically linked executable built for this host, and not a script",
+        )),
+        Linkage::Unreadable => Err(invalid(
+            path,
+            "is an ELF image whose program header table cannot be read whole: the helper must \
+             be a statically linked executable",
+        )),
+    }
 }
 
 /// Refuses an entry of an executable list whose text no adapter can carry: the lexical rule

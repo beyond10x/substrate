@@ -2,17 +2,20 @@
 
 Status: the fourth revision, `8c7318642`, was accepted by the stakeholder, session `sdc`, on
 2026-11-21, and the fifth, `edac77173`, wrote the one change it decided with that acceptance
-(D27). This sixth revision closes a hole that two reviews of story 1's implementation found in
-the design (D28) and writes four corrections from the same reviews. The coordinator of the
-request decided D28 on 2026-11-21 and gave it to the implementor; the stakeholder has not read
-this revision. Serves `story:linux-executable-allow-list` and
+(D27). The sixth revision, `767fbea57`, closed a hole that two reviews of story 1's
+implementation found in the design (D28). A second pass of both reviews on that commit found
+the route D28 had marked as not checked, and this seventh revision closes it (D29): the helper
+is statically linked, and on a start with a list no program runs in the view before it. The
+coordinator of the request decided D29 on 2026-11-21 and gave it to the implementor. The
+stakeholder, session `sdc`, read the decision and has no objection; it has not read this text.
+Serves `story:linux-executable-allow-list` and
 `story:executable-deny-list` (`epic:runs-are-governed-and-limit-hits-are-events`). It changes no
 wire byte and no contract bundle: the lists are substrate-host's confinement API
 ([ADR 0044](../../adr/0044-confinement-is-a-contract-family-served-by-declared-adapters.md)
 decisions 7 and 8). No code before acceptance (invariant 8). § 17 lists the decisions, § 18 every
 claim that is inferred and not observed, § 19 the three defaults the stakeholder decided.
 
-Revised six times on 2026-11-21.
+Revised seven times on 2026-11-21.
 
 - After the first review: session `sdc` decided the helper (D5, D19) under
   `approval-record:sdc-decides-plan-and-design-2026-11-21`.
@@ -61,6 +64,30 @@ Revised six times on 2026-11-21.
   This revision ran no probe and built nothing: the implementor was changing code in the same
   tree. The code it cites was read at `4b5208922` with `git show`, and what the reviews
   measured was read from their cases and their logs.
+- Seventh revision. The sixth is `767fbea57`, committed with the implementor's code for D28.
+  The coordinator settled the five points that revision had left to it: the helper refuses a
+  variable in its own environment; a start with a list gets no `--setenv` at all; a root
+  spelled through `..` is `path-unopenable` and the open answers 501, and the review's
+  assertion moved; the probe of § 9 uses no compiled object; a mount table that is not UTF-8 is
+  `mount-table-unparsable`. A second adversary pass and a second security look then ran on
+  that commit. Both found the route § 18 had listed as not checked (§ 3.11, E6 and E7): a
+  profile with a list declares a read-only file at `/etc/ld.so.preload`, the file names an
+  object in the workspace, and the loader of the dynamically linked helper maps that object
+  before the helper's first instruction. D28 is about variables and does not see a file. D29
+  is the answer, and it is about the helper, not about that one path:
+  - the helper is statically linked, and the driver refuses at the open a helper that names a
+    loader (`PT_INTERP`);
+  - on a start with a list the helper is the first program bubblewrap starts in the view. A
+    start with a list and a controlling terminal is refused before dispatch until the helper
+    takes the terminal itself;
+  - the lane builds the helper static, and refuses by name where it cannot.
+
+  The stakeholder's words on the decision: "No objection to D29: static helper, the driver
+  refuses a helper that needs a dynamic loader, and a listed start with a controlling terminal
+  is refused before dispatch until the helper takes the terminal itself." It added two points,
+  both accepted and written here: what exactly the open tests (D29, rule 1) and two permanent
+  cases (§ 16). This revision ran nothing and built nothing; the code was read at `767fbea57`
+  with `git show`, and the second reviews' cases and logs were read.
 
 Releases, tags, merges to `main` and version numbers are the operator's. This document touches
 none of them.
@@ -89,6 +116,11 @@ A fifth limit is stated since the sixth revision. Inside the domain, a preload o
 into every allowed dynamic program and can run code, as an allowed interpreter can; `execve` of
 an unlisted path still fails (§ 7). What the reviews found was not this limit: there the object
 ran before the domain existed, and what it executed was held to no list (D28).
+
+Since the seventh revision the limit names both of a loader's inputs: inside the domain the
+program's own loader reads `/etc/ld.so.preload` and the environment, as an allowed interpreter
+reads a script. It is observed now (E8). The second reviews found the same object running
+before the domain a second time, through the file and not the variable; D29 closes that.
 
 ## 1. Evidence: what the tree does at `5d5b192db`
 
@@ -420,7 +452,8 @@ and their logs and ran none of them. The files are
   128 bytes that names no credential (`crates/substrate-guarded/src/environment.rs:19-41`).
 - **E3 is why a statically linked helper is not the answer.** A static helper has no loader
   that reads the variable, which closes E2. In E3 the object runs in `/usr/bin/env`, which is
-  the host's and dynamically linked.
+  the host's and dynamically linked. Since the seventh revision: it is not the whole answer.
+  It is one half of D29; the other half is that no program runs before the helper (§ 3.11).
 - **E4** is in the helper's own open of the path's text
   (`crates/substrate-exec-gate/src/landlock.rs:238`). The driver had opened the same entry
   beneath the descriptor of its mount, where the path is shorter.
@@ -429,6 +462,52 @@ and their logs and ran none of them. The files are
   ancestor were joined as text, `..` among them. The driver places `workspace_root` before it
   creates it (`crates/substrate-host/src/lib.rs:1159-1160`). It then created `<ws>/new`, and
   from there on its root was `<ws>`.
+
+### 3.11 What the second pass of both reviews measured
+
+Not probes of this document either. A second adversary pass and a second security look ran
+against `767fbea57`, the commit that holds D28, on 2026-11-21, on the probe host, in the
+delegated lane. This revision read their cases and logs and ran none. The cases are in
+`crates/substrate-host/tests/adversary_exec_lists.rs`,
+`crates/substrate-host/tests/security2_exec_gate.rs` and
+`crates/substrate-exec-gate/tests/security2_gate.rs`; they were not committed when this was
+written.
+
+| | case | what the run was | observed | expected |
+|---|---|---|---|---|
+| E6 | `adversary2_a_read_only_ld_so_preload_runs_before_the_ruleset` | the profile lists `bin` and declares a read-only file mounted at `/etc/ld.so.preload`. The file names `/workspace/evil.so`. The object, on its first load, executes an unlisted base tool: `echo LEAKED`. No variable is set. The lane's helper is a default build, with the loader `/lib64/ld-linux-x86-64.so.2` | `LEAKED`, exit 0: the run never reached its own script | `0`, `126`, `126`, or a named refusal before dispatch |
+| E7 | `security2_a_declared_file_at_the_loaders_preload_path_does_not_lift_the_list` | the same shape. The object appends the `argv[0]` of every process that loads it to a file, and in the helper's process it executes what follows the last `--` | `listed:0`, `unlisted:0`. Loaded in `/.substrate-exec-gate`, `/usr/bin/sh`, `bin/tool` and `other/tool` | `listed:0`, `unlisted:126`, and the object loaded in no process named for the helper |
+| E8 | E7 again, with a helper built from the same commit for `x86_64-unknown-linux-musl`. `file` reports it `static-pie linked` | the same profile and object | `listed:0`, `unlisted:126`: the list held. Loaded in `/usr/bin/sh` and `bin/tool`, and not in the helper | as observed |
+| E9 | `security2_an_object_the_run_names_is_loaded_in_no_process_before_the_program` | D28's own case: the object is named by `LD_PRELOAD` in the run's environment | passed with the default helper and with the static one: the object is loaded in the run's program and what it starts, and in no process before | as observed |
+| E10 | `security2_a_declared_file_at_the_helpers_mount_does_not_stand_in_for_the_helper` | the profile declares a read-only file at the helper's own mount, `/.substrate-exec-gate` | the helper's bytes stood over the declared file, and the list held | as observed, or a named refusal |
+| E11 | `security2_a_value_of_a_listed_run_is_readable_where_an_unlisted_run_shows_it` | where the run can read one of its own values in its view | the arguments of bubblewrap and the environment of the shell, on a start with a list and on one without | the same places on both |
+| E12 | `security2_an_unlisted_start_keeps_its_argv_and_a_listed_one_has_no_stage_before_the_helper`, `security2_a_listed_run_with_piped_input_is_held_with_a_preload_in_its_environment`, `security2_no_refusal_of_a_variable_repeats_its_value` | rule 7 of D28, a start with piped input, and the helper's diagnostic lines | each passed | as observed |
+
+The same pass ran the suites of the first reviews on `767fbea57`: the cases of E1 to E5 pass
+there (`adversary_exec_lists`, 8 cases; `security_exec_gate`, 7 cases), and
+`ess_confinement_linux` runs 74 cases. D28 with its rule in place is therefore observed.
+
+- **E6 and E7 are one cause, and it is not D28's.** `/etc/ld.so.preload` is a file a loader
+  reads beside its variables. `validate_read_only_files` refuses a mount that collides with a
+  mount the driver owns and admits every other path
+  (`crates/substrate-wire/src/lib.rs:4782-4797`, `:4822`; the reserved mounts are `/`,
+  `/usr`, `/bin`, `/lib`, `/lib64`, `/proc`, `/dev`, `/tmp` and `/workspace`, `:4723-4733`).
+  The open admitted a helper that names a loader: it read the helper's bytes and sealed them
+  without looking at them (`crates/substrate-host/src/exec_gate.rs:650`, `:683-686`).
+- **E8 shows what decides it: the helper's linking.** The same commit, the same profile and
+  the same object; only the helper differs. E8 also shows the limit of § 7 as an observation:
+  inside the domain the object is loaded into the allowed shell and the listed tool, and the
+  unlisted tool still ends with status 126.
+- **E10** is D20's order: the helper's bytes are bound after every other mount.
+- **A judgement of the reviews, relayed by the coordinator and not a run:** what bubblewrap
+  takes from the caller before it starts the helper is a cleared environment, an argv the
+  driver built, the driver's descriptors, and the directory of `--chdir`, which becomes `PWD`.
+- **Read, not run:** `CONTROLLING_TERMINAL_ARGV`, which is `/usr/bin/setsid --ctty`, is
+  placed after bubblewrap's `--` and before the helper
+  (`crates/substrate-host/src/process.rs:3077-3079`, `crates/substrate-host/src/pty.rs:44`). A
+  terminal start with a list would run the host's `setsid`, dynamically linked, before the
+  helper. No such start exists today: a terminal belongs to a session start, and the three
+  wire paths carry no list (`process.rs:931`, `:967`, `:1078`).
 
 ## 4. The rule
 
@@ -502,6 +581,13 @@ Reasons:
   included the programs that run before the ruleset exists, and what the constructor executed
   there was held to no list (E1 to E3). D28 keeps the run's variables from every such program.
   Inside the domain the object still loads; § 7 states that as a limit.
+- **No object named by a file the profile declares, either.** The seventh revision's twin of
+  the twin. A loader reads files beside its variables, `/etc/ld.so.preload` first among them,
+  and a profile may declare a read-only file at that path. The file is the caller's, as the
+  variable was, and it too can name an object an earlier run left in the workspace. With a
+  dynamically linked helper the object ran in the helper's own process, before the ruleset
+  (E6, E7). D29 gives the helper no loader and puts no program before it. Inside the domain
+  the file is read by every allowed dynamic program; that is the same limit of § 7.
 - **A view path the kernel takes.** A path given to a system call is at most 4095 bytes
   (`PATH_MAX` with its terminator). The helper opens the text of `<root>/<rel>` for a `follow`
   path and executes the program by that text. The driver checks an entry through the
@@ -546,7 +632,10 @@ The difference of D1 and the rules of this section are stated where a client rea
   `4b5208922`), which ends "Nothing runs with a list that is not enforced." Since the sixth
   revision it says what that rests on: on a start with a list the run's variables reach the
   program and nothing before it (D28), and inside the domain an object those variables name
-  still loads into every allowed dynamic program (§ 7);
+  still loads into every allowed dynamic program (§ 7). Since the seventh revision it also
+  says that the helper is a statically linked program, that one that names a loader is
+  refused `config.exec-gate-invalid`, and that a start with a list has no controlling
+  terminal (D29);
 - the doc comment of `ConfinementProfile.exec_subpaths` and the module documentation of
   `linux.rs` name that limit beside the four of § 7;
 - the confinement pages under `website/docs`, which `cargo xtask check-docs` holds to the
@@ -575,6 +664,12 @@ for each of them, and an object a variable named ran there and started the run's
 no ruleset (E1 to E3). The run did not remove the domain; it kept the domain from being
 created. D28 is the rule that the run supplies nothing to a process before the ruleset exists.
 
+**Since the seventh revision: with D28 and D29.** D28 keeps the run's variables from those
+programs. A profile reached them a second way, with a file: a declared read-only file at the
+path a loader reads (E6, E7). D29 removes what that route needs, a loader, and with it every
+program before the helper. § 6, *Before the ruleset*, states what the two decisions give
+together and what that still rests on.
+
 ### The helper
 
 **D5. `substrate-exec-gate` is a new binary of this repository with no dependency beyond `libc`.**
@@ -592,7 +687,11 @@ above: the acceptance of both stories is a delegated-lane run, and that lane's h
   `execve` after it is the program's. Since the sixth revision that sentence carries a
   condition it did not state: those programs start with none of the run's variables, and the
   `env` stage is not needed on such a start (D28). The line numbers here are the first
-  revision's; D28 cites the argv as implemented.
+  revision's; D28 cites the argv as implemented. Since the seventh revision the helper is the
+  first program after bubblewrap's `--` on such a start, with no `env` and no `setsid` before
+  it (D29): `… -- <gate> <option>… -- <program> <argument>…`.
+- **Statically linked (D29).** "No dependency beyond `libc`" is about the crates it is built
+  from. Since the seventh revision the built file has a rule too: it names no loader.
 - **Only with a list.** A start whose profile has an empty `exec_subpaths` gets no helper and no
   bind. Its argv is today's, byte for byte.
 
@@ -621,6 +720,10 @@ between the comparison and the bind. This closes it:
    the same lines.
 6. Each start gets a descriptor of its own, opened anew on the sealed memfd. Bubblewrap reads
    the descriptor to its end, so a second start on the same open file copies nothing (K3).
+7. Seventh revision. Between step 1 and step 2 the driver looks at the bytes it read: they are
+   an ELF program with no `PT_INTERP`, or the open is refused (D29, rule 1). The bytes that are
+   tested are the bytes that are sealed and bound: one read through the one descriptor, and no
+   second look at the file. A file swapped after the read changes nothing, as before.
 
 What follows:
 
@@ -891,12 +994,15 @@ is a reading, not the stakeholder's words:
    sealed, not bound and never executed, and no probe of § 9 runs.
 4. The file lies in a writable location, or has more than one link:
    `config.exec-gate-invalid` (D21).
-5. The bytes are sealed and hashed, and `--version` is read in a throwaway sandbox (D20):
-   a wrong line is `config.exec-gate-unserved`.
+5. The bytes are read once. Seventh revision: bytes that are not an ELF program without
+   `PT_INTERP` are `config.exec-gate-invalid` (D29). The bytes are then sealed and hashed, and
+   `--version` is read in a throwaway sandbox (D20): a wrong line is
+   `config.exec-gate-unserved`.
 6. The two probes of § 9. A probe that does not hold leaves its fact absent (D19).
 
 A helper with two links on a host whose facts are withheld is therefore not refused there. It
-is refused on the first host where the facts could be proved.
+is refused on the first host where the facts could be proved. The same holds for a helper
+that names a loader: step 5 is not reached there, and the helper is never executed there.
 
 **Nothing runs with a list that is not enforced.** A non-empty list implies its fact
 (`profile.rs:213-229`), and admission refuses the first required fact the proof lacks
@@ -906,7 +1012,7 @@ and runs as today, with no helper in its argv (D5).
 Since the sixth revision: this paragraph argues from admission, and admission was never where
 the sentence failed. A profile with a list was admitted on an adapter that proved the fact, was
 started, and ran programs outside its list (E1 to E3). The stakeholder's sentence is true of a
-start only with D28.
+start only with D28. Since the seventh revision: only with D28 and D29 (E6, E7).
 
 **Where the cause is carried.** The stakeholder's first condition: "the open's result and the
 adapter's capability report carry the named cause (file-system type and path), and the refusal
@@ -1121,7 +1227,13 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
 - An `--allow` or `--program` path that does not open is an error. A `--deny` path that does
   not exist is kept as a name (§ 8.2).
 - **`--env`** carries one variable of the program's environment (sixth revision, D28). Its
-  form is a proposal, and the implementor fixes it in code.
+  form is a proposal, and the implementor fixes it in code. Seventh revision: it is the form
+  `767fbea57` implements.
+- **These arguments are everything the helper is given** (seventh revision, D29). It is the
+  first program in the view, it is statically linked, and its environment holds `PWD` alone,
+  so it reads its arguments, the view's mount table and the paths the arguments name, and no
+  other input. `--loader` is the loader of the run's programs (D7). The helper itself has
+  none.
 
 The first draft's `--allow <path>` could not carry the rule of § 5: one absolute path does not
 say where the writable mount begins. The second revision's `--alias` is gone: the helper reads
@@ -1194,6 +1306,13 @@ every option that carries a `follow` path: `--program`, `--loader`, `--allow` an
 `landlock_restrict_self` returned.** New in the sixth revision. The coordinator of the request
 decided it on 2026-11-21, after the adversary pass and the security review of story 1's
 implementation, and gave it to the implementor. The stakeholder has not read it.
+
+**Seventh revision: implemented at `767fbea57`, and its open points are settled.** The
+coordinator decided the three points this section marked as proposals: no `--setenv` at all on
+a start with a list (rule 1), a helper that refuses and does not clear (rule 5), and the
+operand form `--env <name> <value>`. The commit has no `env` stage on such a start. The words
+"proposes", "proposal" and "the implementor's" below are the sixth revision's and are kept as
+its record. D29 turns rule 2 into a stronger one: no stage runs before the helper at all.
 
 **The argv at `4b5208922`**, in `crates/substrate-host/src/process.rs`:
 
@@ -1304,12 +1423,176 @@ allowed dynamic program and can run code, as an allowed interpreter can; `execve
 unlisted path still fails. § 7 states it with the other limits. The first half follows from
 A10: mapping a file as code is not execution. The cases of E1 to E3 hold the second half: with
 the object named and D28 in place, the unlisted program ends with status 126. Neither half had
-been observed with D28 in place when this was written (§ 18).
+been observed with D28 in place when the sixth revision was written. Both are observed since:
+the cases of E1 to E3 pass on `767fbea57`, and E9 lists the processes the object was loaded in
+(§ 3.11).
 
 **What D28 does not cover.** A loader has inputs that are not variables, such as
 `/etc/ld.so.preload`. The base view holds no `/etc` beyond `/etc/alternatives`
-(`process.rs:2931-2936`), and a run cannot mount (W6). Whether a declared read-only file may be
-mounted at that path was not checked (§ 18).
+(`process.rs:2931-2936`), and a run cannot mount (W6). The sixth revision wrote here that
+whether a declared read-only file may be mounted at that path was not checked. It may, and
+the second reviews measured what follows (E6, E7): the helper's own loader read the file. D29
+is the answer.
+
+### Before the ruleset
+
+**D29. On a start with a list, the helper is statically linked and is the first process
+bubblewrap starts in the view.** New in the seventh revision. The coordinator of the request
+decided it on 2026-11-21, after the second adversary pass and the second security look, and
+gave it to the implementor. The stakeholder, session `sdc`: "No objection to D29: static
+helper, the driver refuses a helper that needs a dynamic loader, and a listed start with a
+controlling terminal is refused before dispatch until the helper takes the terminal itself."
+It added what rule 1 tests and two cases of § 16.
+
+**What was found.** A dynamically linked program does not start at its own first instruction.
+The kernel starts the loader the program names in `PT_INTERP`, and the loader decides what
+else is mapped before the program runs. It decides from variables, which D28 removed, and from
+files of the view. A profile may declare a read-only file at any path the driver does not own,
+`/etc/ld.so.preload` among them (§ 3.11). With one there, the helper's loader mapped an object
+of the workspace into the helper's process, and the object started the run's program with no
+ruleset (E6, E7). With a static helper the same start held (E8).
+
+**The rule:**
+
+1. **The helper is statically linked, and the open refuses one that is not.** The driver reads
+   the helper's bytes once, through the one descriptor of D20, and tests those bytes before it
+   seals them:
+   - they are an ELF image whose class, byte order and machine are the driver's own;
+   - the whole program header table lies in the bytes and was read, and its count is not the
+     escape value for a table too large for the header;
+   - no program header has the type `PT_INTERP`.
+
+   Anything else is refused `config.exec-gate-invalid` (422), address `config.exec_gate`, and
+   the message says which of the three failed. The test is "no `PT_INTERP`", not "no
+   `PT_DYNAMIC`": a static position-independent program has a dynamic section and names no
+   loader, and it passes. E8's helper is one. The bytes tested are the bytes sealed, bound and
+   executed, so there is nothing to swap between the test and the `execve` (D20, step 7). The
+   first two points are this document's reading of "tests the program headers": a file that is
+   not an ELF image, or whose headers cannot be read, has no `PT_INTERP` to find, and passing
+   it would let a `#!` script through, whose interpreter the kernel starts before it.
+2. **No list of loader files is kept.** The driver does not refuse a declared mount at
+   `/etc/ld.so.preload`, and `validate_read_only_files` does not change.
+3. **On a start with a list no program runs in the view before the helper.** After
+   bubblewrap's `--` the next argument is the helper's mount. No `env` stage, which
+   `767fbea57` already has, and no `setsid`.
+4. **A start with a list and a controlling terminal is refused before dispatch**, by name,
+   until the helper takes the terminal itself. Today the terminal is taken by
+   `/usr/bin/setsid --ctty`, a program of the host that would run before the helper (§ 3.11).
+5. **The lane builds the helper static, and refuses by name where it cannot.** It never falls
+   back to a default build (§ 16).
+6. **A start without a list is unchanged.** It has no helper, and its stages run as before.
+
+**Why not the narrower correction.** Refusing a declared mount at `/etc/ld.so.preload` on a
+start with a list would turn E6 and E7 green. It is not taken, because that path is one member
+of a class and the class has no end the driver could write down:
+
+- `/etc/ld.so.cache` tells a loader which file a library name means. A declared file there
+  points the helper's `libc` at a file of the workspace.
+- A declared file or root mounted over a library the helper links, or over a directory its
+  loader searches, replaces the library itself. The reserved mounts refuse `/usr`, `/lib` and
+  `/lib64` and what lies beneath them (`crates/substrate-wire/src/lib.rs:4782-4797`), so this
+  route needs a search path outside those. A run path in the helper, the cache above or a path
+  file below gives one.
+- Another `libc` reads other files. musl's loader reads a path file, `/etc/ld-musl-<arch>.path`,
+  and each loader version may add one.
+- A loader named by a relative `PT_INTERP` is resolved from the directory the start changed
+  to, which is the run's.
+
+A list of paths would be right for the loaders it was written from and silent about the next.
+A helper with no loader reads none of them. The existing reader for D7 shows how easily the
+narrow form goes wrong: `elf_interpreter` answers "none" for a `PT_INTERP` it cannot use as a
+rule's path, such as one that is relative or not normal
+(`crates/substrate-exec-gate/src/lib.rs:359-386`). That is right for D7 and would be wrong
+here. Rule 1 therefore asks whether the header exists, not what it holds, and needs its own
+function.
+
+**The refusal of rule 4: a proposal, and the implementor's to confirm.** No existing code was
+written for this case. Read from § 12 and from the wire crate:
+
+| code | what it says today | fit |
+|---|---|---|
+| `session.pty-unserved` (501) | "This deployment never proved it can give a confined process a controlling terminal" (`crates/substrate-wire/src/lib.rs:434-435`); raised before dispatch for a `pty` session on a driver without the fact, with the address `mode` (`crates/substrate-host/src/process.rs:1019-1025`) | **proposed.** A start with a list and a terminal is a start this driver cannot give a terminal. The class is `Unserved` and the status 501, which is invariant 3's answer for a missing guarantee. The message says why: the profile has a list, and the helper does not take the terminal yet |
+| `exec.sandbox-unavailable` (501) | a host without the sandbox | no: D26 already declined it, because a client could not tell "no sandbox" from this |
+| `confinement.fact-unserved` (501) | an adapter that did not prove a fact | no: it is admission's code and names a fact, and no fact says "a terminal with a list" |
+| `exec.sandbox-path-unrepresentable` (422) | the client wrote something this policy cannot carry | no: the request is well formed, and the host does not serve it |
+
+- **It changes the code's meaning in one point.** Today the code is about the deployment: the
+  fact `sessions.pty` is absent. Here a driver that proved the fact answers it for one kind of
+  start. No wire client can see that today: a terminal belongs to a session start, the wire
+  paths carry no list (D22), and no adapter profile reaches a terminal start (§ 3.11). So the
+  refusal is a guard in the function that builds the argv, for a caller that does not exist
+  yet. When `story:exec-start-carries-executable-lists` gives a session start a list, that
+  story decides between this code and a new one. A new code is a wire change and needs its
+  bundle.
+- **The alternative is a new code of the host crate**, in the family of
+  `exec.sandbox-place-unserved`. It would be exact, and it would be a second new refusal for a
+  start nobody can make. That is the reason for the proposal, and it is a judgement.
+- **Until the helper takes the terminal itself.** `setsid --ctty` makes a session and takes the
+  inherited terminal as its controlling one. The helper could make the same two calls before
+  it applies the ruleset, with `libc` alone. That is not designed here (§ 20).
+
+**What D28 and D29 give together.** On a start with a list, before `landlock_restrict_self`
+returns, the processes in the view are bubblewrap's own and the static helper; the helper's
+environment holds `PWD` and nothing else, and its arguments are the driver's; nothing the run
+or the profile names is loaded as code.
+
+The basis, part by part:
+
+| part of the sentence | basis |
+|---|---|
+| the processes are bubblewrap's own and the helper | the argv has nothing between `--` and the helper's mount (rule 3; a test of the argv, § 16). E12's case holds that for a quiet start and a start with piped input at `767fbea57` |
+| the helper is static | rule 1, on the bytes that are bound. E8 shows a static helper is not reached by the file |
+| its environment holds `PWD` alone | the driver clears its own environment before it spawns bubblewrap (`process.rs:2920`), passes `--clearenv` (`:2951`) and no `--setenv` (`:3054`), and the helper refuses any other variable (D28, rule 5) |
+| its arguments are the driver's | `--` is followed by the helper's mount and the options the driver wrote (`:3080-3089`). The run's values are in them as operands and are read as data |
+| the helper is not replaced by a declared mount | its bytes are bound after every other mount (D20). E10 |
+| nothing the run or the profile names is loaded as code | a static program has no loader, so no file and no variable chooses what is mapped. What the helper opens are its arguments' paths and the view's mount table, and it reads them as data |
+
+**What that sentence still rests on, and what was not run.** Each line is a claim about a part
+this repository does not own or did not probe:
+
+- **Bubblewrap between its own start and the `execve` of the helper.** Bubblewrap is the
+  host's program and is dynamically linked on the probe host (`file`). Its loader ran on the host,
+  before the view existed, with the environment the driver cleared, so the view's files did
+  not reach it. That it maps nothing more once it is inside the view (no library opened late,
+  no name service, no locale file) is not read from its source and not run. Its process stays
+  in the view as the parent of the run.
+- **The helper's mount is the file that is executed.** Bubblewrap executes the first argument
+  after `--`. The driver writes an absolute path there, so no `PATH` is searched; that
+  bubblewrap would search one for a name without a slash is not read.
+- **The kernel starts a static ELF program with no other program.** That is the ELF loader of
+  the kernel. A host can register a handler (`binfmt_misc`) that claims a file by its first
+  bytes and starts an interpreter of the host's choosing. The probe host has none registered:
+  `/proc/sys/fs/binfmt_misc` holds `register` and `status` and nothing else. Other hosts were
+  not read, and the driver does not check it. Rule 1's test of class, byte order and machine
+  is there so that a helper for another machine, which only such a handler could start, is
+  refused.
+- **A static `libc` that loads nothing.** A program can have no `PT_INTERP` and still map a
+  library later, by calling the `libc` function for it. glibc's static form does that for
+  name-service and character-set lookups. The helper calls neither, and E8's helper is
+  musl's. That no call of the helper or of the Rust runtime's start reaches such a function
+  is read from the crate having no dependency beyond `libc` (D5), not from a trace.
+- **The working directory.** Bubblewrap changes to the run's directory before it executes the
+  helper (`--chdir`, `process.rs:3037-3038`). The helper's own path is absolute and its `--env`,
+  `--allow` and `--program` operands are checked forms, so nothing is resolved from that
+  directory; a relative `PT_INTERP` would have been (rule 1 refuses it with every other).
+- **The descriptors.** The helper inherits what the run will: the three standard streams, the
+  secret-slot descriptors and the start's own descriptors (`--block-fd`, `--info-fd`,
+  `process.rs:3039-3042`). The helper reads none of them (read from its source, not traced).
+- **The seccomp program.** Bubblewrap installs the run's program before it executes the helper
+  (`--seccomp`, `process.rs:2981`), so the helper runs under it. That it lets the helper's
+  calls through is observed (the lane's cases run); it is a filter and maps nothing.
+- **`systemd` around `linux`.** The stages `systemd` adds run on the host, outside the view,
+  and the profile's mounts exist only in the view. Read from
+  `crates/substrate-host/src/confinement/systemd.rs:704-712`; the one lane case with a list
+  runs through it (§ 16).
+- **The probes of § 9 and the `--version` run** build their own bubblewrap arguments and
+  declare no file, so the route does not exist there.
+
+**The limit that remains, unchanged in class.** Inside the domain the program's own loader
+reads `/etc/ld.so.preload` and the environment, as an allowed interpreter reads a script. An
+object named there is loaded into every allowed dynamic program and runs its code inside the
+domain; `execve` of an unlisted path still fails. E8 is that observation: the object was
+loaded in `/usr/bin/sh` and `bin/tool`, and `other/tool` ended with status 126. § 7 states it.
 
 ### Embedder notes
 
@@ -1318,12 +1601,19 @@ build a dependency's binary, so the helper does not arrive with the crate. Loom 
 embedder. It must:
 
 1. **Build `substrate-exec-gate` from the revision it pins the crate at**, and install it beside
-   its own binary. A static build is recommended (`x86_64-unknown-linux-musl`, the target the
-   `Dockerfile` builds `substrate-executor` for): it starts in any view. A default build needs the
-   build host's loader path and a compatible `libc` beneath `/usr`, `/lib` or `/lib64` of every
-   host it runs on. A static build also has no loader that could act on a variable before the
-   helper's first instruction. The driver never starts the helper with a variable of the run
-   (D28), so the lists do not rest on that; it is a second line.
+   its own binary. **The build is static. That is the rule since the seventh revision (D29);
+   it was a recommendation before.** The target is `x86_64-unknown-linux-musl`, which
+   `rust-toolchain.toml` pins and the `Dockerfile` builds `substrate-executor` for:
+
+   ```console
+   cargo build --release --locked --target x86_64-unknown-linux-musl \
+     -p b10x-substrate-exec-gate --bin substrate-exec-gate
+   ```
+
+   The driver refuses a helper that names a loader, `config.exec-gate-invalid`, so a default
+   build no longer opens. A static helper also starts in any view, whatever `libc` the host
+   has. The check a build can make itself is the one the `Dockerfile` makes for the executor
+   (`Dockerfile:124`): the program headers hold no `INTERP`.
 2. **Name it in `HostConfig.exec_gate`** as an absolute path. The driver searches nowhere: not
    `PATH`, not the directory of the running executable.
 
@@ -1336,12 +1626,14 @@ What the file must be:
 | a file with one link | D21: a second name could lie in a workspace. Install a copy, not a hard link |
 | a regular file the driver's uid can read | the driver reads its bytes (D20). It needs no execute bit: bubblewrap sets the mode of the copy |
 | at most 64 MiB | `MAX_BACKEND_BINARY_BYTES` (`probe.rs:22`) |
-| able to start inside the view | only `/usr`, `/bin`, `/lib` and `/lib64` of the host are there (`process.rs:2732-2743`) |
+| statically linked: an ELF program for the driver's machine with no `PT_INTERP` | D29: a loader reads files and variables a profile can supply, before the helper's first instruction. A static position-independent build passes |
+| able to start inside the view | a static helper needs nothing of the view. Before the seventh revision this row said that only `/usr`, `/bin`, `/lib` and `/lib64` of the host are there (`process.rs:2732-2743`) |
 | of the driver's protocol | it answers `--version` with the line `substrate-exec-gate/1` and takes the arguments of D24 |
 
 What the driver does with it at open is D27's list of six steps: the path's form, the file,
-the places, the trust check of D21, the seal, hash and `--version` of D20, and the two probes of
-§ 9, with the SHA-256 into `BackendBinding` at the end. On a host whose file system is outside
+the places, the trust check of D21, the test of the bytes for a loader (D29), the seal, hash
+and `--version` of D20, and the two probes of § 9, with the SHA-256 into `BackendBinding` at
+the end. On a host whose file system is outside
 D26's list the open stops after the places and the helper is never used. The driver never
 executes the file outside a sandbox. Who may write the file and its directory is the
 embedder's to settle, as it is for `HostConfig.bubblewrap`.
@@ -1388,6 +1680,14 @@ was run on the probe host (§ 3.7); the paths are that host's.
   cannot start the run without its list. Inside the run it is loaded into every allowed
   dynamic program and runs its code there (§ 7). An embedder that does not want that leaves
   those names out of the environment it builds; the driver does not do it for the embedder.
+- **A declared file at a path a loader reads is not refused either.** A profile may declare a
+  read-only file at `/etc/ld.so.preload` or `/etc/ld.so.cache`. The helper is static and reads
+  neither (D29), so such a file cannot start the run without its list. Inside the run the
+  loader of every allowed dynamic program reads it, as it reads the variables above (§ 7, E8).
+  An embedder that takes `read_only_files` from a source it does not trust checks the mount
+  paths itself.
+- **A start with a list has no controlling terminal** (D29). No adapter profile asks for one
+  today.
 - **Write `workspace_root` and every `writable_roots` path without `..` and `.`.** With
   `exec_gate` set, such a path that does not exist yet is refused at open,
   `config.exec-gate-unserved` with the cause `path-unopenable` (D25).
@@ -1414,10 +1714,15 @@ nothing about a start that was admitted. Such a start ran without its list where
 the run named an object that executed before the helper applied the ruleset (E1 to E3). D28
 is the rule for the start; this table is unchanged by it.
 
+**Since the seventh revision: only with D28 and D29.** With D28 in place a start still ran
+without its list where the profile declared a file that the helper's loader read (E6, E7).
+D29 changes this table in one row: the second, which now also refuses a helper that names a
+loader.
+
 | situation | answer | code and status |
 |---|---|---|
 | `exec_gate` is not set | the adapter opens; neither fact is proved; a profile with a list is refused at admission | `confinement.fact-unserved` naming `exec_subpaths`, 501 |
-| `exec_gate` is set and is not absolute, or the file lies beneath the workspace root or a declared writable root, or has more than one link (D21) | the open is refused before the file is read | `config.exec-gate-invalid`, 422, address `config.exec_gate`; new |
+| `exec_gate` is set and is not absolute, or the file lies beneath the workspace root or a declared writable root, or has more than one link (D21); or, seventh revision, its bytes are not an ELF program for the driver's machine without `PT_INTERP` (D29) | the open is refused: before the file is read for the first three, on the bytes read for the last | `config.exec-gate-invalid`, 422, address `config.exec_gate`; new |
 | `exec_gate` is set and the file is missing, not a regular file, unreadable, over the size bound, or does not print the protocol line in the throwaway sandbox | the open is refused; no adapter exists, so nothing is admitted | `config.exec-gate-unserved`, 501, address `config.exec_gate`; new |
 | `exec_gate` is set and the helper's file, the workspace root, a declared writable root, a base directory or the probes' temporary directory lies on a file-system type outside D26's list, or the kernel reports no mount ID (D27) | the adapter opens; neither fact is proved; the proof names the cause, the path and the type; a profile with a list is refused at admission, and the refusal repeats them | `confinement.fact-unserved` naming `exec_subpaths`, 501, with the cause |
 | `exec_gate` is set and the place of one of those paths cannot be established for one of the other seven causes (D26) | the open is refused | `config.exec-gate-unserved`, 501, address the field whose path it was; the message names the path and the cause |
@@ -1465,6 +1770,24 @@ The code is a `DriverError` of class `Refused` (status 422), the form of
 says which check failed. A helper that a package manager installed with a second hard link is
 refused too; the embedder installs a copy. The same checks are not made for
 `HostConfig.bubblewrap` today; this document does not change that.
+
+**A helper that needs a loader is refused with the same code (seventh revision, D29).** The
+three checks above ask whether a run could have written the helper's file. This fourth asks
+whether a run or a profile could supply code to the helper's process, and a loader is how:
+
+| check | how | why |
+|---|---|---|
+| the bytes are an ELF program for the driver's machine, with a program header table that was read whole and holds no `PT_INTERP` | on the bytes of the one read through the one descriptor, before they are sealed (D20, step 7). The answer has three values and only the first passes: no `PT_INTERP`; a `PT_INTERP`, whatever it holds; not established, for bytes that are not such an image | a loader maps what variables and files of the view name, before the helper's first instruction (E2, E6, E7). `PT_DYNAMIC` is not asked: a static position-independent program has one and names no loader (E8) |
+
+- **`config.exec-gate-invalid`, not `-unserved`.** The file is not a helper this driver takes,
+  on any host; a host that cannot use a good helper is the other code. The message says
+  "names the loader `<path>`", "is not an ELF program", or which part of the header could not
+  be read.
+- **The order.** After the three checks above and before the seal (D27, step 5), so a helper
+  in a workspace is still refused for that, and the protocol line is read only from a helper
+  that passed.
+- **It is a check of the bytes, not a probe.** Nothing is executed for it, so it needs no
+  sandbox and is made wherever the open reaches step 5. § 9 gains no half.
 
 **A root spelled through a name that does not exist yet is not compared; the open is refused.**
 E5's configuration, `workspace_root` written `<ws>/new/..` with `new` absent, has no place
@@ -1598,6 +1921,15 @@ probes; the fifth, added in the sixth revision, is inferred from the fourth.
   allowed program do, and an `execve` it makes of an unlisted path fails with `EACCES`. That
   the constructor runs in an allowed program is inferred from A10; the lane cases of § 16 hold
   both halves.
+  - **Seventh revision: the limit is the loader's, whatever its input.** Inside the domain the
+    program's own loader reads `/etc/ld.so.preload` and the environment, as an allowed
+    interpreter reads a script. A profile may declare a read-only file at that path (§ 3.11),
+    and no variable is needed then. The class is unchanged: code an allowed program maps.
+  - **It is observed now.** With a static helper and such a file, the object was loaded in the
+    allowed shell and the listed tool, and the unlisted tool ended with status 126 (E8). E9
+    shows the same for an object the environment names.
+  - **What is not this limit:** the same object in the helper's process, before the domain
+    (E6, E7). D29 closes that.
 - **On `macos` the last four do not apply in the same way**: Seatbelt also confines
   `file-map-executable` to the listed subpaths (`seatbelt.rs:273-276`). The first applies there
   too.
@@ -1830,6 +2162,13 @@ and `exec_denied_paths` inherits them, because it is proved only where `exec_sub
 - The second run is one more sandbox per open. Its cost was not measured.
 - This form of the half is a proposal. It follows from rule 5 of D28: with a helper that
   clears its environment and does not refuse, the second run would have nothing to observe.
+- Seventh revision. The coordinator settled the form: the probe uses no compiled object, and
+  `767fbea57` implements both observations.
+- **D29 adds no half and no run.** That the helper names no loader is read from its bytes at
+  the open (D21), before any probe; a helper that names one never reaches a probe. The probes
+  build their own bubblewrap arguments with the helper directly after `--`, declare no file
+  and take no terminal, so rule 3 of D29 holds in them as written. The second observation
+  above stays as it is: a static helper reads its own environment as a dynamic one does.
 
 `systemd` around `linux` copies the inner adapter's proved facts
 (`crates/substrate-host/src/confinement/systemd.rs:576-599`), so it needs no change for the two
@@ -1891,7 +2230,8 @@ recorded output work for an in-process embedder today without either.
 |---|---|---|---|
 | `confinement.exec-denied-paths-without-subpaths` | 422 | a deny-list beside an empty `exec_subpaths` | admission, every adapter, after the reserved fields (D13); new |
 | `confinement.exec-denied-paths-exceeded` | 422 | more than `MAX_EXEC_DENIED_PATHS` entries | admission, every adapter; new |
-| `config.exec-gate-invalid` | 422 | `HostConfig.exec_gate` is not absolute, or the file's place is beneath the workspace root or a declared writable root, or the file has more than one link (D21) | the open of `linux`, and of `systemd` around it, before the file is read; new |
+| `config.exec-gate-invalid` | 422 | `HostConfig.exec_gate` is not absolute, or the file's place is beneath the workspace root or a declared writable root, or the file has more than one link (D21). Seventh revision: or its bytes are not an ELF program for the driver's machine without `PT_INTERP` (D29) | the open of `linux`, and of `systemd` around it: before the file is read, and for the last case on the bytes read; new |
+| `session.pty-unserved` | 501 | seventh revision, proposed: a start with a list and a controlling terminal (D29). Unreachable today: no start has both | the start, before dispatch; existing code, new use, the implementor's to confirm |
 | `config.exec-gate-unserved` | 501 | `HostConfig.exec_gate` is set and the file is missing, not a regular file, unreadable, over the size bound, or does not print the protocol line (D19); or the place of the helper's file, of the workspace root, of a declared writable root, of a base directory or of the probes' temporary directory cannot be established for one of seven causes: every cause of D26 but `file-system-unlisted` and `mount-id-unreported` (D27). The address is the field whose path it was | the open of `linux`, and of `systemd` around it; new |
 | `exec.sandbox-place-unserved` | 501 | the place of the workspace, of the program, of an entry of either list, or of the host source of a declared mount cannot be established: one of the nine causes of D26, among them a file-system type outside `ext4`, `overlay` and `tmpfs` | the start of a profile with a list, before dispatch, on an adapter that proved the facts; never admission, never a start without a list; new |
 | `confinement.fact-unserved` naming `exec_subpaths` | 501 | a non-empty `exec_subpaths` on an adapter that did not prove it: `linux` without `exec_gate`, `linux` whose probe did not hold, `linux` that withheld the facts at open (D27), and every adapter of § 13 that proves neither fact. In the withheld case the refusal carries the cause, the path, its address and the file-system type | admission; existing code, with one new field on its error (D27) |
@@ -1911,6 +2251,18 @@ rule. A helper that finds a variable in its own environment exits 125 after disp
 a defect of its caller, not an answer to a client. The row of `config.exec-gate-unserved`
 gains one case through its cause `path-unopenable`: a configured path that does not exist yet
 and is written through `..` or `.` (D25, E5).
+
+**D29 adds no code.** Seventh revision.
+
+- The row of `config.exec-gate-invalid` gains one case: a helper whose bytes are not an ELF
+  program for the driver's machine without `PT_INTERP` (D21).
+- A start with a list and a controlling terminal is refused before dispatch with an existing
+  code. This document proposes `session.pty-unserved` (501), address `mode`, a `DriverError` of
+  class `Unserved`, with a message that names the list; the implementor confirms it or takes a
+  new host code (§ 6, *Before the ruleset*). No client can make such a start today, so no
+  client sees the code for it.
+- No declared mount is refused for its path. A file at `/etc/ld.so.preload` on a start with a
+  list is admitted, and the list holds (E8).
 
 No row compares the text of two paths where a place could not be established (D26). The two
 rows that name a place refuse, and where the open withheld the facts (D27) the row of
@@ -1951,7 +2303,8 @@ The cause is not a field of the specification's `FactUnserved`
 (`spec/confinement/confinement.yaml:161-165`).
 
 D28 adds nothing to the model either. The model has no environment and no start; the rule is
-held by the lane cases and the argv tests of § 16.
+held by the lane cases and the argv tests of § 16. Nor does D29: the model has no helper file,
+no declared file's content and no terminal.
 
 Story 1, `spec/confinement/confinement.yaml`:
 
@@ -2006,6 +2359,11 @@ D28 changes no wire start either. It applies to a start with a list, a wire star
 a start without a list keeps its argv byte for byte. `exec.environment-refused` keeps its rule,
 so no variable a wire client may set today is refused.
 
+D29 changes no wire start. `validate_read_only_files` is untouched, so a wire client declares
+the files it could declare before. A `pty` session is a wire start and has no list, so it
+keeps its `setsid --ctty` stage and is not refused; `session.pty-unserved` is answered on the
+wire exactly where it was.
+
 None of the three defaults of § 19 (the empty-list difference, no `memfd_create` refusal, the
 hard-link limit) reaches a wire property or release notes without being decided again or
 confirmed when `story:exec-start-carries-executable-lists` is planned.
@@ -2021,6 +2379,29 @@ open step of every `linux` scenario fails on the missing fact and does not pass 
 host that withholds the facts (D27) the same step fails the same way, and the scenario runner
 prints the proof's `withheld` entries with the failure, so the lane's log names the path and the
 file-system type.
+
+**The lane's helper is static (seventh revision, D29).** At `767fbea57` the script builds the
+helper for the default target (`scripts/delegated-lane.sh:55`), which is dynamically linked;
+E6 and E7 ran with that helper. From this revision on:
+
+- the script builds it with `--target x86_64-unknown-linux-musl`, the target
+  `rust-toolchain.toml` pins, and names a copy of that file, as it names a copy today
+  (`scripts/delegated-lane.sh:64-68`);
+- before it exports `SUBSTRATE_EXEC_GATE` it checks the file it will name: the program
+  headers hold no `INTERP`, the check `Dockerfile:124` makes for the executor;
+- where the build fails, the target is not installed or the check finds a loader, the script
+  refuses: it names what failed and every suite that therefore did not run, and exits 1, as
+  it does for a missing prerequisite today. It never builds or names a default helper in its
+  place. A lane that ran with a dynamic helper would be refused by the driver at the first
+  open anyway (`config.exec-gate-invalid`); the script's own refusal says why before a suite
+  starts;
+- the hosted lane runs the same script (`.github/workflows/release-lanes.yml:122`). That its
+  runner installs the pinned target with the toolchain is read from `rust-toolchain.toml`, not
+  from a run (§ 18);
+- the helper's own suites in `crates/substrate-exec-gate/tests` start the helper cargo built
+  for them, with no driver around it. They may keep a default build: no profile and no view
+  is involved there. The cases among them that state D28 or D29 through a driver are the
+  host crate's.
 
 Story 1:
 
@@ -2094,11 +2475,46 @@ Story 1:
     its fixed value, and the run's value where the run set the same name;
   - the driver's bound: a run with a list and 64 variables of 4096 bytes each starts, and its
     program has all of them;
-  - a terminal start with a list: the same E1 result, with `setsid` before the helper;
+  - a terminal start with a list: the same E1 result, with `setsid` before the helper.
+    Seventh revision: this case is gone. Such a start is refused before dispatch (D29), and
+    the argv case below holds that;
   - a start without a list and with `LD_PRELOAD` set runs as it did before the story;
   - `limit_a_preload_object_runs_its_code_in_every_allowed_dynamic_program`: with D28 in
     place and the variable naming the object, the object's constructor writes a file from
     inside the allowed shell, and the unlisted program still ends with status 126;
+- **D29, through the driver. Permanent cases of the lane**, each run once, each started
+  through `ConfinementAdapter` with the lane's static helper:
+  - **the measured case, as the stakeholder asked for it.** The profile lists `bin` and
+    declares a read-only file mounted at `/etc/ld.so.preload` that names an object in the
+    workspace. The object, on its first load, executes an unlisted base tool. The run prints
+    what the control prints, the same start without the declared file: `0`, `126`, `126`. This
+    is E6's case, `adversary2_a_read_only_ld_so_preload_runs_before_the_ruleset`. A refusal
+    before dispatch is no longer one of its two passing answers: the start is admitted and
+    the list holds;
+  - **where the object was loaded.** E7's case,
+    `security2_a_declared_file_at_the_loaders_preload_path_does_not_lift_the_list`: the object
+    records every process that loads it. The list holds, and no recorded process is the
+    helper;
+  - `limit_a_declared_preload_file_is_read_by_every_allowed_dynamic_program`: the same
+    profile. The record holds the allowed shell and the listed tool, and the unlisted tool
+    ends with status 126 (E8). This is the limit of § 7, held as it is;
+  - the same shape with the file declared at `/etc/ld.so.cache` is not a second case: the
+    rule is about the helper's linking, not about a path, and one path holds it;
+  - **a dynamically linked helper is refused at the open, as the stakeholder asked.** The
+    case hands the driver a dynamically linked ELF program as `exec_gate`: a copy of the
+    host's `/usr/bin/env`, in a directory outside every workspace, so that it has one link and
+    passes the three checks of D21. The open is refused `config.exec-gate-invalid`, status
+    422, address `config.exec_gate`, and the message names the loader. Portable: nothing is
+    executed for the check. On a host whose `env` names no loader the case prints that it is
+    absent and why. **It is held by a mutant that removes the check**: with the test of the
+    bytes removed, the open accepts that helper and this case fails. The measured case above
+    does not fail under that mutant, because the lane's helper is static; it fails when the
+    lane is given a default helper, which is E6. The mutant is run once by the implementor or
+    the adversary pass and recorded with the story's evidence. It is not a test, a script or
+    a step of the gate (`AGENTS.md`, § *The gate*);
+  - E10's case, a declared file at the helper's own mount: the list holds;
+  - each of these builds its object with the host's `cc` and prints that it is absent, and
+    why, where there is none. The dynamically linked helper case needs no compiler;
 - **The path limit (§ 5, E4).** A read-only root whose mount path is longer than its host
   path, and an entry beneath it that the driver can open through the mount's descriptor and
   whose view path is longer than 4095 bytes: the start is refused
@@ -2210,7 +2626,14 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
     with the run's value where the run and the baseline name one variable;
   - between bubblewrap's `--` and the helper there is nothing, or `setsid --ctty` on a
     terminal start, or the `env -u PWD --` stage if the implementor keeps it; never an
-    argument that holds a variable of the run;
+    argument that holds a variable of the run. Seventh revision, D29: there is nothing, on
+    every start with a list. The argument after `--` is the helper's mount, for a quiet
+    start, a start with piped input and a start with live output;
+  - **the terminal start (D29).** `command` given a list and the terminal channel returns the
+    refusal and builds no argv: the proposed `session.pty-unserved`, class `Unserved`, address
+    `mode`, with a message that names the list. Nothing is spawned. The same input without a
+    list builds the argv it built before, with `setsid --ctty` after `--`. No lane case can
+    make this start: no public start carries both a list and a terminal;
   - a run that set `PWD` has it as an operand and has no `env -- PWD=…` stage;
   - a start without a list renders, byte for byte, the argv it rendered before, `--setenv`
     groups and both `env` stages included. This is the case of D22 above, now with variables
@@ -2318,6 +2741,23 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
   text (`lib.rs:409-427`), so they need no sandbox and run on every Linux host. The class of a
   mount (D24) is decided the same way, from host sources and a mount table given as text: a
   source inside the workspace root, a source that holds it, and a source beside it.
+- **The `PT_INTERP` refusal (D29), on bytes written in the test, with no file and no
+  sandbox.** The function takes the helper's bytes and answers one of three values:
+  - no loader: a 64-bit little-endian image for the host's machine with a `PT_LOAD` header
+    only; the same with a `PT_DYNAMIC` header and no `PT_INTERP`, the static
+    position-independent form, which passes;
+  - a loader: an image with a `PT_INTERP` header, for a path that is absolute, for one that
+    is relative, for one that is not normal, for one that is not UTF-8 and for an empty one.
+    Each is refused. These are the forms for which the reader of D7 answers "none";
+  - not established: bytes that begin `#!/bin/sh`; an empty file; an ELF header cut short; a
+    program header table that ends beyond the bytes; a header count that is the escape value
+    `0xffff`; an image of the other class, of the other byte order and for another machine.
+    Each is refused;
+  - the open's decision function given each of the three answers:
+    `config.exec-gate-invalid`, status 422, address `config.exec_gate`, for the second and
+    the third, with a message that tells them apart; no error for the first;
+  - the order: a helper with a loader that also lies in a workspace is refused for the
+    workspace, and one on a host that withholds the facts is not refused at all (D27).
 - `seatbelt.rs`: the deny rules are rendered after every allow, for a file and for a directory;
   an unrepresentable deny path is refused by name. Rendering compiles everywhere (`seatbelt.rs:16`).
 - `confinement_public_items`: the list is regenerated in each story.
@@ -2339,12 +2779,12 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 | D1 | `linux`: a non-empty `exec_subpaths` holds the run to its program and the list; an empty one runs as today. `macos` is unchanged. The difference is stated, not removed. Decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire story publishes the property (Q2) |
 | D2 | an entry names a directory or one file |
 | D3 | on `linux` entries are view paths: relative beneath `/workspace`, absolute in the base system directories and declared mounts; they must exist; no symbolic link beneath a writable location; the program is absolute. Third revision: which mounts count as writable is D24's, a link elsewhere must not resolve into one, and a listed directory does not reach through a second mount of a part of it (K7). Sixth revision: a path the helper is given that is longer than 4095 bytes in the view is `exec.sandbox-path-unrepresentable` (422) before dispatch (E4) |
-| D4 | Landlock, applied inside the sandbox by a helper that is the last program before the run's. Sixth revision: "the run cannot remove it" holds only with D28 |
-| D5 | the helper is `substrate-exec-gate`, a binary of this repository, named by `HostConfig.exec_gate`, absent from a start without a list. Decided by session `sdc`, 2026-11-21, `approval-record:sdc-decides-plan-and-design-2026-11-21`. Changed in the second revision: how it is bound is D20, its arguments are D24. Sixth revision: the programs before it start with none of the run's variables (D28) |
+| D4 | Landlock, applied inside the sandbox by a helper that is the last program before the run's. Sixth revision: "the run cannot remove it" holds only with D28. Seventh revision: only with D28 and D29 |
+| D5 | the helper is `substrate-exec-gate`, a binary of this repository, named by `HostConfig.exec_gate`, absent from a start without a list. Decided by session `sdc`, 2026-11-21, `approval-record:sdc-decides-plan-and-design-2026-11-21`. Changed in the second revision: how it is bound is D20, its arguments are D24. Sixth revision: the programs before it start with none of the run's variables (D28). Seventh revision: it is statically linked, and no program runs before it on a start with a list (D29) |
 | D6 | the ruleset handles execute and refer only; refer is granted on `/`. Changed: the program's and the loader's rules go through D23 |
 | D7 | the host's loader, read at open from `/usr/bin/env`, is granted; never a loader read from the run's program |
 | D8 | the fact needs Landlock ABI 2; the probe decides, never a version number |
-| D9 | the list restricts `execve` targets, not the code an allowed program runs: interpreters, the loader, a memfd and mapped code are stated limits. No `memfd_create` refusal: decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire story publishes the property (Q3). Sixth revision: a fifth stated limit, a preload object inside the domain |
+| D9 | the list restricts `execve` targets, not the code an allowed program runs: interpreters, the loader, a memfd and mapped code are stated limits. No `memfd_create` refusal: decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire story publishes the property (Q3). Sixth revision: a fifth stated limit, a preload object inside the domain. Seventh revision: the limit is the loader's, for `/etc/ld.so.preload` as for the environment, and it is observed (E8) |
 | D10 | `exec_denied_paths`, fact `exec_denied_paths` after `exec_subpaths`, at most 64 entries, a denied path wins. Changed: a denied program is refused by what it resolves to, not only as written (D23); the bound limits the profile, not the start's cost |
 | D11 | `linux` denies by expanding a listed directory into per-entry rules; the expansion fails closed, and a program replaced in an expanded directory loses the right. Another hard link elsewhere beneath a listed path still runs: decided by the stakeholder (agent:sdc), 2026-11-21, revisable before the wire story publishes the property (Q4). Third revision: the three steps decide "lies in" by place (D25), and a listed path inside a denied one gets no rule (K8) |
 | D12 | `macos` denies with `process-exec` and `file-map-executable` deny rules after every allow |
@@ -2354,16 +2794,17 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 | D16 | `confinement.exec-subpaths` stays unpublished, and the probe test names that exception |
 | D17 | a denied execution is `EACCES` inside the run |
 | D18 | no adapter observes or records a denied execution; § 11 lists what could, and designs none of it |
-| D19 | a profile with a list never runs without it: no `exec_gate` is `confinement.fact-unserved` (501) at admission; a set `exec_gate` that cannot be used is `config.exec-gate-unserved` (501) at open. Decided with D5. Changed: a file changed after the open has no effect (D20), so `exec.capability-stale` is gone from this row. Fifth revision: a file system outside D26's list is not such an open error; the adapter opens with the facts withheld and the cause carried (D27). Sixth revision: the first clause is about the open and admission; for an admitted start it holds only with D28 |
-| D20 | the driver reads the helper once at open through one descriptor, seals and hashes the bytes, and binds those bytes into every view with `--perms 0555 --ro-bind-data`; no name is resolved at a start. Third revision: `F_SEAL_SEAL` is added; each start opens the sealed memfd anew (K3); the two options are cited in the 0.11.2 source |
-| D21 | an `exec_gate` that is not absolute, whose place lies in the workspace root or a declared writable root, or that has more than one link, is `config.exec-gate-invalid` (422) at open. Third revision: both sides are resolved and compared by place (D25), and the link count is new (K4). Fifth revision: where the facts are withheld (D27) the trust check is not reached, because the helper is never used |
+| D19 | a profile with a list never runs without it: no `exec_gate` is `confinement.fact-unserved` (501) at admission; a set `exec_gate` that cannot be used is `config.exec-gate-unserved` (501) at open. Decided with D5. Changed: a file changed after the open has no effect (D20), so `exec.capability-stale` is gone from this row. Fifth revision: a file system outside D26's list is not such an open error; the adapter opens with the facts withheld and the cause carried (D27). Sixth revision: the first clause is about the open and admission; for an admitted start it holds only with D28. Seventh revision: only with D28 and D29; a helper that names a loader is `config.exec-gate-invalid` at open |
+| D20 | the driver reads the helper once at open through one descriptor, seals and hashes the bytes, and binds those bytes into every view with `--perms 0555 --ro-bind-data`; no name is resolved at a start. Third revision: `F_SEAL_SEAL` is added; each start opens the sealed memfd anew (K3); the two options are cited in the 0.11.2 source. Seventh revision: the bytes read are tested for `PT_INTERP` before they are sealed, so what is tested is what runs (D29) |
+| D21 | an `exec_gate` that is not absolute, whose place lies in the workspace root or a declared writable root, or that has more than one link, is `config.exec-gate-invalid` (422) at open. Third revision: both sides are resolved and compared by place (D25), and the link count is new (K4). Fifth revision: where the facts are withheld (D27) the trust check is not reached, because the helper is never used. Seventh revision: a fourth check with the same code, a helper whose bytes are not an ELF program for the driver's machine without `PT_INTERP` (D29) |
 | D22 | the lists are a required argument of a type without `Default`, not a field of `AdapterStart`; the three wire sites write `ExecLists::wire()`. Third revision: `wire` is private to the module `crate::process`, so the adapter's modules cannot call it |
 | D23 | a denied file gets no execute rule from any source: an entry, the program, the loader, or a second mount of its directory; a denied program is `exec.sandbox-program-unlisted` (422) before dispatch. Third revision: the second mount is found by place (D25), and `--alias` is gone |
 | D24 | the helper's arguments: each path is a class (`follow` or `beneath`), a mount root and a relative path. Third revision: the class comes from the mount's host source, not its mode in this run; `--writable` names the mounts the run can write; a `follow` path that resolves into one is `exec.sandbox-path-unrepresentable` (422) before dispatch and exit 125 in the helper. Sixth revision: `--env <name> <value>` carries the program's environment (D28); the form is a proposal |
 | D25 | new in the third revision. Whether one path lies in another is decided by place: the device and root of its mount in `/proc/self/mountinfo`, joined with the rest of the path. The helper reads the view's table, the driver its own. The view-ancestor rule the review proposed is not taken (K2). Accepted by the stakeholder on 2026-11-21 with two conditions (D26, § 3.9). Fourth revision: the mount is the row with the mount ID the kernel reports for the opened path (`statx`, `STATX_MNT_ID`), not the longest matching mount point (S2). Sixth revision: a path that does not exist has no place where a name after its nearest existing ancestor is `..` or `.`; the cause is `path-unopenable` (E5) |
 | D26 | new in the fourth revision, the stakeholder's first condition. Where a place cannot be established, nothing compares path text: nine named causes, one of them a file-system type outside the closed list `ext4`, `overlay`, `tmpfs`. A start is refused `exec.sandbox-place-unserved` (501, new) before dispatch; the open is refused `config.exec-gate-unserved` (501, existing) with the cause; the helper exits 125 with one line. `btrfs`, `xfs` and every network file system are outside the list and refused by name. Accepted by the stakeholder on 2026-11-21, the mount-ID change included. Fifth revision: at the open, `file-system-unlisted` and `mount-id-unreported` withhold the facts and no longer refuse the open (D27); the other seven causes refuse it as before. Sixth revision: a table that was read and is not UTF-8 is `mount-table-unparsable`, and `path-unopenable` gains the case of D25 |
 | D27 | new in the fifth revision, decided by the stakeholder (agent:sdc) on 2026-11-21: "B now, C before the wire story". With a helper configured and a path of the open on a file-system type outside the list, the adapter opens, both facts stay absent, and a profile with a list is refused `confinement.fact-unserved` (501). The cause, path, address and type are in `ExecListProof`, in `AdapterFacts.withheld`, in the `FactUnserved` error and in one `warn` line; the audit record and the wire do not change. Which paths and causes withhold is a reading: every path the open places (the coordinator's), and `mount-id-unreported` beside `file-system-unlisted` (this document's). C: `xfs` is probed in the quota fixture's container before the wire story is planned and enters the list only if every case holds; `btrfs` stays refused by name. Sixth revision: its sentence "nothing ever runs with a list that is not enforced" holds for an admitted start only with D28 |
-| D28 | new in the sixth revision, decided by the coordinator of the request on 2026-11-21 after the adversary pass and the security review of story 1's implementation (E1 to E3); not yet read by the stakeholder. On a start with a list, no variable of the run reaches a process that runs before `landlock_restrict_self` returned: bubblewrap gets no `--setenv` of the run's variables, no stage before the helper starts with one, the driver hands the variables to the helper as operands, and the helper gives them only to the `execve` of the program. No variable is refused by name; a start without a list keeps its argv. This document's additions, each a proposal: no `--setenv` at all on such a start; the helper refuses to run when a variable other than bubblewrap's `PWD` reached its own process, where the decision said it clears them; the operand form `--env <name> <value>`. What remains is a stated limit (§ 7): inside the domain a preload object loads into every allowed dynamic program and can run code, and `execve` of an unlisted path still fails |
+| D28 | new in the sixth revision, decided by the coordinator of the request on 2026-11-21 after the adversary pass and the security review of story 1's implementation (E1 to E3); not yet read by the stakeholder. On a start with a list, no variable of the run reaches a process that runs before `landlock_restrict_self` returned: bubblewrap gets no `--setenv` of the run's variables, no stage before the helper starts with one, the driver hands the variables to the helper as operands, and the helper gives them only to the `execve` of the program. No variable is refused by name; a start without a list keeps its argv. This document's additions, each a proposal: no `--setenv` at all on such a start; the helper refuses to run when a variable other than bubblewrap's `PWD` reached its own process, where the decision said it clears them; the operand form `--env <name> <value>`. What remains is a stated limit (§ 7): inside the domain a preload object loads into every allowed dynamic program and can run code, and `execve` of an unlisted path still fails. Seventh revision: implemented at `767fbea57`; the coordinator settled the three additions as written (no `--setenv`, the helper refuses, `--env`), and the cases of E1 to E3 pass there |
+| D29 | new in the seventh revision, decided by the coordinator of the request on 2026-11-21 after the second adversary pass and the second security look (E6, E7). The stakeholder (agent:sdc): "No objection to D29: static helper, the driver refuses a helper that needs a dynamic loader, and a listed start with a controlling terminal is refused before dispatch until the helper takes the terminal itself." The helper is statically linked: at the open the driver tests the bytes it read through the one descriptor, the bytes it then seals and binds, and refuses `config.exec-gate-invalid` (422) unless they are an ELF program with no `PT_INTERP`. The rule is "no `PT_INTERP`", not "no `PT_DYNAMIC`", so a static position-independent helper passes (the stakeholder's first point). No list of loader files is kept and no declared mount is refused for its path. On a start with a list the helper is the first program bubblewrap starts in the view; a start with a list and a controlling terminal is refused before dispatch, with `session.pty-unserved` (501) proposed and the implementor's to confirm. The lane builds the helper static and refuses by name where it cannot. This document's additions, each a reading: bytes that are not an ELF image for the driver's machine, or whose headers cannot be read, are refused too. With D28: before `landlock_restrict_self` returns, the processes in the view are bubblewrap's own and the static helper, and nothing the run or the profile names is loaded as code. The limit inside the domain is unchanged (§ 7) |
 
 ## 18. Inferred, not observed
 
@@ -2464,28 +2905,15 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 - The sixth revision as a whole: nothing was run or built for it. E1 to E5 are the two
   reviews' cases and logs, read; this revision did not run them. The code was read at
   `4b5208922` with `git show`, because the working tree was changing.
-- D28 with the rule in place was not observed. That the three preload cases then print the
-  expected results, that the variables arrive at the program, and that a terminal start holds
-  the same are the cases of § 16, not runs.
-- D28, the limit: that an object named by `LD_PRELOAD` runs its constructor in an allowed
-  dynamic program inside the domain is inferred from A10 and from what a loader does. E1 to E3
-  show a constructor running before the domain, not inside it.
 - D28, `PWD`: that bubblewrap sets `PWD` after `--clearenv` is from the comment at
   `process.rs:3040-3041` and the stage it explains; bubblewrap's source was not read for it.
   That no loader acts on `PWD` is from `ld.so(8)` as remembered, not read in this revision.
   That bubblewrap sets no other variable was not checked.
-- D28, rule 1 and rule 5: no `--setenv` at all, and a helper that refuses a variable in its
-  own environment, are this document's proposals beyond the decision as given. The `--env`
-  form is a proposal too. The implementor's working tree held a helper of that form while this
-  was written. It was read, nothing here cites its lines, and it may differ when it is
-  committed.
 - D28, the size of a start: that argument and environment strings count against one limit is
   from `execve(2)`. No start with 64 variables of 4096 bytes was run through the helper.
 - D28, `systemd` around `linux`: that its starts go through the same argv is read from
   `systemd.rs:704-712`, where the adapter calls the inner adapter's `start`. Not run.
-- D28, what it does not cover: whether a declared read-only file can be mounted at
-  `/etc/ld.so.preload` in the view was not checked, nor what else a loader reads from files.
-- D15, the preload half: a proposal. That a loader given a preload path at which nothing
+- D15, the preload half: that a loader given a preload path at which nothing
   exists reports it and goes on is glibc's documented behaviour, not run here; musl's was not
   looked up. The cost of the second sandbox per open was not measured.
 - § 5, the path limit: 4095 bytes is `PATH_MAX` less its terminator. E4 shows a path above it
@@ -2499,6 +2927,49 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 - D26, a table that is not UTF-8: that the kernel writes such a byte of a mount point
   unescaped is from `fs/proc_namespace.c` as remembered. No such mount was made, and the
   implementation's answer was read from `place.rs:261`, not provoked.
+- The seventh revision as a whole: nothing was run or built for it, except two reads of the
+  probe host: `file` on its `bwrap` and `setsid`, and a listing of
+  `/proc/sys/fs/binfmt_misc`. E6 to E12 are the second reviews' cases and logs, read. The code
+  was read at `767fbea57` with `git show`. Four items of the sixth revision left this list:
+  they are measured (E6 to E9, § 3.11) or settled by the coordinator.
+- D29 is not implemented. That a helper with `PT_INTERP` is refused at the open, that the
+  lane builds a static helper, and that a start with a list and a terminal is refused are
+  this document's text. E8 ran a static helper against the driver of `767fbea57`, which has
+  none of the three.
+- D29, rule 1: that a static position-independent helper has `PT_DYNAMIC` and no `PT_INTERP`
+  is from `file` calling E8's helper `static-pie linked`; its program headers were not
+  printed. That the reader of D7 answers "none" for a `PT_INTERP` it cannot use is read from
+  `crates/substrate-exec-gate/src/lib.rs:359-386`, not run.
+- D29, rule 1, the three tests beyond "no `PT_INTERP`" (an ELF image, for the driver's
+  machine, with a table read whole): this document's reading of the stakeholder's point, not
+  its words. The reason given for the machine test, a `binfmt_misc` handler, is an argument.
+- D29, the sentence of § 6, *Before the ruleset*. Each of these is read or argued, and none
+  was run:
+  - that bubblewrap maps nothing once it is inside the view and before it executes the
+    helper. Its source was not read for this;
+  - that bubblewrap executes an absolute first argument without a search;
+  - that the kernel starts a static ELF program with no other program on a host with a
+    `binfmt_misc` handler registered. The probe host has none;
+  - that neither the helper's code nor the Rust runtime's start calls a `libc` function that
+    maps a library. No trace of the helper was taken;
+  - that the helper reads none of the descriptors it inherits, read from its source;
+  - that the stages `systemd` adds run outside the view and are not reached by a declared
+    file;
+  - that the kernel resolves a relative `PT_INTERP` from the working directory.
+- D29, why not the narrower correction: that `/etc/ld.so.cache` and a file mounted over a
+  library reach a dynamically linked helper the way `/etc/ld.so.preload` did was not run.
+  Only the preload file was (E6, E7). That musl's loader reads a path file under `/etc` is
+  from its documentation as remembered.
+- D29, rule 4: `session.pty-unserved` is a proposal from reading § 12 and the wire crate.
+  That no start has both a list and a terminal is read from the three wire sites
+  (`process.rs:931`, `:967`, `:1078`) and relayed from the reviews. Nothing was built.
+- D29, the lane: that the hosted runner has the `x86_64-unknown-linux-musl` target because
+  `rust-toolchain.toml` pins it, and that the helper links for it there without a C tool
+  chain for musl. On the probe host that build succeeded (E8). The `Dockerfile` installs
+  `musl-tools` for the executor's build (`Dockerfile:113`); whether the helper needs them was
+  not checked.
+- § 16, the dynamically linked helper case: that a copy of the host's `/usr/bin/env` passes
+  the three checks of D21 and reaches the test of the bytes was not run.
 
 ## 19. The three defaults the stakeholder decided
 
@@ -2609,4 +3080,18 @@ refused by link count.
 - A mount table that is not UTF-8 refuses every open with `exec_gate` set and every start with
   a list, for one mount with such a name anywhere on the host. A reader that takes the table
   as bytes and fails only for the row of the path it places is not designed.
-- D28 on `oci` and `pod`: their story, with the lists themselves.
+- D28 on `oci` and `pod`: their story, with the lists themselves. D29 goes with it.
+- A helper that takes the controlling terminal itself, so that a start with a list can have
+  one (D29, rule 4). It is a session and one `ioctl` before the ruleset, with `libc` alone.
+  No start needs it today. The story that gives a session start a list designs it, and
+  decides the refusal's code on the wire with it.
+- A refusal of declared mounts at paths a loader reads (`/etc/ld.so.preload`,
+  `/etc/ld.so.cache`), on a start with a list or on every start. D29 decides against it for
+  these stories: the helper needs no such rule, and inside the domain it is the stated limit.
+  Whether a profile should be able to declare such a file at all is a question for the
+  read-only files' own design (ADR 0033); it would change starts without a list too.
+- A static bubblewrap, or a check of how `HostConfig.bubblewrap` is linked. Bubblewrap's
+  loader runs on the host, before the view exists and with a cleared environment, so the
+  route of E6 does not reach it. What it does inside the view before it executes the helper
+  is on the list of § 18.
+- A check for a `binfmt_misc` handler on the host. Registering one needs root on the host.

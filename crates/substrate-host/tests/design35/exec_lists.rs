@@ -19,7 +19,8 @@ use substrate_exec_gate::{Class, Lists, Located};
 use substrate_host::HostConfig;
 use substrate_host::confinement::{
     self, AdapterRequest, AuditRecord, AuditSink, Command, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, Fact, FactWithheld, ReadOnlyRoot, RunState, linux::LinuxRequest,
+    ConfinementProfile, Fact, FactWithheld, ReadOnlyFile, ReadOnlyRoot, RunState,
+    linux::LinuxRequest,
 };
 use substrate_host::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
 
@@ -786,6 +787,8 @@ async fn the_helper_replaced_and_removed_after_the_open_changes_no_later_start()
         "bin/tool; echo $?; other/tool 2>/dev/null; echo $?; {GATE} --version 2>/dev/null; \
          echo $?; if (echo x >> {GATE}) 2>/dev/null; then echo written; else echo read-only; fi"
     );
+    // What stands under the name after the open is never read, so it need not be a helper the
+    // driver would take: a script is refused at an open (D29).
     std::fs::write(&installed, "#!/bin/sh\nexec \"$@\"\n").expect("replace the helper");
     let (_, stdout) = run(&adapter, &profile, &script).await;
     assert_eq!(stdout, EXPECTED, "a helper replaced on disk");
@@ -848,20 +851,72 @@ async fn without_a_helper_a_listed_profile_is_refused_and_an_unlisted_one_runs()
     println!("{NAME}: executed");
 }
 
-/// A stand-in helper: it answers the protocol line with `protocol`, and otherwise executes the
-/// program without restricting anything.
-fn stand_in(host: &Path, protocol: &str) -> PathBuf {
-    let path = host.join("stand-in-gate");
-    std::fs::write(
-        &path,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo {protocol}; exit 0; fi\n\
-             while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n"
-        ),
-    )
-    .expect("stand-in");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
-    path
+/// Builds `source` with the host's `cc` as a statically linked program at `host/<file>`, the
+/// only kind of helper the driver takes (D29); or prints `<name>: ABSENT (<reason>)` where no
+/// static program can be built.
+fn static_program(
+    name: &str,
+    host: &Path,
+    file: &str,
+    source: &str,
+    defines: &[&str],
+) -> Option<PathBuf> {
+    let code = host.join(format!("{file}.c"));
+    let program = host.join(file);
+    std::fs::write(&code, source).expect("the source");
+    let built = std::process::Command::new("cc")
+        .arg("-static")
+        .args(defines)
+        .arg("-o")
+        .arg(&program)
+        .arg(&code)
+        .output();
+    match built {
+        Ok(output) if output.status.success() => {
+            assert_eq!(
+                substrate_exec_gate::elf_linkage(&std::fs::read(&program).expect("the program")),
+                substrate_exec_gate::Linkage::Static,
+                "{name}: cc -static built a program with a PT_INTERP"
+            );
+            Some(program)
+        }
+        Ok(output) => {
+            println!(
+                "{name}: ABSENT (cc built no static program: {})",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            None
+        }
+        Err(error) => {
+            println!("{name}: ABSENT (no C compiler named cc: {error})");
+            None
+        }
+    }
+}
+
+/// A stand-in helper, statically linked: it answers the protocol line with `protocol`, and
+/// otherwise executes the program without restricting anything.
+fn stand_in(name: &str, host: &Path, protocol: &str) -> Option<PathBuf> {
+    let source = format!(
+        r#"
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {{
+    int at = 1;
+    if (argc > 1 && strcmp(argv[1], "--version") == 0) {{
+        puts("{protocol}");
+        return 0;
+    }}
+    while (at < argc && strcmp(argv[at], "--") != 0) at++;
+    if (at + 1 >= argc) return 125;
+    execv(argv[at + 1], argv + at + 1);
+    return 126;
+}}
+"#
+    );
+    static_program(name, host, "stand-in-gate", &source, &[])
 }
 
 /// D19, fourth row, and D15: a helper of the protocol that does not restrict leaves the fact
@@ -874,7 +929,9 @@ async fn a_helper_that_does_not_restrict_withholds_the_fact() {
         return;
     };
     let host = tempfile::tempdir().expect("host root");
-    let gate = stand_in(host.path(), "substrate-exec-gate/1");
+    let Some(gate) = stand_in(NAME, host.path(), "substrate-exec-gate/1") else {
+        return;
+    };
     let adapter = open_with(host.path(), &cgroup_root, Some(gate)).expect("linux opens");
     let workspace = workspace(host.path());
     assert_fact_unserved(&adapter, &workspace, "a helper that does not restrict");
@@ -890,7 +947,9 @@ async fn a_helper_of_another_protocol_refuses_the_open() {
         return;
     };
     let host = tempfile::tempdir().expect("host root");
-    let gate = stand_in(host.path(), "substrate-exec-gate/0");
+    let Some(gate) = stand_in(NAME, host.path(), "substrate-exec-gate/0") else {
+        return;
+    };
     let Err(error) = open_with(host.path(), &cgroup_root, Some(gate.clone())) else {
         panic!("a helper of another protocol opened");
     };
@@ -1362,31 +1421,68 @@ async fn the_runs_variables_reach_the_program_as_they_were_given() {
     println!("{NAME}: executed");
 }
 
-/// A helper with one defect, for the probe of design 35 § 9: a shell script that carries the
-/// lane's helper after its last line, writes it to `/tmp/gate` of the view and starts it with
-/// an empty environment of its own, after `before` rewrote the arguments. It restricts as the
-/// real helper does.
-fn defective(host: &Path, name: &str, before: &str) -> PathBuf {
-    let tail = text(&tool("tail"));
-    let chmod = text(&tool("chmod"));
-    let env = text(&tool("env"));
-    let script = |offset: usize| {
-        format!(
-            "#!/bin/sh\n\
-             {tail} -c +{offset:08} /.substrate-exec-gate > /tmp/gate || exit 99\n\
-             {chmod} 0755 /tmp/gate || exit 99\n\
-             {before}\n\
-             exec {env} -i /tmp/gate \"$@\"\n\
-             exit 98\n"
-        )
-    };
-    // `tail -c +N` starts at byte N, counted from one: the first byte after the script.
-    let mut bytes = script(script(0).len() + 1).into_bytes();
-    bytes.extend_from_slice(&std::fs::read(helper()).expect("the lane's helper"));
-    let path = host.join(name);
+/// A helper with one defect, for the probe of design 35 § 9, statically linked as the driver
+/// requires (D29). The file is this program, then the lane's helper, then that helper's length
+/// in eight bytes. It writes the helper to `/tmp/gate` of the view and starts it with an empty
+/// environment of its own, so it restricts as the real helper does; built with
+/// `-DDROP_OPERANDS` it first drops every `--env <name> <value>` before the helper's own `--`.
+const DEFECTIVE: &str = r#"
+#include <fcntl.h>
+#include <stdint.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    static char buffer[1 << 16];
+    char *empty[] = { NULL };
+    struct stat seen;
+    uint64_t length;
+    off_t at;
+    int self = open("/.substrate-exec-gate", O_RDONLY);
+    int out = open("/tmp/gate", O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (self < 0 || out < 0 || fstat(self, &seen) != 0) return 99;
+    if (pread(self, &length, 8, seen.st_size - 8) != 8) return 99;
+    at = seen.st_size - 8 - (off_t)length;
+    while (length > 0) {
+        size_t want = length < sizeof buffer ? (size_t)length : sizeof buffer;
+        ssize_t got = pread(self, buffer, want, at);
+        if (got <= 0 || write(out, buffer, (size_t)got) != got) return 99;
+        at += got;
+        length -= (uint64_t)got;
+    }
+    close(out);
+    close(self);
+#ifdef DROP_OPERANDS
+    {
+        int kept = 1, options = 1;
+        for (int index = 1; index < argc; index++) {
+            if (options && strcmp(argv[index], "--env") == 0 && index + 2 < argc) {
+                index += 2;
+                continue;
+            }
+            if (strcmp(argv[index], "--") == 0) options = 0;
+            argv[kept++] = argv[index];
+        }
+        argv[kept] = NULL;
+    }
+#else
+    (void)argc;
+#endif
+    execve("/tmp/gate", argv, empty);
+    return 98;
+}
+"#;
+
+fn defective(name: &str, host: &Path, file: &str, defines: &[&str]) -> Option<PathBuf> {
+    let path = static_program(name, host, file, DEFECTIVE, defines)?;
+    let helper = std::fs::read(helper()).expect("the lane's helper");
+    let mut bytes = std::fs::read(&path).expect("the wrapper");
+    bytes.extend_from_slice(&helper);
+    bytes.extend_from_slice(&u64::try_from(helper.len()).expect("a length").to_le_bytes());
     std::fs::write(&path, bytes).expect("the defective helper");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
-    path
+    Some(path)
 }
 
 /// D15, the preload half (§ 9): `exec_subpaths` is proved only where a variable given as an
@@ -1403,35 +1499,25 @@ fn defective(host: &Path, name: &str, before: &str) -> PathBuf {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_helper_that_fails_the_preload_half_withholds_the_fact() {
     const NAME: &str = "ESS confinement linux exec helper preload half";
-    /// Drops every `--env <name> <value>` before the helper's own `--`.
-    const DROPS_THE_OPERANDS: &str = "count=$#\n\
-        options=1\n\
-        while [ \"$count\" -gt 0 ]; do\n\
-        \x20 argument=$1; shift; count=$((count - 1))\n\
-        \x20 if [ \"$options\" = 1 ] && [ \"$argument\" = --env ]; then\n\
-        \x20   shift 2; count=$((count - 2))\n\
-        \x20 else\n\
-        \x20   [ \"$argument\" = -- ] && options=0\n\
-        \x20   set -- \"$@\" \"$argument\"\n\
-        \x20 fi\n\
-        done";
     let Some(cgroup_root) = delegated(NAME) else {
         return;
     };
-    for (name, before, what) in [
+    for (file, defines, what) in [
         (
             "gate-drops-operands",
-            DROPS_THE_OPERANDS,
+            &["-DDROP_OPERANDS"][..],
             "a helper that does not hand the operand's variable to the program",
         ),
         (
             "gate-clears-its-own",
-            ":",
+            &[],
             "a helper that starts the program although a variable reached its own process",
         ),
     ] {
         let host = tempfile::tempdir().expect("host root");
-        let gate = defective(host.path(), name, before);
+        let Some(gate) = defective(NAME, host.path(), file, defines) else {
+            return;
+        };
         let adapter = open_with(host.path(), &cgroup_root, Some(gate)).expect("linux opens");
         let workspace = workspace(host.path());
         assert_fact_unserved(&adapter, &workspace, what);
@@ -1485,4 +1571,149 @@ async fn an_entry_over_the_kernels_path_limit_is_refused_and_one_at_it_runs() {
         "an entry of 4095 bytes in the view is one the helper opens"
     );
     println!("{NAME}: executed");
+}
+
+/// D29: **the driver takes only a statically linked helper.** The lane's helper has no
+/// `PT_INTERP` and proves the fact. Cargo's default build of the same binary, which the lane
+/// names in `SUBSTRATE_EXEC_GATE_DYNAMIC`, has one, and the open is refused
+/// `config.exec-gate-invalid` (422) with the path and the reason: its loader would run before
+/// the helper's first instruction and read what a profile mounts at `/etc/ld.so.preload`. A
+/// script is refused the same way. No adapter exists after either, so nothing is admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dynamically_linked_helper_refuses_the_open() {
+    const NAME: &str = "ESS confinement linux exec helper dynamic";
+    let Some(cgroup_root) = delegated(NAME) else {
+        return;
+    };
+    let linkage = |path: &Path| {
+        substrate_exec_gate::elf_linkage(&std::fs::read(path).expect("the helper's bytes"))
+    };
+    assert_eq!(
+        linkage(&helper()),
+        substrate_exec_gate::Linkage::Static,
+        "the lane's helper is statically linked"
+    );
+    let dynamic = PathBuf::from(std::env::var_os("SUBSTRATE_EXEC_GATE_DYNAMIC").expect(
+        "SUBSTRATE_EXEC_GATE_DYNAMIC is unset: `bash scripts/delegated-lane.sh` names a copy \
+         of cargo's default build of substrate-exec-gate",
+    ));
+    assert_eq!(
+        linkage(&dynamic),
+        substrate_exec_gate::Linkage::Interpreted,
+        "the default build of the helper is dynamically linked"
+    );
+    let host = tempfile::tempdir().expect("host root");
+    let script = host.path().join("script-gate");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n[ \"$1\" = --version ] && echo substrate-exec-gate/1\n",
+    )
+    .expect("a script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    for (gate, reason) in [
+        (dynamic, "PT_INTERP"),
+        (
+            script,
+            "is not an ELF image of the driver's class, byte order and machine",
+        ),
+    ] {
+        let Err(error) = open_with(host.path(), &cgroup_root, Some(gate.clone())) else {
+            panic!("the open took the helper {}", gate.display());
+        };
+        assert_eq!(
+            (error.code(), error.status()),
+            ("config.exec-gate-invalid", 422),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&text(&gate)) && message.contains(reason),
+            "the refusal names the path and the reason: {message}"
+        );
+    }
+    println!("{NAME}: executed");
+}
+
+/// What the object of the declared-file limit does wherever it is loaded: it appends the path
+/// of the program that loaded it, as the kernel names it, to `/workspace/loaded`.
+const RECORDING_PRELOAD: &str = r#"
+#include <fcntl.h>
+#include <unistd.h>
+
+static void __attribute__((constructor)) loaded(void) {
+    char program[4096];
+    ssize_t length = readlink("/proc/self/exe", program, sizeof program - 1);
+    int file = open("/workspace/loaded", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (file >= 0 && length > 0) {
+        program[length] = '\n';
+        (void)!write(file, program, (size_t)length + 1);
+    }
+    if (file >= 0) close(file);
+}
+"#;
+
+/// The limit of design 35 § 7 through a file (D29, E8): **a profile may declare a read-only
+/// file at `/etc/ld.so.preload`, and every allowed dynamic program of the run reads it.** The
+/// driver refuses no declared mount for its path. The object the file names is loaded into the
+/// allowed shell and the listed tool, and into nothing before them: the helper has no loader,
+/// and no program runs before the helper. The unlisted tool still ends with status 126.
+#[tokio::test(flavor = "multi_thread")]
+async fn limit_a_declared_preload_file_is_read_by_every_allowed_dynamic_program() {
+    const NAME: &str = "ESS confinement linux exec limit preload file";
+    let Some(lane) = lane(NAME) else {
+        return;
+    };
+    if shared_object(NAME, &lane.workspace, RECORDING_PRELOAD).is_none() {
+        return;
+    }
+    let list = lane
+        .host
+        .path()
+        .canonicalize()
+        .expect("canonical host root")
+        .join("preload.list");
+    std::fs::write(&list, "/workspace/pre.so\n").expect("the list of objects");
+    let profile = ConfinementProfile {
+        read_only_files: vec![ReadOnlyFile {
+            host_path: text(&list),
+            mount: "/etc/ld.so.preload".to_owned(),
+        }],
+        ..listed(&lane.workspace, &["bin"])
+    };
+    let (code, stdout) = run(
+        &lane.adapter,
+        &profile,
+        "bin/tool; echo $?; other/tool 2>/dev/null; echo $?",
+    )
+    .await;
+    assert_eq!(
+        (stdout.as_str(), code),
+        ("0\n126\n", Some(0)),
+        "the list holds the run with the declared file in its view"
+    );
+    let record = std::fs::read_to_string(lane.workspace.join("loaded")).unwrap_or_default();
+    let loaded: Vec<&str> = record.lines().collect();
+    let shell = std::fs::canonicalize(tool("sh")).expect("the shell's file");
+    assert_eq!(
+        loaded.first().copied(),
+        Some(text(&shell).as_str()),
+        "the first program that loaded the object is the run's own: {loaded:?}"
+    );
+    let dynamic = |path: &Path| {
+        substrate_exec_gate::elf_linkage(&std::fs::read(path).expect("the tool's bytes"))
+            == substrate_exec_gate::Linkage::Interpreted
+    };
+    if dynamic(&tool("true")) {
+        assert!(
+            loaded.contains(&"/workspace/bin/tool"),
+            "the listed tool is dynamically linked and read the file: {loaded:?}"
+        );
+    }
+    assert!(
+        !loaded
+            .iter()
+            .any(|program| program.contains("exec-gate") || program.contains("other/tool")),
+        "the object was loaded in the helper or in a program outside the list: {loaded:?}"
+    );
+    println!("{NAME}: executed, loaded in {loaded:?}");
 }

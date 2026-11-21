@@ -354,10 +354,134 @@ fn field(image: &[u8], offset: usize, width: usize) -> Option<usize> {
     usize::try_from(u64::from_le_bytes(value)).ok()
 }
 
+/// The program header type of the loader a dynamically linked image names.
+const PT_INTERP: usize = 3;
+
+/// The class, byte order and machine of an ELF image: `EI_CLASS`, `EI_DATA` and `e_machine`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElfTarget {
+    /// `EI_CLASS`: 1 for a 32-bit image, 2 for a 64-bit one.
+    pub class: u8,
+    /// `EI_DATA`: 1 for little-endian, 2 for big-endian.
+    pub data: u8,
+    /// `e_machine`.
+    pub machine: u16,
+}
+
+impl ElfTarget {
+    /// What the kernel under this build executes natively: the target this crate was compiled
+    /// for, which is the driver's own where the driver links it. `None` on an architecture
+    /// this table does not name, where no image is taken for native.
+    pub const NATIVE: Option<Self> = {
+        let machine = if cfg!(target_arch = "x86_64") {
+            Some(62)
+        } else if cfg!(target_arch = "aarch64") {
+            Some(183)
+        } else if cfg!(target_arch = "x86") {
+            Some(3)
+        } else if cfg!(target_arch = "arm") {
+            Some(40)
+        } else if cfg!(target_arch = "riscv64") {
+            Some(243)
+        } else {
+            None
+        };
+        match machine {
+            Some(machine) => Some(Self {
+                class: if cfg!(target_pointer_width = "64") {
+                    2
+                } else {
+                    1
+                },
+                data: if cfg!(target_endian = "little") { 1 } else { 2 },
+                machine,
+            }),
+            None => None,
+        }
+    };
+}
+
+/// How the kernel starts an executable image, read from its ELF header and program headers
+/// and from nothing else (design 35 D29, rule 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Linkage {
+    /// A native ELF image with no `PT_INTERP` header: the kernel starts it directly, and no
+    /// loader runs before its first instruction. A static-pie image is one, though it has a
+    /// `PT_DYNAMIC` header.
+    Static,
+    /// A native ELF image with a `PT_INTERP` header, whatever the header names: a loader runs
+    /// first.
+    Interpreted,
+    /// Not an ELF image, or one of another class, byte order or machine than the native one. A
+    /// `#!` script is one, and what runs first there is its interpreter; an image of another
+    /// machine is run by whatever the host registered for it.
+    Foreign,
+    /// A native ELF image whose program header table was not read whole: it declares no
+    /// program header, keeps its count elsewhere (`PN_XNUM`), or the table lies outside the
+    /// bytes.
+    Unreadable,
+}
+
+/// Whether the kernel starts `image` directly: [`Linkage::Static`] exactly when it is an ELF
+/// image of [`ElfTarget::NATIVE`], its whole program header table was read, and no header has
+/// the type `PT_INTERP`. The three are asked in that order. The contents of a `PT_INTERP`
+/// header are not read, and `PT_DYNAMIC` is not asked.
+pub fn elf_linkage(image: &[u8]) -> Linkage {
+    linkage_for(image, ElfTarget::NATIVE)
+}
+
+fn linkage_for(image: &[u8], native: Option<ElfTarget>) -> Linkage {
+    // Only a little-endian image is read here, so a big-endian host takes none.
+    let identity = || {
+        let found = ElfTarget {
+            class: *image.get(4)?,
+            data: *image.get(5)?,
+            machine: u16::try_from(field(image, 18, 2)?).ok()?,
+        };
+        (image.get(..4)? == b"\x7fELF" && found.data == 1 && Some(found) == native).then_some(())
+    };
+    if identity().is_none() {
+        return Linkage::Foreign;
+    }
+    match program_header_types(image) {
+        Some(types) if types.contains(&PT_INTERP) => Linkage::Interpreted,
+        Some(_) => Linkage::Static,
+        None => Linkage::Unreadable,
+    }
+}
+
+/// The `p_type` of every program header of a little-endian ELF image, 32-bit or 64-bit. `None`
+/// when one of them cannot be read, and for an image that declares none or keeps its count
+/// elsewhere (`PN_XNUM`).
+fn program_header_types(image: &[u8]) -> Option<Vec<usize>> {
+    const PN_XNUM: usize = 0xffff;
+    if image.get(..4)? != b"\x7fELF" || *image.get(5)? != 1 {
+        return None;
+    }
+    // (e_phoff, its width, e_phentsize, e_phnum, the size of one program header).
+    let (table, word, entry_size, count, header_size) = match *image.get(4)? {
+        1 => (28, 4, 42, 44, 32),
+        2 => (32, 8, 54, 56, 56),
+        _ => return None,
+    };
+    let table = field(image, table, word)?;
+    let entry_size = field(image, entry_size, 2)?;
+    let count = field(image, count, 2)?;
+    if count == 0 || count == PN_XNUM || entry_size < header_size {
+        return None;
+    }
+    (0..count)
+        .map(|index| {
+            let header = table.checked_add(index.checked_mul(entry_size)?)?;
+            image.get(header..header.checked_add(entry_size)?)?;
+            field(image, header, 4)
+        })
+        .collect()
+}
+
 /// The `PT_INTERP` of an ELF image: the loader a dynamically linked program names. `None` for a
 /// static program and for bytes that are not a little-endian ELF image.
 pub fn elf_interpreter(image: &[u8]) -> Option<String> {
-    const PT_INTERP: usize = 3;
     if image.get(..4)? != b"\x7fELF" || *image.get(5)? != 1 {
         return None;
     }
@@ -782,6 +906,228 @@ mod tests {
         image.extend(header);
         image.extend(text.bytes());
         image
+    }
+
+    const X86_64: u16 = 62;
+    const AARCH64: u16 = 183;
+    const I386: u16 = 3;
+
+    /// A little-endian image of `class` (1 or 2) for `machine`, of the ELF type `kind`, whose
+    /// program headers have the types `segments`, each header empty but for its type.
+    fn image_with(class: u8, machine: u16, kind: u16, segments: &[u32]) -> Vec<u8> {
+        let (header, offset_at, size_at, count_at, entry) = match class {
+            1 => (52, 28, 42, 44, 32_usize),
+            _ => (64, 32, 54, 56, 56_usize),
+        };
+        let mut image = vec![0_u8; header];
+        image[..4].copy_from_slice(b"\x7fELF");
+        image[4] = class;
+        image[5] = 1;
+        image[16..18].copy_from_slice(&kind.to_le_bytes());
+        image[18..20].copy_from_slice(&machine.to_le_bytes());
+        image[offset_at..offset_at + 2]
+            .copy_from_slice(&u16::try_from(header).expect("small").to_le_bytes());
+        image[size_at..size_at + 2]
+            .copy_from_slice(&u16::try_from(entry).expect("small").to_le_bytes());
+        image[count_at..count_at + 2]
+            .copy_from_slice(&u16::try_from(segments.len()).expect("few").to_le_bytes());
+        for segment in segments {
+            let mut one = vec![0_u8; entry];
+            one[..4].copy_from_slice(&segment.to_le_bytes());
+            image.extend(one);
+        }
+        image
+    }
+
+    const ET_EXEC: u16 = 2;
+    const ET_DYN: u16 = 3;
+    const PT_LOAD: u32 = 1;
+    const PT_DYNAMIC: u32 = 2;
+    const INTERP: u32 = 3;
+    const PT_PHDR: u32 = 6;
+    const PT_TLS: u32 = 7;
+    const PT_GNU_STACK: u32 = 0x6474_e551;
+
+    /// D29, rule 1: among native images the helper's linkage is the presence of a `PT_INTERP`
+    /// header and nothing else. A static image and a static-pie image, which has a
+    /// `PT_DYNAMIC` header, are static; an image with `PT_INTERP` is not, wherever the header
+    /// stands and whatever it names. Asked for a 64-bit and a 32-bit native target.
+    #[test]
+    fn linkage_is_the_presence_of_pt_interp() {
+        for (class, machine) in [(2, X86_64), (2, AARCH64), (1, I386)] {
+            let native = Some(ElfTarget {
+                class,
+                data: 1,
+                machine,
+            });
+            let linkage = |kind: u16, segments: &[u32]| {
+                linkage_for(&image_with(class, machine, kind, segments), native)
+            };
+            assert_eq!(
+                linkage(ET_EXEC, &[PT_LOAD, PT_LOAD, PT_TLS, PT_GNU_STACK]),
+                Linkage::Static,
+                "class {class}: a static image that is not position independent"
+            );
+            assert_eq!(
+                linkage(
+                    ET_DYN,
+                    &[PT_LOAD, PT_LOAD, PT_DYNAMIC, PT_TLS, PT_GNU_STACK]
+                ),
+                Linkage::Static,
+                "class {class}: a static-pie image has PT_DYNAMIC and no PT_INTERP"
+            );
+            assert_eq!(
+                linkage(
+                    ET_DYN,
+                    &[PT_PHDR, INTERP, PT_LOAD, PT_LOAD, PT_DYNAMIC, PT_GNU_STACK]
+                ),
+                Linkage::Interpreted,
+                "class {class}: a dynamically linked image"
+            );
+            assert_eq!(
+                linkage(ET_EXEC, &[PT_LOAD, PT_GNU_STACK, INTERP]),
+                Linkage::Interpreted,
+                "class {class}: PT_INTERP as the last header"
+            );
+        }
+        // The interpreter's text is not what decides: `elf_interpreter` reads none here.
+        let native = Some(ElfTarget {
+            class: 2,
+            data: 1,
+            machine: X86_64,
+        });
+        let unnamed = image_with(2, X86_64, ET_DYN, &[PT_LOAD, INTERP]);
+        assert_eq!(elf_interpreter(&unnamed), None);
+        assert_eq!(linkage_for(&unnamed, native), Linkage::Interpreted);
+        // Nor is its form: the reader of D7 takes a loader from the first of these only, and
+        // every one of them is a loader the kernel would start, or fail to.
+        for (path, read) in [
+            (&b"/lib64/ld-linux-x86-64.so.2"[..], true),
+            (b"ld.so", false),
+            (b"/lib/../lib64/ld.so", false),
+            (b"/lib/\xff", false),
+            (b"", false),
+            (b"/", false),
+        ] {
+            let mut image = image_with(2, X86_64, ET_DYN, &[PT_LOAD, INTERP]);
+            let start = u64::try_from(image.len()).expect("small");
+            let size = u64::try_from(path.len() + 1).expect("small");
+            // The second header, 64 + 56 bytes in: p_offset at 8, p_filesz at 32.
+            image[128..136].copy_from_slice(&start.to_le_bytes());
+            image[152..160].copy_from_slice(&size.to_le_bytes());
+            image.extend_from_slice(path);
+            image.push(0);
+            assert_eq!(
+                elf_interpreter(&image).is_some(),
+                read,
+                "{:?}",
+                String::from_utf8_lossy(path)
+            );
+            assert_eq!(
+                linkage_for(&image, native),
+                Linkage::Interpreted,
+                "{:?}",
+                String::from_utf8_lossy(path)
+            );
+        }
+    }
+
+    /// D29, rule 1, first point: an image of another machine, class or byte order than the
+    /// native one is foreign, with or without a `PT_INTERP`, and so are bytes that are no ELF
+    /// image: a `#!` script, nothing, the magic alone. On a target the table does not name,
+    /// every image is.
+    #[test]
+    fn an_image_of_another_machine_and_a_script_are_foreign() {
+        let native = Some(ElfTarget {
+            class: 2,
+            data: 1,
+            machine: X86_64,
+        });
+        let fixed = image_with(2, X86_64, ET_EXEC, &[PT_LOAD]);
+        assert_eq!(linkage_for(&fixed, native), Linkage::Static, "the control");
+        for (what, image) in [
+            (
+                "another machine",
+                image_with(2, AARCH64, ET_EXEC, &[PT_LOAD]),
+            ),
+            (
+                "another machine, dynamically linked",
+                image_with(2, AARCH64, ET_DYN, &[INTERP, PT_LOAD]),
+            ),
+            ("another class", image_with(1, I386, ET_EXEC, &[PT_LOAD])),
+            (
+                "the machine in another class",
+                image_with(1, X86_64, ET_EXEC, &[PT_LOAD]),
+            ),
+        ] {
+            assert_eq!(linkage_for(&image, native), Linkage::Foreign, "{what}");
+        }
+        let mut big_endian = fixed.clone();
+        big_endian[5] = 2;
+        assert_eq!(linkage_for(&big_endian, native), Linkage::Foreign);
+        for (what, bytes) in [
+            ("a script", &b"#!/bin/sh\nexec \"$@\"\n"[..]),
+            ("nothing", b""),
+            ("the magic alone", b"\x7fELF"),
+            ("text", b"gate"),
+        ] {
+            assert_eq!(linkage_for(bytes, native), Linkage::Foreign, "{what}");
+        }
+        assert_eq!(
+            linkage_for(&fixed, None),
+            Linkage::Foreign,
+            "no native target"
+        );
+        // This build's own target is one of the table's on every host the driver runs on.
+        if cfg!(target_os = "linux") {
+            let own = ElfTarget::NATIVE.expect("a Linux target the table names");
+            let image = image_with(own.class, own.machine, ET_EXEC, &[PT_LOAD]);
+            assert_eq!(elf_linkage(&image), Linkage::Static);
+            assert_eq!(elf_linkage(b"#!/bin/sh\n"), Linkage::Foreign);
+        }
+    }
+
+    /// D29, rule 1, second point: a native image whose program header table was not read
+    /// whole is refused as such, whatever the part that was read holds: a truncated image, one
+    /// with no program header, and one whose count is the escape value.
+    #[test]
+    fn a_truncated_image_is_unreadable() {
+        for (class, machine) in [(2, X86_64), (1, I386)] {
+            let native = Some(ElfTarget {
+                class,
+                data: 1,
+                machine,
+            });
+            let whole = image_with(class, machine, ET_EXEC, &[PT_LOAD, PT_GNU_STACK]);
+            assert_eq!(linkage_for(&whole, native), Linkage::Static);
+            let mut truncated = whole.clone();
+            truncated.pop();
+            assert_eq!(
+                linkage_for(&truncated, native),
+                Linkage::Unreadable,
+                "class {class}: the last header ends outside the bytes"
+            );
+            // The header that was cut off is the one that names a loader.
+            let mut hidden = image_with(class, machine, ET_EXEC, &[PT_LOAD, INTERP]);
+            hidden.truncate(hidden.len() - 8);
+            assert_eq!(linkage_for(&hidden, native), Linkage::Unreadable);
+            assert_eq!(
+                linkage_for(&image_with(class, machine, ET_EXEC, &[]), native),
+                Linkage::Unreadable,
+                "class {class}: no program header"
+            );
+            let count_at = if class == 1 { 44 } else { 56 };
+            let mut extended = whole.clone();
+            extended[count_at..count_at + 2].copy_from_slice(&0xffff_u16.to_le_bytes());
+            assert_eq!(
+                linkage_for(&extended, native),
+                Linkage::Unreadable,
+                "PN_XNUM"
+            );
+            let mut header_only = whole.clone();
+            header_only.truncate(if class == 1 { 52 } else { 64 });
+            assert_eq!(linkage_for(&header_only, native), Linkage::Unreadable);
+        }
     }
 
     #[test]

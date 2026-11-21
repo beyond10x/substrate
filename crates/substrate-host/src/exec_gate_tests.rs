@@ -21,8 +21,9 @@ use substrate_wire::ReadOnlyRoot;
 use super::{
     EXEC_GATE_INVALID, EXEC_GATE_UNSERVED, ExecGate, FileFacts, Location, OpenDecision,
     OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, View,
-    check_file, check_length, check_links, check_location, check_openable, check_protocol, classed,
-    decide_open, open, place_open, plan, shown_location, start_unplaced, withheld_facts,
+    check_file, check_length, check_linkage, check_links, check_location, check_openable,
+    check_protocol, classed, decide_open, open, place_open, plan, shown_location, start_unplaced,
+    withheld_facts,
 };
 use crate::confinement::{Fact, FactWithheld};
 use crate::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
@@ -700,7 +701,8 @@ fn a_gate_a_run_could_have_written_is_invalid() {
     );
     // K4: outside every workspace, with a second hard link inside one.
     let outside = root.path().join("install/gate");
-    write(&outside, b"gate");
+    let image = elf_image(ET_EXEC, &[PT_LOAD, PT_LOAD]);
+    write(&outside, &image);
     let second = workspaces.join("ws_1/second-name");
     std::fs::hard_link(&outside, &second).expect("a second link");
     assert_invalid(
@@ -714,7 +716,7 @@ fn a_gate_a_run_could_have_written_is_invalid() {
     else {
         panic!("the helper is not used on a host where every place is established");
     };
-    assert_eq!(gate.sha256(), hex::encode(Sha256::digest(b"gate")));
+    assert_eq!(gate.sha256(), hex::encode(Sha256::digest(&image)));
     let env = std::fs::read("/usr/bin/env").expect("the host's env");
     assert_eq!(
         gate.loader().map(str::to_owned),
@@ -1267,4 +1269,170 @@ fn a_root_written_through_a_missing_name_and_dot_dot_refuses_the_open() {
         "which a run can write",
     );
     println!("exec gate root spelling: executed");
+}
+
+const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
+const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
+const PT_INTERP: u32 = 3;
+const PT_GNU_STACK: u32 = 0x6474_e551;
+
+/// A synthetic 64-bit little-endian ELF header for this host's machine, of the type `kind`,
+/// with one empty program header of each type in `segments`: what the linkage check reads, and
+/// nothing a kernel would run.
+fn elf_image(kind: u16, segments: &[u32]) -> Vec<u8> {
+    let native = substrate_exec_gate::ElfTarget::NATIVE.expect("a target the driver runs on");
+    assert_eq!(
+        (native.class, native.data),
+        (2, 1),
+        "a 64-bit little-endian host"
+    );
+    elf_image_for(native.machine, kind, segments)
+}
+
+fn elf_image_for(machine: u16, kind: u16, segments: &[u32]) -> Vec<u8> {
+    let mut image = vec![0_u8; 64];
+    image[..4].copy_from_slice(b"\x7fELF");
+    image[4] = 2;
+    image[5] = 1;
+    image[16..18].copy_from_slice(&kind.to_le_bytes());
+    image[18..20].copy_from_slice(&machine.to_le_bytes());
+    image[32..40].copy_from_slice(&64_u64.to_le_bytes());
+    image[54..56].copy_from_slice(&56_u16.to_le_bytes());
+    image[56..58].copy_from_slice(&u16::try_from(segments.len()).expect("few").to_le_bytes());
+    for segment in segments {
+        let mut header = [0_u8; 56];
+        header[..4].copy_from_slice(&segment.to_le_bytes());
+        image.extend(header);
+    }
+    image
+}
+
+/// D29, step 5 of the open, on synthetic headers: a static image that is not position
+/// independent and a static-pie image, which has `PT_DYNAMIC`, are taken. An image with
+/// `PT_INTERP`, an image of another machine, a `#!` script and a truncated image are each
+/// `config.exec-gate-invalid`, and the message says which test failed.
+#[test]
+fn a_helper_a_loader_would_start_is_invalid() {
+    let path = Path::new("/opt/substrate/substrate-exec-gate");
+    check_linkage(path, &elf_image(ET_EXEC, &[PT_LOAD, PT_LOAD, PT_GNU_STACK]))
+        .expect("a static image");
+    check_linkage(
+        path,
+        &elf_image(ET_DYN, &[PT_LOAD, PT_LOAD, PT_DYNAMIC, PT_GNU_STACK]),
+    )
+    .expect("a static-pie image: PT_DYNAMIC is not asked");
+    let dynamic = elf_image(
+        ET_DYN,
+        &[PT_INTERP, PT_LOAD, PT_LOAD, PT_DYNAMIC, PT_GNU_STACK],
+    );
+    assert_invalid(
+        &check_linkage(path, &dynamic).expect_err("a dynamically linked image"),
+        "its program headers hold PT_INTERP",
+    );
+    // Another machine: the one of the two the driver runs on that this host is not.
+    let native = substrate_exec_gate::ElfTarget::NATIVE.expect("a target the driver runs on");
+    let other = if native.machine == 62 { 183 } else { 62 };
+    for (what, image) in [
+        (
+            "a static image of another machine",
+            elf_image_for(other, ET_EXEC, &[PT_LOAD, PT_GNU_STACK]),
+        ),
+        (
+            "a dynamic image of another machine",
+            elf_image_for(other, ET_DYN, &[PT_INTERP, PT_LOAD]),
+        ),
+    ] {
+        assert_invalid(
+            &check_linkage(path, &image).expect_err(what),
+            "is not an ELF image of the driver's class, byte order and machine",
+        );
+    }
+    // A `#!` script, and what is no image at all.
+    for (what, bytes) in [
+        ("a script", &b"#!/bin/sh\nexec \"$@\"\n"[..]),
+        ("an empty file", b""),
+        ("text", b"gate"),
+    ] {
+        assert_invalid(
+            &check_linkage(path, bytes).expect_err(what),
+            "is not an ELF image of the driver's class, byte order and machine",
+        );
+    }
+    // A truncated image: the table ends outside the bytes, whatever the part read holds.
+    let mut truncated = elf_image(ET_EXEC, &[PT_LOAD, PT_GNU_STACK]);
+    truncated.pop();
+    let mut hidden = elf_image(ET_EXEC, &[PT_LOAD, PT_INTERP]);
+    hidden.truncate(hidden.len() - 8);
+    for (what, image) in [("truncated", truncated), ("its PT_INTERP cut off", hidden)] {
+        assert_invalid(
+            &check_linkage(path, &image).expect_err(what),
+            "program header table cannot be read whole",
+        );
+    }
+}
+
+/// D29 through the open, on real files: the check reads the bytes the open then seals, after
+/// the trust checks. A dynamically linked file outside every writable location, with one link,
+/// is refused for its `PT_INTERP`; the host's own `env`, copied, is one where it is dynamic. A
+/// static image in the same place opens, and one in a workspace is refused for where it lies.
+#[test]
+fn the_open_refuses_a_dynamically_linked_helper_and_takes_a_static_one() {
+    let root = staged();
+    if !placed("helper linkage", root.path()) {
+        return;
+    }
+    std::fs::create_dir_all(root.path().join("workspaces/ws_1")).expect("a workspace");
+    let dynamic = root.path().join("install/dynamic");
+    write(
+        &dynamic,
+        &elf_image(ET_DYN, &[PT_INTERP, PT_LOAD, PT_DYNAMIC]),
+    );
+    let error = open(&config(root.path(), &dynamic)).expect_err("a dynamic helper");
+    assert_invalid(&error, "its program headers hold PT_INTERP");
+    assert!(
+        error.message.contains(dynamic.to_str().expect("UTF-8")),
+        "{error}"
+    );
+
+    let env = std::fs::read("/usr/bin/env").expect("the host's env");
+    if substrate_exec_gate::elf_linkage(&env) == substrate_exec_gate::Linkage::Interpreted {
+        let copied = root.path().join("install/env");
+        write(&copied, &env);
+        assert_invalid(
+            &open(&config(root.path(), &copied)).expect_err("a copy of the host's env"),
+            "its program headers hold PT_INTERP",
+        );
+    }
+
+    let script = root.path().join("install/script");
+    write(&script, b"#!/bin/sh\nexec \"$@\"\n");
+    assert_invalid(
+        &open(&config(root.path(), &script)).expect_err("a script"),
+        "is not an ELF image of the driver's class, byte order and machine",
+    );
+
+    for (kind, segments) in [
+        (ET_EXEC, &[PT_LOAD, PT_GNU_STACK][..]),
+        (ET_DYN, &[PT_LOAD, PT_DYNAMIC, PT_GNU_STACK]),
+    ] {
+        let fixed = root.path().join(format!("install/static-{kind}"));
+        write(&fixed, &elf_image(kind, segments));
+        assert!(
+            matches!(
+                open(&config(root.path(), &fixed)).expect("a static helper opens"),
+                Opening::Gate(_)
+            ),
+            "type {kind}"
+        );
+    }
+    // Where it lies is asked first: a dynamic file in a workspace is refused for that.
+    let inside = root.path().join("workspaces/ws_1/gate");
+    write(&inside, &elf_image(ET_DYN, &[PT_INTERP, PT_LOAD]));
+    assert_invalid(
+        &open(&config(root.path(), &inside)).expect_err("in a workspace"),
+        "which a run can write",
+    );
+    println!("exec gate helper linkage: executed");
 }

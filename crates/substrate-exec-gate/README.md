@@ -49,9 +49,15 @@ as an absolute path:
 cargo build --release -p b10x-substrate-exec-gate --target x86_64-unknown-linux-musl
 ```
 
-A static build starts in every sandbox, and has no loader that could act on a variable before
-the helper's first instruction. A default build needs the build host's loader and a
-compatible `libc` beneath `/usr`, `/lib` or `/lib64` of every host it runs on. The file must lie
+**The helper must be statically linked: build it for a musl target, as above.** The driver
+tests the file's bytes when it opens and refuses `config.exec-gate-invalid` unless they are an
+ELF image of the driver's own class, byte order and machine, whose program header table it could
+read whole and which holds no `PT_INTERP`. Cargo's default build has one, and a script is no ELF
+image. A loader would run before the helper's first instruction and read
+files a run's profile can mount into its view, `/etc/ld.so.preload` among them, so an object
+named there would run before the list is applied. A static-pie image has no `PT_INTERP` and is
+taken. For the same reason a run with a list is given no controlling terminal
+(`session.pty-unserved`). The file must lie
 outside the driver's workspace root and every declared writable root, and have one link:
 **install a copy, not cargo's own output**, which cargo hard-links to a second name under
 `deps/`. The driver reads it once, when it opens, and runs those bytes in every later start.

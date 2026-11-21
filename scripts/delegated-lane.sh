@@ -47,25 +47,68 @@ fi
 # The executable gate (design 35): the helper that holds a run to its executable allow-list. The
 # linux adapter of this lane is opened with it, because every `linux` scenario's open step states
 # `exec_subpaths`; without it those steps fail on the missing fact instead of passing silently.
+#
+# **The helper is statically linked, and this lane never falls back to a dynamic one** (D29). The
+# driver refuses a helper whose program headers hold `PT_INTERP` (`config.exec-gate-invalid`): a
+# loader would run before the helper and read files a profile can mount. So the helper is built
+# for the host's musl target, as the `executor` stage of the `Dockerfile` builds
+# `substrate-executor`, and a build that fails, or yields an interpreter, ends the lane here by
+# name. `rust-toolchain.toml` lists `x86_64-unknown-linux-musl`; the package depends on `libc`
+# alone, so the target's own self-contained C runtime links it and no musl C compiler is needed.
+#
 # The path is the one cargo reports, for the reason given at the daemon below. The lane names a
 # copy, not cargo's output: cargo hard-links `substrate-exec-gate` to its file under `deps/`, and
 # the driver refuses a helper with a second link (`config.exec-gate-invalid`), which may lie where
 # a run can write.
-gate_built="$(
-  cargo build -p b10x-substrate-exec-gate --bin substrate-exec-gate --locked \
+gate_host="$(rustc -vV | sed -n 's/^host: //p')"
+case "${gate_host}" in
+  *-linux-gnu) gate_target="${gate_host%-gnu}-musl" ;;
+  *-linux-musl) gate_target="${gate_host}" ;;
+  *) echo "delegated-lane: no static target is known for the host '${gate_host}'; the executable gate must be statically linked and the lane does not fall back to a dynamic helper" >&2; exit 1 ;;
+esac
+if ! command -v readelf >/dev/null 2>&1; then
+  echo "delegated-lane: readelf is required to show that the executable gate has no PT_INTERP" >&2
+  exit 1
+fi
+# The named executable of one build of the helper: cargo's own report, or nothing.
+gate_executable() {
+  cargo build -p b10x-substrate-exec-gate --bin substrate-exec-gate --locked "$@" \
     --message-format=json-render-diagnostics \
     | jq -r 'select(.reason == "compiler-artifact" and .target.name == "substrate-exec-gate"
                     and .executable != null) | .executable'
-)"
+}
+gate_built="$(gate_executable --target "${gate_target}")" || gate_built=""
 if [[ -z "${gate_built}" || "${gate_built}" == *$'\n'* || ! -x "${gate_built}" ]]; then
-  echo "delegated-lane: cargo reported no single executable for substrate-exec-gate (got: '${gate_built}')" >&2
+  echo "delegated-lane: the executable gate could not be built statically for ${gate_target} (got: '${gate_built}'); install the target with 'rustup target add ${gate_target}'. The lane does not fall back to a dynamic helper" >&2
+  exit 1
+fi
+gate_headers="$(readelf -lW "${gate_built}")"
+if ! grep -q '^Program Headers:' <<<"${gate_headers}" || grep -q 'INTERP' <<<"${gate_headers}"; then
+  echo "delegated-lane: the executable gate built for ${gate_target} is not statically linked (${gate_built} has a PT_INTERP, or no program headers); the lane does not fall back to a dynamic helper" >&2
   exit 1
 fi
 gate_bin="$(dirname "${gate_built}")/substrate-exec-gate.lane"
 rm -f "${gate_bin}"
 cp "${gate_built}" "${gate_bin}"
-echo "delegated-lane: executable gate ${gate_bin}"
+echo "delegated-lane: executable gate ${gate_bin} (static, ${gate_target})"
 export SUBSTRATE_EXEC_GATE="${gate_bin}"
+
+# Cargo's default build of the same helper, which is dynamically linked: the one case that hands
+# it to the driver requires the open refused (`ESS confinement linux exec helper dynamic`). A
+# copy for the same reason as above; the lane names it and never uses it as the helper.
+gate_default="$(gate_executable)" || gate_default=""
+if [[ -z "${gate_default}" || "${gate_default}" == *$'\n'* || ! -x "${gate_default}" ]]; then
+  echo "delegated-lane: cargo reported no single executable for the default build of substrate-exec-gate (got: '${gate_default}')" >&2
+  exit 1
+fi
+if ! readelf -lW "${gate_default}" | grep -q 'INTERP'; then
+  echo "delegated-lane: the default build of substrate-exec-gate has no PT_INTERP, so the case that requires a dynamic helper refused has nothing to hand the driver" >&2
+  exit 1
+fi
+gate_dynamic="$(dirname "${gate_default}")/substrate-exec-gate.dynamic"
+rm -f "${gate_dynamic}"
+cp "${gate_default}" "${gate_dynamic}"
+export SUBSTRATE_EXEC_GATE_DYNAMIC="${gate_dynamic}"
 
 # The host crate has delegated cases of its own — a pty session's echo, controlling terminal,
 # SIGWINCH, output bound and whole-tree cleanup (design 13). They read the same variable and are
@@ -196,7 +239,9 @@ require_executed ess_confinement_linux \
   'ESS confinement linux exec limit preload: executed' \
   'ESS confinement linux exec variables: executed' \
   'ESS confinement linux exec helper preload half: executed' \
-  'ESS confinement linux exec path limit: executed'
+  'ESS confinement linux exec path limit: executed' \
+  'ESS confinement linux exec helper dynamic: executed' \
+  'ESS confinement linux exec limit preload file: executed'
 require_executed ess_confinement_systemd \
   'ESS confinement systemd local scoped write: executed' \
   'ESS confinement systemd linux scoped write: executed' \
@@ -224,7 +269,8 @@ require_executed adversary_exec_lists \
   'adversary exec list read-only file: executed' \
   'adversary exec list writable root: executed' \
   'adversary exec list path limit: executed, refused before dispatch' \
-  'adversary exec list unmounted writable root: executed'
+  'adversary exec list unmounted writable root: executed' \
+  'adversary2 exec list ld.so.preload: executed'
 require_executed security_exec_gate \
   'security exec gate floor argv: executed' \
   'security exec gate floor run: executed' \
@@ -233,8 +279,20 @@ require_executed security_exec_gate \
   'security exec gate without landlock: executed' \
   'security exec gate root spelling: executed' \
   'security exec gate published facts: executed'
+# D29, the measured case: a read-only file a profile mounts at `/etc/ld.so.preload` names an
+# object of the workspace, and the run prints what it prints without the file. The adversary's
+# case of the same is required above.
+require_executed security2_exec_gate \
+  'security2 exec gate loaded where: executed' \
+  'security2 exec gate ld.so.preload: executed, the list held' \
+  'security2 exec gate helper mount: executed' \
+  'security2 exec gate value visibility: executed' \
+  'security2 exec gate rule 7: executed' \
+  'security2 exec gate piped: executed'
 
-# The helper's own cases start `substrate-exec-gate` with no sandbox around it. They need no
+# The helper's own cases start cargo's test build of `substrate-exec-gate`, which is dynamically
+# linked, with no sandbox and no driver around it: what they hold is the helper's own argument
+# grammar, ruleset and environment rule, which do not depend on how it is linked. They need no
 # delegated root, only a kernel with Landlock ABI 2 and a scratch directory on a listed file
 # system (`ext4`, `overlay`, `tmpfs`), and are absent, exit 0, without either; so each is
 # required by its line here, where the lists are proved.
@@ -251,6 +309,8 @@ require_executed -p b10x-substrate-exec-gate gate \
   'exec gate preload operand: executed'
 require_executed -p b10x-substrate-exec-gate adversary_gate \
   'adversary landlock failures: executed'
+require_executed -p b10x-substrate-exec-gate security2_gate \
+  'security2 exec gate refusals: executed'
 require_executed -p b10x-substrate-exec-gate security_gate \
   'security exec gate landlock refused: executed' \
   'security exec gate preload: executed' \

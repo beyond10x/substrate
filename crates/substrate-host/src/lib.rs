@@ -411,6 +411,14 @@ pub struct HostConfig {
     /// dynamic program and runs its code there; an `execve` it makes of an unlisted path fails.
     /// No variable is refused by name.
     ///
+    /// **The helper must be statically linked** (D29). The open tests the bytes it then seals,
+    /// and refuses `config.exec-gate-invalid` unless they are an ELF image of the driver's own
+    /// class, byte order and machine, whose program header table was read whole and holds no
+    /// `PT_INTERP`: a loader, or a script's interpreter, would
+    /// run before the helper and read files a profile can mount into the view. Build it for a
+    /// musl target. A start with a list is given no controlling terminal
+    /// (`session.pty-unserved`), because taking one needs a program before the helper.
+    ///
     /// Write `workspace_root` and every `writable_roots` path without `..` and `.`: with a
     /// helper named here, such a path that does not exist yet has no place and refuses the open,
     /// `config.exec-gate-unserved` with the cause `path-unopenable`.
