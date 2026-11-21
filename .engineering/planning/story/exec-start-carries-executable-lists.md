@@ -50,7 +50,7 @@ scope:
   path: xtask/src/bundle
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 14
+revision: 15
 ---
 # Story: An exec start carries the executable lists on the wire
 
@@ -107,6 +107,11 @@ each, and each applied record echoes both lists; on `0.26.0` neither start has t
 Checks:
 
 - The design document is merged before any code of this story.
+- Before this story is planned, the place rule of design 35 is probed on xfs in the quota
+  fixture's container (`fixtures/quota-lab/Dockerfile`), and the run is recorded in design 35.
+  `xfs` joins the closed list of file-system types only if every probed case holds there; `btrfs`
+  stays refused by name
+  (`approval-record:sdc-accepts-d26-and-withheld-facts-2026-11-21`).
 - Delegated lane: the machine publishes both properties, and
   `the_published_set_is_the_linux_adapters_proof` holds the published set equal to the adapter's
   proof with no exception.

@@ -41,7 +41,7 @@ scope:
   path: spec/generated
 - confidence: inferred
   path: website/docs
-revision: 14
+revision: 15
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
@@ -113,12 +113,16 @@ Checks:
   `/usr/bin/id` is denied (probe K2), and a listed directory inside a denied one is denied
   (probe K8), each through the driver and not only through the helper
   (`approval-record:sdc-accepts-d25-with-conditions-2026-11-21`).
-- Where the place of a path cannot be established (its mount is not in the mount table, two rows
-  could both be its mount, or the file system's type is outside the closed list the design
-  states), the profile is refused by the named refusal the design gives. A unit test per cause
-  uses synthetic mount-table text. No code path compares path text instead.
+- Where the place of a path of a start cannot be established (the mount ID the kernel reports for
+  it has no row or more than one in the mount table, or the file system's type is outside the
+  closed list the design states, among the nine causes of design 35's D26), the start is refused
+  `exec.sandbox-place-unserved`. A unit test per cause uses synthetic mount-table text. No code
+  path compares path text instead.
 - The design document records a run of the place rule on overlayfs before this story merges, and
-  the closed list of file-system types names every type the rule was shown to hold on.
+  the closed list of file-system types names every type the rule was shown to hold on. Recorded
+  in the fourth revision (`8c7318642`): `ext4`, `overlay`, `tmpfs`.
+- The embedder notes carry the stakeholder's sentence: "never list a lower directory of an overlay
+  that is also in the view" (`approval-record:sdc-accepts-d26-and-withheld-facts-2026-11-21`).
 - Two permanent delegated-lane cases, kept at the stakeholder's request
   (`approval-record:sdc-accepts-design-35-2026-11-21`): a run whose program is a link to a denied
   program (`sh` to a denied `bash`, built from a read-only root) is refused before dispatch; and

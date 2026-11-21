@@ -25,6 +25,8 @@ scope:
 - confidence: inferred
   path: crates/substrate-host/tests/confinement-public-items.txt
 - confidence: inferred
+  path: deploy/helm/substrate
+- confidence: inferred
   path: docs/design/35-executable-lists.md
 - confidence: inferred
   path: scripts/delegated-lane.sh
@@ -36,7 +38,7 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 12
+revision: 14
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
@@ -128,6 +130,15 @@ Checks:
 - An entry's class and the helper's path are decided by the place of a path (design 35, D25).
   Where the place cannot be established the profile or the open is refused by name; no code path
   compares path text instead. A profile with an empty list takes no place check.
+- With a helper configured and a path the open checks on a file system outside the closed list
+  (`ext4`, `overlay`, `tmpfs`), the open succeeds, the adapter proves neither list fact, and a
+  profile with a list is refused `confinement.fact-unserved`; nothing runs with a list that is
+  not enforced. The open's result, the adapter's capability report and that refusal each name the
+  cause, the file-system type and the path
+  (`approval-record:sdc-accepts-d26-and-withheld-facts-2026-11-21`; the design's fifth revision
+  names the items).
+- The chart's documentation says that the executable lists are served only on ext4, overlay and
+  tmpfs volumes today.
 - With `/usr` listed, `/bin/id` is not executable; with `/usr/bin` listed it is. A lane case
   holds that limit.
 - A delegated-lane case holds each stated limit as it is: with `/usr/bin` listed, `sh script` runs
@@ -160,3 +171,4 @@ First story of `epic:runs-are-governed-and-limit-hits-are-events`. It depends on
 - `crates/substrate-host/tests/confinement-public-items.txt`. Inferred: the public `linux::proof`
   gains an argument in the draft design.
 - `website/docs`. Inferred.
+- `deploy/helm/substrate`. Inferred: the chart's sentence about the served file systems.
