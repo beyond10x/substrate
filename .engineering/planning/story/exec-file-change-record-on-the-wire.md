@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:exec-file-change-record-on-the-wire
 kind: story
-status: draft
+status: active
 title: An exec's file-change record is readable on the wire and announced by an event
 summary: 'A successor bundle: the fact, the start member, the routes for the record and its content, the event and the refusals, over the record story:exec-file-changes-are-recorded produces.'
 owner: substrate
@@ -45,7 +45,10 @@ scope:
   path: xtask/src/bundle
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 6
+revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-21T03:15:49Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":2}}, executor: "agent:substrate", correlation: "operator-standing-acceptance-2026-11-21"}
+- {from: "proposed", to: "active", at: "2026-11-21T03:15:49Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":2}}, executor: "agent:substrate", correlation: "operator-standing-acceptance-2026-11-21"}
 ---
 # Story: An exec's file-change record is readable on the wire and announced by an event
 
