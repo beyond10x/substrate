@@ -262,22 +262,72 @@ fn a_file_entry_admits_that_file_only() {
 
 /// D6: refer is granted on `/`, so a hard link and a rename between two unlisted directories
 /// still work under the ruleset.
+///
+/// The two tools are listed and started by their own paths, each a `follow` entry, so the rule
+/// is on the file the name resolves to. Listing the directory of the name is not the same
+/// thing, and searching the shell's default path is not either: on Ubuntu 26.04 `/usr/bin/ln`
+/// is a symbolic link to `/usr/lib/cargo/bin/coreutils/ln`, and a rule on `/usr/bin` does not
+/// reach it (the limit of the case below). This case listed `/usr/bin` and called `ln` by name
+/// until it met that layout.
 #[test]
 fn a_link_and_a_rename_between_two_unlisted_directories_still_work() {
     const NAME: &str = "refer";
     let (_directory, root) = scratch();
-    let tools = base(tool("ln").parent().expect("a directory"));
+    let (ln, mv) = (tool("ln"), tool("mv"));
     let output = shell(
         &root,
-        vec![tools],
-        "ln outside/true elsewhere/linked && mv elsewhere/linked outside/moved && \
-         mv outside/moved outside/renamed && echo done",
+        vec![base(&ln), base(&mv)],
+        &format!(
+            "{ln} outside/true elsewhere/linked && {mv} elsewhere/linked outside/moved && \
+             {mv} outside/moved outside/renamed && echo done",
+            ln = ln.display(),
+            mv = mv.display()
+        ),
     );
     if absent(NAME, &output) {
         return;
     }
     assert_eq!(text(&output.stdout), "done\n", "{}", text(&output.stderr));
     assert!(root.join("outside/renamed").is_file());
+    println!("exec gate {NAME}: executed");
+}
+
+/// The limit behind the case above, held as it is: **a listed directory admits the files beneath
+/// it, not what a symbolic link in it points to.** The kernel decides on the file a path
+/// resolves to. With `listed` as the entry, `listed/link`, a link to a program in `elsewhere`,
+/// is refused; with the link itself as a `follow` entry the rule is on the program it resolves
+/// to, which then runs by either name. A distribution whose base tools are links out of
+/// `/usr/bin` needs the second form, or the directory the links point into.
+#[test]
+fn limit_a_link_in_a_listed_directory_that_points_outside_it_is_not_admitted() {
+    const NAME: &str = "limit link out of a listed directory";
+    let (_directory, root) = scratch();
+    std::fs::create_dir(root.join("listed")).expect("listed");
+    std::fs::copy(tool("true"), root.join("listed/true")).expect("copy true");
+    std::os::unix::fs::symlink("../outside/true", root.join("listed/link")).expect("a link");
+    let script = "listed/true; echo $?; listed/link 2>/dev/null; echo $?; \
+                  outside/true 2>/dev/null; echo $?";
+    let output = shell(&root, vec![follow(&root, "listed")], script);
+    if absent(NAME, &output) {
+        return;
+    }
+    assert_eq!(
+        text(&output.stdout),
+        "0\n126\n126\n",
+        "the directory admits its own file and not the target of its link: {}",
+        text(&output.stderr)
+    );
+    let output = shell(
+        &root,
+        vec![follow(&root, "listed"), follow(&root, "listed/link")],
+        script,
+    );
+    assert_eq!(
+        text(&output.stdout),
+        "0\n0\n0\n",
+        "the link as an entry is a rule on what it resolves to: {}",
+        text(&output.stderr)
+    );
     println!("exec gate {NAME}: executed");
 }
 

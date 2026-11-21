@@ -16,7 +16,7 @@
 //! | 3 | a place the open needs cannot be established, for a cause that refuses (D26) | `config.exec-gate-unserved`, 501, with the cause and the path |
 //! | 3 | every such cause is `file-system-unlisted` or `mount-id-unreported` | **the adapter opens and the facts are withheld** (D27): the helper is not sealed, bound or executed, and no probe runs |
 //! | 4 | in the workspace root or a declared writable root, or a file with more than one link | `config.exec-gate-invalid`, 422 |
-//! | 5 | not a statically linked ELF image of the driver's own class, byte order and machine: no such image, a program header table not read whole, or a `PT_INTERP` (D29) | `config.exec-gate-invalid`, 422 |
+//! | 5 | not a statically linked ELF image of the driver's own class, byte order and machine that the kernel starts: no such image, a header the kernel's loader refuses, a program header table not read whole, or a `PT_INTERP` (D29) | `config.exec-gate-invalid`, 422 |
 //! | 6 | not of the driver's protocol | `config.exec-gate-unserved`, 501 |
 //!
 //! **Step 5 is asked of the bytes that are then sealed and executed**, read from the one
@@ -27,7 +27,12 @@
 //! image has a `PT_DYNAMIC` header and no `PT_INTERP`, and passes; `PT_DYNAMIC` is not asked.
 //! Bytes that are no ELF image of this machine, a `#!` script among them, and an image whose
 //! header table was not read whole are refused as well: what starts first there is another
-//! program, or is not known.
+//! program, or is not known. So is an image the kernel's loader answers `ENOEXEC` for: one whose
+//! type is neither `ET_EXEC` nor `ET_DYN`, whose `e_phentsize` is not the program header size
+//! of its class, or which declares no program header or more than one 4 KiB page of them
+//! (a kernel with larger pages reads more; such an image is refused on every host). Bubblewrap
+//! starts the helper with `execvp`, which answers `ENOEXEC` by running `/bin/sh` with the file
+//! as its script: a dynamically linked program of the view, before any ruleset.
 //!
 //! After the open the file is never read again: every start binds the sealed bytes, so a file
 //! replaced or removed on disk changes nothing until the adapter is opened again.
@@ -708,13 +713,16 @@ pub(crate) fn open(config: &HostConfig) -> Result<Opening, DriverError> {
 
 /// D29, rule 1: the helper is the first program of a listed run's view, so nothing may run
 /// before its first instruction. Decided on the bytes the driver will seal and execute, in this
-/// order: they are an ELF image of the driver's own class, byte order and machine; the whole
-/// program header table was read; and no header has the type `PT_INTERP`. A script's
-/// interpreter, a registered handler of another machine's images and a loader each run first.
+/// order: they are an ELF image of the driver's own class, byte order and machine; the header
+/// is one the kernel's loader takes (the type `ET_EXEC` or `ET_DYN`, a program header size of
+/// the class, a header count the kernel reads); the whole program header table was read; and no
+/// header has the type `PT_INTERP`. A script's interpreter, a registered handler of another
+/// machine's images and a loader each run first, and for an image the kernel answers `ENOEXEC`
+/// for, bubblewrap's `execvp` runs a shell of the view with the file as its script.
 ///
 /// # Errors
 ///
-/// [`EXEC_GATE_INVALID`], naming the path and which of the three it is.
+/// [`EXEC_GATE_INVALID`], naming the path and which of the four it is.
 pub(crate) fn check_linkage(path: &Path, image: &[u8]) -> Result<(), DriverError> {
     match substrate_exec_gate::elf_linkage(image) {
         Linkage::Static => Ok(()),
@@ -728,6 +736,13 @@ pub(crate) fn check_linkage(path: &Path, image: &[u8]) -> Result<(), DriverError
             path,
             "is not an ELF image of the driver's class, byte order and machine: the helper must \
              be a statically linked executable built for this host, and not a script",
+        )),
+        Linkage::Unstartable => Err(invalid(
+            path,
+            "is an ELF image the kernel does not start (its type is neither ET_EXEC nor ET_DYN, \
+             its program header size is not its class's, or it declares no program header or \
+             more than the kernel reads): a shell would run it as a script, so the helper must \
+             be a statically linked executable",
         )),
         Linkage::Unreadable => Err(invalid(
             path,

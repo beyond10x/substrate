@@ -378,14 +378,23 @@ workspace member `crates/substrate-exec-gate` (package `b10x-substrate-exec-gate
 `HostConfig.exec_gate` names it; unset, `exec_subpaths` is not proved and a profile with a list is
 refused `confinement.fact-unserved`. **The helper is statically linked** (D29): at the open the
 driver tests the bytes it then seals and executes, and refuses `config.exec-gate-invalid` unless
-they are an ELF image of its own class, byte order and machine, whose program header table was
-read whole and holds no `PT_INTERP`
+they are an ELF image of its own class, byte order and machine, with a header the kernel's
+loader takes (the type `ET_EXEC` or `ET_DYN`, the class's program header size, and at most one
+4 KiB page of program headers), whose program header table was read whole and holds no
+`PT_INTERP`
 (`substrate_exec_gate::elf_linkage`, `check_linkage` in `crates/substrate-host/src/exec_gate.rs`);
-a script is refused by the first of the three. A loader would run before the helper's first
-instruction and read what a
+a script is refused by the first of the four, and an image the kernel answers `ENOEXEC` for by
+the second, because bubblewrap's `execvp` would run a shell of the view with the file as its
+script. A loader would run before the helper's first instruction and read what a
 profile can mount (`/etc/ld.so.preload`). A static-pie image passes; `PT_DYNAMIC` is not asked.
 For the same reason a start with a list and a controlling terminal is refused
-`session.pty-unserved` before dispatch: `setsid --ctty` would run before the helper.
+`session.pty-unserved` before dispatch: `setsid --ctty` would run before the helper. And on a
+start with a list a declared mount at or beneath the helper's own, `/.substrate-exec-gate`, is
+refused before dispatch by the code its kind has for a mount the driver owns
+(`exec.read-only-root-invalid`, `exec.read-only-file-mount-reserved`,
+`exec.writable-root-mount-reserved`; `listed_mounts_leave_the_helpers` in
+`crates/substrate-host/src/process.rs`); a start without a list is judged by the wire crate's
+rules alone, as before.
 `scripts/delegated-lane.sh` builds the helper for the host's musl target
 (`x86_64-unknown-linux-musl`, which `rust-toolchain.toml` lists and `release-lanes.yml` adds),
 checks with `readelf` that it has no `PT_INTERP`, copies it to `substrate-exec-gate.lane` beside
@@ -395,9 +404,18 @@ name; it never falls back to a dynamic helper. It also names a copy of cargo's d
 dynamically linked build in `SUBSTRATE_EXEC_GATE_DYNAMIC`, for the one case that requires the
 open refused. The lane then requires, by each case's own `executed` line and with
 no `ABSENT` line, the `exec` cases of `ess_confinement_linux` and `ess_confinement_systemd`, the
-adversary and security-review roots `adversary_exec_lists`, `security_exec_gate` and
-`security2_exec_gate`, and the helper package's `gate`, `adversary_gate`, `security_gate` and
-`security2_gate`. Those cases need Landlock ABI 2
+adversary and security-review roots `adversary_exec_lists`, `security_exec_gate`,
+`security2_exec_gate` and `security3_exec_gate`, and the helper package's `gate`,
+`adversary_gate`, `security_gate` and `security2_gate`. The trace case of `security3_exec_gate`
+runs the driver's own start under `/usr/bin/strace`, which `release-lanes.yml` installs, and is
+absent, so refused by the lane, without it. **An entry admits a file by where the file itself
+lies**: a symbolic link in a listed directory that points outside it is not admitted
+(`limit_a_link_in_a_listed_directory_that_points_outside_it_is_not_admitted` in the helper's
+`gate` root). `gate.yml` runs on `ubuntu-latest` (Ubuntu 26.04 on 2026-11-21, where `ln`, `env`,
+`cat`, `ls` and `mkdir` in `/usr/bin` are links into `/usr/lib/cargo/bin/coreutils`), and
+`release-lanes.yml` pins `ubuntu-24.04`; the host crate's lane cases list the directories of
+their tools through `base_directories()`, so they assume tools that are regular files in those
+directories and would fail on a 26.04 runner. Those cases need Landlock ABI 2
 (Linux 5.19) and the workspace root, `/usr`, `/bin`, `/lib`, `/lib64` and the temporary directory
 on `ext4`, `overlay` or `tmpfs`; the preload cases and the stand-in helpers also need a C
 compiler named `cc` that links statically. Without the

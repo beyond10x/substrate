@@ -270,7 +270,8 @@ require_executed adversary_exec_lists \
   'adversary exec list writable root: executed' \
   'adversary exec list path limit: executed, refused before dispatch' \
   'adversary exec list unmounted writable root: executed' \
-  'adversary2 exec list ld.so.preload: executed'
+  'adversary2 exec list ld.so.preload: executed' \
+  'adversary3 exec list helper shadow: executed, refused before dispatch'
 require_executed security_exec_gate \
   'security exec gate floor argv: executed' \
   'security exec gate floor run: executed' \
@@ -289,6 +290,13 @@ require_executed security2_exec_gate \
   'security2 exec gate value visibility: executed' \
   'security2 exec gate rule 7: executed' \
   'security2 exec gate piped: executed'
+# The third look. Its trace case runs the driver's own start of one listed run with bubblewrap
+# under `/usr/bin/strace -f` and reads which programs are executed before the ruleset; it is
+# absent, so refused here, on a host without strace or without a `cc` that builds a shared object.
+require_executed security3_exec_gate \
+  'security3 exec gate trace: executed' \
+  'security3 exec gate binfmt: executed' \
+  'security3 exec gate unstartable image: executed, the byte test'
 
 # The helper's own cases start cargo's test build of `substrate-exec-gate`, which is dynamically
 # linked, with no sandbox and no driver around it: what they hold is the helper's own argument
@@ -300,6 +308,7 @@ require_executed -p b10x-substrate-exec-gate gate \
   'exec gate listed directory: executed' \
   'exec gate file entry: executed' \
   'exec gate refer: executed' \
+  'exec gate limit link out of a listed directory: executed' \
   'exec gate follow into a writable mount: executed' \
   'exec gate unestablished place: executed' \
   'exec gate program exec failure: executed' \

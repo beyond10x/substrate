@@ -26,7 +26,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     that is not an ELF image of the driver's own machine with a readable program header table,
     are refused `config.exec-gate-invalid` at the open: a loader would
     run before the helper and read files a profile can mount, `/etc/ld.so.preload` among them.
-    A start with a list and a controlling terminal is refused `session.pty-unserved`.
+    So is an image the kernel does not start (a type other than `ET_EXEC` and `ET_DYN`, a
+    program header size that is not its class's, no program header or more than one 4 KiB
+    page of them), which bubblewrap would hand to a shell.
+    A start with a list and a controlling terminal is refused `session.pty-unserved`, and one
+    with a declared mount at or beneath `/.substrate-exec-gate`, where the helper is bound, by
+    the code its kind has for a mount the driver owns.
+  - An entry admits a file by where the file itself lies: a symbolic link in a listed
+    directory that points outside it is not admitted. On Ubuntu 26.04 `ln`, `env`, `cat`, `ls`
+    and `mkdir` in `/usr/bin` are such links, into `/usr/lib/cargo/bin/coreutils`.
   - On a start with a list the run's variables reach the run's program and no program before
     it: the driver gives them to the helper as `--env <name> <value>` operands and gives
     bubblewrap no `--setenv`, and the helper refuses to run when a variable other than `PWD`

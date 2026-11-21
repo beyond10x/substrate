@@ -681,3 +681,116 @@ async fn adversary_a_root_inside_a_declared_writable_root_no_start_mounts_is_cla
     assert_eq!((stdout.as_str(), code), ("0\n126\n126\n", Some(0)));
     println!("{NAME}: executed");
 }
+
+/// **A declared mount at the helper's own path must not become the helper, and is refused
+/// before dispatch.** D29 seals the real helper into a memfd, tests its bytes (`check_linkage`)
+/// and binds it at [`GATE_MOUNT`] (`/.substrate-exec-gate`). `validate_read_only_files` does not
+/// reserve that path (`collides_with_owned_mount` lists only `RESERVED_MOUNTS` and the
+/// aperture/capsule/scratch mounts), so the wire crate's rules admit a read-only file there.
+///
+/// The declared file is a copy of the host's `true`: were it to become the executed helper, it
+/// would ignore the helper's argv, exit 0 and run nothing.
+///
+/// **Changed by the implementor**, on the coordinator's word and by the design's eighth revision
+/// (D29, rule 7; § 16). As first written the case declared one read-only file of the workspace
+/// at the path and passed on any outcome but the shadow running: on a refusal, and on a run the
+/// helper ended with 125. On a start with a list the driver now refuses such a mount before
+/// dispatch, by the code its kind has for a mount the driver owns, and that refusal is what the
+/// case requires: for a read-only file in the workspace and one outside every writable
+/// location, at the path and beneath it, for a read-only root and for a writable root. The
+/// control is a start without a list, which has no helper: the same file at the same path is
+/// bound and runs. The bind order that kept the shadow from the helper before, the gate bind
+/// after every declared bind in `ProcessRuntime::command`, is unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary3_a_read_only_file_cannot_shadow_the_helper_mount() {
+    const NAME: &str = "adversary3 exec list helper shadow";
+    const AT: &str = "/.substrate-exec-gate";
+    const BENEATH: &str = "/.substrate-exec-gate/inner";
+    let Some(lane) = lane_with(NAME, |config, host| {
+        let out = host.join("out");
+        std::fs::create_dir_all(&out).expect("out");
+        config.writable_roots = vec![confinement::DeclaredWritableRoot {
+            name: "out".to_owned(),
+            path: out,
+        }];
+    }) else {
+        return;
+    };
+    let copy_of_true = |path: PathBuf| {
+        std::fs::copy(tool("true"), &path).expect("a copy of true");
+        std::fs::canonicalize(&path).expect("canonical")
+    };
+    let inside = copy_of_true(lane.workspace.join("shadow"));
+    let tools = lane.host.path().join("tools");
+    std::fs::create_dir_all(&tools).expect("tools");
+    let tools = std::fs::canonicalize(&tools).expect("canonical");
+    let outside = copy_of_true(tools.join("shadow"));
+    let file = |host_path: &Path, mount: &str| ConfinementProfile {
+        read_only_files: vec![ReadOnlyFile {
+            host_path: text(host_path),
+            mount: mount.to_owned(),
+        }],
+        ..listed(&lane.workspace, &["bin"])
+    };
+    let cases = [
+        (
+            "a read-only file of the workspace at the path",
+            file(&inside, AT),
+            "exec.read-only-file-mount-reserved",
+        ),
+        (
+            "a read-only file outside every writable location at the path",
+            file(&outside, AT),
+            "exec.read-only-file-mount-reserved",
+        ),
+        (
+            "a read-only file beneath the path",
+            file(&outside, BENEATH),
+            "exec.read-only-file-mount-reserved",
+        ),
+        (
+            "a read-only root at the path",
+            ConfinementProfile {
+                read_only_roots: vec![read_only_root(&tools, AT)],
+                ..listed(&lane.workspace, &["bin"])
+            },
+            "exec.read-only-root-invalid",
+        ),
+        (
+            "a writable root at the path",
+            ConfinementProfile {
+                writable_roots: vec![WritableHostRoot {
+                    host: "out".to_owned(),
+                    mount: AT.to_owned(),
+                }],
+                ..listed(&lane.workspace, &["bin"])
+            },
+            "exec.writable-root-mount-reserved",
+        ),
+    ];
+    let mut seen = Vec::new();
+    for (what, profile, code) in &cases {
+        let refusal = refused(&lane, profile, what).await;
+        assert_eq!(
+            (refusal.code(), refusal.status()),
+            (*code, 422),
+            "{what}: {refusal}"
+        );
+        seen.push(format!("{what}: {}", refusal.code()));
+    }
+    // Without a list there is no helper and the driver owns no mount there: the same file at
+    // the same path is bound, and the run executes it.
+    let unlisted = ConfinementProfile {
+        exec_subpaths: Vec::new(),
+        ..file(&outside, AT)
+    };
+    let (code, stdout) = run(
+        &lane.adapter,
+        &unlisted,
+        "/.substrate-exec-gate; echo $?",
+        &[],
+    )
+    .await;
+    assert_eq!((stdout.as_str(), code), ("0\n", Some(0)));
+    println!("{NAME}: executed, refused before dispatch: {seen:?}");
+}

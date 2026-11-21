@@ -291,11 +291,6 @@ pub(crate) struct GateStart {
     lists: substrate_exec_gate::Lists,
 }
 
-/// The program's whole environment on a start with a list (design 35 D28), which the helper is
-/// given as operands: one value per name, and the same variables a start without a list gets
-/// from bubblewrap's `--setenv` options and the `env` stage after them. Later sources replace
-/// earlier ones in that order (the baseline, the request, the slot mapping, the trust anchor),
-/// and `PWD` is the request's own or absent, never the directory bubblewrap changed to.
 /// Design 35 D29: a start with an executable list and a controlling terminal. Taking the
 /// terminal needs `setsid --ctty` between bubblewrap and the program, and on a listed start
 /// nothing runs in the view before the helper applied the list. The code is the one a pty
@@ -310,6 +305,69 @@ fn listed_terminal_unserved() -> DriverError {
     )
 }
 
+/// Design 35 D29: on a start with an executable list the driver owns one more mount of the
+/// view, the helper's at [`crate::exec_gate::GATE_MOUNT`], bound after every declared one. A
+/// declared read-only root, read-only file or writable root at or beneath it is refused here,
+/// before admission, by the code its kind has for a mount the driver owns:
+/// `exec.read-only-root-invalid`, `exec.read-only-file-mount-reserved` and
+/// `exec.writable-root-mount-reserved`. The comparison is of the text: another spelling of the
+/// path is not canonical, and admission refuses it for that. The one mount above the helper's
+/// is `/`, which admission refuses for every start, with or without a list, as a path no
+/// declared mount may have: `exec.read-only-root-invalid`, `exec.read-only-file-path-invalid`
+/// and `exec.writable-root-mount-invalid`. A start without a list has no helper and no such
+/// mount, and the wire crate's rules alone decide there.
+fn listed_mounts_leave_the_helpers(
+    lists: &ExecLists,
+    input: &ExecStartInput,
+) -> Result<(), DriverError> {
+    const GATE: &str = crate::exec_gate::GATE_MOUNT;
+    if lists.is_empty() {
+        return Ok(());
+    }
+    let taken = |mount: &str| {
+        mount
+            .strip_prefix(GATE)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
+    let refused = |code: &'static str, what: &str, address: &'static str| {
+        DriverError::refused(
+            code,
+            format!(
+                "A declared {what} is mounted at or beneath {GATE}, which a run held to an \
+                 executable list keeps for the helper that applies the list."
+            ),
+            address,
+        )
+    };
+    if input.read_only_roots.iter().any(|root| taken(&root.mount)) {
+        return Err(refused(
+            substrate_wire::READ_ONLY_ROOT_INVALID,
+            "read-only root",
+            "read_only_roots",
+        ));
+    }
+    if input.read_only_files.iter().any(|file| taken(&file.mount)) {
+        return Err(refused(
+            substrate_wire::READ_ONLY_FILE_MOUNT_RESERVED,
+            "read-only file",
+            "read_only_files",
+        ));
+    }
+    if input.writable_roots.iter().any(|root| taken(root.mount())) {
+        return Err(refused(
+            substrate_wire::EXEC_WRITABLE_ROOT_MOUNT_RESERVED,
+            "writable root",
+            "writable_roots",
+        ));
+    }
+    Ok(())
+}
+
+/// The program's whole environment on a start with a list (design 35 D28), which the helper is
+/// given as operands: one value per name, and the same variables a start without a list gets
+/// from bubblewrap's `--setenv` options and the `env` stage after them. Later sources replace
+/// earlier ones in that order (the baseline, the request, the slot mapping, the trust anchor),
+/// and `PWD` is the request's own or absent, never the directory bubblewrap changed to.
 fn listed_environment(
     environment: &substrate_wire::ExecEnvironment,
     slot_mapping: Option<String>,
@@ -1178,6 +1236,10 @@ impl ProcessRuntime {
         // no controlling terminal. The argv builder refuses the same pair.
         if !lists.is_empty() && pipe_settings.is_some_and(|settings| settings.window.is_some()) {
             return DispatchOutcome::NotDispatched(listed_terminal_unserved());
+        }
+        // And no declared mount lands on the helper's own (D29).
+        if let Err(error) = listed_mounts_leave_the_helpers(lists, input) {
+            return DispatchOutcome::NotDispatched(error);
         }
         let retention = adapter.retention;
         let (pinned, read_only_roots, writable_roots) =
@@ -2798,6 +2860,7 @@ impl ProcessRuntime {
         lists: &ExecLists,
     ) -> Result<(PathBuf, Vec<String>), DriverError> {
         self.exec_lists_served(lists)?;
+        listed_mounts_leave_the_helpers(lists, input)?;
         if !input.writable_roots.is_empty()
             || !input.secret_slots.is_empty()
             || input.capsule.is_some()
@@ -8768,6 +8831,197 @@ mod tests {
                     .render(&workspace, &input, &ExecLists::listing(&["bin"]))
                     .expect_err("a render of a listed start without a proved gate"),
             );
+        }
+    }
+
+    /// **A start with a list and a terminal is refused where it starts, before admission**
+    /// (design 35 D29): `start_inner` answers `session.pty-unserved` for the pair before it
+    /// admits or pins anything. The identity is one admission refuses and the workspace does
+    /// not exist, so an answer that came after either would name them instead. The same start
+    /// without a list goes on to admission, which refuses the identity.
+    #[tokio::test]
+    async fn a_listed_start_with_a_terminal_is_refused_before_anything_is_pinned() {
+        let root = tempfile::tempdir().expect("a root");
+        let (runtime, _, snapshot) = gated_runtime(root.path(), Some(true));
+        let input = pty_exec_input(&snapshot);
+        let terminal = Some(super::PipeSettings {
+            capture: substrate_wire::CaptureMode::Recorded,
+            input_limit: 1,
+            frame_limit: 1,
+            queued_frames: 1,
+            window: Some(substrate_wire::PtyWindow {
+                columns: 80,
+                rows: 24,
+            }),
+        });
+        let absent = root.path().join("ws_absent");
+        let start = |lists: ExecLists| {
+            let (runtime, input, absent) = (&runtime, &input, &absent);
+            async move {
+                runtime
+                    .start_inner(
+                        "not an exec identity",
+                        absent,
+                        &[],
+                        input,
+                        terminal,
+                        AdapterStart::default(),
+                        &lists,
+                    )
+                    .await
+            }
+        };
+        let DispatchOutcome::NotDispatched(error) = start(ExecLists::listing(&["bin"])).await
+        else {
+            panic!("a listed start with a terminal was dispatched");
+        };
+        assert_eq!(error.code, substrate_wire::SESSION_PTY_UNSERVED, "{error}");
+        assert_eq!(error.class, crate::DriverErrorClass::Unserved, "{error}");
+        assert_eq!(error.address.as_deref(), Some("mode"), "{error}");
+        assert!(!absent.exists(), "the start created its workspace");
+
+        let DispatchOutcome::NotDispatched(error) = start(ExecLists::wire()).await else {
+            panic!("a start with an identity admission refuses was dispatched");
+        };
+        assert_eq!(error.code, "exec.identity-invalid", "{error}");
+    }
+
+    /// One kind of declared mount, for the two cases below: how a start declares it at a path,
+    /// the code the kind has for a mount the driver owns, the field it is refused at, and
+    /// admission's code for a mount at `/`.
+    struct DeclaredKind {
+        declare: fn(ExecStartInput, &str) -> ExecStartInput,
+        owned: &'static str,
+        address: &'static str,
+        at_the_root: &'static str,
+    }
+
+    const DECLARED_KINDS: [DeclaredKind; 3] = [
+        DeclaredKind {
+            declare: |mut input, mount| {
+                input.read_only_roots = vec![substrate_wire::ReadOnlyRoot {
+                    host_path: "/opt/tools".to_owned(),
+                    mount: mount.to_owned(),
+                }];
+                input
+            },
+            owned: substrate_wire::READ_ONLY_ROOT_INVALID,
+            address: "read_only_roots",
+            at_the_root: substrate_wire::READ_ONLY_ROOT_INVALID,
+        },
+        DeclaredKind {
+            declare: |mut input, mount| {
+                input.read_only_files = vec![substrate_wire::ReadOnlyFile {
+                    host_path: "/opt/tools/one".to_owned(),
+                    mount: mount.to_owned(),
+                }];
+                input
+            },
+            owned: substrate_wire::READ_ONLY_FILE_MOUNT_RESERVED,
+            address: "read_only_files",
+            at_the_root: substrate_wire::READ_ONLY_FILE_PATH_INVALID,
+        },
+        DeclaredKind {
+            declare: |mut input, mount| {
+                input.writable_roots = vec![substrate_wire::WritableRoot::Host(
+                    substrate_wire::WritableHostRoot {
+                        host: "cache".to_owned(),
+                        mount: mount.to_owned(),
+                    },
+                )];
+                input
+            },
+            owned: substrate_wire::EXEC_WRITABLE_ROOT_MOUNT_RESERVED,
+            address: "writable_roots",
+            at_the_root: substrate_wire::EXEC_WRITABLE_ROOT_MOUNT_INVALID,
+        },
+    ];
+
+    /// The refusal of a start of `input` with `lists`, under an identity admission refuses or
+    /// one it takes.
+    async fn not_dispatched(
+        runtime: &ProcessRuntime,
+        workspace: &Path,
+        id: &str,
+        input: &ExecStartInput,
+        lists: ExecLists,
+    ) -> crate::DriverError {
+        let outcome = runtime
+            .start_for_adapter(id, workspace, input, AdapterStart::default(), lists)
+            .await;
+        match outcome {
+            DispatchOutcome::NotDispatched(error) => error,
+            _ => panic!("the start was dispatched"),
+        }
+    }
+
+    /// **A declared mount at the helper's own path is refused before dispatch on a listed
+    /// start** (design 35 D29, rule 7): a read-only root, a read-only file or a writable root at
+    /// or beneath `/.substrate-exec-gate` is refused by the code its kind has for a mount the
+    /// driver owns, before admission (the identity here is one admission refuses), and a render
+    /// of the same start by the same code. A start without a list has no helper: there the path
+    /// is admission's to judge, as before, and admission asks the identity first.
+    #[tokio::test]
+    async fn a_listed_start_with_a_mount_at_the_helpers_is_not_dispatched() {
+        const AT: &str = "/.substrate-exec-gate";
+        const NO_IDENTITY: &str = "not an exec identity";
+        let root = tempfile::tempdir().expect("a root");
+        let (runtime, workspace, snapshot) = gated_runtime(root.path(), Some(true));
+        for kind in &DECLARED_KINDS {
+            for mount in [AT, "/.substrate-exec-gate/inner"] {
+                let input = (kind.declare)(pty_exec_input(&snapshot), mount);
+                let refused = |error: &crate::DriverError| {
+                    assert_eq!(error.code, kind.owned, "{mount}: {error}");
+                    assert_eq!(error.class, crate::DriverErrorClass::Refused, "{error}");
+                    assert_eq!(error.address.as_deref(), Some(kind.address), "{error}");
+                    assert!(error.message.contains(AT), "{error}");
+                };
+                let listed = ExecLists::listing(&["bin"]);
+                refused(&not_dispatched(&runtime, &workspace, NO_IDENTITY, &input, listed).await);
+                refused(
+                    &runtime
+                        .render(&workspace, &input, &ExecLists::listing(&["bin"]))
+                        .expect_err("a render of the same start"),
+                );
+                let unlisted =
+                    not_dispatched(&runtime, &workspace, NO_IDENTITY, &input, ExecLists::wire())
+                        .await;
+                assert_eq!(
+                    unlisted.code, "exec.identity-invalid",
+                    "{mount}: {unlisted}"
+                );
+            }
+        }
+    }
+
+    /// **Rule 7 takes the helper's path and what lies beneath it, and nothing beside or above
+    /// it** (design 35 D29). A name that only begins like the helper's is another path: a
+    /// listed start with a mount there goes on to admission. The one mount above the helper's
+    /// is `/`, which admission refuses for every start, with or without a list, as a path no
+    /// declared mount may have.
+    #[tokio::test]
+    async fn a_mount_beside_or_above_the_helpers_is_admissions_to_judge() {
+        let root = tempfile::tempdir().expect("a root");
+        let (runtime, workspace, snapshot) = gated_runtime(root.path(), Some(true));
+        for kind in &DECLARED_KINDS {
+            for mount in [
+                "/.substrate-exec-gate2",
+                "/.substrate-exec-gates/inner",
+                "/opt",
+            ] {
+                let input = (kind.declare)(pty_exec_input(&snapshot), mount);
+                let listed = ExecLists::listing(&["bin"]);
+                let error =
+                    not_dispatched(&runtime, &workspace, "not an exec identity", &input, listed)
+                        .await;
+                assert_eq!(error.code, "exec.identity-invalid", "{mount}: {error}");
+            }
+            let input = (kind.declare)(pty_exec_input(&snapshot), "/");
+            for lists in [ExecLists::listing(&["bin"]), ExecLists::wire()] {
+                let error = not_dispatched(&runtime, &workspace, "ex_above", &input, lists).await;
+                assert_eq!(error.code, kind.at_the_root, "{}: {error}", kind.address);
+                assert_eq!(error.address.as_deref(), Some(kind.address), "{error}");
+            }
         }
     }
 

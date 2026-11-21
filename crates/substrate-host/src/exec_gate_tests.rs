@@ -1373,6 +1373,37 @@ fn a_helper_a_loader_would_start_is_invalid() {
     }
 }
 
+/// D29, step 5 of the open: an image of the driver's class, byte order and machine that the
+/// kernel answers `ENOEXEC` for is `config.exec-gate-invalid` at the byte test, with or without
+/// a `PT_INTERP`: a core file's type, a program header size that is not the class's, more
+/// headers than the kernel reads, and none.
+#[test]
+fn a_helper_the_kernel_does_not_start_is_invalid() {
+    const ET_CORE: u16 = 4;
+    const ET_REL: u16 = 1;
+    let path = Path::new("/opt/substrate/substrate-exec-gate");
+    let mut entry_size = elf_image(ET_EXEC, &[PT_LOAD, PT_GNU_STACK]);
+    entry_size[54..56].copy_from_slice(&64_u16.to_le_bytes());
+    entry_size.extend([0_u8; 64]);
+    for (what, image) in [
+        ("a core file", elf_image(ET_CORE, &[PT_LOAD, PT_GNU_STACK])),
+        (
+            "a core file with a loader",
+            elf_image(ET_CORE, &[PT_INTERP, PT_LOAD]),
+        ),
+        ("a relocatable object", elf_image(ET_REL, &[PT_LOAD])),
+        ("a larger program header size", entry_size),
+        ("74 program headers", elf_image(ET_EXEC, &[PT_LOAD; 74])),
+        ("no program header", elf_image(ET_EXEC, &[])),
+    ] {
+        assert_invalid(
+            &check_linkage(path, &image).expect_err(what),
+            "is an ELF image the kernel does not start",
+        );
+    }
+    check_linkage(path, &elf_image(ET_EXEC, &[PT_LOAD; 73])).expect("one page of headers");
+}
+
 /// D29 through the open, on real files: the check reads the bytes the open then seals, after
 /// the trust checks. A dynamically linked file outside every writable location, with one link,
 /// is refused for its `PT_INTERP`; the host's own `env`, copied, is one where it is dynamic. A

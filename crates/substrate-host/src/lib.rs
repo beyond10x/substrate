@@ -413,8 +413,11 @@ pub struct HostConfig {
     ///
     /// **The helper must be statically linked** (D29). The open tests the bytes it then seals,
     /// and refuses `config.exec-gate-invalid` unless they are an ELF image of the driver's own
-    /// class, byte order and machine, whose program header table was read whole and holds no
-    /// `PT_INTERP`: a loader, or a script's interpreter, would
+    /// class, byte order and machine, with a header the kernel's loader takes (the type
+    /// `ET_EXEC` or `ET_DYN`, the class's program header size, at most one 4 KiB page of
+    /// program headers), whose program header table was read whole and holds no
+    /// `PT_INTERP`: a loader, a script's interpreter, or the shell that is handed an image the
+    /// kernel does not start, would
     /// run before the helper and read files a profile can mount into the view. Build it for a
     /// musl target. A start with a list is given no controlling terminal
     /// (`session.pty-unserved`), because taking one needs a program before the helper.

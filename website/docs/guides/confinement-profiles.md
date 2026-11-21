@@ -195,6 +195,13 @@ An entry names a directory, which admits every file beneath it, or one file:
 - The program is an absolute path when the list is not empty.
 - List the directory that holds the programs, not one above it. With `/usr` listed, `/bin/sh` is
   denied on a host whose `/bin` is a link into `/usr`; with `/usr/bin` listed both names run.
+- An entry admits a file by where the file itself lies. A symbolic link in a listed directory
+  that points outside it is not admitted. On Ubuntu 26.04, `ln`, `env`, `cat`, `ls` and `mkdir`
+  in `/usr/bin` are links into `/usr/lib/cargo/bin/coreutils` and are denied with only
+  `/usr/bin` listed; `mv`, `cp`, `rm` and `true` are links to `gnu*` names in `/usr/bin` and
+  run. List the directory the tools really lie in as well, or the tool itself.
+- A declared root or file mounted at or beneath `/.substrate-exec-gate` is refused when the
+  profile has a list: the helper is bound there.
 - Create `target` or `node_modules` before the start: an entry must exist.
 - The list limits which files are executed. An allowed interpreter still runs any script it can
   read, and the loader run as a program loads any file.

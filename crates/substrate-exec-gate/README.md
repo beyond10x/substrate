@@ -51,9 +51,13 @@ cargo build --release -p b10x-substrate-exec-gate --target x86_64-unknown-linux-
 
 **The helper must be statically linked: build it for a musl target, as above.** The driver
 tests the file's bytes when it opens and refuses `config.exec-gate-invalid` unless they are an
-ELF image of the driver's own class, byte order and machine, whose program header table it could
-read whole and which holds no `PT_INTERP`. Cargo's default build has one, and a script is no ELF
-image. A loader would run before the helper's first instruction and read
+ELF image of the driver's own class, byte order and machine, with a header the kernel's loader
+takes, whose program header table it could read whole and which holds no `PT_INTERP`. Cargo's
+default build has one, and a script is no ELF image. The kernel's loader takes the type `ET_EXEC`
+or `ET_DYN`, the program header size of the class, and at least one program header in at most
+one 4 KiB page; for any other image the kernel answers `ENOEXEC`, and bubblewrap would then run
+a shell of the view with the file as its script. A loader would run before the helper's first
+instruction and read
 files a run's profile can mount into its view, `/etc/ld.so.preload` among them, so an object
 named there would run before the list is applied. A static-pie image has no `PT_INTERP` and is
 taken. For the same reason a run with a list is given no controlling terminal
@@ -74,6 +78,13 @@ An entry names a directory, which admits every file beneath it, or one file, in 
 sees. **List the directory that holds the programs, not one above it**: with `/usr` listed,
 `/bin/sh` is denied on a host whose `/bin` is a link into `/usr`, because the rule does not reach
 through the view's second mount of `/usr/bin`. With `/usr/bin` listed both names run.
+
+**A listed directory admits the files beneath it, not what a symbolic link in it points to.**
+The kernel decides on the file a path resolves to. On a distribution that keeps a tool's name in
+`/usr/bin` as a link to a file elsewhere, the tool is refused with `/usr/bin` listed: on Ubuntu
+26.04, `/usr/bin/ln` is a link to `/usr/lib/cargo/bin/coreutils/ln`. List the tool by its own
+path, which puts the rule on the file the link resolves to, or list the directory the links
+point into as well.
 
 ## What the list does not stop
 

@@ -91,6 +91,17 @@ pub struct ConfinementProfile {
     /// unlisted path still fails (D28).
     /// A listed directory does not reach through a second mount of a part of it, so list
     /// `/usr/bin`, the directory that holds the programs, and not `/usr`.
+    ///
+    /// An entry admits a file by where the file itself lies: a symbolic link in a listed
+    /// directory that points outside it is not admitted. On Ubuntu 26.04, `ln`, `env`, `cat`,
+    /// `ls` and `mkdir` in `/usr/bin` are links into `/usr/lib/cargo/bin/coreutils` and are
+    /// denied with only `/usr/bin` listed, while `mv`, `cp`, `rm` and `true` are links to
+    /// `gnu*` names in `/usr/bin` and run. List the directory the tools really lie in as
+    /// well, or the tool itself.
+    ///
+    /// With a list, a declared root or file mounted at or beneath `/.substrate-exec-gate`,
+    /// where the helper is bound, is refused before dispatch by its kind's code for a mount
+    /// the driver owns (D29).
     pub exec_subpaths: Vec<String>,
     /// A per-run `TMPDIR`, invisible to another run and gone after `wait`.
     pub private_tmpdir: bool,

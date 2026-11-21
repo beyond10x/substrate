@@ -416,16 +416,22 @@ pub enum Linkage {
     /// `#!` script is one, and what runs first there is its interpreter; an image of another
     /// machine is run by whatever the host registered for it.
     Foreign,
-    /// A native ELF image whose program header table was not read whole: it declares no
-    /// program header, keeps its count elsewhere (`PN_XNUM`), or the table lies outside the
-    /// bytes.
+    /// A native ELF image the kernel's loader refuses before it maps anything (`ENOEXEC`): its
+    /// type is neither `ET_EXEC` nor `ET_DYN`, its `e_phentsize` is not the size of a program
+    /// header of its class, or it declares no program header or more than the kernel reads,
+    /// which the escape value of a count kept elsewhere (`PN_XNUM`) is. A caller that starts a
+    /// program with `execvp` then runs a shell with the file as its script.
+    Unstartable,
+    /// A native ELF image whose header or program header table was not read whole: one of
+    /// them lies outside the bytes.
     Unreadable,
 }
 
 /// Whether the kernel starts `image` directly: [`Linkage::Static`] exactly when it is an ELF
-/// image of [`ElfTarget::NATIVE`], its whole program header table was read, and no header has
-/// the type `PT_INTERP`. The three are asked in that order. The contents of a `PT_INTERP`
-/// header are not read, and `PT_DYNAMIC` is not asked.
+/// image of [`ElfTarget::NATIVE`], its header is one the kernel's loader takes
+/// ([`Linkage::Unstartable`] otherwise), its whole program header table was read, and no
+/// header has the type `PT_INTERP`. The four are asked in that order. The contents of a
+/// `PT_INTERP` header are not read, and `PT_DYNAMIC` is not asked.
 pub fn elf_linkage(image: &[u8]) -> Linkage {
     linkage_for(image, ElfTarget::NATIVE)
 }
@@ -443,40 +449,95 @@ fn linkage_for(image: &[u8], native: Option<ElfTarget>) -> Linkage {
     if identity().is_none() {
         return Linkage::Foreign;
     }
-    match program_header_types(image) {
+    let Some(table) = ProgramHeaderTable::of(image) else {
+        return Linkage::Unreadable;
+    };
+    if !table.is_one_the_kernel_loads() {
+        return Linkage::Unstartable;
+    }
+    match table.types(image) {
         Some(types) if types.contains(&PT_INTERP) => Linkage::Interpreted,
         Some(_) => Linkage::Static,
         None => Linkage::Unreadable,
     }
 }
 
-/// The `p_type` of every program header of a little-endian ELF image, 32-bit or 64-bit. `None`
-/// when one of them cannot be read, and for an image that declares none or keeps its count
-/// elsewhere (`PN_XNUM`).
-fn program_header_types(image: &[u8]) -> Option<Vec<usize>> {
-    const PN_XNUM: usize = 0xffff;
-    if image.get(..4)? != b"\x7fELF" || *image.get(5)? != 1 {
-        return None;
-    }
-    // (e_phoff, its width, e_phentsize, e_phnum, the size of one program header).
-    let (table, word, entry_size, count, header_size) = match *image.get(4)? {
-        1 => (28, 4, 42, 44, 32),
-        2 => (32, 8, 54, 56, 56),
-        _ => return None,
-    };
-    let table = field(image, table, word)?;
-    let entry_size = field(image, entry_size, 2)?;
-    let count = field(image, count, 2)?;
-    if count == 0 || count == PN_XNUM || entry_size < header_size {
-        return None;
-    }
-    (0..count)
-        .map(|index| {
-            let header = table.checked_add(index.checked_mul(entry_size)?)?;
-            image.get(header..header.checked_add(entry_size)?)?;
-            field(image, header, 4)
+/// The largest program header table every kernel this crate runs on reads: 4096 bytes, which
+/// is 73 headers of the 64-bit class and 128 of the 32-bit one.
+///
+/// From `load_elf_phdrs` in `fs/binfmt_elf.c`, where `size` is `sizeof(struct elf_phdr) *
+/// e_phnum`. Linux v5.19 (line 478) and v6.8 (line 523) refuse a table with
+/// `size == 0 || size > 65536 || size > ELF_MIN_ALIGN`, and `ELF_MIN_ALIGN` is the larger of
+/// `ELF_EXEC_PAGESIZE` and `PAGE_SIZE` (lines 81 to 85 of v6.18), so 4096 where a page is
+/// 4 KiB. Linux v6.18 (line 537) refuses `size == 0 || size > 65536` only: measured on
+/// 6.18.55 with 4 KiB pages, an image with 74 headers and one with 1170 start, and one with
+/// 1171 is `ENOEXEC`. The bound here is the smallest of these, so an image this crate takes
+/// is one each of those kernels reads; an image with more headers is refused on every host,
+/// also where the kernel would start it.
+const PROGRAM_HEADER_TABLE_BYTES: usize = 4096;
+
+/// What the header of a little-endian ELF image, 32-bit or 64-bit, says of its type and its
+/// program header table.
+struct ProgramHeaderTable {
+    /// `e_type`.
+    kind: usize,
+    /// `e_phoff`.
+    offset: usize,
+    /// `e_phentsize`.
+    entry_size: usize,
+    /// `e_phnum`.
+    count: usize,
+    /// The size of one program header of the image's class.
+    header_size: usize,
+}
+
+impl ProgramHeaderTable {
+    /// `None` when the header ends outside the bytes, and for a class that is neither.
+    fn of(image: &[u8]) -> Option<Self> {
+        // (e_phoff, its width, e_phentsize, e_phnum, the size of one program header).
+        let (offset, word, entry_size, count, header_size) = match *image.get(4)? {
+            1 => (28, 4, 42, 44, 32),
+            2 => (32, 8, 54, 56, 56),
+            _ => return None,
+        };
+        Some(Self {
+            kind: field(image, 16, 2)?,
+            offset: field(image, offset, word)?,
+            entry_size: field(image, entry_size, 2)?,
+            count: field(image, count, 2)?,
+            header_size,
         })
-        .collect()
+    }
+
+    /// What the kernel's loader asks of the header before it maps anything, and answers
+    /// `ENOEXEC` without (`load_elf_binary` and `load_elf_phdrs` of `fs/binfmt_elf.c`): the type
+    /// is `ET_EXEC` or `ET_DYN`, `e_phentsize` is the size of a program header of the class,
+    /// and the table is neither empty nor over [`PROGRAM_HEADER_TABLE_BYTES`]. The last refuses
+    /// a count kept elsewhere (`PN_XNUM`, 0xffff), which the kernel does not follow.
+    fn is_one_the_kernel_loads(&self) -> bool {
+        const ET_EXEC: usize = 2;
+        const ET_DYN: usize = 3;
+        if !matches!(self.kind, ET_EXEC | ET_DYN) {
+            return false;
+        }
+        if self.entry_size != self.header_size {
+            return false;
+        }
+        self.count != 0 && self.count * self.header_size <= PROGRAM_HEADER_TABLE_BYTES
+    }
+
+    /// The `p_type` of every program header, or `None` when one of them lies outside the bytes.
+    fn types(&self, image: &[u8]) -> Option<Vec<usize>> {
+        (0..self.count)
+            .map(|index| {
+                let header = self
+                    .offset
+                    .checked_add(index.checked_mul(self.entry_size)?)?;
+                image.get(header..header.checked_add(self.entry_size)?)?;
+                field(image, header, 4)
+            })
+            .collect()
+    }
 }
 
 /// The `PT_INTERP` of an ELF image: the loader a dynamically linked program names. `None` for a
@@ -1087,9 +1148,8 @@ mod tests {
         }
     }
 
-    /// D29, rule 1, second point: a native image whose program header table was not read
-    /// whole is refused as such, whatever the part that was read holds: a truncated image, one
-    /// with no program header, and one whose count is the escape value.
+    /// D29, rule 1: a native image whose header or program header table was not read whole is
+    /// refused as such, whatever the part that was read holds.
     #[test]
     fn a_truncated_image_is_unreadable() {
         for (class, machine) in [(2, X86_64), (1, I386)] {
@@ -1111,22 +1171,150 @@ mod tests {
             let mut hidden = image_with(class, machine, ET_EXEC, &[PT_LOAD, INTERP]);
             hidden.truncate(hidden.len() - 8);
             assert_eq!(linkage_for(&hidden, native), Linkage::Unreadable);
-            assert_eq!(
-                linkage_for(&image_with(class, machine, ET_EXEC, &[]), native),
-                Linkage::Unreadable,
-                "class {class}: no program header"
-            );
-            let count_at = if class == 1 { 44 } else { 56 };
-            let mut extended = whole.clone();
-            extended[count_at..count_at + 2].copy_from_slice(&0xffff_u16.to_le_bytes());
-            assert_eq!(
-                linkage_for(&extended, native),
-                Linkage::Unreadable,
-                "PN_XNUM"
-            );
             let mut header_only = whole.clone();
             header_only.truncate(if class == 1 { 52 } else { 64 });
             assert_eq!(linkage_for(&header_only, native), Linkage::Unreadable);
+            let mut half_a_header = whole.clone();
+            half_a_header.truncate(40);
+            assert_eq!(
+                linkage_for(&half_a_header, native),
+                Linkage::Unreadable,
+                "class {class}: the ELF header itself ends outside the bytes"
+            );
+        }
+    }
+
+    /// The two native targets the cases below ask: (class, machine, where `e_phentsize` is,
+    /// the size of one program header, the most headers a kernel with 4 KiB pages reads).
+    const TARGETS: [(u8, u16, usize, u16, usize); 2] =
+        [(2, X86_64, 54, 56, 73), (1, I386, 42, 32, 128)];
+
+    /// D29, rule 1: a count kept elsewhere (`PN_XNUM`, 0xffff in `e_phnum`) is not started. The
+    /// kernel does not follow the escape value; it reads it as a count, over its bound. The
+    /// image holds all 0xffff headers, none of them `PT_INTERP`, so nothing but the count
+    /// refuses it.
+    #[test]
+    fn a_program_header_count_kept_elsewhere_is_unstartable() {
+        const PN_XNUM: usize = 0xffff;
+        for (class, machine, _, _, _) in TARGETS {
+            let native = Some(ElfTarget {
+                class,
+                data: 1,
+                machine,
+            });
+            let image = image_with(class, machine, ET_EXEC, &vec![PT_LOAD; PN_XNUM]);
+            let count_at = if class == 1 { 44 } else { 56 };
+            assert_eq!(image[count_at..count_at + 2], [0xff, 0xff]);
+            assert_eq!(
+                linkage_for(&image, native),
+                Linkage::Unstartable,
+                "class {class}"
+            );
+        }
+    }
+
+    /// D29, rule 1: a count the kernel's loader does not read is not started. The kernel reads
+    /// a table of at most one page and refuses an empty one. Each image holds every header
+    /// its count names, so nothing but the count refuses it.
+    #[test]
+    fn a_program_header_count_the_kernel_does_not_read_is_unstartable() {
+        for (class, machine, _, _, most) in TARGETS {
+            let native = Some(ElfTarget {
+                class,
+                data: 1,
+                machine,
+            });
+            let counting = |count: usize| {
+                linkage_for(
+                    &image_with(class, machine, ET_EXEC, &vec![PT_LOAD; count]),
+                    native,
+                )
+            };
+            assert_eq!(counting(1), Linkage::Static, "class {class}: one header");
+            assert_eq!(
+                counting(most),
+                Linkage::Static,
+                "class {class}: one page of headers"
+            );
+            assert_eq!(
+                counting(most + 1),
+                Linkage::Unstartable,
+                "class {class}: one header more than a page holds"
+            );
+            assert_eq!(
+                counting(0),
+                Linkage::Unstartable,
+                "class {class}: no program header"
+            );
+        }
+    }
+
+    /// D29, rule 1: an `e_phentsize` other than the size of a program header of the class is
+    /// not started, smaller or larger, as the kernel refuses it. Each image is long enough for
+    /// its table at the size it states, so nothing but the size refuses it.
+    #[test]
+    fn a_program_header_size_other_than_the_classs_is_unstartable() {
+        for (class, machine, size_at, size, _) in TARGETS {
+            let native = Some(ElfTarget {
+                class,
+                data: 1,
+                machine,
+            });
+            let whole = image_with(class, machine, ET_EXEC, &[PT_LOAD, PT_GNU_STACK, PT_LOAD]);
+            assert_eq!(linkage_for(&whole, native), Linkage::Static, "the control");
+            for (what, other) in [
+                ("eight bytes smaller", size - 8),
+                ("one byte smaller", size - 1),
+                ("none", 0),
+                ("one byte larger", size + 1),
+                ("eight bytes larger", size + 8),
+            ] {
+                let mut image = whole.clone();
+                image[size_at..size_at + 2].copy_from_slice(&other.to_le_bytes());
+                image.extend([0_u8; 64]);
+                assert_eq!(
+                    linkage_for(&image, native),
+                    Linkage::Unstartable,
+                    "class {class}: e_phentsize {what}"
+                );
+            }
+        }
+    }
+
+    /// D29, rule 1: an image whose type is neither `ET_EXEC` nor `ET_DYN` is not started,
+    /// whatever its program headers hold: a relocatable object, a core file, no type, and the
+    /// values an operating system or a processor keeps.
+    #[test]
+    fn an_image_of_a_type_the_kernel_does_not_execute_is_unstartable() {
+        for (class, machine, _, _, _) in TARGETS {
+            let native = Some(ElfTarget {
+                class,
+                data: 1,
+                machine,
+            });
+            for kind in [ET_EXEC, ET_DYN] {
+                assert_eq!(
+                    linkage_for(&image_with(class, machine, kind, &[PT_LOAD]), native),
+                    Linkage::Static,
+                    "class {class}: type {kind}"
+                );
+            }
+            for (what, kind) in [
+                ("ET_NONE", 0_u16),
+                ("ET_REL", 1),
+                ("ET_CORE", 4),
+                ("the first after ET_CORE", 5),
+                ("ET_LOOS", 0xfe00),
+                ("ET_HIPROC", 0xffff),
+            ] {
+                for segments in [&[PT_LOAD, PT_GNU_STACK][..], &[INTERP, PT_LOAD]] {
+                    assert_eq!(
+                        linkage_for(&image_with(class, machine, kind, segments), native),
+                        Linkage::Unstartable,
+                        "class {class}: {what} with the headers {segments:?}"
+                    );
+                }
+            }
         }
     }
 
