@@ -317,41 +317,95 @@ require_executed -p b10x-substrate-exec-gate gate \
   'exec gate own environment: executed' \
   'exec gate preload operand: executed'
 
-# Design 35 D30, what is mounted beneath a location a run can write: two roots make their own
-# mounts, each in a user and mount namespace of its own, and need a host that grants such a
-# namespace a mount. A workstation does; a hosted runner's AppArmor gives a user namespace no
-# capability. Where the mount is granted each case is required by its `executed` line. Where
-# it is not, each case must print its own `ABSENT` line with that reason, so one that neither
-# ran nor said why still fails, and the lane says in one line that they did not run: there
-# they are workstation evidence, never a passed case.
-require_unstaged() {
+# Design 35 D30, what is mounted beneath a location a run can write, and the symbolic links a
+# followed entry reads: these roots make their own mounts, each case in a user and mount
+# namespace of its own, and need a host that grants such a namespace a mount. A workstation
+# does; a hosted runner's AppArmor gives a user namespace no capability. Each case is required
+# by name. Where the mount is granted it must print its `executed` line. Where it is not, its
+# own `ABSENT (` line is taken instead, so a case that neither ran nor said why still fails,
+# and the lane says in one line which cases did not run: there they are workstation evidence,
+# never a passed case. A name written `?<name>|<reason>` depends on something else the host
+# may lack (a mount this user cannot open, `/usr/local`, an overlay in a user namespace): its
+# `ABSENT (` line is taken on any host where it gives that reason, and named.
+if unshare --user --map-root-user --mount -- mount -t tmpfs tmpfs /tmp >/dev/null 2>&1; then
+  mounts_granted=1
+else
+  mounts_granted=0
+fi
+unstaged=()
+require_staged() {
   local package=b10x-substrate-host
   if [[ "$1" == "-p" ]]; then
     package="$2"
     shift 2
   fi
-  local binary="$1" line="$2"
+  local binary="$1"
+  shift
   local log
   log="$(cargo test -p "${package}" --locked --test "${binary}" \
     -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${log}" >&2; exit 1; }
   printf '%s\n' "${log}"
-  if ! grep -qF "${line}" <<<"${log}"; then
-    echo "delegated-lane: ${binary} did not print '${line}'" >&2
+  local name reason
+  for name in "$@"; do
+    reason=""
+    if [[ "${name}" == \?* ]]; then
+      name="${name#\?}"
+      reason="${name#*|}"
+      name="${name%%|*}"
+    fi
+    if grep -qF "${name}: executed" <<<"${log}"; then
+      continue
+    fi
+    if (( ! mounts_granted )) && grep -qF "${name}: ABSENT (" <<<"${log}"; then
+      unstaged+=("${binary}: ${name}")
+      continue
+    fi
+    if [[ -n "${reason}" ]] && grep -F "${name}: ABSENT (" <<<"${log}" | grep -qF "${reason}"; then
+      unstaged+=("${binary}: ${name}")
+      continue
+    fi
+    echo "delegated-lane: ${binary} did not print '${name}: executed'" >&2
     exit 1
-  fi
+  done
+  echo "delegated-lane: ${binary} answered for each of its cases"
 }
-if unshare --user --map-root-user --mount -- mount -t tmpfs tmpfs /tmp >/dev/null 2>&1; then
-  require_executed exec_lists_view_mounts \
-    'ESS confinement linux exec view mounts: executed'
-  require_executed -p b10x-substrate-exec-gate view_mounts_gate \
-    'exec gate view mounts follow into a mount beneath a writable mount: executed'
-else
-  require_unstaged exec_lists_view_mounts \
-    'ESS confinement linux exec view mounts: ABSENT (no '
-  require_unstaged -p b10x-substrate-exec-gate view_mounts_gate \
-    'exec gate view mounts follow into a mount beneath a writable mount: ABSENT (no '
-  echo "delegated-lane: a user namespace is granted no mount on this host; absent, not passed: exec_lists_view_mounts, view_mounts_gate"
+require_staged exec_lists_view_mounts \
+  'ESS confinement linux exec view mounts'
+require_staged security5_view_mounts \
+  'security5 view mounts link through a skipped mount' \
+  '?security5 view mounts ordinary|this host has no /usr/local/src'
+require_staged adversary5_view_mounts \
+  'adversary5 exec view mounts unlisted' \
+  'adversary5 exec view mounts bind' \
+  'adversary5 exec view mounts workspace root is a mount point' \
+  '?adversary5 exec view mounts usr local|no /usr/local on this host' \
+  'adversary5 exec view mounts stack beneath a root' \
+  '?adversary5 exec view mounts unopenable mount beneath a root|this host has no mount of a listed type'
+require_staged -p b10x-substrate-exec-gate view_mounts_gate \
+  'exec gate view mounts follow into a mount beneath a writable mount' \
+  'exec gate view mounts links of a followed path' \
+  'exec gate view mounts unlisted mount beneath a writable mount'
+require_staged -p b10x-substrate-exec-gate adversary5_view_mounts_gate \
+  'adversary5 exec gate view mounts file bind' \
+  'adversary5 exec gate view mounts chain and escapes' \
+  'adversary5 exec gate view mounts beneath an unlisted type' \
+  'adversary5 exec gate view mounts writable root is a mount point' \
+  'adversary5 exec gate view mounts planted link on an unlisted type' \
+  'adversary5 exec gate view mounts covered mounts' \
+  '?adversary5 exec gate view mounts limit: overlay upper|the stage failed'
+if (( ${#unstaged[@]} > 0 )); then
+  if (( mounts_granted )); then
+    why="this host lacks what they need"
+  else
+    why="a user namespace is granted no mount on this host"
+  fi
+  echo "delegated-lane: ${why}; absent, not passed: $(IFS=';'; echo "${unstaged[*]}")"
 fi
+# The mount table as a tree, on tables written as text: no mount and no namespace, so it runs
+# on every host. Required by the lines of its two long tables.
+require_executed -p b10x-substrate-exec-gate adversary5_mount_tree \
+  'adversary5 mount tree 10000 rows side by side: linked in' \
+  'adversary5 mount tree 10000 rows deep: linked in'
 require_executed -p b10x-substrate-exec-gate adversary_gate \
   'adversary landlock failures: executed'
 require_executed -p b10x-substrate-exec-gate security2_gate \

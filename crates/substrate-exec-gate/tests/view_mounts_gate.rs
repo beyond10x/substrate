@@ -3,6 +3,10 @@
 //! itself is (D24). What is mounted beneath a directory has a place on another file system, or
 //! on the same one under other names, and lies in that directory in the view all the same.
 //!
+//! **Every symbolic link such a path resolves through is placed as well**: a link the run can
+//! replace is refused, and so is one that has no place, on a mount of a file-system type
+//! outside the list. A mount of such a type beneath a writable root refuses nothing by itself.
+//!
 //! No case has a privilege. Each run makes its mounts in a user and mount namespace of its own,
 //! `unshare --user --map-root-user --mount`, and starts the shipped `substrate-exec-gate` there
 //! with an empty environment, so the helper reads that namespace's mount table as it reads a
@@ -56,17 +60,32 @@ fn base(path: &str) -> Located {
 
 /// One run in a fresh scratch root. The root holds `fs/tree`, `fs/beside/true`,
 /// `fs/apart/true` and `fs/links/{held,beside,apart}`, links to `fs/tree/held`, `fs/beside`
-/// and `fs/apart`. `stage` runs in the
+/// and `fs/apart`; the empty `fs/unlisted`; `fs/tree/out`, a link out of `fs/tree` to
+/// `fs/apart`; `fs/loop`, a link to itself; and `fs/dangling`, a link to nothing. `stage` runs
+/// in the
 /// root inside the namespace and mounts what the case names at `fs/tree/held`; the helper then
 /// starts the shell with `script`, `entry` as its one allow entry and `writable` as the mounts
 /// the run can write. `Err` holds why the case is absent on this host.
 fn run(stage: &str, entry: &str, writable: &[&str], script: &str) -> Result<Output, String> {
-    let [unshare, sh, env, mount, cp, tool] =
-        tools(["unshare", "sh", "env", "mount", "cp", "true"])?;
+    let [unshare, sh, env, mount, cp, ln, tool] =
+        tools(["unshare", "sh", "env", "mount", "cp", "ln", "true"])?;
     let directory = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("scratch");
     let root = directory.path().canonicalize().expect("canonical scratch");
-    for name in ["fs/tree/held", "fs/beside", "fs/apart", "fs/links"] {
+    for name in [
+        "fs/tree/held",
+        "fs/beside",
+        "fs/apart",
+        "fs/links",
+        "fs/unlisted",
+    ] {
         std::fs::create_dir_all(root.join(name)).expect(name);
+    }
+    for (name, target) in [
+        ("fs/tree/out", "../apart"),
+        ("fs/loop", "loop"),
+        ("fs/dangling", "nothing"),
+    ] {
+        std::os::unix::fs::symlink(target, root.join(name)).expect("a link");
     }
     std::fs::copy(&tool, root.join("fs/beside/true")).expect("copy true");
     std::fs::copy(&tool, root.join("fs/apart/true")).expect("copy true");
@@ -87,7 +106,10 @@ fn run(stage: &str, entry: &str, writable: &[&str], script: &str) -> Result<Outp
         ],
         writable: writable.iter().map(|rel| at(rel)).collect(),
     };
-    let stage = stage.replace("{mount}", &mount).replace("{cp}", &cp);
+    let stage = stage
+        .replace("{mount}", &mount)
+        .replace("{cp}", &cp)
+        .replace("{ln}", &ln);
     let output = Command::new(unshare)
         .args(["--user", "--map-root-user", "--mount", "--"])
         .arg(&sh)
@@ -117,9 +139,12 @@ fn run(stage: &str, entry: &str, writable: &[&str], script: &str) -> Result<Outp
             "no user and mount namespace: {}",
             diagnostic.trim()
         )),
+        // The scratch directory on a type outside the list. A `ramfs` is what a stage
+        // mounts, and a refusal that names it is the helper's answer to the case.
         Some(REFUSED)
             if diagnostic.contains("Landlock is unavailable")
-                || diagnostic.contains("file-system-unlisted") =>
+                || (diagnostic.contains("file-system-unlisted")
+                    && !diagnostic.contains("file-system-unlisted ramfs")) =>
         {
             Err(diagnostic.trim().to_owned())
         }
@@ -208,5 +233,142 @@ fn a_followed_entry_into_a_mount_beneath_a_writable_mount_is_refused() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    println!("exec gate view mounts {NAME}: executed");
+}
+
+/// A `ramfs`, a type outside the list, at `fs/unlisted`, with `link` on it, a link to
+/// `fs/apart`.
+const RAMFS: &str = "{mount} -t ramfs ramfs fs/unlisted && {ln} -s ../apart fs/unlisted/link";
+
+/// D30: **every symbolic link a followed path resolves through is placed.**
+///
+/// - A link on a mount of a type outside the list has no place. No rule compares such a mount,
+///   so whether the run can write the link cannot be said, and the helper exits 125 with the
+///   cause. With no writable mount nothing is the run's to write, no table is read, and the
+///   same entry runs.
+/// - A link in the writable mount that points out of it is refused: the run can point it
+///   anywhere. So is one on a tmpfs mounted beneath the writable mount.
+/// - A link nothing writable reaches is followed, as before, and the walk answers a link to
+///   itself and a link to nothing as the kernel does.
+#[test]
+fn every_symbolic_link_a_followed_path_reads_is_placed() {
+    const NAME: &str = "links of a followed path";
+    const TMPFS: &str =
+        "{mount} -t tmpfs tmpfs fs/tree/held && {ln} -s ../../apart fs/tree/held/out";
+    let through = "resolves through the symbolic link";
+    let mut failures = Vec::new();
+    for (what, stage, entry, writable, script, expected, holds) in [
+        (
+            "a link nothing writable reaches",
+            ":",
+            "fs/links/apart",
+            &["fs/tree"][..],
+            "fs/links/apart/true; echo $?",
+            (Some(0), "0\n"),
+            &[][..],
+        ),
+        (
+            "a link on a ramfs, with a writable mount",
+            RAMFS,
+            "fs/unlisted/link",
+            &["fs/tree"][..],
+            "fs/unlisted/link/true; echo $?",
+            (Some(REFUSED), ""),
+            &[
+                "cannot establish the place of",
+                "fs/unlisted/link: file-system-unlisted ramfs",
+            ][..],
+        ),
+        (
+            "a link on a ramfs, with no writable mount",
+            RAMFS,
+            "fs/unlisted/link",
+            &[][..],
+            "fs/unlisted/link/true; echo $?",
+            (Some(0), "0\n"),
+            &[][..],
+        ),
+        (
+            "a link in the writable mount that points out of it",
+            ":",
+            "fs/tree/out",
+            &["fs/tree"][..],
+            "fs/tree/out/true; echo $?",
+            (Some(REFUSED), ""),
+            &[through, "fs/tree/out, in the writable mount"][..],
+        ),
+        (
+            "a link on a tmpfs beneath the writable mount that points out of it",
+            TMPFS,
+            "fs/links/held/out",
+            &["fs/tree"][..],
+            "fs/links/held/out/true; echo $?",
+            (Some(REFUSED), ""),
+            &[through, "fs/tree/held/out, in the writable mount"][..],
+        ),
+        (
+            "a link to itself",
+            ":",
+            "fs/loop",
+            &["fs/tree"][..],
+            "echo ran",
+            (Some(REFUSED), ""),
+            &["cannot open", "Too many levels of symbolic links"][..],
+        ),
+        (
+            "a link to nothing",
+            ":",
+            "fs/dangling",
+            &["fs/tree"][..],
+            "echo ran",
+            (Some(REFUSED), ""),
+            &["cannot open", "No such file or directory"][..],
+        ),
+    ] {
+        let output = match run(stage, entry, writable, script) {
+            Ok(output) => output,
+            Err(reason) => {
+                return println!("exec gate view mounts {NAME}: ABSENT ({what}: {reason})");
+            }
+        };
+        let diagnostic = text(&output.stderr);
+        let observed = (output.status.code(), text(&output.stdout));
+        if (observed.0, observed.1.as_str()) != expected {
+            failures.push(format!(
+                "{what}: {observed:?}, not {expected:?}: {diagnostic}"
+            ));
+        }
+        for part in holds {
+            if !diagnostic.contains(part) {
+                failures.push(format!("{what}: no `{part}` in: {diagnostic}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    println!("exec gate view mounts {NAME}: executed");
+}
+
+/// D30: **a mount of a type outside the list beneath a writable mount refuses nothing by
+/// itself.** It is compared with no place, and a start whose entries stay apart from it runs.
+/// Bubblewrap binds each device node of `/dev` as such a mount beneath the writable `/dev`, so
+/// a helper that refused here would refuse every start with a list.
+#[test]
+fn a_mount_of_an_unlisted_type_beneath_a_writable_mount_refuses_no_start() {
+    const NAME: &str = "unlisted mount beneath a writable mount";
+    let output = match run(
+        "{mount} -t ramfs ramfs fs/tree/held",
+        "fs/links/apart",
+        &["fs/tree"],
+        "fs/links/apart/true; echo $?",
+    ) {
+        Ok(output) => output,
+        Err(reason) => return println!("exec gate view mounts {NAME}: ABSENT ({reason})"),
+    };
+    assert_eq!(
+        (output.status.code(), text(&output.stdout).as_str()),
+        (Some(0), "0\n"),
+        "a ramfs beneath the writable mount, and an entry apart from it: {}",
+        text(&output.stderr)
+    );
     println!("exec gate view mounts {NAME}: executed");
 }

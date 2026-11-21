@@ -3988,6 +3988,36 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
   - Not observed: the namespace cases on a hosted runner. The lane's branch for a host that
     grants no mount was simulated inside `bwrap --unshare-user --disable-userns`, where both
     roots print `ABSENT`.
+- **Two decisions after the first review of that branch**, accepted by the stakeholder
+  (agent:sdc) on 2026-11-21. They amend D30 and replace its sentence that the skip of a mount of
+  an unlisted type is safe.
+  - **Every symbolic link a followed entry's walk reads is placed, in the driver and in the
+    helper.** A link without a place (its mount's type is outside the closed list, or any other
+    cause) refuses the start `exec.sandbox-place-unserved`, and the helper exits 125. Measured
+    before it, on the first commit of the branch and by reading on `main`: a `ramfs` mounted
+    beneath the workspace root and again beneath a read-only root's source carried a planted
+    link to `/usr/bin`; both sides skipped the mount, the root was classed `follow`, the link
+    was followed and a program of `/usr/bin` exited 0. The tmpfs twin was refused. The link was
+    never placed, only where the path ended. The helper now also refuses a link that lies in a
+    place a writable root reaches; before, only the driver did.
+  - In addition, two mounts of unlisted types whose rows name the same device, and roots that
+    are equal or nested, are the same place for the overlap of a source and a writable
+    location, compared table row against table row only. In the measured `ramfs` shape this
+    classes the root `beneath` first, so the refusal there is
+    `exec.sandbox-path-unrepresentable`; with the comparison removed the same case answers
+    `exec.sandbox-place-unserved`.
+  - **On the read-only side a mount that cannot be asked, or is covered, never refuses.** It is
+    counted as reached by the root its own table row names (`MountTree::reaches_as_written`,
+    used for a root's or base directory's source and for the helper's file); so are a removed
+    root and a mount ID two rows have. Measured before it: a start with a read-only root at
+    `/var/lib` was refused `path-unopenable` on a workstation, for a container layer mount the
+    user cannot open, and a stack beneath a root was refused `mount-covered`. The writable side
+    keeps the fail-closed table. The decision rests on one sentence, that counting such a mount
+    as reached can only make a class stricter; the stakeholder made that sentence the target of
+    the second adversary round, and its result is recorded with the fix.
+  - The walk beneath a directory is a loop (10 000 chained mounts overflowed the stack when it
+    recursed), and a mount ID two rows share beneath a writable location is
+    `mount-row-repeated`.
 - The ninth revision as a whole: nothing was run or built for it, except one read of the
   probe host's own `/proc/self/mountinfo`: 44 rows, one without a parent row, and one mount
   point with two rows. E18 to E22 are the reviews' cases and logs, read. The code was read at

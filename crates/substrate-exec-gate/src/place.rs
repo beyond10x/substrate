@@ -40,22 +40,38 @@
 //! - **a mount is mounted beneath a directory** when its attachment point lies in the
 //!   directory's place, or its parent mount is mounted beneath the directory;
 //! - **the places a directory reaches** are its own place and the root of every mount that is
-//!   mounted beneath it ([`MountTree::reaches`]).
+//!   mounted beneath it ([`MountTree::reaches`], [`Reach`]).
 //!
 //! So a path lies in a directory, in the view, when its place lies in a place the directory
 //! reaches. It fails closed like a place: `mount-row-missing`, `mount-row-repeated` and
 //! `mount-point-mismatch` are also raised for a row whose parent cannot be established, asked
-//! of the whole table once ([`MountTable::into_tree`]); `mount-root-deleted` and
-//! `mount-covered` are raised only for a mount whose root is compared, and so are
-//! `path-unopenable` and `mount-id-unreported` where the mount point cannot be asked. A mount
-//! of a file-system type outside the list is not compared, and is refused only where the
-//! caller says so ([`Unlisted`]).
+//! of the whole table once ([`MountTable::into_tree`]). The other causes depend on which side
+//! of a comparison the directory is:
+//!
+//! - **a location a run can write** ([`MountTree::reaches`]) fails closed for every mount
+//!   whose root is compared: `mount-row-repeated` where two rows have its ID,
+//!   `mount-root-deleted`, `mount-covered`, and `path-unopenable` or `mount-id-unreported`
+//!   where the mount point cannot be asked. A place that is missing from this side would be
+//!   a writable place called read-only;
+//! - **a directory nothing is written through** ([`MountTree::reaches_as_written`]: the host
+//!   source of a read-only mount) never refuses. A mount beneath it is counted as reached by
+//!   the root its own row names, whether or not the kernel shows it there: that can only make
+//!   the directory overlap more, never less, and a host is not refused for a mount nothing
+//!   writable touches.
+//!
+//! A mount of a file-system type outside the list is not compared as a place, and is refused
+//! only where the caller says so ([`Unlisted`]). Its row is kept all the same: two such rows
+//! with one device, the root of one in the root of the other, show the same files, so two
+//! directories that each reach one of them overlap ([`Reach::overlaps`]). No path is ever
+//! placed on such a mount: **a symbolic link read there, like a file named there, has no
+//! place and refuses** where it is asked.
 //!
 //! [`place`] is the one function that establishes a place, from the reported mount ID, the
 //! descriptor's path and the table's text. The helper and the driver compile this file, so the
 //! two cannot disagree. The helper reads the table of the run's view; the driver reads its own,
 //! for host paths.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// The closed list of file-system types the place rule was observed to hold on (design 35
@@ -135,7 +151,7 @@ pub struct Unestablished {
 
 impl Unestablished {
     /// The place of `path` could not be established for `cause`.
-    pub fn place(path: impl Into<String>, cause: Cause) -> Self {
+    pub(crate) fn place(path: impl Into<String>, cause: Cause) -> Self {
         Self {
             path: path.into(),
             cause,
@@ -215,17 +231,47 @@ pub struct Opened {
 }
 
 /// Whether `place` lies in one of the places a directory reaches (D30).
-pub fn lies_in_any(place: &Place, reached: &[Place]) -> bool {
+fn lies_in_any(place: &Place, reached: &[Place]) -> bool {
     reached.iter().any(|other| place.lies_in(other))
 }
 
 /// Whether two sets of places overlap (D30): a place of one lies in a place of the other.
-pub fn overlap(one: &[Place], other: &[Place]) -> bool {
+fn overlap(one: &[Place], other: &[Place]) -> bool {
     one.iter().any(|place| {
         other
             .iter()
             .any(|against| place.relation(against) != Relation::Apart)
     })
+}
+
+/// **What a directory reaches** (D30): its own place, and the root of every mount that is
+/// mounted beneath it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reach {
+    /// The directory's own place first, then the roots of the mounts of a listed type.
+    places: Vec<Place>,
+    /// The roots of the mounts beneath it of a type outside the list, as their rows name
+    /// them: device and root. Never a place a path is compared with, only row against row.
+    unlisted: Vec<Place>,
+}
+
+impl Reach {
+    /// The places: the directory's own first.
+    pub fn places(&self) -> &[Place] {
+        &self.places
+    }
+
+    /// Whether `place` lies in the directory, in the view: in one of the places it reaches.
+    pub fn holds(&self, place: &Place) -> bool {
+        lies_in_any(place, &self.places)
+    }
+
+    /// Whether two directories overlap, in the view: a place one reaches lies in a place the
+    /// other reaches, or each reaches a mount of a type outside the list and the two rows
+    /// name one device with the root of one in the root of the other.
+    pub fn overlaps(&self, other: &Self) -> bool {
+        overlap(&self.places, &other.places) || overlap(&self.unlisted, &other.unlisted)
+    }
 }
 
 /// One row of the table.
@@ -398,12 +444,15 @@ impl MountTable {
 }
 
 impl Row {
-    /// The place of the directory or file this mount shows: its device and its root.
+    /// The place of the directory or file this mount shows: its device and its root. For a
+    /// removed directory, the names it had: only a caller that never refuses counts that.
     fn root_place(&self) -> Place {
         Place {
             device: self.device.clone(),
             names: self
                 .root
+                .strip_suffix("//deleted")
+                .unwrap_or(&self.root)
                 .split('/')
                 .filter(|name| !name.is_empty())
                 .map(str::to_owned)
@@ -440,6 +489,8 @@ pub struct MountTree {
     table: MountTable,
     /// For each row the index of its parent's row; `None` for the root of the view.
     parents: Vec<Option<usize>>,
+    /// For each row whether another row has its mount ID.
+    repeated: Vec<bool>,
     reported: Reported,
 }
 
@@ -465,7 +516,7 @@ impl MountTable {
     /// the one root of the view, at `/`, or where a row's parents never reach that root;
     /// `mount-row-repeated` where more than one row has the parent ID; and
     /// `mount-point-mismatch` where a row's mount point is not its parent row's or beneath it.
-    pub fn into_tree_reported_by(
+    fn into_tree_reported_by(
         self,
         reported: impl Fn(&str) -> Result<u64, Cause> + Send + Sync + 'static,
     ) -> Result<MountTree, Unestablished> {
@@ -516,37 +567,67 @@ impl MountTable {
                 }
             }
         }
+        let mut seen: HashMap<u64, usize> = HashMap::new();
+        for row in &self.rows {
+            *seen.entry(row.id).or_default() += 1;
+        }
+        let repeated = self.rows.iter().map(|row| seen[&row.id] > 1).collect();
         Ok(MountTree {
             table: self,
             parents,
+            repeated,
             reported: Box::new(reported),
         })
     }
 
-    /// [`Self::into_tree_reported_by`] for a table given as text, in which no mount is hidden:
-    /// at each mount point the kernel is taken to report the last row that has it, which is
-    /// the upper mount of a stack.
+    /// The tree of a table given as text, in which no mount is hidden: at each mount point
+    /// the kernel is taken to report the top of the stack there, the row no other row at that
+    /// mount point names as its parent, and of several such rows the last. The order of the
+    /// rows of a stack decides nothing.
     ///
     /// # Errors
     ///
-    /// As [`Self::into_tree_reported_by`].
+    /// [`Unestablished`] for the first row whose attachment cannot be established, asked of
+    /// the whole table, because such a row may be mounted beneath anything:
+    /// `mount-row-missing` where a row names a parent ID no row has, or its own, and is not
+    /// the one root of the view, at `/`, or where a row's parents never reach that root;
+    /// `mount-row-repeated` where more than one row has the parent ID; and
+    /// `mount-point-mismatch` where a row's mount point is not its parent row's or beneath it.
     pub fn into_tree_as_written(self) -> Result<MountTree, Unestablished> {
-        let rows = self.rows.clone();
+        let at: HashMap<u64, &str> = self
+            .rows
+            .iter()
+            .map(|row| (row.id, row.mount_point.as_str()))
+            .collect();
+        // The rows another row is stacked on: its parent, at its own mount point.
+        let beneath: HashSet<u64> = self
+            .rows
+            .iter()
+            .filter(|row| {
+                row.parent != row.id
+                    && at
+                        .get(&row.parent)
+                        .is_some_and(|above| *above == row.mount_point)
+            })
+            .map(|row| row.parent)
+            .collect();
+        let shown: HashMap<String, u64> = self
+            .rows
+            .iter()
+            .filter(|row| !beneath.contains(&row.id))
+            .map(|row| (row.mount_point.clone(), row.id))
+            .collect();
         self.into_tree_reported_by(move |mount_point| {
-            rows.iter()
-                .rev()
-                .find(|row| row.mount_point == mount_point)
-                .map(|row| row.id)
-                .ok_or(Cause::MountCovered)
+            shown.get(mount_point).copied().ok_or(Cause::MountCovered)
         })
     }
 
-    /// [`Self::into_tree_reported_by`] with what the kernel reports in this process's mount
-    /// namespace: the table must be this namespace's.
+    /// The tree of this process's mount namespace, with what the kernel reports there at each
+    /// mount point: the table must be this namespace's.
     ///
     /// # Errors
     ///
-    /// As [`Self::into_tree_reported_by`].
+    /// As [`Self::into_tree_as_written`].
     #[cfg(target_os = "linux")]
     pub fn into_tree(self) -> Result<MountTree, Unestablished> {
         self.into_tree_reported_by(reported_at)
@@ -574,42 +655,68 @@ impl MountTree {
         Some(place)
     }
 
-    /// Whether the mount of row `index` is mounted beneath `directory`: its attachment point
+    /// For each row whether its mount is mounted beneath `directory`: its attachment point
     /// lies in the directory's place, or its parent mount is mounted beneath the directory.
-    fn beneath(&self, index: usize, directory: &Place, known: &mut [Option<bool>]) -> bool {
-        if let Some(answer) = known[index] {
-            return answer;
+    /// A loop over the rows and no recursion: a namespace holds up to `fs.mount-max` mounts,
+    /// 100 000 by default, each of which may be mounted in the one before it.
+    fn beneath(&self, directory: &Place) -> Vec<bool> {
+        let mut known: Vec<Option<bool>> = vec![None; self.table.rows.len()];
+        let mut chain = Vec::new();
+        for start in 0..known.len() {
+            // Up to the first row whose answer is known, or to the root, which is beneath
+            // nothing; then down again, each row after its parent.
+            let mut at = start;
+            let mut above = loop {
+                if let Some(answer) = known[at] {
+                    break answer;
+                }
+                match self.parents[at] {
+                    None => {
+                        known[at] = Some(false);
+                        break false;
+                    }
+                    Some(parent) => {
+                        chain.push((at, parent));
+                        at = parent;
+                    }
+                }
+            };
+            while let Some((index, parent)) = chain.pop() {
+                above = above
+                    || self
+                        .attachment(index, parent)
+                        .is_some_and(|place| place.lies_in(directory));
+                known[index] = Some(above);
+            }
         }
-        let answer = self.parents[index].is_some_and(|parent| {
-            self.attachment(index, parent)
-                .is_some_and(|place| place.lies_in(directory))
-                || self.beneath(parent, directory, known)
-        });
-        known[index] = Some(answer);
-        answer
+        known
+            .into_iter()
+            .map(|answer| answer.unwrap_or(false))
+            .collect()
     }
 
-    /// **The places `directory` reaches** (D30): its own place, and the root of every mount
-    /// that is mounted beneath it. A path lies in the directory, in the view, when its place
-    /// lies in one of them ([`lies_in_any`]).
+    /// **What `directory` reaches, a location a run can write** (D30): its own place, and the
+    /// root of every mount that is mounted beneath it. A path lies in the directory, in the
+    /// view, when its place lies in one of them ([`Reach::holds`]). It fails closed: a mount
+    /// beneath the directory whose root cannot be taken as a place refuses.
     ///
     /// # Errors
     ///
-    /// [`Unestablished`], naming the mount point of a mount beneath the directory whose root
-    /// cannot be taken as a place: `file-system-unlisted` where `unlisted` refuses such a
-    /// type; `mount-root-deleted` where the root of a mount of a listed type was removed;
-    /// `mount-covered` where the kernel reports another mount at that mount point or the path
-    /// is gone, so the row's root is not what the path shows; and `path-unopenable` or
-    /// `mount-id-unreported` where the mount point cannot be asked.
-    pub fn reaches(
-        &self,
-        directory: &Place,
-        unlisted: Unlisted,
-    ) -> Result<Vec<Place>, Unestablished> {
-        let mut known = vec![None; self.table.rows.len()];
-        let mut reached = vec![directory.clone()];
+    /// [`Unestablished`], naming the mount point of such a mount: `file-system-unlisted`
+    /// where `unlisted` refuses such a type; and for a mount of a listed type
+    /// `mount-row-repeated` where another row has its mount ID, so which of them the kernel
+    /// shows cannot be said, `mount-root-deleted` where its root was removed, `mount-covered`
+    /// where the kernel reports another mount at that mount point or the path is gone, so the
+    /// row's root is not what the path shows, and `path-unopenable` or `mount-id-unreported`
+    /// where the mount point cannot be asked.
+    pub fn reaches(&self, directory: &Place, unlisted: Unlisted) -> Result<Reach, Unestablished> {
+        let beneath = self.beneath(directory);
+        let mut reach = Reach {
+            places: vec![directory.clone()],
+            unlisted: Vec::new(),
+        };
         for (index, row) in self.table.rows.iter().enumerate() {
-            if !self.beneath(index, directory, &mut known) {
+            if !beneath[index] {
                 continue;
             }
             let unattached = |cause: Cause| Unestablished {
@@ -619,13 +726,19 @@ impl MountTree {
             };
             if !LISTED_FILE_SYSTEMS.contains(&row.file_system.as_str()) {
                 match unlisted {
-                    Unlisted::Skipped => continue,
+                    Unlisted::Skipped => {
+                        reach.unlisted.push(row.root_place());
+                        continue;
+                    }
                     Unlisted::Refused => {
                         return Err(unattached(Cause::FileSystemUnlisted(
                             row.file_system.clone(),
                         )));
                     }
                 }
+            }
+            if self.repeated[index] {
+                return Err(unattached(Cause::MountRowRepeated));
             }
             if row.root_deleted() {
                 return Err(unattached(Cause::MountRootDeleted));
@@ -635,9 +748,37 @@ impl MountTree {
                 Ok(_) => return Err(unattached(Cause::MountCovered)),
                 Err(cause) => return Err(unattached(cause)),
             }
-            reached.push(row.root_place());
+            reach.places.push(row.root_place());
         }
-        Ok(reached)
+        Ok(reach)
+    }
+
+    /// **What `directory` reaches, by the table alone**: for a directory nothing is written
+    /// through, the host source of a read-only mount. Every mount the table puts beneath it
+    /// is counted by the root its own row names, and the kernel is not asked: a mount that is
+    /// covered, whose mount point cannot be opened, whose root was removed or whose ID two
+    /// rows have is counted like any other. So this never refuses, and it reaches at least
+    /// what [`Self::reaches`] would: a directory can only overlap more for it, never less.
+    pub fn reaches_as_written(&self, directory: &Place) -> Reach {
+        let beneath = self.beneath(directory);
+        let mut reach = Reach {
+            places: vec![directory.clone()],
+            unlisted: Vec::new(),
+        };
+        for (row, _) in self
+            .table
+            .rows
+            .iter()
+            .zip(beneath)
+            .filter(|(_, beneath)| *beneath)
+        {
+            if LISTED_FILE_SYSTEMS.contains(&row.file_system.as_str()) {
+                reach.places.push(row.root_place());
+            } else {
+                reach.unlisted.push(row.root_place());
+            }
+        }
+        reach
     }
 }
 
@@ -725,7 +866,7 @@ fn mount_id_of(descriptor: std::os::fd::RawFd) -> Option<u64> {
 /// lies beneath a later mount. `path-unopenable` where it cannot be opened for another
 /// reason, and `mount-id-unreported` where the kernel reports no ID for it.
 #[cfg(target_os = "linux")]
-pub fn reported_at(path: &str) -> Result<u64, Cause> {
+fn reported_at(path: &str) -> Result<u64, Cause> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
     let name = std::ffi::CString::new(path).map_err(|_| Cause::PathUnopenable)?;
     // SAFETY: `name` is a NUL-terminated string that outlives the call.
@@ -1360,7 +1501,8 @@ mod tests {
     fn devices(tree: &MountTree, id: u64, path: &str) -> Vec<String> {
         tree.reaches(&on(tree, id, path), Unlisted::Skipped)
             .expect("what the directory reaches")
-            .into_iter()
+            .places()
+            .iter()
             .map(|place| format!("{} /{}", place.device, place.names.join("/")))
             .collect()
     }
@@ -1398,7 +1540,9 @@ mod tests {
         );
         let reached = tree
             .reaches(&on(&tree, 500, "/srv"), Unlisted::Skipped)
-            .expect("reached");
+            .expect("reached")
+            .places()
+            .to_vec();
         let deep = on(&tree, 512, "/srv/one/two/three/file");
         assert!(!deep.lies_in(&on(&tree, 500, "/srv")), "by place alone");
         assert!(lies_in_any(&deep, &reached));
@@ -1424,7 +1568,9 @@ mod tests {
         );
         let reached = again
             .reaches(&on(&again, 500, "/srv"), Unlisted::Skipped)
-            .expect("reached");
+            .expect("reached")
+            .places()
+            .to_vec();
         for (id, path) in [(513, "/mnt/again/file"), (514, "/mnt/part/file")] {
             assert!(lies_in_any(&on(&again, id, path), &reached), "{path}");
         }
@@ -1455,7 +1601,9 @@ mod tests {
         );
         let reached = tree
             .reaches(&on(&tree, 500, "/srv"), Unlisted::Skipped)
-            .expect("reached");
+            .expect("reached")
+            .places()
+            .to_vec();
         assert!(lies_in_any(&on(&tree, 500, "/data/part/file"), &reached));
         assert!(lies_in_any(&on(&tree, 530, "/srv/bound/file"), &reached));
         assert!(!lies_in_any(&on(&tree, 500, "/data/other"), &reached));
@@ -1470,13 +1618,17 @@ mod tests {
         assert_eq!(devices(&bound, 500, "/t/two"), ["259:2 /t/two"]);
         let one = bound
             .reaches(&on(&bound, 500, "/t/one"), Unlisted::Skipped)
-            .expect("reached");
+            .expect("reached")
+            .places()
+            .to_vec();
         assert!(lies_in_any(&on(&bound, 500, "/t/bin/tool"), &one));
         assert!(overlap(&[on(&bound, 500, "/t/bin/tool")], &one));
         // Two sets overlap when a place of one lies in a place of the other, either way.
         let data = tree
             .reaches(&on(&tree, 500, "/data"), Unlisted::Skipped)
-            .expect("reached");
+            .expect("reached")
+            .places()
+            .to_vec();
         assert_eq!(data, [on(&tree, 500, "/data")]);
         assert!(
             overlap(&data, &reached),
@@ -1776,7 +1928,8 @@ mod tests {
         );
         // Beside every unlisted mount the refusing form answers too.
         assert_eq!(
-            tree.reaches(&on(&tree, 500, "/opt"), Unlisted::Refused),
+            tree.reaches(&on(&tree, 500, "/opt"), Unlisted::Refused)
+                .map(|reach| reach.places().to_vec()),
             Ok(vec![on(&tree, 500, "/opt")])
         );
     }
@@ -1812,7 +1965,8 @@ mod tests {
                     Ok(place) => {
                         // Nothing is mounted beneath a directory this case just made.
                         assert_eq!(
-                            tree.reaches(&place, Unlisted::Refused),
+                            tree.reaches(&place, Unlisted::Refused)
+                                .map(|reach| reach.places().to_vec()),
                             Ok(vec![place.clone()])
                         );
                         println!("place mount tree of this process: executed");
@@ -1823,5 +1977,213 @@ mod tests {
             // A process whose root is no mount of its own table (a `chroot`) has no tree.
             Err(why) => println!("place mount tree of this process: ABSENT ({why})"),
         }
+    }
+
+    /// D30, the side nothing is written through: what a directory reaches is read from the
+    /// table alone and never refuses. A stack, a mount a later one hides, a removed root and a
+    /// mount ID two rows have are each counted by the root their row names; the same table
+    /// refuses the side a run can write, cause by cause.
+    #[test]
+    fn what_a_source_reaches_is_read_from_the_table_and_never_refuses() {
+        let as_written = |tree: &MountTree, path: &str| -> Vec<String> {
+            tree.reaches_as_written(&on(tree, 500, path))
+                .places()
+                .iter()
+                .map(|place| format!("{} /{}", place.device, place.names.join("/")))
+                .collect()
+        };
+        for (rows, reached, cause) in [
+            (
+                "560 500 0:60 / /srv/stack rw - tmpfs tmpfs rw\n\
+                 561 560 0:61 / /srv/stack rw - tmpfs tmpfs rw\n",
+                vec!["259:2 /srv", "0:60 /", "0:61 /"],
+                Cause::MountCovered,
+            ),
+            (
+                "600 500 259:2 /gone//deleted /srv/removed rw - ext4 /dev/a rw\n",
+                vec!["259:2 /srv", "259:2 /gone"],
+                Cause::MountRootDeleted,
+            ),
+            (
+                "580 500 0:80 / /srv/twice rw - tmpfs tmpfs rw\n\
+                 580 500 0:81 / /opt/again rw - tmpfs tmpfs rw\n",
+                vec!["259:2 /srv", "0:80 /"],
+                Cause::MountRowRepeated,
+            ),
+        ] {
+            let tree = tree(rows);
+            assert_eq!(as_written(&tree, "/srv"), reached, "{rows}");
+            assert_eq!(as_written(&tree, "/usr"), ["259:2 /usr"], "{rows}");
+            assert_eq!(
+                unreached(&tree, 500, "/srv", Unlisted::Skipped).cause,
+                cause,
+                "{rows}"
+            );
+        }
+        // A mount the kernel cannot be asked about, for each answer it can give.
+        let rows = "550 500 0:55 / /srv/hold/sub rw - tmpfs tmpfs rw\n";
+        for shows in [
+            Err(Cause::MountCovered),
+            Err(Cause::PathUnopenable),
+            Err(Cause::MountIdUnreported),
+            Ok(999),
+        ] {
+            let tree = MountTable::parse(&format!("{BESIDE}{rows}"))
+                .expect("the table parses")
+                .into_tree_reported_by(move |_| shows.clone())
+                .expect("every row is attached");
+            assert_eq!(as_written(&tree, "/srv"), ["259:2 /srv", "0:55 /"]);
+            assert!(
+                tree.reaches(&on(&tree, 500, "/srv"), Unlisted::Skipped)
+                    .is_err()
+            );
+        }
+        // On a table with nothing to refuse the two sides reach the same.
+        let plain = tree("510 500 0:50 / /srv/one rw - tmpfs tmpfs rw\n");
+        assert_eq!(
+            Ok(plain.reaches_as_written(&on(&plain, 500, "/srv"))),
+            plain.reaches(&on(&plain, 500, "/srv"), Unlisted::Skipped)
+        );
+    }
+
+    /// D30, a mount ID two rows have, beneath a location a run can write: which of the two
+    /// the kernel shows at the mount point cannot be said, as for a path (D26). Neither row
+    /// is a parent, so the check of the whole table does not see them; asked about a
+    /// directory beside both, the table answers.
+    #[test]
+    fn a_repeated_mount_id_beneath_a_directory_refuses_mount_row_repeated() {
+        let tree = tree(
+            "\
+580 500 0:80 / /srv/twice rw - tmpfs tmpfs rw
+580 500 0:81 / /opt/again rw - tmpfs tmpfs rw
+",
+        );
+        for (directory, mount_point) in [("/srv", "/srv/twice"), ("/opt", "/opt/again")] {
+            assert_eq!(
+                unreached(&tree, 500, directory, Unlisted::Skipped),
+                Unestablished {
+                    path: mount_point.to_owned(),
+                    cause: Cause::MountRowRepeated,
+                    asked: Asked::Attachment,
+                }
+            );
+        }
+        assert_eq!(devices(&tree, 500, "/usr"), ["259:2 /usr"]);
+        // Of a type outside the list the rows are not compared, and refuse nothing.
+        let unlisted = self::tree(
+            "\
+580 500 0:80 / /srv/twice rw - devpts devpts rw
+580 500 0:81 / /opt/again rw - devpts devpts rw
+",
+        );
+        assert_eq!(devices(&unlisted, 500, "/srv"), ["259:2 /srv"]);
+    }
+
+    /// A table given as text: the mount the kernel is taken to show at a mount point is the
+    /// top of the stack there by the rows' parent links, in whatever order the rows are
+    /// written.
+    #[test]
+    fn the_top_of_a_stack_is_read_from_the_parent_links() {
+        for rows in [
+            "560 500 0:60 / /srv/stack rw - tmpfs tmpfs rw\n\
+             561 560 0:61 / /srv/stack rw - tmpfs tmpfs rw\n\
+             562 561 0:62 / /srv/stack rw - tmpfs tmpfs rw\n",
+            "562 561 0:62 / /srv/stack rw - tmpfs tmpfs rw\n\
+             561 560 0:61 / /srv/stack rw - tmpfs tmpfs rw\n\
+             560 500 0:60 / /srv/stack rw - tmpfs tmpfs rw\n",
+        ] {
+            let tree = tree(rows);
+            // The top is what the path shows, and nothing is mounted beneath it.
+            assert_eq!(devices(&tree, 562, "/srv/stack"), ["0:62 /"], "{rows}");
+            // The middle one reaches the top, which is shown; `/srv` reaches the covered ones.
+            assert_eq!(
+                devices(&tree, 561, "/srv/stack"),
+                ["0:61 /", "0:62 /"],
+                "{rows}"
+            );
+            let why = unreached(&tree, 500, "/srv", Unlisted::Skipped);
+            assert_eq!(
+                (why.path.as_str(), why.cause),
+                ("/srv/stack", Cause::MountCovered),
+                "{rows}"
+            );
+        }
+    }
+
+    /// D30 and a type outside the list: the root of such a mount is no place and holds no
+    /// path, but its row is kept, and two directories that each reach a row of one device,
+    /// the root of one in the root of the other, overlap. Row against row only: a place on a
+    /// listed type with the same names is apart from it.
+    #[test]
+    fn two_rows_of_an_unlisted_type_with_one_device_overlap() {
+        let tree = tree(
+            "\
+620 500 0:70 / /srv/media rw - ramfs ramfs rw
+621 500 0:70 / /opt/media rw - ramfs ramfs rw
+622 500 0:70 /sub /mnt/part rw - ramfs ramfs rw
+623 500 0:71 / /var/other rw - ramfs ramfs rw
+624 500 0:70 /apart /media/apart rw - ramfs ramfs rw
+",
+        );
+        let reach = |path: &str, as_written: bool| {
+            let directory = on(&tree, 500, path);
+            if as_written {
+                tree.reaches_as_written(&directory)
+            } else {
+                tree.reaches(&directory, Unlisted::Skipped)
+                    .expect("reached")
+            }
+        };
+        for as_written in [false, true] {
+            let srv = reach("/srv", as_written);
+            assert_eq!(srv.places(), [on(&tree, 500, "/srv")], "no place is added");
+            for (path, overlaps) in [
+                ("/opt", true),
+                ("/mnt", true),
+                ("/var", false),
+                ("/media", true),
+                ("/usr", false),
+            ] {
+                for other in [reach(path, false), reach(path, true)] {
+                    assert_eq!(srv.overlaps(&other), overlaps, "/srv and {path}");
+                    assert_eq!(other.overlaps(&srv), overlaps, "{path} and /srv");
+                }
+            }
+            // Two parts of the file system that are apart do not overlap.
+            assert!(!reach("/mnt", as_written).overlaps(&reach("/media", as_written)));
+            // No path lies in it for the row: a place is never compared with a row.
+            let named_alike = Place {
+                device: "0:70".to_owned(),
+                names: vec!["file".to_owned()],
+            };
+            assert!(!srv.holds(&named_alike));
+        }
+    }
+
+    /// The kernel is asked at the path itself, never at what a symbolic link there names: a
+    /// link to a directory of another mount reports the link's own mount.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_kernel_is_asked_at_a_mount_point_and_not_through_a_link_there() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let here = Opened::of_path(directory.path().to_str().expect("UTF-8"))
+            .expect("the directory opens")
+            .mount_id
+            .expect("statx reported no mount ID");
+        let Some(elsewhere) = ["/proc", "/sys", "/dev", "/run", "/"]
+            .into_iter()
+            .find(|path| reported_at(path).is_ok_and(|id| id != here))
+        else {
+            println!("place question at a link: ABSENT (this host has one mount)");
+            return;
+        };
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(elsewhere, &link).expect("a link");
+        assert_eq!(
+            reported_at(link.to_str().expect("UTF-8")),
+            Ok(here),
+            "a link to {elsewhere} reported the mount it names"
+        );
+        println!("place question at a link: executed");
     }
 }

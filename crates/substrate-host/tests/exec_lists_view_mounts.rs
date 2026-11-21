@@ -12,6 +12,8 @@
 //!   profile lists the link (K10's attack across a mount);
 //! - a read-only root holds a mount on which a declared writable root lies, and the profile
 //!   lists a link planted through that root;
+//! - a read-only root holds a mount of a file-system type outside the list, which no rule
+//!   compares, and the profile lists a link on it: the link has no place;
 //! - the helper's own file is installed on the mount.
 //!
 //! The cases need `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a delegated cgroup v2 subtree this
@@ -215,6 +217,18 @@ async fn inside(host: &Path) {
         Err(error) => println!("{NAME} inside: holding did not open: {error}"),
     }
 
+    // A link on a mount of a type outside the list, which nothing writable shows and no
+    // rule compares: where the link lies cannot be said.
+    let apart = host.join("apart");
+    std::os::unix::fs::symlink("/usr/bin", apart.join("media/link")).expect("a link on the ramfs");
+    match open(host, &cgroup_root, helper(), Vec::new()) {
+        Ok(adapter) => println!(
+            "{NAME} inside: unlisted {}",
+            run(&adapter, &workspace, &apart, "/opt/k/media/link", &script).await
+        ),
+        Err(error) => println!("{NAME} inside: unlisted did not open: {error}"),
+    }
+
     // The helper's own file on the mount beneath the workspace root.
     let gate = host.join("workspaces/ws_other/media/substrate-exec-gate");
     std::fs::copy(helper(), &gate).expect("install the helper on the mount");
@@ -237,6 +251,9 @@ async fn inside(host: &Path) {
 ///   of `/usr/bin` ends with status 126;
 /// - `holding`: a read-only root holds the second mount, on which a declared writable root
 ///   lies with such a link. The same refusal;
+/// - `unlisted`: a third mount, a `ramfs` at `<host>/apart/media`, is of a type outside the
+///   list. A read-only root holds it and the profile lists a link on it. The link has no
+///   place, so the start is refused `exec.sandbox-place-unserved` with the cause;
 /// - `gate`: the helper's file on the first mount is refused at the open,
 ///   `config.exec-gate-invalid`.
 #[tokio::test(flavor = "multi_thread")]
@@ -294,6 +311,16 @@ async fn what_is_mounted_beneath_a_writable_location_lies_in_it() {
             ));
         }
     }
+    let unlisted = observed("unlisted");
+    println!("{NAME}: unlisted: {unlisted}");
+    if !(unlisted.starts_with("refused exec.sandbox-place-unserved")
+        && unlisted.contains("/opt/k/media/link: file-system-unlisted ramfs"))
+    {
+        failures.push(format!(
+            "a link on a mount of a type outside the list was followed, or refused for another \
+             reason: {unlisted}"
+        ));
+    }
     let gate = observed("gate");
     println!("{NAME}: gate: {gate}");
     if !gate.starts_with("refused config.exec-gate-invalid") {
@@ -305,7 +332,8 @@ async fn what_is_mounted_beneath_a_writable_location_lies_in_it() {
     println!("{NAME}: executed");
 }
 
-/// Runs this case again inside a user and mount namespace in which the two tmpfs are mounted:
+/// Runs this case again inside a user and mount namespace in which the two tmpfs and the
+/// ramfs are mounted:
 /// what that run printed, with its diagnostics after it, or why the case is absent.
 fn staged() -> Result<String, String> {
     delegated()?;
@@ -322,6 +350,7 @@ fn staged() -> Result<String, String> {
     let mounts = [
         host.join("workspaces/ws_other/media"),
         host.join("tools/media"),
+        host.join("apart/media"),
     ];
     for mount_point in &mounts {
         std::fs::create_dir_all(mount_point).expect("a mount point");
@@ -340,8 +369,9 @@ fn staged() -> Result<String, String> {
         .arg(shell)
         .arg("-c")
         .arg(format!(
-            "{{ {mount} -t tmpfs tmpfs \"$1\" && {mount} -t tmpfs tmpfs \"$2\"; }} >&2 \
-             || exit {STAGE_FAILED}; shift 2; exec \"$@\"",
+            "{{ {mount} -t tmpfs tmpfs \"$1\" && {mount} -t tmpfs tmpfs \"$2\" \
+             && {mount} -t ramfs ramfs \"$3\"; }} >&2 || exit {STAGE_FAILED}; shift 3; \
+             exec \"$@\"",
             mount = mount.display()
         ))
         .arg("sh")

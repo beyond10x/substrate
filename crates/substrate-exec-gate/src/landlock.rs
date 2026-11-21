@@ -3,11 +3,12 @@
 //! Every descriptor opened here is close-on-exec, and the kernel creates the ruleset's descriptor
 //! close-on-exec, so the run's program inherits none of them.
 
+use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 
-use crate::place::{MountTable, MountTree, Opened, Place, Unestablished, Unlisted, lies_in_any};
+use crate::place::{MountTable, MountTree, Opened, Reach, Unestablished, Unlisted};
 use crate::{Class, Lists, Located};
 
 /// `LANDLOCK_ACCESS_FS_EXECUTE`.
@@ -203,16 +204,16 @@ fn execute_targets(lists: &Lists) -> Result<Vec<(String, OwnedFd)>, String> {
 }
 
 /// The mounts of the view the run can write, and once they were needed the view's mount table
-/// with the places each reaches (D30): its own place, and the root of every mount that is
-/// mounted beneath it.
+/// with what each reaches (D30): its own place, and the root of every mount that is mounted
+/// beneath it.
 struct Writable<'a> {
     roots: &'a [String],
-    placed: Option<(MountTree, Vec<Vec<Place>>)>,
+    placed: Option<(MountTree, Vec<Reach>)>,
 }
 
 impl Writable<'_> {
-    /// The table and the places, established at the first call.
-    fn placed(&mut self, path: &str) -> Result<&(MountTree, Vec<Vec<Place>>), Unestablished> {
+    /// The table and what each root reaches, established at the first call.
+    fn placed(&mut self, path: &str) -> Result<&(MountTree, Vec<Reach>), Unestablished> {
         if self.placed.is_none() {
             // The table before any path: D26 names its causes first.
             let table = MountTable::read().map_err(|cause| Unestablished {
@@ -223,8 +224,9 @@ impl Writable<'_> {
             // The table as a tree, asked whole before any root is asked what it reaches.
             let tree = table.into_tree()?;
             // A mount beneath a writable root of a type outside the list is not compared and
-            // does not refuse: bubblewrap binds each device node of `/dev` as one, and a
-            // followed path on such a type has no place and is refused for that.
+            // does not refuse: bubblewrap binds each device node of `/dev` as one. A followed
+            // path that ends on such a type, or reads a symbolic link there, has no place and
+            // is refused for that.
             let places = self
                 .roots
                 .iter()
@@ -239,33 +241,129 @@ impl Writable<'_> {
     }
 }
 
+/// The symbolic links one path may resolve through: the kernel's own bound.
+const MAX_LINKS: usize = 40;
+
+/// The longest target of a symbolic link: `PATH_MAX`.
+const LINK_BYTES: usize = 4096;
+
+/// The target of the symbolic link `link` is, read from the link itself.
+fn link_target(link: &OwnedFd) -> io::Result<Vec<u8>> {
+    let mut target = vec![0_u8; LINK_BYTES];
+    // SAFETY: the empty path names the link the descriptor is; the buffer is live and its length
+    // is the one passed.
+    let length = unsafe {
+        libc::readlinkat(
+            link.as_raw_fd(),
+            c"".as_ptr(),
+            target.as_mut_ptr().cast(),
+            target.len(),
+        )
+    };
+    let length = usize::try_from(length).map_err(|_| io::Error::last_os_error())?;
+    if length == 0 {
+        return Err(io::Error::from_raw_os_error(libc::ENOENT));
+    }
+    target.truncate(length);
+    Ok(target)
+}
+
+/// Opens `path` as the kernel resolves it, one name at a time and with no link followed by the
+/// kernel, so that **every symbolic link the walk reads is seen before its target is taken**:
+/// `link` is given the link's own descriptor, and the target is read from that descriptor. An
+/// absolute target starts again at the root of the view.
+fn walk(
+    path: &str,
+    mut link: impl FnMut(&OwnedFd) -> Result<(), String>,
+) -> Result<OwnedFd, String> {
+    let unopened = |error: io::Error| format!("cannot open {path:?}: {error}");
+    let names = |text: &[u8]| -> Vec<Vec<u8>> {
+        text.split(|byte| *byte == b'/')
+            .filter(|name| !name.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect()
+    };
+    let start = if path.starts_with('/') { c"/" } else { c"." };
+    let mut current = open_at(libc::AT_FDCWD, start, libc::O_DIRECTORY).map_err(unopened)?;
+    let mut pending: VecDeque<Vec<u8>> = names(path.as_bytes()).into();
+    let mut links = 0;
+    while let Some(name) = pending.pop_front() {
+        let name = CString::new(name).map_err(|_| format!("{path:?} holds a NUL byte"))?;
+        let next = open_at(current.as_raw_fd(), &name, libc::O_NOFOLLOW).map_err(unopened)?;
+        if kind(&status(&next).map_err(unopened)?) != libc::S_IFLNK {
+            current = next;
+            continue;
+        }
+        links += 1;
+        if links > MAX_LINKS {
+            return Err(unopened(io::Error::from_raw_os_error(libc::ELOOP)));
+        }
+        link(&next)?;
+        let target = link_target(&next).map_err(unopened)?;
+        if target.starts_with(b"/") {
+            current = open_at(libc::AT_FDCWD, c"/", libc::O_DIRECTORY).map_err(unopened)?;
+        }
+        for name in names(&target).into_iter().rev() {
+            pending.push_front(name);
+        }
+    }
+    Ok(current)
+}
+
 /// Opens a `follow` path, following symbolic links, and refuses one that resolves into a mount
 /// the run can write (D24): what such a path names is a file the run can replace. Where the
 /// path lies is decided by its place (D25): the mount the kernel reports for the descriptor,
 /// in the view's mount table. A writable mount is every place it reaches (D30), so a path that
-/// resolves onto a mount beneath one is refused as well. A place that cannot be established
-/// refuses too, with its cause (D26); the text of the two paths decides nothing.
+/// resolves onto a mount beneath one is refused as well.
+///
+/// **Every symbolic link the path resolves through is placed too**, and refused in a place a
+/// writable mount reaches: the run can replace the link. A place that cannot be established
+/// refuses, with its cause (D26), for a link as for the path's end: a link on a mount of a
+/// file-system type outside the list has no place, and such a mount beneath a writable mount
+/// is compared with nothing, so the link may be the run's. The text of two paths decides
+/// nothing.
 fn open_follow(option: &str, path: &str, view: &mut Writable<'_>) -> Result<OwnedFd, String> {
-    let descriptor = open_at(libc::AT_FDCWD, &c_path(path)?, 0)
-        .map_err(|error| format!("cannot open {path:?}: {error}"))?;
     if view.roots.is_empty() {
-        return Ok(descriptor);
+        // Nothing of the view is the run's to write: no table is read and no link is placed.
+        return open_at(libc::AT_FDCWD, &c_path(path)?, 0)
+            .map_err(|error| format!("cannot open {path:?}: {error}"));
     }
     let roots = view.roots;
-    let (tree, places) = view.placed(path).map_err(|why| why.to_string())?;
-    let opened = Opened::of_descriptor(descriptor.as_raw_fd(), path);
-    let place = tree
-        .table()
-        .place_of(&opened)
-        .map_err(|why| why.to_string())?;
-    for (root, writable) in roots.iter().zip(places) {
-        if lies_in_any(&place, writable) {
-            // The path the kernel holds for the descriptor: what the links resolved to.
-            let resolved = opened.descriptor_path.as_deref().unwrap_or(path);
-            return Err(format!(
-                "{option} {path} resolves to {resolved}, in the writable mount {root}"
-            ));
+    let (tree, reached) = view.placed(path).map_err(|why| why.to_string())?;
+    // The writable mount `opened` lies in, by place.
+    let within = |opened: &Opened| -> Result<Option<String>, String> {
+        let place = tree
+            .table()
+            .place_of(opened)
+            .map_err(|why| why.to_string())?;
+        Ok(roots
+            .iter()
+            .zip(reached)
+            .find(|(_, reach)| reach.holds(&place))
+            .map(|(root, _)| root.clone()))
+    };
+    let descriptor = walk(path, |link| {
+        // Named by the path the kernel holds for the link itself.
+        let mut opened = Opened::of_descriptor(link.as_raw_fd(), path);
+        if let Some(own) = &opened.descriptor_path {
+            opened.path.clone_from(own);
         }
+        match within(&opened)? {
+            Some(root) => Err(format!(
+                "{option} {path} resolves through the symbolic link {}, in the writable mount \
+                 {root}",
+                opened.path
+            )),
+            None => Ok(()),
+        }
+    })?;
+    let opened = Opened::of_descriptor(descriptor.as_raw_fd(), path);
+    if let Some(root) = within(&opened)? {
+        // The path the kernel holds for the descriptor: what the links resolved to.
+        let resolved = opened.descriptor_path.as_deref().unwrap_or(path);
+        return Err(format!(
+            "{option} {path} resolves to {resolved}, in the writable mount {root}"
+        ));
     }
     Ok(descriptor)
 }

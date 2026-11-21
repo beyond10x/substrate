@@ -20,10 +20,10 @@ use substrate_wire::ReadOnlyRoot;
 
 use super::{
     EXEC_GATE_INVALID, EXEC_GATE_UNSERVED, ExecGate, FileFacts, Location, OpenDecision,
-    OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, View,
-    check_file, check_length, check_linkage, check_links, check_location, check_openable,
-    check_protocol, classed, decide_open, open, place_open, plan, shown_location, start_unplaced,
-    withheld_facts,
+    OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, Unfollowed,
+    View, check_file, check_length, check_linkage, check_links, check_location, check_openable,
+    check_protocol, classed, decide_open, judge_link, open, place_open, plan, shown_location,
+    start_unplaced, withheld_facts,
 };
 use crate::confinement::{Fact, FactWithheld};
 use crate::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
@@ -320,43 +320,54 @@ fn a_mount_beneath_a_writable_location_that_cannot_be_compared_refuses_the_open(
     }
 }
 
-/// D30's causes at a start. A mount whose root cannot be compared beneath the host source of
-/// a declared mount refuses the start `exec.sandbox-place-unserved`, with the declaring
-/// field. A row that is attached nowhere refuses the open and the start, whatever is asked. A
-/// mount of a file-system type outside the list is not compared and refuses neither.
+/// D30 on the side nothing is written through: **a mount beneath the host source of a
+/// declared mount refuses no start**, whatever the kernel would say of it. A stack, a removed
+/// root and a mount ID two rows have are counted by the root each row names, and the class is
+/// decided: `follow` where none of them shows a writable place, and `beneath` where one does,
+/// although a later mount covers it. The fail-closed causes belong to the writable side
+/// (`a_mount_beneath_a_writable_location_that_cannot_be_compared_refuses_the_open`).
 #[test]
-fn a_mount_beneath_a_source_that_cannot_be_compared_refuses_the_start() {
+fn a_mount_beneath_a_source_that_cannot_be_compared_refuses_no_start() {
     let helper = || sightings(seen("/opt/substrate/substrate-exec-gate", 31));
-    // The stack lies beneath the host source of a declared root, and beneath no writable
-    // location, so the open has nothing to refuse and the class cannot be decided.
-    let beside = tree(&format!(
+    let class = |rows: &str, source: &str| {
+        let table = tree(&format!("{HOST}{rows}"));
+        let writable = established(&helper(), &table).writable;
+        classed("read_only_roots", &seen(source, 31), &writable, &table)
+            .unwrap_or_else(|error| panic!("{source} with {rows}: {error}"))
+    };
+    for rows in [
+        // Two mounts on one mount point: the kernel does not show the lower one.
+        "80 31 0:60 / /opt/tools/stack rw - tmpfs tmpfs rw\n\
+         81 80 0:61 / /opt/tools/stack rw - tmpfs tmpfs rw\n",
+        // A mount whose directory was removed.
+        "82 31 259:2 /gone//deleted /opt/tools/removed rw - ext4 /dev/nvme0n1p2 rw\n",
+        // A mount ID two rows have.
+        "83 31 0:62 / /opt/tools/twice rw - tmpfs tmpfs rw\n\
+         83 31 0:63 / /opt/tools/again rw - tmpfs tmpfs rw\n",
+    ] {
+        assert_eq!(class(rows, "/opt/tools"), Class::Follow, "{rows}");
+        assert_eq!(class(rows, "/usr"), Class::Follow, "{rows}");
+    }
+    // Counted, not skipped: the covered mount shows a directory of a workspace, so the source
+    // is `beneath`. Never the looser answer for want of the kernel's.
+    let covered = "80 31 259:2 /work/u/workspaces/ws_1/media /opt/tools/stack rw - ext4 /dev/a rw\n\
+                   81 80 0:61 / /opt/tools/stack rw - tmpfs tmpfs rw\n";
+    assert_eq!(class(covered, "/opt/tools"), Class::Beneath);
+    assert_eq!(class(covered, "/opt/other"), Class::Follow);
+    // The writable side still fails closed on the same stack.
+    let stacked = tree(&format!(
         "{HOST}\
-80 31 0:60 / /opt/tools/stack rw - tmpfs tmpfs rw
-81 80 0:61 / /opt/tools/stack rw - tmpfs tmpfs rw
+80 31 0:60 / /srv/out/stack rw - tmpfs tmpfs rw
+81 80 0:61 / /srv/out/stack rw - tmpfs tmpfs rw
 "
     ));
-    let writable = established(&helper(), &beside).writable;
-    let error = classed(
-        "read_only_roots",
-        &seen("/opt/tools", 31),
-        &writable,
-        &beside,
-    )
-    .expect_err("a root that holds a mount whose root cannot be compared");
-    assert_eq!(error.code, PLACE_UNSERVED, "{error}");
-    assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
-    assert_eq!(error.address.as_deref(), Some("read_only_roots"));
-    assert!(
-        error
-            .message
-            .contains("cannot establish where /opt/tools/stack is attached: mount-covered"),
-        "{error}"
-    );
-    // Only where the rule looks: a root beside the stack is classed.
-    assert_eq!(
-        classed("read_only_roots", &seen("/usr", 31), &writable, &beside).expect("classed"),
-        Class::Follow
-    );
+    assert!(matches!(
+        place_open(&helper(), &stacked),
+        OpenPlacement::Refused(OpenUnplaced {
+            address: "config.writable_roots",
+            ..
+        })
+    ));
     // A row attached nowhere refuses the table, with the helper's field at the open and the
     // list's at a start.
     let unattached = MountTable::parse(&format!(
@@ -378,25 +389,148 @@ fn a_mount_beneath_a_source_that_cannot_be_compared_refuses_the_start() {
     let error = start_unplaced("exec_subpaths", &unattached);
     assert_eq!(error.code, PLACE_UNSERVED);
     assert!(error.message.contains(attached), "{error}");
-    // A mount of a type outside the list is not compared: beneath a workspace (the device
-    // nodes bubblewrap binds are such mounts) and beneath a declared root's host source.
-    let unlisted = tree(&format!(
-        "{HOST}\
-83 31 0:5 /null /work/u/workspaces/ws_1/null rw - devtmpfs devtmpfs rw
-84 31 8:33 / /opt/tools/data rw - xfs /dev/sdc1 rw
-"
-    ));
-    let writable = established(&helper(), &unlisted).writable;
-    assert_eq!(
+}
+
+/// D30 and a file-system type outside the list. Such a mount is compared as a place nowhere:
+/// beneath a workspace (the device nodes bubblewrap binds are such mounts) and beneath a
+/// declared root's host source it refuses nothing. Row against row it is compared: the same
+/// file system mounted beneath a workspace and beneath the source, whole or in part, is one
+/// a run can write, and the source is `beneath`.
+#[test]
+fn a_mount_of_an_unlisted_type_is_compared_row_against_row_only() {
+    let helper = || sightings(seen("/opt/substrate/substrate-exec-gate", 31));
+    let class = |rows: &str| {
+        let table = tree(&format!("{HOST}{rows}"));
+        let writable = established(&helper(), &table).writable;
         classed(
             "read_only_roots",
             &seen("/opt/tools", 31),
             &writable,
-            &unlisted
+            &table,
         )
-        .expect("classed"),
-        Class::Follow
-    );
+        .unwrap_or_else(|error| panic!("{rows}: {error}"))
+    };
+    for (rows, expected) in [
+        // Beneath the workspace only, and beneath the source only.
+        (
+            "83 31 0:5 /null /work/u/workspaces/ws_1/null rw - devtmpfs devtmpfs rw\n\
+             84 31 8:33 / /opt/tools/data rw - xfs /dev/sdc1 rw\n",
+            Class::Follow,
+        ),
+        // One ramfs beneath both.
+        (
+            "85 31 0:70 / /work/u/workspaces/ws_1/media rw - ramfs ramfs rw\n\
+             86 31 0:70 / /opt/tools/media rw - ramfs ramfs rw\n",
+            Class::Beneath,
+        ),
+        // A part of it beneath the source, and the whole beneath a part of the workspace.
+        (
+            "85 31 0:70 / /work/u/workspaces/ws_1/media rw - ramfs ramfs rw\n\
+             86 31 0:70 /sub /opt/tools/media rw - ramfs ramfs rw\n",
+            Class::Beneath,
+        ),
+        (
+            "85 31 0:70 /sub/deep /work/u/workspaces/ws_1/media rw - ramfs ramfs rw\n\
+             86 31 0:70 /sub /opt/tools/media rw - ramfs ramfs rw\n",
+            Class::Beneath,
+        ),
+        // Two file systems of the type, and two parts of one that are apart.
+        (
+            "85 31 0:70 / /work/u/workspaces/ws_1/media rw - ramfs ramfs rw\n\
+             86 31 0:71 / /opt/tools/media rw - ramfs ramfs rw\n",
+            Class::Follow,
+        ),
+        (
+            "85 31 0:70 /one /work/u/workspaces/ws_1/media rw - ramfs ramfs rw\n\
+             86 31 0:70 /two /opt/tools/media rw - ramfs ramfs rw\n",
+            Class::Follow,
+        ),
+    ] {
+        assert_eq!(class(rows), expected, "{rows}");
+    }
+}
+
+/// D30, **every symbolic link the walk of a followed entry reads is placed.** A link on a
+/// mount of a file-system type outside the list has no place: no rule compares such a mount,
+/// so whether a run can write the link cannot be said, and the start is refused
+/// `exec.sandbox-place-unserved` with the cause and the link's path in the view. A link with a
+/// place is judged by it: on a mount beneath a workspace a run can replace it.
+#[test]
+fn a_symbolic_link_the_walk_reads_is_placed() {
+    let table = tree(&format!(
+        "{HOST}\
+70 31 0:50 / /work/u/workspaces/ws_1/media rw - tmpfs tmpfs rw
+85 31 0:70 / /opt/tools/media rw - ramfs ramfs rw
+"
+    ));
+    let writable = established(
+        &sightings(seen("/opt/substrate/substrate-exec-gate", 31)),
+        &table,
+    )
+    .writable;
+    // The link as the walk sees it: named by its view path, reported at its host path.
+    let link = |view: &str, host: &str, mount_id: Option<u64>| Opened {
+        path: view.to_owned(),
+        mount_id,
+        descriptor_path: Some(host.to_owned()),
+        remaining: Vec::new(),
+    };
+    let judged = |link: &Opened| judge_link(link, &table, &writable);
+    for (mount_id, cause) in [
+        (Some(85), "file-system-unlisted ramfs"),
+        (None, "mount-id-unreported"),
+        (Some(999), "mount-row-missing"),
+        (Some(61), "mount-point-mismatch"),
+    ] {
+        let unplaced = match judged(&link(
+            "/opt/k/media/link",
+            "/opt/tools/media/link",
+            mount_id,
+        )) {
+            Err(why @ Unfollowed::Unplaced(_)) => why,
+            Err(Unfollowed::Refused(why)) => panic!("{cause}: refused for the path: {why}"),
+            Ok(()) => panic!("{cause}: a link with no place was followed"),
+        };
+        let error = unplaced.refusal("/opt/k/media/link", "exec_subpaths");
+        assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+        assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
+        assert_eq!(error.address.as_deref(), Some("exec_subpaths"));
+        assert!(
+            error.message.contains(&format!(
+                "cannot establish the place of /opt/k/media/link: {cause}"
+            )),
+            "{error}"
+        );
+    }
+    // A link a run can replace: on the mount beneath a workspace.
+    match judged(&link(
+        "/opt/j/link",
+        "/work/u/workspaces/ws_1/media/link",
+        Some(70),
+    )) {
+        Err(Unfollowed::Refused(why)) => {
+            assert_eq!(
+                why,
+                "resolves through the symbolic link /opt/j/link, which lies in \
+                 /work/u/workspaces, a location a run can write"
+            );
+            let error = Unfollowed::Refused(why).refusal("/opt/j/link", "exec_subpaths");
+            assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
+        }
+        Err(Unfollowed::Unplaced(why)) => panic!("{why}"),
+        Ok(()) => panic!("a link on a mount beneath a workspace was followed"),
+    }
+    // A link nothing writable reaches is followed.
+    for (view, host, mount_id) in [
+        ("/usr/bin/sh", "/usr/bin/sh", 31),
+        ("/opt/k/link", "/opt/tools/link", 31),
+        ("/tmp/link", "/tmp/link", 61),
+    ] {
+        assert!(
+            judged(&link(view, host, Some(mount_id))).is_ok(),
+            "{view} was not followed"
+        );
+    }
 }
 
 /// The entries of an open that withholds; any other placement fails the case.

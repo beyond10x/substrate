@@ -23,10 +23,12 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
   opens.
 - A `beneath` path is opened beneath its `<root>` with no symbolic link followed. A `follow` path
   is opened following links, and refused when what it resolves to lies in a `--writable` root, a
-  mount of the view the run can write, or in a mount that is mounted beneath one. Where a path
-  lies is read from the view's mount table (`/proc/self/mountinfo`), never from the text of two
-  paths, and a place, or where a mount beneath a `--writable` root is attached, that cannot be
-  established refuses as well.
+  mount of the view the run can write, or in a mount that is mounted beneath one. So is one
+  that resolves through a symbolic link lying there: the helper resolves a `follow` path one
+  name at a time and places every link it reads. Where a path or a link lies is read from the
+  view's mount table (`/proc/self/mountinfo`), never from the text of two paths, and a place,
+  or where a mount beneath a `--writable` root is attached, that cannot be established refuses
+  as well: a link on a file-system type other than `ext4`, `overlay` and `tmpfs` has none.
 - `--env` carries one variable of the program's environment. **The program starts with the
   `--env` operands as its whole environment, and nothing of the helper's own.** An empty name, a
   name that holds `=` and a name given twice are refused.

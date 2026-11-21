@@ -89,15 +89,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
   Each now asks the places the location reaches: its own, and the root of every mount that
   is mounted beneath it, read from the parent IDs of the mount table. Where that cannot be
-  established the answer is the one a place has, with the mount point in its text,
-  `cannot establish where <mount point> is attached: <cause>`: `exec.sandbox-place-unserved`
-  (501) at a start with a list, `config.exec-gate-unserved` (501) at the open, and status 125
-  from the helper. A tenth cause, `mount-covered`, names a mount beneath such a location that
-  a later mount hides or that lies under a stack; it refuses the open. A mount of a
-  file-system type other than `ext4`, `overlay` and `tmpfs` beneath such a location is not
-  compared and refuses nothing. A start without a list reads no mount table, as before.
-  `substrate_exec_gate::place::Unestablished` gains the public field `asked`, and `Cause` the
-  variant `MountCovered`.
+  established for a location a run can write, the answer is the one a place has, with the
+  mount point in its text, `cannot establish where <mount point> is attached: <cause>`:
+  `exec.sandbox-place-unserved` (501) at a start with a list, `config.exec-gate-unserved`
+  (501) at the open, and status 125 from the helper. A tenth cause, `mount-covered`, names a
+  mount beneath such a location that a later mount hides or that lies under a stack; it
+  refuses the open. The host directory of a read-only root, and `/usr`, `/bin`, `/lib` and
+  `/lib64`, are never refused for a mount beneath them: such a mount is counted by what the
+  mount table says it shows, which can only make the directory count as one a run can write.
+  A start without a list reads no mount table, as before.
+- **A symbolic link on a file system of a type other than `ext4`, `overlay` and `tmpfs` is
+  no longer followed.** Also on `main` since pull request 241, and in no release. A mount of
+  such a type is compared with nothing, so a link a run had left on one, mounted beneath a
+  workspace and again beneath a read-only root, was followed out of that root: a profile
+  that listed the link ran what it named. Every symbolic link that a listed path, the
+  program or the loader resolves through is now placed like the path's end, by the driver
+  before dispatch and by the helper in the run's view. A link that has no place refuses the
+  start `exec.sandbox-place-unserved` (501) with the cause, `file-system-unlisted` and the
+  type for such a mount, and the helper exits 125; a link in a place a run can write is
+  refused as before, and now by the helper as well, which checked only where a path ends.
+  The same file system of such a type mounted beneath a workspace and beneath a read-only
+  root also makes that root count as one a run can write.
+- `substrate_exec_gate::place`: `Unestablished` gains the public field `asked` (the new
+  `Asked`) and `Cause` the variant `MountCovered`. New and public, for the host driver:
+  `MountTree` (`table`, `reaches`, `reaches_as_written`), `Reach` (`places`, `holds`,
+  `overlaps`), `Unlisted`, `MountTable::into_tree` and `into_tree_as_written`.
 
 ## [0.22.0] — 2026-11-20
 

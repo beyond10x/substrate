@@ -222,6 +222,9 @@ root, a workspace) lies in that location: a read-only root declared on it counts
 can write, and a helper installed on it is refused. `mount-covered` names such a mount that a
 later mount hides, or two mounts on one mount point: unmount one, or declare another directory.
 
+A listed path is refused where it reads a symbolic link on another file-system type, with
+`file-system-unlisted`: list what the link names instead.
+
 | Where | Cause | Answer |
 |---|---|---|
 | opening the adapter with `exec_gate` set | `file-system-unlisted` or `mount-id-unreported` | the adapter opens without the fact, and `facts().withheld` names the cause, the path and the type |
