@@ -22,6 +22,7 @@ use substrate_wire::{
 
 use crate::delegation::{ContextRefusal, VerifiedContext};
 
+use super::private_paths::ResolvedPrivatePaths;
 use super::responses::{
     conflict, delegated_context_refusal, failure, failure_detail, operation_ledger_capacity,
     outcome_unknown, query_is_empty, schema_invalid, store_failure, success,
@@ -400,6 +401,7 @@ impl WorkspaceInput for WorkspaceCreateInput {
 #[allow(clippy::too_many_lines)] // Validation order is the public refusal precedence.
 pub(super) fn validate_exec_input(
     app: &App,
+    private: &ResolvedPrivatePaths,
     mutation: &BoundMutation<ExecStartInput>,
     request_id: &str,
 ) -> Result<(), Response> {
@@ -461,10 +463,10 @@ pub(super) fn validate_exec_input(
     check_confinement_requires(&facts, &input.sandbox, mutation, request_id)?;
     check_egress_aperture(&facts, &input.sandbox, mutation, request_id)?;
     check_secret_slots(&facts, mutation, request_id)?;
-    check_read_only_files(&facts, mutation, request_id)?;
+    check_read_only_files(private, &facts, mutation, request_id)?;
     check_writable_roots(app, &facts, mutation, request_id)?;
     check_workdir(&facts, mutation, request_id)?;
-    check_read_only_roots(&facts, mutation, request_id)?;
+    check_read_only_roots(private, &facts, mutation, request_id)?;
     if !input.measurements.is_empty() && facts.exec_resource_usage.is_none() {
         return Err(failure(
             StatusCode::NOT_IMPLEMENTED,
@@ -856,7 +858,13 @@ fn check_secret_slots(
 /// naming a root, and the caller hears `exec.sandbox-unavailable`, the answer that fact's absence
 /// is published to mean. Whether each host path is present and a directory reached without a
 /// symlink is the driver's question, answered against the descriptor it pins.
+///
+/// Last, with the fact published: a root whose host path equals, lies under or contains a path
+/// this daemon keeps private ([`PrivateHostPaths`](crate::PrivateHostPaths)) is
+/// `exec.read-only-root-absent` (ADR 0010, amendment of 2026-11-22). The caller records it as
+/// refused before any dispatch.
 fn check_read_only_roots(
+    private: &ResolvedPrivatePaths,
     facts: &substrate_wire::CapabilityFacts,
     mutation: &BoundMutation<ExecStartInput>,
     request_id: &str,
@@ -890,15 +898,47 @@ fn check_read_only_roots(
             false,
         ));
     }
+    let host_paths = input
+        .read_only_roots
+        .iter()
+        .map(|root| root.host_path.as_str());
+    if private.meets_a_root(host_paths) {
+        return Err(failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Refused,
+            substrate_wire::READ_ONLY_ROOT_ABSENT,
+            READ_ONLY_ROOT_PRIVATE_MESSAGE,
+            Some("read_only_roots"),
+            false,
+        ));
+    }
     Ok(())
 }
+
+/// The message of `exec.read-only-root-absent` for a root whose host path meets a path this
+/// daemon keeps private (ADR 0010, amendment of 2026-11-22). It names no entry of that set. What
+/// a caller learns from it is whether the path it named meets the set, which the amendment
+/// accepts.
+const READ_ONLY_ROOT_PRIVATE_MESSAGE: &str = "A declared read-only root is not admitted: its \
+                                              host path meets a path this host keeps private.";
+/// The same for `exec.read-only-file-absent` (ADR 0033, amendment of 2026-11-22).
+const READ_ONLY_FILE_PRIVATE_MESSAGE: &str = "A declared read-only file is not admitted: its \
+                                              host path meets a path this host keeps private.";
 
 /// Daemon-side admission for declared read-only host files (ADR 0033).
 ///
 /// Shape, then capability — the order the driver uses independently, so a caller hears the same
 /// answer whichever layer sees the request first. Whether each host path exists, is a regular file
 /// and is reached without a symlink is the driver's question, answered against the object it pins.
+///
+/// Last, with the fact published, and the daemon's alone: a file whose host path equals or lies
+/// under a path this daemon keeps private
+/// ([`PrivateHostPaths`](crate::PrivateHostPaths)) is `exec.read-only-file-absent`
+/// (ADR 0033, amendment of 2026-11-22). The caller records it as refused before any dispatch.
 fn check_read_only_files(
+    private: &ResolvedPrivatePaths,
     facts: &substrate_wire::CapabilityFacts,
     mutation: &BoundMutation<ExecStartInput>,
     request_id: &str,
@@ -935,11 +975,28 @@ fn check_read_only_files(
             false,
         ));
     }
+    let host_paths = input
+        .read_only_files
+        .iter()
+        .map(|file| file.host_path.as_str());
+    if private.meets_a_file(host_paths) {
+        return Err(failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Refused,
+            substrate_wire::READ_ONLY_FILE_ABSENT,
+            READ_ONLY_FILE_PRIVATE_MESSAGE,
+            Some("read_only_files"),
+            false,
+        ));
+    }
     Ok(())
 }
 
 pub(super) fn validate_pipe_session_input(
     app: &App,
+    private: &ResolvedPrivatePaths,
     mutation: &BoundMutation<PipeSessionStartInput>,
     request_id: &str,
 ) -> Result<(), Response> {
@@ -1048,7 +1105,7 @@ pub(super) fn validate_pipe_session_input(
     // contract ranked the same pair of refusals in opposite orders. It was invisible only because
     // this port answers `request.schema-invalid` for both, differing in `address`, which is
     // precisely why a pin that read the code could not see it.
-    validate_exec_input(app, &exec_mutation, request_id)?;
+    validate_exec_input(app, private, &exec_mutation, request_id)?;
     Ok(())
 }
 

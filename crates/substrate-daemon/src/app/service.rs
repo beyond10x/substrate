@@ -17,8 +17,8 @@ use substrate_store::{
     LeaseClock, LeaseResource, Scope, Store, StoreError, WorkspaceAdmission,
 };
 use substrate_wire::{
-    ExecSignalInput, ExecState, OperationState, WorkspaceAbsence, WorkspaceKind, WorkspaceOrigin,
-    WorkspaceState,
+    ExecSignalInput, ExecStartInput, ExecState, OperationState, WorkspaceAbsence, WorkspaceKind,
+    WorkspaceOrigin, WorkspaceState,
 };
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, Semaphore};
 use ulid::Ulid;
@@ -28,6 +28,7 @@ use crate::delegation::DelegatedContextPolicy;
 use super::events::{EventStreamLimits, EventStreamPolicy, EventWakeups};
 use super::metrics::MetricsStreamPolicy;
 use super::operations::{driver_detail, linux_lease_clock, observation_from_stored, stored_exec};
+use super::private_paths::{PrivateHostPaths, ResolvedPrivatePaths};
 use super::sessions::{PendingContainments, PipeAttachmentLimits, PipeSessionPolicy};
 use super::{
     LEASE_CLEANUP_BATCH, MAINTENANCE_DRIVER_TIMEOUT, PROVISIONAL_RECOVERY_BATCH,
@@ -220,6 +221,11 @@ pub struct App {
     pub(super) pipe_attachment_limits: Arc<PipeAttachmentLimits>,
     pub(super) pipe_session_policy: PipeSessionPolicy,
     pub allow_unrecorded_sessions: bool,
+    /// The host paths this daemon keeps private. A start whose read-only root or read-only file
+    /// names a source that meets one is refused before dispatch (ADR 0010 and ADR 0033,
+    /// amendments of 2026-11-22). Given at construction and never set afterwards: the
+    /// composition root's constructor takes the set of the daemon configuration.
+    private_host_paths: PrivateHostPaths,
     /// The host-process driver (ADR 0036), present only when the composition root opened it over
     /// a usable delegated cgroup root for a daemon whose one listener is the personal Unix socket.
     /// Absent, every start is `process.host-unserved` and nothing runs; nothing selects a
@@ -260,6 +266,8 @@ pub struct App {
 }
 
 impl App {
+    /// A harness's application: no daemon configuration, so no trust anchor and no private host
+    /// path. The composition root uses [`Self::with_delegated_context`].
     pub fn new(
         store: Arc<Store>,
         driver: Arc<dyn Driver>,
@@ -268,6 +276,7 @@ impl App {
         Self::with_authority(store, driver, deployment, Arc::new(SystemAuthority))
     }
 
+    /// [`Self::new`] with the harness's own clock and identifiers.
     pub fn with_authority(
         store: Arc<Store>,
         driver: Arc<dyn Driver>,
@@ -280,21 +289,28 @@ impl App {
             deployment,
             authority,
             DelegatedContextPolicy::none(),
+            PrivateHostPaths::of_no_daemon_configuration(),
         )
     }
 
-    /// The composition root's constructor: everything above, plus the configured trust anchor.
+    /// The composition root's constructor: everything above, plus the configured trust anchor
+    /// and the host paths the daemon keeps private.
     ///
     /// Separate rather than a fifth parameter on `with_authority`, because a test that says nothing
     /// about delegated context should keep meaning "no trust anchor configured" — which is a real
     /// posture (ADR 0011: until an issuer ships, the field is optional everywhere), not a default
     /// standing in for one.
+    ///
+    /// The private paths are an argument, not a field to set afterwards, so a composition root
+    /// that leaves them out does not compile; a daemon's set is `PrivateHostPaths::of` its
+    /// configuration, and nothing outside `crate::app` can build another.
     pub fn with_delegated_context(
         store: Arc<Store>,
         driver: Arc<dyn Driver>,
         deployment: impl Into<String>,
         authority: Arc<dyn Authority>,
         delegated_context: DelegatedContextPolicy,
+        private_host_paths: PrivateHostPaths,
     ) -> Arc<Self> {
         let restart_cutoff = authority.now();
         let host_process_run_id = format!("run_{}", Ulid::generate());
@@ -329,6 +345,7 @@ impl App {
             ),
             pipe_session_policy,
             allow_unrecorded_sessions: false,
+            private_host_paths,
             host_processes: None,
             host_process_logs: None,
             host_process_uid: nix::unistd::geteuid().as_raw(),
@@ -377,6 +394,20 @@ impl App {
         F: FnOnce() -> T + Send,
     {
         bounded_blocking(&self.blocking_store_slots, operation).await
+    }
+
+    /// The private host paths as one start compares them (ADR 0010 and ADR 0033, amendments of
+    /// 2026-11-22): resolved once for the start, for both of its lists, off the async worker and
+    /// under the same bound as the daemon's other blocking I/O. A start that names no read-only
+    /// source reads nothing from the filesystem.
+    pub(super) async fn private_paths_for(&self, input: &ExecStartInput) -> ResolvedPrivatePaths {
+        if input.read_only_roots.is_empty() && input.read_only_files.is_empty() {
+            return self.private_host_paths.as_written();
+        }
+        bounded_blocking(&self.blocking_store_slots, || {
+            self.private_host_paths.resolve()
+        })
+        .await
     }
 
     pub(super) async fn lock_workspace(&self, scope: &Scope, workspace: &str) -> WorkspaceGuard {
