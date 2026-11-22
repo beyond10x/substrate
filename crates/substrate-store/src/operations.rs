@@ -966,9 +966,10 @@ pub(crate) struct LoadedOperation {
 impl LoadedOperation {
     /// What this row answers to a request of its deployment, subject and operation id.
     ///
-    /// Every read that can hand a stored row to a request goes through here, in the transaction
-    /// that found the row, so the row's outcome and its pending record reach a request only
-    /// after the grant is compared (ADR 0017):
+    /// Every read that can hand a stored row to a mutation request goes through here, in the
+    /// transaction that found the row. The read routes (`Store::operation` and the operation
+    /// events) do not: a read needs no context (design 09 § 4). The row's outcome and its
+    /// pending record reach a mutation request only after the grant is compared (ADR 0017):
     ///
     /// - a row that records a grant and a request that verified a different one is
     ///   [`Reservation::GrantConflict`], decided before the input is compared, so that request

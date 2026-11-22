@@ -20,13 +20,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Security
 
-- **A stored operation outcome is returned only after the recorded grant is compared, in every
-  transaction that can find the row**
+- **A stored operation outcome is returned to a mutation request only after the recorded grant
+  is compared, in every transaction in which such a request can find the row**
   ([ADR 0017](adr/0017-delegated-context-is-verified-before-replay.md)). The comparison
   holds for requests that arrive at the same time: a request that verified another grant than the
   row records is answered `delegated-context.grant-conflict` (409) whichever of them wrote the
-  row, and a refusal decided for a request, such as a missing or invalid delegated context, is
-  never replaced by another request's stored outcome. The wire and the bundle are unchanged.
+  row, and a refusal decided from a request's own envelope or delegated context, such as a
+  missing or invalid context, is never replaced by another request's stored outcome. Reads of an
+  operation (`GET /v1/ops/{op}`, the event stream) are as before and need no context. The wire
+  and the bundle are unchanged.
 
 ## [0.24.0] — 2026-11-22
 

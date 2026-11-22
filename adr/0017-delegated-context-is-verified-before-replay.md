@@ -41,3 +41,11 @@ The grant is compared before the request hash, so a request under another grant 
 Unchanged and recorded here because the text above leaves it open: where the deployment does
 not require delegated context, a valid request without one replays a row that records a grant.
 A deployment that requires context refuses that request `delegated-context.absent` first.
+
+Three more answers the code gives and the text above does not state. The comparison is of the
+grant's bytes: two grants that differ in case or in a trailing space are different grants, and
+an empty grant is a grant. A refusal recorded for a request whose context was missing or
+invalid is a row without a grant, so it replays to a later request of the same operation
+identity and input that presents a valid context. The comparison is a rule for mutation
+requests: reading an operation or its events needs no context
+([design 09](../docs/design/09-delegated-context-and-grant-attribution.md) § 4).
