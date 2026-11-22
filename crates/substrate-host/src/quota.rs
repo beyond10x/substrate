@@ -204,33 +204,6 @@ impl ProjectQuotas {
         })
     }
 
-    /// The byte limit of the project quota the directory at `path` is under; `None` when it is
-    /// under none of this allocator's, or its quota states no byte limit.
-    pub(crate) fn byte_limit(&self, path: &Path) -> Option<u64> {
-        let quota = self.quota_of(path)?;
-        (quota.bhardlimit != 0).then(|| quota.bhardlimit.saturating_mul(ALLOCATION_UNIT_BYTES))
-    }
-
-    /// The inode limit of the project quota the directory at `path` is under; `None` when it
-    /// is under none of this allocator's, or its quota states no inode limit.
-    pub(crate) fn inode_limit(&self, path: &Path) -> Option<u64> {
-        let quota = self.quota_of(path)?;
-        (quota.ihardlimit != 0).then_some(quota.ihardlimit)
-    }
-
-    /// The project quota the directory at `path` is under, when it is one of this allocator's.
-    fn quota_of(&self, path: &Path) -> Option<IfDqblk> {
-        let project = self
-            .state
-            .lock()
-            .paths
-            .get(path)
-            .copied()
-            .or_else(|| project_id(path).ok())
-            .filter(|project| (self.range.0..=self.range.1).contains(project))?;
-        get_quota(&self.filesystem, project).ok()
-    }
-
     /// Move a private quota directory and its allocator ownership at one installation boundary.
     /// The lock prevents another allocation or release from observing a renamed but stale path.
     pub(crate) fn rename(&self, source: &Path, target: &Path) -> Result<(), nix::errno::Errno> {

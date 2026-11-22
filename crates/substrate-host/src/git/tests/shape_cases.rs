@@ -1,8 +1,8 @@
 //! Cases of the check of a baseline's shape (design 21, § *The baseline store*): the shape of a
 //! baseline is checked before anything walks it. The check reads each tree once, however often
 //! the baseline names it, and holds the bounds of nesting, of names and path lengths, of object
-//! sizes, of paths and of bytes. A create runs it before it checks anything out, and a build
-//! before it writes the store.
+//! sizes, of paths and of bytes. A create runs it before it checks anything out, and again
+//! when it writes the store.
 
 use std::path::Path;
 
@@ -11,12 +11,11 @@ use substrate_wire::StorageLimit;
 use tempfile::{TempDir, tempdir};
 
 use super::super::{finish_materialization, store};
-use super::store_cases::{QUERY, leftovers, store_objects};
+
 use super::store_failure_cases::{
-    NESTING_BOUND, both, codes, commit_id_file_alone, nested_repository, repository_holding,
-    repository_of, store_of_another_commit,
+    NESTING_BOUND, nested_repository, repository_holding, repository_of,
 };
-use super::{baseline_file, changes, store_of, target_within};
+use super::write_baseline;
 use crate::DriverErrorClass;
 use crate::git_baselines::{DEFAULT_BYTE_LIMIT, DEFAULT_INODE_LIMIT, DEFAULT_LIMIT};
 
@@ -131,52 +130,6 @@ fn a_baseline_that_names_as_many_paths_as_the_inode_limit_is_served_and_one_more
     assert_eq!(outcome, ["workspace.git-storage-limit"; 2]);
     assert_eq!(checkout, NOTHING);
     assert_eq!(left, 0, "the refused write left an entry");
-}
-
-/// A build refuses a baseline that names more paths than the inode limit
-/// `workspace.git-storage-limit`, for both observations, and makes no store and leaves no copy.
-/// The limit is 200,000 for a workspace under no project quota.
-#[test]
-fn a_build_refuses_a_baseline_that_names_more_paths_than_the_inode_limit() {
-    let (workspace, commit) = doubled_repository(17);
-    let baselines = commit_id_file_alone(commit);
-
-    assert_eq!(
-        codes(both(workspace.path(), baselines.path())),
-        ["workspace.git-storage-limit"; 2]
-    );
-    assert!(!store_of(baselines.path()).exists(), "a store is kept");
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
-}
-
-/// A build that is refused for the paths its baseline names leaves the store that was there.
-/// The baseline here names two paths; with a limit of two the store is built, and what the
-/// build read is in it.
-#[test]
-fn a_build_refused_for_the_paths_of_its_baseline_leaves_the_store_that_was_there() {
-    let (workspace, baselines, commit) = store_of_another_commit();
-    let before = store_objects(baselines.path());
-    let observe = |max_inodes: u64| {
-        target_within(
-            workspace.path(),
-            baselines.path(),
-            inodes(max_inodes),
-            |held| {
-                [
-                    changes(held, QUERY).map(|_| ()),
-                    baseline_file(held, "README.md", 1024).map(|_| ()),
-                ]
-            },
-        )
-    };
-
-    assert_eq!(codes(observe(1)), ["workspace.git-storage-limit"; 2]);
-    assert_eq!(store_objects(baselines.path()), before);
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
-
-    assert_eq!(codes(observe(2)), ["answered"; 2]);
-    assert!(store_objects(baselines.path()).contains(&commit));
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
 }
 
 /// The check reads each tree of the baseline once, however often the baseline names it: of a
@@ -718,11 +671,12 @@ fn a_file_counts_toward_the_byte_limit_once_for_each_place_the_baseline_names_it
     );
 }
 
-/// A build refuses a commit whose header states more than the byte limit
-/// `workspace.git-storage-limit`, for both observations. The commit here states more than
-/// 8 KiB, with a message of 8,192 bytes; under a limit of 16 KiB its store is built.
+/// The write of a store refuses a commit whose header states more than the byte limit
+/// `workspace.git-storage-limit` and leaves nothing in the baseline root. The commit here
+/// states more than 8 KiB, with a message of 8,192 bytes; under a limit of 16 KiB its store is
+/// written.
 #[test]
-fn a_build_refuses_a_commit_that_states_more_than_the_byte_limit() {
+fn the_write_of_a_store_refuses_a_commit_that_states_more_than_the_byte_limit() {
     let (workspace, commit) = repository_of(|_| Vec::new());
     let larger = {
         let repository = Repository::open(workspace.path()).expect("repository");
@@ -736,22 +690,26 @@ fn a_build_refuses_a_commit_that_states_more_than_the_byte_limit() {
             .commit(None, &signature, &signature, &"m".repeat(8192), &tree, &[])
             .expect("a larger commit")
     };
-    let observe = |max_bytes: u64| {
-        let baselines = commit_id_file_alone(larger);
-        let outcome = target_within(
-            workspace.path(),
+    let write = |max_bytes: u64| {
+        let baselines = tempdir().expect("baseline root");
+        let written = write_baseline(
             baselines.path(),
-            bytes(max_bytes),
-            |held| {
-                [
-                    changes(held, QUERY).map(|_| ()),
-                    baseline_file(held, "README.md", 1024).map(|_| ()),
-                ]
-            },
-        );
-        (codes(outcome), store_of(baselines.path()).exists())
+            "ws_git",
+            workspace.path(),
+            &larger.to_string(),
+            max_bytes,
+        )
+        .map_or_else(|error| error.code, |()| "written");
+        let left = std::fs::read_dir(baselines.path())
+            .expect("baseline root")
+            .count();
+        (written, left)
     };
 
-    assert_eq!(observe(8192), (["workspace.git-storage-limit"; 2], false));
-    assert_eq!(observe(16 * 1024), (["answered"; 2], true));
+    assert_eq!(write(8192), ("workspace.git-storage-limit", 0));
+    assert_eq!(
+        write(16 * 1024),
+        ("written", 2),
+        "the commit-id file and the directory of the stores"
+    );
 }

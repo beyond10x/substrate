@@ -1,10 +1,11 @@
-//! Cases of the baseline store (design 21, § *The baseline store*) where a write, a build or a
-//! read is refused: by which name, and what stands in the baseline root afterwards.
+//! Cases of the baseline store (design 21, § *The baseline store*) where a write or a read is
+//! refused: by which name, and what stands in the baseline root afterwards.
 
-use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use git2::{Oid, Repository, Signature};
+use sha2::{Digest as _, Sha256};
 use tempfile::{TempDir, tempdir};
 
 use super::store_cases::{leftovers, plant_store, store_objects};
@@ -12,7 +13,6 @@ use super::{
     baseline_file, baseline_object, baseline_root, commit_paths, objects_of, observe,
     source_repository, store_of, target, write_baseline,
 };
-use crate::git_baselines::DEFAULT_BYTE_LIMIT;
 use crate::{DriverError, DriverErrorClass};
 
 /// How deep the directories of a baseline may nest (design 21, § *Nesting*).
@@ -113,7 +113,7 @@ pub(super) fn commit_id_file_alone(commit: Oid) -> TempDir {
 pub(super) fn both(workspace: &Path, baselines: &Path) -> [Result<(), DriverError>; 2] {
     [
         observe(workspace, baselines, 1024).map(|_| ()),
-        target(workspace, baselines, DEFAULT_BYTE_LIMIT, |held| {
+        target(workspace, baselines, |held| {
             baseline_file(held, "README.md", 1024)
         })
         .map(|_| ()),
@@ -122,40 +122,6 @@ pub(super) fn both(workspace: &Path, baselines: &Path) -> [Result<(), DriverErro
 
 pub(super) fn codes(outcomes: [Result<(), DriverError>; 2]) -> [&'static str; 2] {
     outcomes.map(|outcome| outcome.map_or_else(|error| error.code, |()| "answered"))
-}
-
-/// A build refuses a baseline whose directories nest deeper than the bound
-/// `workspace.git-path-unrepresentable` and leaves no store and no copy.
-#[test]
-fn a_build_refuses_a_baseline_whose_directories_nest_deeper_than_the_bound() {
-    let (workspace, commit) = nested_repository(NESTING_BOUND + 1);
-    let baselines = commit_id_file_alone(commit);
-
-    assert_eq!(
-        codes(both(workspace.path(), baselines.path())),
-        ["workspace.git-path-unrepresentable"; 2]
-    );
-    assert!(!store_of(baselines.path()).exists(), "a store is kept");
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
-}
-
-/// A build holds a baseline whose directories nest exactly as deep as the bound: the store is
-/// written and both observations answer from it.
-#[test]
-fn a_build_holds_a_baseline_whose_directories_nest_as_deep_as_the_bound() {
-    let (workspace, commit) = nested_repository(NESTING_BOUND);
-    let baselines = commit_id_file_alone(commit);
-
-    assert_eq!(
-        codes(both(workspace.path(), baselines.path())),
-        ["answered"; 2]
-    );
-    // The commit, its tree, the file and one tree for each nested directory.
-    assert_eq!(
-        objects_of(&store_of(baselines.path())).len(),
-        NESTING_BOUND + 3
-    );
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
 }
 
 /// A directory the baseline holds in two places is bounded at each of them: the same
@@ -296,72 +262,29 @@ pub(super) fn store_of_another_commit() -> (TempDir, TempDir, Oid) {
     (workspace, baselines, commit)
 }
 
-/// The loose object file of `path` in the commit `commit` of the repository at `workspace`.
-fn object_of(workspace: &Path, commit: Oid, path: &str) -> PathBuf {
-    let id = Repository::open(workspace)
-        .expect("repository")
-        .find_commit(commit)
-        .and_then(|commit| commit.tree())
-        .and_then(|tree| tree.get_path(Path::new(path)))
-        .expect("entry")
-        .id()
-        .to_string();
-    workspace.join(".git/objects").join(&id[..2]).join(&id[2..])
-}
-
-/// A store that does not hold the named commit is replaced only by a finished one: a build
-/// that is refused leaves the store that was there, and a later build replaces it.
+/// A store that does not hold the commit the commit-id file names gives no observation: both
+/// are refused `workspace.git-baseline-missing`, and the store is there afterwards as it was,
+/// though the workspace's own object store holds every object of the named commit.
 #[test]
-fn a_build_that_is_refused_leaves_the_store_that_lacked_the_commit_in_place() {
+fn a_store_that_lacks_the_named_commit_is_refused_and_left_as_it_is() {
     let (workspace, baselines, commit) = store_of_another_commit();
-    let before = store_objects(baselines.path());
-    let object = object_of(workspace.path(), commit, "later.txt");
-    let bytes = std::fs::read(&object).expect("object");
-    std::fs::remove_file(&object).expect("object removed");
+    assert!(
+        objects_of(&workspace.path().join(".git/objects")).contains(&commit),
+        "the workspace holds the named commit"
+    );
+    let before = listing(baselines.path());
 
     assert_eq!(
         codes(both(workspace.path(), baselines.path())),
         ["workspace.git-baseline-missing"; 2]
     );
-    assert!(
-        store_of(baselines.path()).is_dir(),
-        "the refused build removed the store that was there"
-    );
-    assert_eq!(store_objects(baselines.path()), before);
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
-
-    std::fs::write(&object, bytes).expect("object restored");
-    assert_eq!(
-        codes(both(workspace.path(), baselines.path())),
-        ["answered"; 2]
-    );
-    assert!(store_objects(baselines.path()).contains(&commit));
+    assert_eq!(listing(baselines.path()), before);
+    assert!(!store_objects(baselines.path()).contains(&commit));
     assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
 }
 
-/// A build that fails after its store was put into place, here at the sync of the directory of
-/// the stores, keeps no store of its own: the store that was there is there again.
-#[test]
-fn a_build_that_fails_once_its_store_is_in_place_leaves_the_store_that_was_there() {
-    let (workspace, baselines, _) = store_of_another_commit();
-    let before = store_objects(baselines.path());
-    let stores = baselines.path().join(".objects");
-    closed(&stores, 0o300, 0o700).expect(NOT_RUN);
-
-    let outcomes = both(workspace.path(), baselines.path());
-    std::fs::set_permissions(&stores, std::fs::Permissions::from_mode(0o700))
-        .expect("directory mode");
-
-    assert_eq!(codes(outcomes), ["workspace.git-baseline-write-failed"; 2]);
-    assert!(
-        store_of(baselines.path()).is_dir(),
-        "the failed build left no store where one was"
-    );
-    assert_eq!(store_objects(baselines.path()), before);
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
-}
-
-/// The entries of the store of `ws_git`, each with its type and mode, sorted.
+/// The entries of the directory of the stores, each with its type, its mode and the time it
+/// was last written, and a regular file also with its length and the hash of its bytes; sorted.
 fn listing(baselines: &Path) -> Vec<String> {
     let mut entries = Vec::new();
     let mut pending = vec![baselines.join(".objects")];
@@ -369,11 +292,19 @@ fn listing(baselines: &Path) -> Vec<String> {
         for entry in std::fs::read_dir(&directory).expect("directory") {
             let path = entry.expect("entry").path();
             let metadata = path.symlink_metadata().expect("entry");
+            let content = if metadata.is_file() {
+                let bytes = std::fs::read(&path).expect("file of the store");
+                format!(" {} {}", bytes.len(), hex::encode(Sha256::digest(&bytes)))
+            } else {
+                String::new()
+            };
             entries.push(format!(
-                "{} {:?} {:o}",
+                "{} {:?} {:o} {}.{:09}{content}",
                 path.display(),
                 metadata.file_type(),
-                metadata.permissions().mode() & 0o7777
+                metadata.permissions().mode() & 0o7777,
+                metadata.mtime(),
+                metadata.mtime_nsec()
             ));
             if metadata.is_dir() {
                 pending.push(path);
@@ -385,8 +316,7 @@ fn listing(baselines: &Path) -> Vec<String> {
 }
 
 /// A store that cannot be opened or read is not absent: both observations are refused
-/// `workspace.git-baseline-read-failed`, no store is built in its place, and every entry of it
-/// is there afterwards as it was.
+/// `workspace.git-baseline-read-failed`, and every entry of it is there afterwards as it was.
 #[test]
 fn a_store_that_cannot_be_read_is_refused_and_not_removed() {
     let (workspace, commit) = source_repository();
@@ -425,11 +355,11 @@ fn a_store_that_cannot_be_read_is_refused_and_not_removed() {
     }
 }
 
-/// A store whose pack index the Git library cannot read as one counts as not holding the
-/// commit: a finished build replaces it and the observation answers, and a build that is
-/// refused leaves it in place as it was.
+/// A store whose pack index the Git library cannot read as one gives no observation: both are
+/// refused `workspace.git-baseline-missing`, and the store is there afterwards as it was,
+/// though the workspace's own object store holds every object of the commit.
 #[test]
-fn a_store_whose_pack_index_cannot_be_read_as_one_is_replaced_only_by_a_finished_build() {
+fn a_store_whose_pack_index_is_not_an_index_is_refused_and_left_as_it_is() {
     let (workspace, commit) = source_repository();
     let baselines = baseline_root(workspace.path(), commit);
     let index = std::fs::read_dir(store_of(baselines.path()).join("pack"))
@@ -442,28 +372,13 @@ fn a_store_whose_pack_index_cannot_be_read_as_one_is_replaced_only_by_a_finished
     std::fs::write(&index, vec![b'x'; length]).expect("bytes that are no index");
     std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o400)).expect("mode");
     let before = listing(baselines.path());
-    let object = baseline_object(workspace.path(), commit);
-    let bytes = std::fs::read(&object).expect("object");
+    assert!(baseline_object(workspace.path(), commit).is_file());
 
-    std::fs::remove_file(&object).expect("object removed");
     assert_eq!(
         codes(both(workspace.path(), baselines.path())),
         ["workspace.git-baseline-missing"; 2]
     );
     assert_eq!(listing(baselines.path()), before);
-    assert_eq!(
-        std::fs::read(&index).expect("index"),
-        vec![b'x'; length],
-        "the refused build changed the store that was there"
-    );
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
-
-    std::fs::write(&object, bytes).expect("object restored");
-    assert_eq!(
-        codes(both(workspace.path(), baselines.path())),
-        ["answered"; 2]
-    );
-    assert!(store_objects(baselines.path()).contains(&commit));
     assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
 }
 
@@ -516,12 +431,9 @@ fn a_baseline_file_stated_larger_than_the_limit_is_refused_before_its_object_is_
     std::fs::copy(objects.join(&larger[..2]).join(&larger[2..]), &held)
         .expect("another object's bytes in the object's place");
     let read = |max_bytes: u64| {
-        target(
-            workspace.path(),
-            baselines.path(),
-            DEFAULT_BYTE_LIMIT,
-            |held| baseline_file(held, "README.md", max_bytes),
-        )
+        target(workspace.path(), baselines.path(), |held| {
+            baseline_file(held, "README.md", max_bytes)
+        })
         .expect_err("no answer from this object")
     };
 

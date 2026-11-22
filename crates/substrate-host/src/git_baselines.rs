@@ -11,10 +11,7 @@
 //! no Git source configured it neither reads nor removes anything here at start or at destroy
 //! (design 23).
 
-use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
 
 use substrate_wire::StorageLimit;
 
@@ -23,12 +20,10 @@ use crate::DriverError;
 /// The directory of the stores, beside the commit-id files.
 const STORES: &str = ".objects";
 
-/// The byte limit of a Git create that requests no storage limit, and the bound of the copy a
-/// store is built from for a workspace under no project quota.
+/// The byte limit of a Git create that requests no storage limit.
 pub(crate) const DEFAULT_BYTE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 
-/// The inode limit of a Git create that requests no storage limit, and the number of paths the
-/// baseline of a workspace under no project quota may name when its store is built.
+/// The inode limit of a Git create that requests no storage limit.
 pub(crate) const DEFAULT_INODE_LIMIT: u64 = 200_000;
 
 /// The limit of a Git create that requests none.
@@ -36,73 +31,6 @@ pub(crate) const DEFAULT_LIMIT: StorageLimit = StorageLimit {
     max_bytes: DEFAULT_BYTE_LIMIT,
     max_inodes: DEFAULT_INODE_LIMIT,
 };
-
-/// How long an observation waits for its turn to build a store (design 21, § *The baseline
-/// store*).
-pub(crate) const BUILD_TURN_WAIT: Duration = Duration::from_secs(10);
-
-/// A Git workspace as an observation names it.
-#[cfg_attr(not(feature = "git"), allow(dead_code))] // Read only by the build that serves Git.
-pub(crate) struct GitWorkspace<'a> {
-    pub(crate) id: &'a str,
-    /// The directory that holds all workspaces, as the driver pinned it.
-    pub(crate) root: &'a OwnedFd,
-    /// The workspace's own directory in it.
-    pub(crate) path: &'a Path,
-    pub(crate) baseline_root: &'a Path,
-    pub(crate) root_name: &'a str,
-    /// The bounds of a build of the workspace's store: the bytes of the copy it is built from,
-    /// and the paths its baseline may name. They are asked only when a store is built, so an
-    /// observation of a workspace that has its store asks nothing.
-    pub(crate) build_limit: &'a dyn Fn() -> StorageLimit,
-}
-
-/// The turns to build a store. One build runs at a time in a daemon: its driver keeps these,
-/// and whoever holds the turn builds.
-#[derive(Clone, Default)]
-pub(crate) struct BuildTurns(Arc<tokio::sync::Mutex<()>>);
-
-/// The turn to build a store. It ends when this is dropped.
-pub(crate) struct BuildTurn(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>);
-
-impl BuildTurns {
-    /// Waits for the turn, at most `wait`; `None` when the wait ended first. An observation
-    /// waits here and nowhere else, so while it waits it holds none of the places the driver
-    /// keeps for file operations.
-    pub(crate) async fn taken_within(&self, wait: Duration) -> Option<BuildTurn> {
-        tokio::time::timeout(wait, Arc::clone(&self.0).lock_owned())
-            .await
-            .ok()
-            .map(BuildTurn)
-    }
-
-    /// Waits for the turn however long that takes.
-    #[cfg(all(test, feature = "git"))]
-    pub(crate) async fn taken(&self) -> BuildTurn {
-        BuildTurn(Arc::clone(&self.0).lock_owned().await)
-    }
-
-    /// Waits for the turn on a thread that runs no task of the driver.
-    #[cfg(all(test, feature = "git"))]
-    pub(crate) fn taken_blocking(&self) -> BuildTurn {
-        BuildTurn(Arc::clone(&self.0).blocking_lock_owned())
-    }
-
-    /// The turn, when nobody holds it now.
-    #[cfg(all(test, feature = "git"))]
-    pub(crate) fn free(&self) -> Option<BuildTurn> {
-        Arc::clone(&self.0).try_lock_owned().ok().map(BuildTurn)
-    }
-}
-
-/// What a Git observation gave.
-#[cfg_attr(not(feature = "git"), allow(dead_code))] // A build that serves no Git builds no store.
-pub(crate) enum Observed<T> {
-    Answer(T),
-    /// The workspace's store has to be built. An observation builds none: it made nothing,
-    /// and is run again once the store is built.
-    NeedsBuild,
-}
 
 /// The two entries the driver keeps for one root name.
 pub(crate) struct Entries {

@@ -4,24 +4,23 @@
 //! of its own: the commit, every tree it reaches and every file and link object those trees
 //! name, as one pack and its index. Both observations read the baseline from that store.
 //!
-//! The Git library is only ever pointed at a directory the driver wrote: a store, the staging
-//! tree of a create, or the copy a store is built from. It is never pointed at a workspace.
+//! The Git library is only ever pointed at a directory the driver wrote: a store, or the
+//! staging tree of a create. It is never pointed at a workspace.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
 
 use git2::{ObjectType, Oid};
 use nix::errno::Errno;
 use nix::fcntl::RenameFlags;
-use substrate_guarded::fs as guarded;
 use substrate_wire::StorageLimit;
 
-use super::{failed, object_store, read_baseline, storage_limit, worktree};
+use super::{failed, object_store};
 use crate::DriverError;
-use crate::git_baselines::{self as baselines, BuildTurn, GitWorkspace};
+use crate::git_baselines as baselines;
 
 const WRITE_FAILED: &str = "workspace.git-baseline-write-failed";
 const READ_FAILED: &str = "workspace.git-baseline-read-failed";
@@ -62,94 +61,36 @@ pub(super) enum Unwritten {
     Write,
 }
 
-/// Which place a finished store is put into.
-#[derive(Clone, Copy)]
-pub(super) enum Place {
-    /// The place of a workspace that is being created: a store that stands there is another
-    /// workspace's and is not replaced.
-    Free,
-    /// The place of a workspace whose store is built: a store that stands there does not hold
-    /// the workspace's commit, and the finished store replaces it.
-    Taken,
-}
-
-/// What stands in the place of a workspace's store.
-enum Standing {
-    /// A store that holds the workspace's commit, opened for reading.
-    Held(git2::Repository),
-    /// Nothing.
-    Absent,
-    /// A store that does not hold the workspace's commit.
-    Lacking,
-}
-
-/// The store of the workspace, opened for reading, when it holds the workspace's baseline
-/// commit `commit`. `None` for a workspace that has no store, and for one whose store does not
-/// hold `commit`: its store has to be built ([`built`]). Nothing is made here.
+/// The store of the workspace `root_name`, opened for reading: it holds the workspace's
+/// baseline commit `commit`. Nothing is made, removed or replaced here, and nothing of a
+/// workspace is opened.
 ///
 /// # Errors
 ///
-/// `workspace.git-baseline-read-failed` for a store that cannot be opened: it is not absent,
-/// and nothing of it is removed.
+/// `workspace.git-baseline-missing` for a workspace that has no store, for a store that does
+/// not hold `commit`, and for one whose pack or index the Git library cannot read as one.
+/// `workspace.git-baseline-read-failed` for a store that cannot be opened for any other
+/// reason.
 pub(super) fn held(
-    workspace: &GitWorkspace<'_>,
+    baseline_root: &Path,
+    root_name: &str,
     commit: Oid,
-) -> Result<Option<git2::Repository>, DriverError> {
-    let entries = baselines::entries(workspace.baseline_root, workspace.root_name)?;
-    match open(&entries.store, commit)? {
-        Standing::Held(store) => Ok(Some(store)),
-        Standing::Absent | Standing::Lacking => Ok(None),
-    }
-}
-
-/// Gives the workspace its store, which holds its baseline commit `commit`.
-///
-/// A workspace that predates the store has none, and gets it here, from a copy of the
-/// workspace's object store of at most `max_entries` entries. A store that does not hold
-/// `commit` is replaced the same way. Either is a build, one build runs at a time in a daemon,
-/// and whoever builds holds the turn.
-///
-/// # Errors
-///
-/// `workspace.git-baseline-read-failed` for a store that cannot be opened. Otherwise the
-/// refusal that ended the build, which leaves what stood in the store's place before, and no
-/// copy.
-pub(super) fn built(
-    workspace: &GitWorkspace<'_>,
-    commit: Oid,
-    max_entries: usize,
-    _turn: &BuildTurn,
-) -> Result<(), DriverError> {
-    let entries = baselines::entries(workspace.baseline_root, workspace.root_name)?;
-    // Another observation may have built the store while this one waited for its turn.
-    if let Standing::Held(_) = open(&entries.store, commit)? {
-        return Ok(());
-    }
-    build(workspace, &entries.store, commit, max_entries)?;
-    match open(&entries.store, commit)? {
-        Standing::Held(_) => Ok(()),
-        Standing::Absent | Standing::Lacking => Err(failed("workspace.git-baseline-missing")),
-    }
-}
-
-/// What stands at `store`. Only a store that is not there, and one that does not hold `commit`,
-/// are answered as such; a store that cannot be opened or read is an error.
-fn open(store: &Path, commit: Oid) -> Result<Standing, DriverError> {
+) -> Result<git2::Repository, DriverError> {
+    let missing = || failed("workspace.git-baseline-missing");
+    let store = baselines::entries(baseline_root, root_name)?.store;
     match store.symlink_metadata() {
         Ok(metadata) if metadata.is_dir() => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Standing::Absent);
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(missing()),
         Ok(_) | Err(_) => return Err(failed(READ_FAILED)),
     }
-    readable(store)?;
+    readable(&store)?;
     let repository = store
         .to_str()
         .and_then(|store| object_store(store).ok())
         .ok_or_else(|| failed(READ_FAILED))?;
     match repository.find_commit(commit).map(|_| ()) {
-        Ok(()) => Ok(Standing::Held(repository)),
-        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(Standing::Lacking),
+        Ok(()) => Ok(repository),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Err(missing()),
         Err(_) => Err(failed(READ_FAILED)),
     }
 }
@@ -176,109 +117,11 @@ fn readable(store: &Path) -> Result<(), DriverError> {
     opened().map_err(|_| failed(READ_FAILED))
 }
 
-/// Builds the store of a workspace, in the three steps of the design: copy the pack files and
-/// the loose objects of the workspace's object store beneath its pinned directory, index the
-/// copied packs and write the store from the copy, and remove the copy whatever the outcome.
-/// What stands in the store's place is replaced only by the finished store.
-fn build(
-    workspace: &GitWorkspace<'_>,
-    store: &Path,
-    commit: Oid,
-    max_entries: usize,
-) -> Result<(), DriverError> {
-    let pinned = guarded::pin_workspace_directory_beneath(workspace.root, workspace.path)
-        .map_err(|_| failed("workspace.git-repository-failed"))?;
-    let objects = worktree::open_directory(&pinned, ".git/objects")?
-        .ok_or_else(|| failed("workspace.git-repository-failed"))?;
-    let limit = (workspace.build_limit)();
-    let copy = tempfile::Builder::new()
-        .prefix(".copy-")
-        .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir_in(workspace.baseline_root)
-        .map_err(|_| failed(WRITE_FAILED))?;
-    // The object store the Git library is pointed at, and beside it the packs as they were
-    // copied, which it is not pointed at.
-    let (source, packs) = (copy.path().join("objects"), copy.path().join("packs"));
-    let indexed = source.join("pack");
-    let built = [&source, &packs, &indexed]
-        .into_iter()
-        .try_for_each(|directory| std::fs::DirBuilder::new().mode(0o700).create(directory))
-        .map_err(|_| failed(WRITE_FAILED))
-        .and_then(|()| {
-            worktree::copy_store(&objects, &source, &packs, max_entries, limit.max_bytes)
-        })
-        .and_then(|()| index_packs(&packs, &indexed))
-        .and_then(|()| {
-            let written = write(
-                workspace.baseline_root,
-                store,
-                &source,
-                commit,
-                limit,
-                Place::Taken,
-            );
-            written.map_err(|unwritten| match unwritten {
-                Unwritten::Object => failed("workspace.git-baseline-missing"),
-                Unwritten::Limit => storage_limit(),
-                Unwritten::Path => failed("workspace.git-path-unrepresentable"),
-                Unwritten::Exists | Unwritten::Write => failed(WRITE_FAILED),
-            })
-        });
-    let removed = copy.close();
-    built?;
-    removed.map_err(|_| failed(WRITE_FAILED))?;
-    // The store stays only while the commit-id file names the commit it was built for.
-    match read_baseline(workspace.baseline_root, workspace.root_name) {
-        Ok(named) if named == commit.to_string() => Ok(()),
-        named => {
-            let _ = baselines::remove_entry(store, WRITE_FAILED);
-            named.and(Err(failed("workspace.git-baseline-missing")))
-        }
-    }
-}
-
-/// Indexes each pack in `packs`, the packs as they were copied, into the directory `target`
-/// of the copy. The driver reads the pack and hands its bytes to the Git library's indexer,
-/// which writes the pack and an index of its own. The indexer names every object by the hash
-/// of what it read or resolved, and ends in an error for a pack that is not whole or holds an
-/// object it cannot resolve. No index a workspace wrote is read.
-///
-/// # Errors
-///
-/// `workspace.git-baseline-missing` for a pack whose objects do not all resolve.
-fn index_packs(packs: &Path, target: &Path) -> Result<(), DriverError> {
-    let unwritten = || failed(WRITE_FAILED);
-    let unresolved = || failed("workspace.git-baseline-missing");
-    let mut buffer = vec![0; 64 * 1024];
-    for entry in std::fs::read_dir(packs).map_err(|_| unwritten())? {
-        let path = entry.map_err(|_| unwritten())?.path();
-        let mut pack = std::fs::File::open(&path).map_err(|_| unwritten())?;
-        // A pack of a workspace need not hold the history of its commits, so the indexer does
-        // not look for the objects its commits and trees refer to.
-        let mut indexer =
-            git2::Indexer::new(None, target, 0o600, false).map_err(|_| unwritten())?;
-        loop {
-            let read = match pack.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => read,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(unwritten()),
-            };
-            indexer
-                .write_all(&buffer[..read])
-                .map_err(|_| unresolved())?;
-        }
-        indexer.commit().map_err(|_| unresolved())?;
-        std::fs::remove_file(&path).map_err(|_| unwritten())?;
-    }
-    Ok(())
-}
-
 /// Writes the store `store` of `commit` from the object store at `source`, a directory the
-/// driver owns, and puts it into `place`: one pack and its index, made in a staging directory
-/// inside `baseline_root`, synced, and renamed. The baseline is checked first
-/// ([`check_baseline`]) against `limit`. Every object is read by its id and checked against
-/// it, and none whose header states more than `limit.max_bytes` is read.
+/// driver owns: one pack and its index, made in a staging directory inside `baseline_root`,
+/// synced, and renamed into place. The baseline is checked first ([`check_baseline`]) against
+/// `limit`. Every object is read by its id and checked against it, and none whose header
+/// states more than `limit.max_bytes` is read.
 ///
 /// # Errors
 ///
@@ -289,7 +132,6 @@ pub(super) fn write(
     source: &Path,
     commit: Oid,
     limit: StorageLimit,
-    place: Place,
 ) -> Result<(), Unwritten> {
     let repository =
         object_store(source.to_str().ok_or(Unwritten::Write)?).map_err(|_| Unwritten::Object)?;
@@ -306,7 +148,7 @@ pub(super) fn write(
         .map_err(|_| Unwritten::Write)?;
     write_pack(&repository, commit, &pack, limit.max_bytes)?;
     seal(staging.path(), &pack, limit.max_bytes)?;
-    install(baseline_root, staging, store, place)
+    install(baseline_root, staging, store)
 }
 
 /// A directory of the baseline the check is in.
@@ -685,16 +527,13 @@ fn seal(staging: &Path, pack: &Path, max_bytes: u64) -> Result<(), Unwritten> {
     }
 }
 
-/// Renames the staged store into `place` and syncs the directory of the stores, which is made
-/// here when there is none. A link or a file in place of that directory is not followed. A
-/// store that replaces another changes places with it in one step, and the replaced one is
-/// removed. When the sync fails, the staged store is not kept: what stood in its place before
-/// stands there again.
+/// Renames the staged store to `store` and syncs the directory of the stores, which is made
+/// here when there is none. A link or a file in place of that directory is not followed, and
+/// a store that stands at `store` is not replaced. When the sync fails, the store is not kept.
 fn install(
     baseline_root: &Path,
     staging: tempfile::TempDir,
     store: &Path,
-    place: Place,
 ) -> Result<(), Unwritten> {
     let stores = baselines::stores(baseline_root);
     match std::fs::DirBuilder::new().mode(0o700).create(&stores) {
@@ -707,32 +546,22 @@ fn install(
     if !baselines::is_directory(&stores) {
         return Err(Unwritten::Write);
     }
-    let rename = |flags: RenameFlags| {
-        nix::fcntl::renameat2(
-            nix::fcntl::AT_FDCWD,
-            staging.path(),
-            nix::fcntl::AT_FDCWD,
-            store,
-            flags,
-        )
-    };
-    let replaced = match (rename(RenameFlags::RENAME_NOREPLACE), place) {
-        (Ok(()), _) => false,
-        (Err(Errno::EEXIST | Errno::ENOTEMPTY), Place::Taken) => {
-            rename(RenameFlags::RENAME_EXCHANGE).map_err(|_| Unwritten::Write)?;
-            true
-        }
-        (Err(Errno::EEXIST | Errno::ENOTEMPTY), Place::Free) => return Err(Unwritten::Exists),
-        (Err(_), _) => return Err(Unwritten::Write),
-    };
+    match nix::fcntl::renameat2(
+        nix::fcntl::AT_FDCWD,
+        staging.path(),
+        nix::fcntl::AT_FDCWD,
+        store,
+        RenameFlags::RENAME_NOREPLACE,
+    ) {
+        Ok(()) => {}
+        Err(Errno::EEXIST | Errno::ENOTEMPTY) => return Err(Unwritten::Exists),
+        Err(_) => return Err(Unwritten::Write),
+    }
+    // The staged directory is the store now: nothing is left under the staging name.
+    drop(staging.keep());
     if baselines::sync_directory(&stores, WRITE_FAILED).is_err() {
-        // The stores change places again; what is then under the staging name goes with it.
-        if !(replaced && rename(RenameFlags::RENAME_EXCHANGE).is_ok()) {
-            let _ = baselines::remove_entry(store, WRITE_FAILED);
-        }
+        let _ = baselines::remove_entry(store, WRITE_FAILED);
         return Err(Unwritten::Write);
     }
-    // Under the staging name is the replaced store, or nothing.
-    baselines::remove_entry(&staging.keep(), WRITE_FAILED).map_err(|_| Unwritten::Write)?;
     Ok(())
 }

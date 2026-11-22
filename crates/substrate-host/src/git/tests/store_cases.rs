@@ -1,27 +1,24 @@
 //! Cases of the baseline store (design 21, § *The baseline store*): the driver keeps the objects
 //! of a Git workspace's baseline commit in a store of its own, both observations read the
-//! baseline from that store, and a workspace that predates the store gets one at its first
-//! observation.
+//! baseline from that store, and a workspace without a store has no Git observation.
 
 use std::collections::BTreeSet;
-use std::os::fd::OwnedFd;
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::time::Duration;
 
 use git2::{ObjectType, Oid, Repository, Signature};
 use sha2::{Digest as _, Sha256};
 use substrate_wire::{GitBaselineFile, GitChange, GitChangesQuery, is_root_name};
 use tempfile::{TempDir, tempdir};
 
-use super::super::{read_baseline, remove_baseline, store, worktree};
+use super::super::{read_baseline, remove_baseline};
+use super::store_failure_cases::{both, codes, commit_id_file_alone};
 use super::watch::{Event, Kind, Watch};
 use super::{
     baseline_file, baseline_object, baseline_root, change_every_kind_of_entry, changes,
-    commit_paths, objects_of, observe, paths, remove_store, source_repository, store_of, target,
+    commit_paths, objects_of, observe, paths, source_repository, store_of, target,
     tracked_workspace, write_baseline,
 };
-use crate::git_baselines::{BuildTurns, DEFAULT_BYTE_LIMIT};
 use crate::{DriverError, DriverErrorClass};
 
 pub(super) const QUERY: GitChangesQuery = GitChangesQuery {
@@ -41,14 +38,9 @@ struct Answer {
     absent: Option<GitBaselineFile>,
 }
 
-/// The changes, a baseline file and a path the baseline does not hold, with `copy_bound` bytes
-/// for the copy a store is built from.
-fn answer_within(
-    workspace: &Path,
-    baselines: &Path,
-    copy_bound: u64,
-) -> Result<Answer, DriverError> {
-    target(workspace, baselines, copy_bound, |held| {
+/// The changes, a baseline file and a path the baseline does not hold.
+fn answer(workspace: &Path, baselines: &Path) -> Result<Answer, DriverError> {
+    target(workspace, baselines, |held| {
         let set = changes(held, QUERY)?;
         let file = baseline_file(held, "README.md", 1024)?;
         let absent = baseline_file(held, "absent.txt", 1024)?;
@@ -61,10 +53,6 @@ fn answer_within(
             absent: absent.file,
         })
     })
-}
-
-fn answer(workspace: &Path, baselines: &Path) -> Result<Answer, DriverError> {
-    answer_within(workspace, baselines, DEFAULT_BYTE_LIMIT)
 }
 
 /// The names in `directory`, sorted; none when it is absent.
@@ -99,7 +87,7 @@ pub(super) fn leftovers(baselines: &Path) -> Vec<String> {
         .collect()
 }
 
-fn assert_no_store_and_no_copy(baselines: &Path) {
+fn assert_nothing_is_left(baselines: &Path) {
     assert!(!store_of(baselines).exists(), "a store is kept");
     assert_eq!(
         leftovers(baselines),
@@ -191,31 +179,23 @@ fn noisy_workspace(files: u8, length: usize) -> (TempDir, Oid) {
     (workspace, commit)
 }
 
-/// A workspace materialized before the store existed: its commit-id file, and no store.
-fn predating() -> (TempDir, TempDir, Oid) {
-    let (workspace, commit) = source_repository();
-    let baselines = baseline_root(workspace.path(), commit);
-    remove_store(baselines.path());
-    (workspace, baselines, commit)
-}
-
-/// Every entry beneath `directory`, and the bytes of the regular files among them.
-fn entries_and_bytes(directory: &Path) -> (usize, u64) {
-    let (mut entries, mut bytes) = (0, 0);
+/// Watches every directory beneath `directory`, itself included. Listing them for that is
+/// reported, which shows that the watch reports a directory that is opened.
+fn watch_beneath(watch: &mut Watch, directory: &Path) {
     let mut pending = vec![directory.to_owned()];
     while let Some(directory) = pending.pop() {
+        watch.add("objects", &directory);
         for entry in std::fs::read_dir(&directory).expect("directory") {
             let entry = entry.expect("entry");
-            let metadata = entry.metadata().expect("metadata");
-            entries += 1;
-            if metadata.is_dir() {
+            if entry.file_type().expect("kind").is_dir() {
                 pending.push(entry.path());
-            } else {
-                bytes += metadata.len();
             }
         }
     }
-    (entries, bytes)
+    assert!(
+        !watch.events().is_empty(),
+        "the watch reports a directory that is opened"
+    );
 }
 
 /// A baseline is written store first: the store is made in a staging directory inside the
@@ -361,12 +341,9 @@ fn a_baseline_whose_tree_is_empty_is_held_and_read() {
     );
     let baselines = baseline_root(workspace.path(), commit);
 
+    assert!(store_objects(baselines.path()).contains(&commit));
     let held = observe(workspace.path(), baselines.path(), 1024).expect("change set");
     assert_eq!(paths(&held), ["README.md"], "{held:#?}");
-    remove_store(baselines.path());
-    let built = observe(workspace.path(), baselines.path(), 1024).expect("change set");
-    assert_eq!(paths(&built), ["README.md"], "{built:#?}");
-    assert!(store_objects(baselines.path()).contains(&commit));
 }
 
 /// Both observations of a workspace that has its store open nothing beneath the workspace's
@@ -376,20 +353,7 @@ fn observations_of_a_workspace_with_a_store_open_nothing_beneath_its_object_stor
     let (workspace, baselines) = tracked_workspace();
     change_every_kind_of_entry(workspace.path());
     let mut watch = Watch::new();
-    let mut pending = vec![workspace.path().join(".git/objects")];
-    while let Some(directory) = pending.pop() {
-        watch.add("objects", &directory);
-        for entry in std::fs::read_dir(&directory).expect("object store") {
-            let entry = entry.expect("entry");
-            if entry.file_type().expect("kind").is_dir() {
-                pending.push(entry.path());
-            }
-        }
-    }
-    assert!(
-        !watch.events().is_empty(),
-        "the watch reports a directory that is opened"
-    );
+    watch_beneath(&mut watch, &workspace.path().join(".git/objects"));
 
     let answered = answer(workspace.path(), baselines.path()).expect("both observations");
     assert!(answered.file.is_some() && !answered.items.is_empty());
@@ -454,7 +418,7 @@ fn a_baseline_is_refused_for_a_root_name_that_has_a_commit_id_file_or_a_store() 
         std::fs::read(with_file.path().join("ws_git")).expect("entry"),
         b"another workspace's\n"
     );
-    assert_no_store_and_no_copy(with_file.path());
+    assert_nothing_is_left(with_file.path());
 
     let with_store = tempdir().expect("baseline root");
     let store = store_of(with_store.path());
@@ -486,7 +450,7 @@ fn a_store_over_the_byte_limit_is_refused_and_nothing_is_left() {
     assert_eq!(error.code, "workspace.git-storage-limit");
     assert_eq!(error.class, DriverErrorClass::Exhausted);
     assert!(!baselines.path().join("ws_git").exists());
-    assert_no_store_and_no_copy(baselines.path());
+    assert_nothing_is_left(baselines.path());
 
     write(64 * 1024).expect("a store within the limit");
     assert_eq!(
@@ -565,304 +529,51 @@ fn a_root_name_outside_the_root_name_set_is_refused_before_anything_is_written_o
     }
 }
 
-/// A workspace with a commit-id file and no store gets its store at the first observation,
-/// whichever observation that is. The store holds the baseline's objects, the copy it was made
-/// from is gone, and later observations open nothing in the workspace's object store.
+/// Writes the objects of `commit` into the workspace's own object store a second time, as one
+/// pack and its index beside the loose objects.
+fn pack_into_the_workspace(workspace: &Path, commit: Oid) {
+    let repository = Repository::open(workspace).expect("repository");
+    let mut builder = repository.packbuilder().expect("pack builder");
+    builder.insert_commit(commit).expect("baseline objects");
+    let mut pack = git2::Buf::new();
+    builder.write_buf(&mut pack).expect("pack");
+    let objects = repository.odb().expect("object store");
+    let mut writer = objects.packwriter().expect("pack writer");
+    std::io::Write::write_all(&mut writer, &pack).expect("pack bytes");
+    writer.commit().expect("pack index");
+}
+
+/// A workspace with a commit-id file and no store has no Git observation: both are refused
+/// `workspace.git-baseline-missing`. No store is made for it and nothing is staged, and
+/// nothing beneath the workspace's `.git/objects` is opened, though that directory holds every
+/// object of the baseline, loose and in a pack.
 #[test]
-fn a_workspace_without_a_store_gets_its_store_at_the_first_observation() {
-    let (workspace, baselines) = tracked_workspace();
-    change_every_kind_of_entry(workspace.path());
-    let commit = held_commit(baselines.path());
-    let with_store = answer(workspace.path(), baselines.path()).expect("answer with the store");
-    let expected = baseline_objects(workspace.path(), commit);
-
-    remove_store(baselines.path());
-    let file = target(
-        workspace.path(),
-        baselines.path(),
-        DEFAULT_BYTE_LIMIT,
-        |held| baseline_file(held, "README.md", 1024),
-    )
-    .expect("baseline file of a workspace that predates the store");
-    assert_eq!(file.file, with_store.file);
-    assert_eq!(store_objects(baselines.path()), expected);
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
-
-    remove_store(baselines.path());
-    let set = target(
-        workspace.path(),
-        baselines.path(),
-        DEFAULT_BYTE_LIMIT,
-        |held| changes(held, QUERY),
-    )
-    .expect("changes of a workspace that predates the store");
-    assert_eq!(set.items, with_store.items);
-    assert_eq!(store_objects(baselines.path()), expected);
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
-    for directory in [
-        store_of(baselines.path()),
-        store_of(baselines.path()).join("pack"),
-    ] {
-        assert_eq!(mode(&directory), 0o700, "{}", directory.display());
-    }
-
-    std::fs::remove_dir_all(workspace.path().join(".git/objects")).expect("object store removed");
-    assert_eq!(
-        answer(workspace.path(), baselines.path()).expect("answer from the built store"),
-        with_store
-    );
-}
-
-/// How an object store that holds more than directories and regular files is made from the
-/// one at `objects`, whose baseline file object is `object`; `elsewhere` is outside the
-/// workspace.
-type Tamper = fn(objects: &Path, object: &Path, elsewhere: &Path);
-
-fn object_replaced_by_a_link(_: &Path, object: &Path, elsewhere: &Path) {
-    let outside = elsewhere.join("object");
-    std::fs::copy(object, &outside).expect("the object's bytes outside the workspace");
-    std::fs::remove_file(object).expect("object removed");
-    std::os::unix::fs::symlink(&outside, object).expect("link");
-}
-
-fn object_replaced_by_a_fifo(_: &Path, object: &Path, _: &Path) {
-    std::fs::remove_file(object).expect("object removed");
-    nix::unistd::mkfifo(object, nix::sys::stat::Mode::from_bits_truncate(0o600)).expect("FIFO");
-}
-
-fn a_socket_beside_the_objects(objects: &Path, _: &Path, _: &Path) {
-    drop(std::os::unix::net::UnixListener::bind(objects.join("socket")).expect("socket"));
-}
-
-fn an_alternates_file(objects: &Path, _: &Path, elsewhere: &Path) {
-    std::fs::create_dir_all(objects.join("info")).expect("directory");
-    std::fs::write(
-        objects.join("info/alternates"),
-        format!("{}\n", elsewhere.display()),
-    )
-    .expect("object store named by a file");
-}
-
-fn a_directory_replaced_by_a_link(_: &Path, object: &Path, elsewhere: &Path) {
-    let directory = object.parent().expect("directory of the object");
-    let outside = elsewhere.join("directory");
-    std::fs::rename(directory, &outside).expect("directory moved out");
-    std::os::unix::fs::symlink(&outside, directory).expect("link");
-}
-
-fn directories_nested_nine_deep(objects: &Path, _: &Path, _: &Path) {
-    std::fs::create_dir_all(objects.join(["d"; 9].join("/"))).expect("nested directories");
-}
-
-/// What an observation that has to build a store answers: `Ok` when it built one, else the
-/// code of its refusal. `None` when it did not answer within five seconds.
-fn build(workspace: &Path, baselines: &Path) -> Option<Result<(), String>> {
-    let (answer, answered) = std::sync::mpsc::channel();
-    let (root, baseline) = (workspace.to_owned(), baselines.to_owned());
-    std::thread::spawn(move || {
-        let outcome = observe(&root, &baseline, 1024)
-            .map(|_| ())
-            .map_err(|error| error.code.to_owned());
-        let _ = answer.send(outcome);
-    });
-    answered.recv_timeout(Duration::from_secs(5)).ok()
-}
-
-/// No store is built from an object store that holds a link, a FIFO, another entry that is
-/// neither a directory nor a regular file, an `info/alternates` file, or directories nested
-/// deeper than eight: the attempt ends `workspace.git-repository-failed` without waiting, and
-/// leaves no store and no copy.
-#[test]
-fn no_store_is_built_from_an_object_store_of_more_than_directories_and_regular_files() {
-    let cases: [(&str, Tamper); 6] = [
-        ("an object replaced by a link", object_replaced_by_a_link),
-        ("an object replaced by a FIFO", object_replaced_by_a_fifo),
-        ("a socket", a_socket_beside_the_objects),
-        ("info/alternates", an_alternates_file),
-        (
-            "a directory replaced by a link",
-            a_directory_replaced_by_a_link,
-        ),
-        ("directories nested nine deep", directories_nested_nine_deep),
-    ];
-    for (what, tamper) in cases {
-        let (workspace, baselines, commit) = predating();
-        let elsewhere = tempdir().expect("directory outside the workspace");
-        let object = baseline_object(workspace.path(), commit);
-        tamper(
-            &workspace.path().join(".git/objects"),
-            &object,
-            elsewhere.path(),
-        );
-
-        let outcome = build(workspace.path(), baselines.path());
-        // Lets a reader that waits on a FIFO return, so the test process keeps no thread.
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&object);
-        assert_eq!(
-            outcome.unwrap_or_else(|| panic!("{what}: the observation waited")),
-            Err("workspace.git-repository-failed".to_owned()),
-            "{what}"
-        );
-        assert_no_store_and_no_copy(baselines.path());
-    }
-}
-
-/// Directories nested eight deep are within the bound: the store is built.
-#[test]
-fn a_store_is_built_from_an_object_store_with_directories_nested_eight_deep() {
-    let (workspace, baselines, commit) = predating();
-    std::fs::create_dir_all(
-        workspace
-            .path()
-            .join(".git/objects")
-            .join(["d"; 8].join("/")),
-    )
-    .expect("nested directories");
-
-    observe(workspace.path(), baselines.path(), 1024).expect("change set");
-    assert_eq!(
-        store_objects(baselines.path()),
-        baseline_objects(workspace.path(), commit)
-    );
-}
-
-/// An object store with more entries than the bound ends the attempt
-/// `workspace.git-repository-failed`; one with exactly as many is copied.
-#[test]
-fn no_store_is_built_from_an_object_store_with_more_entries_than_the_bound() {
-    let (workspace, baselines, commit) = predating();
-    let (entries, _) = entries_and_bytes(&workspace.path().join(".git/objects"));
-    let turn = BuildTurns::default().taken_blocking();
-    let held = |max_entries: usize| {
-        target(
-            workspace.path(),
-            baselines.path(),
-            DEFAULT_BYTE_LIMIT,
-            |held| store::built(held, commit, max_entries, &turn),
-        )
-    };
-
-    let error = held(entries - 1).expect_err("more entries than the bound");
-    assert_eq!(error.code, "workspace.git-repository-failed");
-    assert_no_store_and_no_copy(baselines.path());
-    held(entries).expect("as many entries as the bound");
-    assert!(store_objects(baselines.path()).contains(&commit));
-}
-
-/// An object store of more bytes than the copy's bound ends the attempt
-/// `workspace.git-storage-limit`; the copy takes exactly the bound and no byte more.
-#[test]
-fn no_store_is_built_from_an_object_store_of_more_bytes_than_the_bound() {
-    let (workspace, baselines, commit) = predating();
+fn a_workspace_without_a_store_has_no_git_observation() {
+    let (workspace, commit) = source_repository();
+    let baselines = commit_id_file_alone(commit);
+    pack_into_the_workspace(workspace.path(), commit);
     let objects = workspace.path().join(".git/objects");
-    let (_, bytes) = entries_and_bytes(&objects);
-
-    let error = answer_within(workspace.path(), baselines.path(), bytes - 1)
-        .expect_err("more bytes than the bound");
-    assert_eq!(error.code, "workspace.git-storage-limit");
-    assert_eq!(error.class, DriverErrorClass::Exhausted);
-    assert_no_store_and_no_copy(baselines.path());
-
-    let pinned: OwnedFd = std::fs::File::open(&objects).expect("object store").into();
-    // The object store here holds loose objects alone, so every byte of it is copied.
-    let copy = |max_bytes: u64| {
-        let copy = tempdir().expect("copy");
-        let (loose, packs) = (copy.path().join("objects"), copy.path().join("packs"));
-        for directory in [&loose, &packs] {
-            std::fs::create_dir(directory).expect("directory");
-        }
-        worktree::copy_store(&pinned, &loose, &packs, usize::MAX, max_bytes)
-            .map(|()| entries_and_bytes(copy.path()).1)
-    };
-    assert_eq!(
-        copy(bytes - 1).expect_err("one byte over").code,
-        "workspace.git-storage-limit"
+    let packed = names(&objects.join("pack"));
+    assert!(
+        ["idx", "pack"]
+            .iter()
+            .all(|kind| packed.iter().any(|name| Path::new(name)
+                .extension()
+                .is_some_and(|found| found == *kind))),
+        "a pack and its index: {packed:?}"
     );
-    assert_eq!(copy(bytes).expect("exactly the bound"), bytes);
-
-    answer_within(workspace.path(), baselines.path(), bytes + 64 * 1024)
-        .expect("an object store within the bound");
-    assert!(store_objects(baselines.path()).contains(&commit));
-}
-
-/// An object of the baseline that is absent, or that is not what its id names, ends the attempt
-/// `workspace.git-baseline-missing` with no store and no copy left. A later observation tries
-/// again.
-#[test]
-fn an_absent_or_altered_baseline_object_ends_the_build_and_a_later_observation_tries_again() {
-    let (workspace, baselines, commit) = predating();
-    let object = baseline_object(workspace.path(), commit);
-    let bytes = std::fs::read(&object).expect("object");
-    let refusal = || {
-        observe(workspace.path(), baselines.path(), 1024)
-            .expect_err("no store without every object of the baseline")
-            .code
-    };
-
-    std::fs::remove_file(&object).expect("object removed");
-    assert_eq!(refusal(), "workspace.git-baseline-missing");
-    assert_no_store_and_no_copy(baselines.path());
-
-    std::fs::write(&object, [0xb7, 0x55, 0x00, 0x00]).expect("other bytes in the object's place");
-    assert_eq!(refusal(), "workspace.git-baseline-missing");
-    assert_no_store_and_no_copy(baselines.path());
-
-    std::fs::remove_file(&object).expect("other bytes removed");
-    std::fs::write(&object, bytes).expect("object restored");
-    observe(workspace.path(), baselines.path(), 1024).expect("change set");
-    assert_eq!(
-        store_objects(baselines.path()),
-        baseline_objects(workspace.path(), commit)
-    );
-}
-
-/// An object of the baseline whose header states a size over the copy's bound is not read: the
-/// attempt ends `workspace.git-storage-limit`, though the copy and the object itself are sound.
-#[test]
-fn a_baseline_object_stated_larger_than_the_bound_is_not_read() {
-    let (workspace, first) = source_repository();
-    std::fs::write(workspace.path().join("zeros.bin"), vec![0_u8; 1024 * 1024])
-        .expect("a file that compresses to almost nothing");
-    let commit = commit_paths(workspace.path(), first, &["zeros.bin"]);
-    let baselines = baseline_root(workspace.path(), commit);
-    remove_store(baselines.path());
-    let (_, bytes) = entries_and_bytes(&workspace.path().join(".git/objects"));
-    assert!(bytes < 64 * 1024, "the object store is {bytes} bytes");
-
-    let error = answer_within(workspace.path(), baselines.path(), 64 * 1024)
-        .expect_err("an object stated larger than the bound");
-    assert_eq!(error.code, "workspace.git-storage-limit");
-    assert_no_store_and_no_copy(baselines.path());
-
-    answer_within(workspace.path(), baselines.path(), 2 * 1024 * 1024)
-        .expect("the object within the bound");
-    assert!(store_objects(baselines.path()).contains(&commit));
-}
-
-/// A store that does not hold the commit the commit-id file names is replaced by one that
-/// does, built like the store of a workspace that has none.
-#[test]
-fn a_store_that_lacks_the_named_commit_is_replaced() {
-    let (workspace, first) = source_repository();
-    std::fs::write(workspace.path().join("later.txt"), b"later\n").expect("file");
-    let commit = commit_paths(workspace.path(), first, &["later.txt"]);
-    let baselines = baseline_root(workspace.path(), commit);
-    std::fs::write(workspace.path().join("README.md"), b"changed workspace\n").expect("change");
-    let expected = answer(workspace.path(), baselines.path()).expect("answer with the store");
-    remove_store(baselines.path());
-    plant_store(baselines.path(), workspace.path(), first);
-    assert!(!store_objects(baselines.path()).contains(&commit));
+    assert!(baseline_object(workspace.path(), commit).is_file());
+    let mut watch = Watch::new();
+    watch_beneath(&mut watch, &objects);
+    let before = names(baselines.path());
+    assert_eq!(before, ["ws_git"], "a commit-id file and no store");
 
     assert_eq!(
-        answer(workspace.path(), baselines.path()).expect("answer"),
-        expected
+        codes(both(workspace.path(), baselines.path())),
+        ["workspace.git-baseline-missing"; 2]
     );
-    assert_eq!(
-        store_objects(baselines.path()),
-        baseline_objects(workspace.path(), commit)
-    );
-    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
+
+    assert_eq!(watch.events(), Vec::<Event>::new());
+    assert_eq!(names(baselines.path()), before);
+    assert_nothing_is_left(baselines.path());
 }

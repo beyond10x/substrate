@@ -12,7 +12,6 @@ use super::{
     baseline_object, baseline_root, changes, changes_within, commit_paths, observe, paths,
     remove_store, source_repository, store_of, target,
 };
-use crate::git_baselines::DEFAULT_BYTE_LIMIT;
 
 /// An instant long before any index of a test is written.
 fn earlier() -> SystemTime {
@@ -265,7 +264,7 @@ fn the_file_and_total_byte_bounds_cut_the_answer_and_mark_it_truncated() {
         write(root, path, "line\n".repeat(100).as_bytes());
     }
 
-    let observed = target(root, baselines.path(), DEFAULT_BYTE_LIMIT, |held| {
+    let observed = target(root, baselines.path(), |held| {
         changes(
             held,
             GitChangesQuery {
@@ -344,8 +343,8 @@ fn the_observation_answers_when_worktree_entries_are_not_regular_files() {
 
 /// A size the reader reports for a baseline entry is the size of an object that was read whole
 /// and checked against its id: the object in the driver's store, whatever regular file the
-/// workspace's object store holds in its place. No store is built from an object that is not
-/// what its id names.
+/// workspace's object store holds in its place. Without its store the workspace has no
+/// observation.
 #[test]
 fn a_baseline_size_comes_only_from_a_checked_object_of_the_store_the_driver_holds() {
     let (workspace, commit) = source_repository();
@@ -365,8 +364,8 @@ fn a_baseline_size_comes_only_from_a_checked_object_of_the_store_the_driver_hold
     assert_eq!(sizes, [22], "{observed:#?}");
 
     remove_store(baselines.path());
-    let error = observe(workspace.path(), baselines.path(), 16)
-        .expect_err("an object that is not what its id names");
+    let error =
+        observe(workspace.path(), baselines.path(), 16).expect_err("a workspace without a store");
     assert_eq!(error.code, "workspace.git-baseline-missing");
     assert!(!store_of(baselines.path()).exists());
 }
@@ -409,7 +408,7 @@ fn a_baseline_object_the_budget_does_not_cover_ends_the_answer_and_marks_it() {
     let baselines = baseline_root(workspace.path(), commit);
     write(root, "a.txt", "LINE\n".repeat(20).as_bytes());
     let within = |budget: u64| {
-        target(root, baselines.path(), DEFAULT_BYTE_LIMIT, |held| {
+        target(root, baselines.path(), |held| {
             changes_within(
                 held,
                 GitChangesQuery {

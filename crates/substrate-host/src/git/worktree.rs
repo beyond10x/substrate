@@ -1,5 +1,4 @@
-//! The worktree side of the Git changes observation, and the copy of a workspace's object store
-//! that a baseline store is built from.
+//! The worktree side of the Git changes observation.
 //!
 //! Every entry is observed and read beneath the pinned workspace directory with the guarded file
 //! system: `openat2` beneath that directory, no link followed, no open that waits. Nothing the
@@ -8,11 +7,10 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
-use std::path::Path;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
 use git2::{ObjectType, Oid};
 use gix::bstr::{BStr, ByteSlice as _};
@@ -21,7 +19,7 @@ use gix::glob::{Pattern, wildmatch};
 use substrate_guarded::fs as guarded;
 use substrate_wire::MAX_IO_BYTES;
 
-use super::{failed, storage_limit};
+use super::failed;
 use crate::{DriverError, DriverErrorClass};
 
 pub(super) const FILE: u32 = 0o100_644;
@@ -30,10 +28,6 @@ pub(super) const LINK: u32 = 0o120_000;
 
 /// Directories nested deeper than this beneath the workspace root are not entered.
 const MAX_WALK_DEPTH: usize = 100;
-/// An object store with more entries than this is not copied.
-pub(super) const MAX_STORE_ENTRIES: usize = 262_144;
-/// Directories nested deeper than this beneath the object store are refused.
-const MAX_STORE_DEPTH: usize = 8;
 
 /// One regular file or link beneath the workspace root, observed without following it.
 #[derive(Clone, Copy)]
@@ -307,153 +301,6 @@ impl Walk<'_> {
             .find_map(|rules| rules.decide(path, is_directory))
             .unwrap_or(false)
     }
-}
-
-/// Copies the pack files and the loose objects of the object store at `objects`, a directory
-/// beneath the pinned workspace, into directories the driver owns: a loose object
-/// `<two hex digits>/<38 hex digits>` to the same path beneath `loose`, and a pack file
-/// `pack/<name>.pack` to `packs/<name>.pack`. Nothing else of the object store is copied or
-/// opened: no pack index, no multi-pack index, no commit graph, nothing under `info/`. The Git
-/// library is then pointed at `loose` and never at the workspace.
-///
-/// Every entry is listed, and every directory is opened beneath `objects` without following a
-/// link. A file that is copied is opened for reading only once it is known to be a regular
-/// file, without waiting, and is copied with plain reads.
-///
-/// # Errors
-///
-/// `workspace.git-repository-failed` for an entry that is neither a directory nor a regular
-/// file, a link among them, for an `info/alternates` file, for directories nested deeper than
-/// [`MAX_STORE_DEPTH`] and for more than `max_entries` entries, whether or not the entry would
-/// be copied. `workspace.git-storage-limit` for more than `max_bytes` copied bytes.
-pub(super) fn copy_store(
-    objects: &OwnedFd,
-    loose: &Path,
-    packs: &Path,
-    max_entries: usize,
-    max_bytes: u64,
-) -> Result<(), DriverError> {
-    let mut copy = StoreCopy {
-        loose,
-        packs,
-        entries_left: max_entries,
-        bytes_left: max_bytes,
-        buffer: vec![0; 64 * 1024],
-    };
-    copy.directory(objects, "", 0)
-}
-
-/// Where a copy goes, what is left of its bounds, and the bytes of the read in hand.
-struct StoreCopy<'a> {
-    loose: &'a Path,
-    packs: &'a Path,
-    entries_left: usize,
-    bytes_left: u64,
-    buffer: Vec<u8>,
-}
-
-/// Whether `text` is `length` lowercase hexadecimal digits.
-fn hexadecimal(text: &str, length: usize) -> bool {
-    text.len() == length
-        && text
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-impl StoreCopy<'_> {
-    /// Lists `directory`, which lies `level` directories beneath the object store at the path
-    /// `prefix`, and copies what of it is a pack file or a loose object.
-    fn directory(
-        &mut self,
-        directory: &OwnedFd,
-        prefix: &str,
-        level: usize,
-    ) -> Result<(), DriverError> {
-        // The entry bound is applied while the directory is listed: no listing is held whole.
-        let listing = std::fs::read_dir(descriptor_path(directory)).map_err(|_| not_plain())?;
-        for entry in listing {
-            self.entries_left = self.entries_left.checked_sub(1).ok_or_else(not_plain)?;
-            let (name, kind) = entry
-                .and_then(|entry| Ok((entry.file_name(), entry.file_type()?)))
-                .map_err(|_| not_plain())?;
-            let name = name.to_str().ok_or_else(not_plain)?;
-            if kind.is_dir() {
-                if level == MAX_STORE_DEPTH {
-                    return Err(not_plain());
-                }
-                let child = open_directory(directory, name)
-                    .ok()
-                    .flatten()
-                    .ok_or_else(not_plain)?;
-                self.directory(&child, &format!("{prefix}{name}/"), level + 1)?;
-            } else if kind.is_file() && !(prefix == "info/" && name == "alternates") {
-                if let Some(copied) = self.copied(prefix, name)? {
-                    self.file(directory, name, &copied)?;
-                }
-            } else {
-                return Err(not_plain());
-            }
-        }
-        Ok(())
-    }
-
-    /// Where the regular file `name` of the directory at `prefix` is copied to: a pack file to
-    /// the directory of the packs, a loose object to its directory beneath the loose objects,
-    /// which is made here. `None` for every other file.
-    fn copied(&self, prefix: &str, name: &str) -> Result<Option<std::path::PathBuf>, DriverError> {
-        if prefix == "pack/" {
-            let pack = name
-                .strip_suffix(".pack")
-                .is_some_and(|stem| !stem.is_empty());
-            return Ok(pack.then(|| self.packs.join(name)));
-        }
-        let Some(fanout) = prefix
-            .strip_suffix('/')
-            .filter(|fanout| hexadecimal(fanout, 2) && hexadecimal(name, 38))
-        else {
-            return Ok(None);
-        };
-        let directory = self.loose.join(fanout);
-        match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(failed("workspace.git-baseline-write-failed")),
-        }
-        Ok(Some(directory.join(name)))
-    }
-
-    /// Copies the regular file `name` of `directory` to `copied`, with plain reads.
-    fn file(&mut self, directory: &OwnedFd, name: &str, copied: &Path) -> Result<(), DriverError> {
-        let (mut file, _) = regular(directory, name)
-            .ok()
-            .flatten()
-            .ok_or_else(not_plain)?;
-        let mut copy = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(copied)
-            .map_err(|_| failed("workspace.git-baseline-write-failed"))?;
-        loop {
-            let read = match file.read(&mut self.buffer) {
-                Ok(0) => return Ok(()),
-                Ok(read) => read,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(not_plain()),
-            };
-            self.bytes_left = u64::try_from(read)
-                .ok()
-                .and_then(|read| self.bytes_left.checked_sub(read))
-                .ok_or_else(storage_limit)?;
-            copy.write_all(&self.buffer[..read])
-                .map_err(|_| failed("workspace.git-baseline-write-failed"))?;
-        }
-    }
-}
-
-/// The refusal of an object store no store is built from.
-fn not_plain() -> DriverError {
-    failed("workspace.git-repository-failed")
 }
 
 /// The names in `directory` and what kind of entry each is, in byte order.

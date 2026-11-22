@@ -11,6 +11,7 @@
 //! source configured when it belongs to no workspace directory that exists.
 //! Invariant 3: a missing mechanism is a named refusal, never a degraded Git workspace.
 
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -20,7 +21,6 @@ use substrate_wire::{
 };
 use zeroize::Zeroizing;
 
-use crate::git_baselines::{BuildTurn, GitWorkspace, Observed};
 use crate::{DriverError, GitSourceBinding};
 
 /// Whether this build serves a Git source at all; `git.rs` holds `true`.
@@ -87,25 +87,24 @@ pub(super) fn remove_baseline(baseline_root: &Path, root_name: &str) -> Result<(
     crate::git_baselines::remove(baseline_root, root_name)
 }
 
-pub(super) fn build_store(
-    _workspace: &GitWorkspace<'_>,
-    _turn: &BuildTurn,
-) -> Result<(), DriverError> {
-    Err(source_unserved())
-}
-
 pub(super) fn baseline_file(
-    _workspace: &GitWorkspace<'_>,
+    _workspace_id: &str,
+    _baseline_root: &Path,
+    _root_name: &str,
     _path: &str,
     _max_bytes: u64,
-) -> Result<Observed<GitBaselineFileResult>, DriverError> {
+) -> Result<GitBaselineFileResult, DriverError> {
     Err(source_unserved())
 }
 
 pub(super) fn changes(
-    _workspace: &GitWorkspace<'_>,
+    _workspace_id: &str,
+    _root: &OwnedFd,
+    _workspace: &Path,
+    _baseline_root: &Path,
+    _root_name: &str,
     _query: GitChangesQuery,
-) -> Result<Observed<GitChangeSet>, DriverError> {
+) -> Result<GitChangeSet, DriverError> {
     Err(source_unserved())
 }
 
