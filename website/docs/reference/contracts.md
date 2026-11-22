@@ -1,6 +1,6 @@
 ---
 title: Contracts overview
-description: Every contract Substrate publishes, who uses it, where it is defined and how it is checked, with the confinement contract's ten families and thirteen facts.
+description: Every contract Substrate publishes, who uses it, where it is defined and how it is checked, with the confinement contract's ten families and fourteen facts.
 ---
 
 # What Substrate promises, and where
@@ -68,7 +68,7 @@ Every adapter's declared set in the specification holds `process_run`, `process_
 `output_read`, `wait`, `workspace` and
 `audit`; the specification's `model-*` scenario refuses each by name on an adapter that lacks it.
 
-### The thirteen facts
+### The fourteen facts
 
 A refusal names the first missing fact in this order.
 
@@ -82,6 +82,7 @@ A refusal names the first missing fact in this order.
 | `ipc_signals_contained` | no signal reaches a process outside the tree |
 | `sealed_paths` | paths inside a writable workspace stay unwritable |
 | `exec_subpaths` | exec is admitted by declared subpath, not only by literal program |
+| `exec_denied_paths` | exec of a denied path fails, even beneath a declared subpath |
 | `private_tmpdir` | a per-run `TMPDIR`, invisible to another run and gone after `wait` |
 | `host_network` | the run uses the host's network directly |
 | `image_digest_pinned` | the image runs by digest only |
@@ -94,7 +95,8 @@ refused `confinement.fact-unserved` naming the fact.
 
 ### Admission order
 
-Admission refuses in a fixed order: a reserved field (`ingress_routes`, `rate_bounds`), an adapter
+Admission refuses in a fixed order: a reserved field (`ingress_routes`, `rate_bounds`), a
+deny-list without an allow-list or over its bound, an adapter
 that did not open, a missing reason on a declared-insecure adapter, an unpinned image on a
 digest-pinning adapter, the host's policy against `local`, the first missing family, then the first
 missing fact. The [profile guide](../guides/confinement-profiles.md#refusals) gives each code and
@@ -102,17 +104,17 @@ status.
 
 ### Scenarios and lanes
 
-The specification holds 67 authored scenarios. Each is named for its adapter and the lane it runs
+The specification holds 74 authored scenarios. Each is named for its adapter and the lane it runs
 in, and each adapter's test file runs its lane's scenarios against the real adapter.
 
 | Lane | Scenarios | Runs against |
 |---|---|---|
-| `portable` | 20 | `local`, and the open refusals and absences any host can check |
-| `delegated` | 22 | `linux` and `systemd` on a host with a delegated cgroup v2 root |
-| `macos` | 10 | `macos` on the `macos-15` CI job |
+| `portable` | 22 | `local`, and the open refusals and absences any host can check |
+| `delegated` | 25 | `linux` and `systemd` on a host with a delegated cgroup v2 root |
+| `macos` | 11 | `macos` on the `macos-15` CI job |
 | `oci` | 7 | `oci` against Docker in the gate workflow |
 | `pod` | 5 | `pod` against a pinned `kind` cluster in the gate workflow |
-| `interpreted` | 3 | ESS's interpreted reference only |
+| `interpreted` | 4 | ESS's interpreted reference only |
 
 ## The consumer surface
 

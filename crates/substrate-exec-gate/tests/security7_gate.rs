@@ -115,6 +115,7 @@ fn security7_the_helper_asks_the_kernel_for_no_dot_dot_and_a_moved_directory_doe
             Located::new(Class::Follow, &text(root), "fs/ro/beside").expect("a follow path"),
         ],
         writable: vec![text(&root.join("fs/w"))],
+        deny: Vec::new(),
     };
     let helper = |command: &mut Command, root: &Path| {
         let lists = lists(root);

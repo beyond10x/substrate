@@ -94,6 +94,7 @@ impl Scratch {
             loader: loader(),
             allow: allow.iter().map(|rel| self.entry(rel)).collect(),
             writable: vec![self.at("fs/w")],
+            deny: Vec::new(),
         }
     }
 

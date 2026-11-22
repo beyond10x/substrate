@@ -122,6 +122,7 @@ pub struct SeatbeltPolicy {
     executables: Vec<PathBuf>,
     writable: Vec<PathBuf>,
     exec_subpaths: Vec<PathBuf>,
+    exec_denied: Vec<PathBuf>,
     sealed: Vec<PathBuf>,
 }
 
@@ -134,6 +135,7 @@ impl SeatbeltPolicy {
             executables: Vec::new(),
             writable: Vec::new(),
             exec_subpaths: Vec::new(),
+            exec_denied: Vec::new(),
             sealed: Vec::new(),
         }
     }
@@ -149,6 +151,14 @@ impl SeatbeltPolicy {
     #[must_use]
     pub fn exec_subpath(mut self, directory: impl Into<PathBuf>) -> Self {
         self.exec_subpaths.push(directory.into());
+        self
+    }
+
+    /// Adds a path the command may not execute or map as code, with everything beneath it, even
+    /// where an exec subpath or an executable admits it (design 35 D12). It need not exist.
+    #[must_use]
+    pub fn exec_denied(mut self, path: impl Into<PathBuf>) -> Self {
+        self.exec_denied.push(path.into());
         self
     }
 
@@ -198,6 +208,7 @@ impl SeatbeltPolicy {
             executables: all(&self.executables, resolve)?,
             writable: all(&self.writable, resolve)?,
             exec_subpaths: all(&self.exec_subpaths, resolve_ancestor)?,
+            exec_denied: all(&self.exec_denied, resolve_ancestor)?,
             sealed: all(&self.sealed, resolve_ancestor)?,
         })
     }
@@ -311,7 +322,20 @@ impl SeatbeltPolicy {
         for path in &sealed {
             let _ = writeln!(profile, "(deny file-write* (subpath \"{path}\"))");
         }
+        self.render_exec_denied(&mut profile)?;
         Ok(profile)
+    }
+
+    /// The deny rules of the denied paths, written after every allow: the last matching rule
+    /// decides, so a denied path beneath an exec subpath, or one that is an executable of the
+    /// policy, is not executed or mapped as code (design 35 D12).
+    fn render_exec_denied(&self, profile: &mut String) -> Result<(), DriverError> {
+        for path in &self.exec_denied {
+            let path = literal(path)?;
+            let _ = writeln!(profile, "(deny process-exec (subpath \"{path}\"))");
+            let _ = writeln!(profile, "(deny file-map-executable (subpath \"{path}\"))");
+        }
+        Ok(())
     }
 
     /// A command that runs `program` with `args` under this policy.
@@ -361,6 +385,23 @@ impl SeatbeltPolicy {
             return Err(DriverError::refused(
                 PROGRAM_UNLISTED,
                 format!("{} is not an executable of this policy", program.display()),
+                "seatbelt.program",
+            ));
+        }
+        // A denied path wins over the program (design 35 D10): refused here, before anything is
+        // spawned, and not left to the sandbox's own denial of the launcher's exec.
+        if let Some(denied) = resolved
+            .exec_denied
+            .iter()
+            .find(|denied| program.starts_with(denied))
+        {
+            return Err(DriverError::refused(
+                PROGRAM_UNLISTED,
+                format!(
+                    "{} lies in the denied path {}",
+                    program.display(),
+                    denied.display()
+                ),
                 "seatbelt.program",
             ));
         }
@@ -430,11 +471,15 @@ fn probe_with_launcher(launcher: &Path) -> Result<(), DriverError> {
 /// `true` only when its probe ran under Seatbelt and both halves held: what the rule allows
 /// happened, and what it refuses did not.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // One proof per rule; each is probed on its own.
 pub struct BuildProof {
     /// A write beneath a sealed path failed while a write beside it succeeded.
     pub sealed_paths: bool,
     /// A program beneath an exec subpath ran while one outside every subpath did not.
     pub exec_subpaths: bool,
+    /// A program beneath an exec subpath ran while a denied one beneath the same subpath did
+    /// not (design 35 D12).
+    pub exec_denied_paths: bool,
     /// A directory beside the workspace was written through the variable `TMPDIR`.
     pub private_tmpdir: bool,
 }
@@ -487,6 +532,15 @@ fn probe_build_with_launcher(launcher: &Path) -> BuildProof {
         "/usr/bin/true || exit 1; if /bin/echo; then exit 2; fi >/dev/null 2>&1; exit 0",
         &[],
     );
+    // `false` exits 1 when it runs and the shell reports 126 when it may not; `true` is denied.
+    let exec_denied_paths = runs(
+        &probe_policy()
+            .exec_subpath("/usr/bin")
+            .exec_denied("/usr/bin/true"),
+        "/usr/bin/false; [ $? -eq 1 ] || exit 1; \
+         if /usr/bin/true; then exit 2; fi >/dev/null 2>&1; exit 0",
+        &[],
+    );
     let private_tmpdir = runs(
         &probe_policy().writable(&private),
         ": > \"$TMPDIR/written\"",
@@ -495,6 +549,7 @@ fn probe_build_with_launcher(launcher: &Path) -> BuildProof {
     BuildProof {
         sealed_paths,
         exec_subpaths,
+        exec_denied_paths,
         private_tmpdir,
     }
 }
@@ -511,7 +566,7 @@ fn resolve(path: &Path) -> Result<PathBuf, DriverError> {
 
 /// Resolves the nearest existing ancestor of `path` and appends the rest, which must be normal
 /// names: `literal` refuses anything else when the profile is rendered.
-fn resolve_ancestor(path: &Path) -> Result<PathBuf, DriverError> {
+pub(crate) fn resolve_ancestor(path: &Path) -> Result<PathBuf, DriverError> {
     let mut rest = Vec::new();
     let mut existing = path;
     loop {
@@ -834,6 +889,7 @@ mod tests {
             BuildProof {
                 sealed_paths: true,
                 exec_subpaths: true,
+                exec_denied_paths: true,
                 private_tmpdir: true,
             }
         );
@@ -843,5 +899,79 @@ mod tests {
     #[test]
     fn the_platform_sandbox_enforces_a_profile() {
         probe().expect("sandbox-exec enforces a deny-default profile on this host");
+    }
+
+    /// Design 35 D12: a denied path is rendered as two deny rules after every allow, for a
+    /// file and for a directory, so the last matching rule denies what an exec subpath or the
+    /// program's own rule admits. A path SBPL cannot carry is refused by name.
+    #[test]
+    fn denied_paths_are_rendered_after_every_allow() {
+        let profile = SeatbeltPolicy::new("/w/space")
+            .executable("/bin/bash")
+            .exec_subpath("/usr/bin")
+            .exec_subpath("/w/space/target")
+            .exec_denied("/usr/bin/id")
+            .exec_denied("/w/space/target/private")
+            .sealed("/w/space/.git")
+            .profile()
+            .expect("a profile");
+        let lines: Vec<&str> = profile.lines().collect();
+        let position = |line: &str| {
+            lines
+                .iter()
+                .position(|other| *other == line)
+                .unwrap_or_else(|| panic!("no {line} in {profile}"))
+        };
+        let last_allow = lines
+            .iter()
+            .rposition(|line| line.starts_with("(allow "))
+            .expect("an allow rule");
+        for denied in ["/usr/bin/id", "/w/space/target/private"] {
+            for operation in ["process-exec", "file-map-executable"] {
+                let rule = position(&format!("(deny {operation} (subpath \"{denied}\"))"));
+                assert!(rule > last_allow, "{profile}");
+                assert!(
+                    rule > position("(allow process-exec (subpath \"/usr/bin\"))"),
+                    "{profile}"
+                );
+            }
+        }
+        let error = SeatbeltPolicy::new("/w/space")
+            .exec_denied("/usr/bin/a\"b")
+            .profile()
+            .expect_err("a quote in a denied path");
+        assert_eq!(error.code, PATH_UNREPRESENTABLE);
+        // Without a denied path the profile is what it was.
+        let plain = SeatbeltPolicy::new("/w/space")
+            .exec_subpath("/usr/bin")
+            .profile()
+            .expect("a profile");
+        assert!(!plain.contains("(deny process-exec"), "{plain}");
+    }
+
+    /// Design 35 D10: a denied path wins over the program. A program that lies in a denied
+    /// path is refused before anything is spawned, `exec.sandbox-program-unlisted`.
+    #[test]
+    fn a_program_in_a_denied_path_is_refused_before_the_launcher_runs() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let root = std::fs::canonicalize(scratch.path()).expect("canonical");
+        let launcher = root.join("launcher");
+        let program = root.join("bin/tool");
+        std::fs::create_dir_all(root.join("bin")).expect("bin");
+        for file in [&launcher, &program] {
+            std::fs::write(file, b"").expect("a file");
+        }
+        let policy = |denied: &Path| {
+            SeatbeltPolicy::new(&root)
+                .executable(&program)
+                .exec_denied(denied)
+                .command_with_launcher(&launcher, &program, ["argument"])
+        };
+        for denied in [program.clone(), root.join("bin")] {
+            let error = policy(&denied).expect_err("a denied program");
+            assert_eq!(error.code, PROGRAM_UNLISTED, "{error}");
+            assert!(error.message.contains("lies in the denied path"), "{error}");
+        }
+        policy(&root.join("other")).expect("a program the deny-list does not reach");
     }
 }

@@ -215,6 +215,18 @@ impl Place {
     pub(crate) fn lies_in(&self, other: &Self) -> bool {
         self.relation(other) == Relation::Within
     }
+
+    /// The place of the entry `name` of the directory at this place, in the same mount: the
+    /// directory's place and the entry's own name.
+    #[must_use]
+    pub fn entry(&self, name: &str) -> Self {
+        let mut names = self.names.clone();
+        names.push(name.to_owned());
+        Self {
+            device: self.device.clone(),
+            names,
+        }
+    }
 }
 
 /// What the kernel reported for an opened path: the inputs of [`MountTable::place`] beside the
@@ -487,10 +499,48 @@ pub enum Unlisted {
     Skipped,
     /// It refuses, `file-system-unlisted`: beneath a denied directory, whose files the
     /// profile denies wherever else that file system is mounted.
-    // No caller on this branch: the deny-list (`story:executable-deny-list`) asks this of
-    // every denied directory. Held here by the unit cases, so the two stories share one
-    // function.
+    // The deny-list asks this of every denied directory, in the helper and in the driver.
     Refused,
+}
+
+/// A mount of a file-system type outside [`LISTED_FILE_SYSTEMS`] as an entry of a directory
+/// (D30, D11 step 3): what the kernel shows at its mount point, and the directory that
+/// holds the mount point. An entry that is a mount point has the place its own row gives it,
+/// and this row gives none, so a walk of the holder cannot place the entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlistedEntry {
+    /// The place of the directory the mount point is an entry of.
+    pub holder: Place,
+    /// The mount point, as the table names it.
+    pub mount_point: String,
+    /// The file-system type of the mount.
+    pub file_system: String,
+}
+
+impl UnlistedEntry {
+    /// What a walk of the holder ends with at this entry: no place, `file-system-unlisted`.
+    #[must_use]
+    pub fn unplaced(&self) -> Unestablished {
+        Unestablished::place(
+            self.mount_point.clone(),
+            Cause::FileSystemUnlisted(self.file_system.clone()),
+        )
+    }
+}
+
+/// A mount of a listed type as an entry of a directory (D30, D11 step 3): what a walk of the
+/// holder steps at the mount point. Unlike [`UnlistedEntry`] it has a place, the root of the
+/// mount, and the walk goes on in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedEntry {
+    /// The place of the directory the mount point is an entry of.
+    pub holder: Place,
+    /// The place the entry has: the root of the mount.
+    pub root: Place,
+    /// The ID of the mount, which a walk of its root is on.
+    pub mount: u64,
+    /// The mount point, as the table names it.
+    pub mount_point: String,
 }
 
 /// What the kernel reports at a mount point: the ID of the mount that shows there, or why
@@ -796,6 +846,114 @@ impl MountTree {
         }
         reach
     }
+
+    /// **The mounts of a type outside the list beneath `directory`, each as the entry of
+    /// the directory that holds its mount point** (D30, D11 step 3). [`Self::reaches`] skips
+    /// such a mount for a listed directory, because nothing is compared with it. A start
+    /// that expands the holder meets it all the same, as an entry it cannot place: the
+    /// caller asks whether the holder is expanded, and refuses there.
+    ///
+    /// A mount is counted where the kernel shows it at its mount point, or cannot be asked.
+    /// One that is hidden is no entry ([`Self::hidden`]): another mount covers it at its
+    /// mount point, and that mount is the entry; or its mount point is gone beneath a mount
+    /// laid over a directory above, and no walk meets it. Of a stack the holder is the
+    /// directory the lowest mount is attached in. "Beneath" is by place, as everywhere in
+    /// D30: a mount attached in the directory's file system counts wherever that file
+    /// system shows. It never refuses.
+    #[must_use]
+    pub fn unlisted_entries(&self, directory: &Place) -> Vec<UnlistedEntry> {
+        let rows = &self.table.rows;
+        let mut entries = Vec::new();
+        for (index, _) in self
+            .beneath(directory)
+            .into_iter()
+            .enumerate()
+            .filter(|(_, beneath)| *beneath)
+        {
+            let row = &rows[index];
+            if LISTED_FILE_SYSTEMS.contains(&row.file_system.as_str()) || self.hidden(row) {
+                continue;
+            }
+            if let Some((_, holder)) = self.held(index) {
+                entries.push(UnlistedEntry {
+                    holder,
+                    mount_point: row.mount_point.clone(),
+                    file_system: row.file_system.clone(),
+                });
+            }
+        }
+        entries
+    }
+
+    /// Whether the kernel shows something else where the table puts the mount of `row`:
+    /// another mount at its mount point, or no such path, because a mount covers it there
+    /// or from a directory above. A mount point that cannot be asked is not known to be
+    /// hidden.
+    fn hidden(&self, row: &Row) -> bool {
+        match (self.reported)(&row.mount_point) {
+            Ok(shown) => shown != row.id,
+            Err(cause) => cause == Cause::MountCovered,
+        }
+    }
+
+    /// The directory that holds the mount point of row `index`, and the row of the mount
+    /// that directory is in. Down a stack first, to the mount that is attached in a
+    /// directory: each mount above it is attached on the root of the one below, at the same
+    /// mount point. `None` for the root of the view, for a mount on the root of its parent
+    /// and where the parent's root was removed.
+    fn held(&self, index: usize) -> Option<(usize, Place)> {
+        let rows = &self.table.rows;
+        let mut at = index;
+        loop {
+            let parent = self.parents[at]?;
+            if rows[parent].mount_point == rows[at].mount_point {
+                at = parent;
+            } else {
+                let mut holder = self.attachment(at, parent)?;
+                holder.names.pop()?;
+                return Some((parent, holder));
+            }
+        }
+    }
+
+    /// **The mounts of a listed type a walk of `directory` meets as entries** (D30, D11
+    /// step 3), for a directory on the mount with the ID `mount`: each mount the kernel
+    /// shows at its mount point whose holder lies in the directory and is in that mount.
+    /// The helper steps such an entry with the place its own row gives it, the root of the
+    /// mount, and asks what that reaches, which holds the mounts attached in that file
+    /// system wherever else it shows. So a caller that asked only what `directory` reaches
+    /// has not asked what the walk asks.
+    ///
+    /// By the tree and not by place alone: a mount attached under a second mount of the
+    /// directory's file system is beneath the directory, and the walk never meets it. Of a
+    /// stack the holder is the directory the lowest mount is attached in, and the entry is
+    /// the mount on top. A mount that is not shown at its mount point is no entry; of a
+    /// listed type it has already refused what the directory reaches. It never refuses.
+    #[must_use]
+    pub fn listed_entries(&self, mount: u64, directory: &Place) -> Vec<ListedEntry> {
+        let rows = &self.table.rows;
+        let mut entries = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            if !LISTED_FILE_SYSTEMS.contains(&row.file_system.as_str()) {
+                continue;
+            }
+            let Some((parent, holder)) = self.held(index) else {
+                continue;
+            };
+            if rows[parent].id == mount
+                && holder.lies_in(directory)
+                && (self.reported)(&row.mount_point) == Ok(row.id)
+            {
+                entries.push(ListedEntry {
+                    holder,
+                    root: row.root_place(),
+                    mount: row.id,
+                    mount_point: row.mount_point.clone(),
+                });
+            }
+        }
+        entries
+    }
 }
 
 /// **The place function** (D26): the place of a descriptor, from the mount ID the kernel
@@ -853,7 +1011,7 @@ fn remaining_names(mut collected: Vec<String>) -> Option<Vec<String>> {
 
 /// The mount ID the kernel reports for the open `descriptor`, where it reports one.
 #[cfg(target_os = "linux")]
-fn mount_id_of(descriptor: std::os::fd::RawFd) -> Option<u64> {
+pub(crate) fn mount_id_of(descriptor: std::os::fd::RawFd) -> Option<u64> {
     let mut status = Statx {
         mask: 0,
         _before: [0; 140],
@@ -1951,6 +2109,190 @@ mod tests {
                 .map(|reach| reach.places().to_vec()),
             Ok(vec![on(&tree, 500, "/opt")])
         );
+    }
+
+    /// D30 with D11 step 3, a mount of a type outside the list as an entry: each is named
+    /// with the directory that holds its mount point, where the kernel shows it there.
+    ///
+    /// - one mount: the holder is the directory above the mount point, in the parent mount;
+    /// - a stack of two: the upper one is the entry, and its holder is where the lower one
+    ///   is attached. The lower one is covered and is no entry;
+    /// - a mount of a listed type on top of one: no entry, the listed mount is shown;
+    /// - one attached in a mount beneath the directory: counted, with its holder on that
+    ///   mount's device;
+    /// - a mount whose mount point cannot be asked is counted: it fails closed.
+    #[test]
+    fn an_unlisted_mount_is_named_as_an_entry_of_the_directory_that_holds_it() {
+        const ROWS: &str = "\
+620 500 0:70 / /srv/odd/media rw - ramfs ramfs rw
+621 500 0:71 / /srv/st/m rw - ramfs ramfs rw
+622 621 0:72 / /srv/st/m rw - proc proc rw
+623 500 0:73 / /srv/cov/m rw - ramfs ramfs rw
+624 623 0:74 / /srv/cov/m rw - tmpfs tmpfs rw
+625 500 8:17 /data /srv/far rw - ext4 /dev/sdb1 rw
+626 625 0:75 /null /srv/far/in/null rw - devtmpfs devtmpfs rw
+627 500 0:76 / /opt/elsewhere rw - ramfs ramfs rw
+";
+        let tree = tree(ROWS);
+        let named = |tree: &MountTree, id: u64, path: &str| -> Vec<String> {
+            tree.unlisted_entries(&on(tree, id, path))
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} {} in {} /{}",
+                        entry.mount_point,
+                        entry.file_system,
+                        entry.holder.device,
+                        entry.holder.names.join("/")
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            named(&tree, 500, "/srv"),
+            [
+                "/srv/odd/media ramfs in 259:2 /srv/odd",
+                "/srv/st/m proc in 259:2 /srv/st",
+                "/srv/far/in/null devtmpfs in 8:17 /data/in",
+            ]
+        );
+        assert_eq!(
+            named(&tree, 500, "/srv/odd"),
+            ["/srv/odd/media ramfs in 259:2 /srv/odd"]
+        );
+        // By place: the mount attached in `/data/in` of the second file system is beneath
+        // that directory under whatever name it is asked.
+        assert_eq!(
+            named(&tree, 625, "/srv/far/in"),
+            ["/srv/far/in/null devtmpfs in 8:17 /data/in"]
+        );
+        assert!(named(&tree, 500, "/srv/cov").is_empty());
+        assert!(named(&tree, 500, "/srv/far/in").is_empty());
+        let entries = tree.unlisted_entries(&on(&tree, 500, "/srv/odd"));
+        assert_eq!(
+            entries[0].unplaced().to_string(),
+            "cannot establish the place of /srv/odd/media: file-system-unlisted ramfs"
+        );
+        // Where the kernel cannot be asked at a mount point, the mount is counted.
+        let unasked = MountTable::parse(&format!("{BESIDE}{ROWS}"))
+            .expect("the table parses")
+            .into_tree_reported_by(|_| Err(Cause::PathUnopenable))
+            .expect("every row is attached");
+        assert_eq!(
+            named(&unasked, 500, "/srv/cov"),
+            ["/srv/cov/m ramfs in 259:2 /srv/cov"]
+        );
+        // S9-2: a mount point that is gone lies beneath a mount laid over a directory
+        // above it. No walk meets that mount, so it is no entry; nor is one at whose mount
+        // point the kernel shows another mount. Every other answer still counts it.
+        for (shows, counted) in [
+            (Err(Cause::MountCovered), false),
+            (Ok(999), false),
+            (Ok(620), true),
+            (Err(Cause::PathUnopenable), true),
+            (Err(Cause::MountIdUnreported), true),
+        ] {
+            let asked = MountTable::parse(&format!("{BESIDE}{ROWS}"))
+                .expect("the table parses")
+                .into_tree_reported_by(move |_| shows.clone())
+                .expect("every row is attached");
+            assert_eq!(
+                named(&asked, 500, "/srv/odd"),
+                if counted {
+                    vec!["/srv/odd/media ramfs in 259:2 /srv/odd".to_owned()]
+                } else {
+                    Vec::new()
+                }
+            );
+        }
+    }
+
+    /// D30 with D11 step 3, a mount of a listed type as an entry of a walk (S9-1): named
+    /// with the directory that holds its mount point, its root and its ID, for the mount
+    /// the walked directory is on.
+    ///
+    /// - one mount: an entry of the directory above its mount point, and of every directory
+    ///   above that on the same mount;
+    /// - a tmpfs stacked on a ramfs: the tmpfs is the entry, held where the ramfs is
+    ///   attached;
+    /// - a mount attached in another mount: an entry of the walk on that mount, not of the
+    ///   walk on the mount above;
+    /// - a mount attached under a second mount of the directory: beneath the directory by
+    ///   place, and an entry only of the walk on the second mount;
+    /// - a mount on the directory itself is no entry of it, and one the kernel does not
+    ///   show at its mount point is no entry at all.
+    #[test]
+    fn a_listed_mount_is_an_entry_of_the_walk_on_the_mount_it_is_attached_in() {
+        const ROWS: &str = "\
+630 500 0:80 / /srv/a/vol rw - tmpfs tmpfs rw
+631 500 0:81 / /srv/cov/m rw - ramfs ramfs rw
+632 631 0:82 / /srv/cov/m rw - tmpfs tmpfs rw
+633 630 0:83 / /srv/a/vol/in/deep rw - tmpfs tmpfs rw
+634 500 259:2 /srv/a /opt/second rw - ext4 /dev/a rw
+635 634 0:84 / /opt/second/x rw - tmpfs tmpfs rw
+636 500 0:85 / /srv/on rw - tmpfs tmpfs rw
+637 500 0:86 / /srv/odd/media rw - ramfs ramfs rw
+";
+        let tree = tree(ROWS);
+        let met = |tree: &MountTree, mount: u64, directory: &Place| -> Vec<String> {
+            tree.listed_entries(mount, directory)
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} {} in {} /{}, root {} /{}",
+                        entry.mount,
+                        entry.mount_point,
+                        entry.holder.device,
+                        entry.holder.names.join("/"),
+                        entry.root.device,
+                        entry.root.names.join("/")
+                    )
+                })
+                .collect()
+        };
+        let vol = "630 /srv/a/vol in 259:2 /srv/a, root 0:80 /";
+        assert_eq!(
+            met(&tree, 500, &on(&tree, 500, "/srv")),
+            [
+                vol,
+                "632 /srv/cov/m in 259:2 /srv/cov, root 0:82 /",
+                "636 /srv/on in 259:2 /srv, root 0:85 /",
+            ]
+        );
+        assert_eq!(met(&tree, 500, &on(&tree, 500, "/srv/a")), [vol]);
+        // A mount on the directory itself, and a directory beside every mount.
+        assert!(met(&tree, 500, &on(&tree, 500, "/srv/on")).is_empty());
+        assert!(met(&tree, 500, &on(&tree, 500, "/usr")).is_empty());
+        // The walk goes on in the mount: its own entries, held by its own directories.
+        let deep = "633 /srv/a/vol/in/deep in 0:80 /in, root 0:83 /";
+        assert_eq!(met(&tree, 630, &on(&tree, 630, "/srv/a/vol")), [deep]);
+        assert_eq!(met(&tree, 630, &on(&tree, 630, "/srv/a/vol/in")), [deep]);
+        assert!(met(&tree, 630, &on(&tree, 630, "/srv/a/vol/other")).is_empty());
+        // By the tree: `/opt/second` shows `/srv/a`, so the mount at `/opt/second/x` is
+        // beneath `/srv/a` by place, and `/srv/a/vol` is beneath `/opt/second`. Each is
+        // met only by the walk on the mount it is attached in.
+        let second = on(&tree, 634, "/opt/second");
+        assert_eq!(second, on(&tree, 500, "/srv/a"));
+        assert_eq!(
+            met(&tree, 634, &second),
+            ["635 /opt/second/x in 259:2 /srv/a, root 0:84 /"]
+        );
+        assert_eq!(
+            devices(&tree, 500, "/srv/a"),
+            ["259:2 /srv/a", "0:80 /", "0:83 /", "0:84 /"]
+        );
+        // Not shown at its mount point, or not to be asked there: no entry.
+        for shows in [
+            Ok(999),
+            Err(Cause::MountCovered),
+            Err(Cause::PathUnopenable),
+        ] {
+            let asked = MountTable::parse(&format!("{BESIDE}{ROWS}"))
+                .expect("the table parses")
+                .into_tree_reported_by(move |_| shows.clone())
+                .expect("every row is attached");
+            assert!(met(&asked, 500, &on(&asked, 500, "/srv")).is_empty());
+        }
     }
 
     /// The reader on this host: the table of this process is a tree, the kernel reports the

@@ -90,6 +90,7 @@ fn adversary_a_landlock_call_that_fails_starts_no_program() {
             ("/usr", rel)
         });
     let lists = Lists {
+        deny: Vec::new(),
         program: Located::new(Class::Follow, mount, rel).expect("the shell's path"),
         loader: substrate_exec_gate::elf_interpreter(&std::fs::read(tool("env")).expect("env")),
         allow: Vec::new(),

@@ -1,0 +1,50 @@
+# Design 35 section 9: `systemd` around `linux` copies the inner adapter's proved facts, so it
+# proves `exec_denied_paths` where `linux` does.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: systemd-linux-admits-exec-denied-paths-on-delegated
+summary: "lane delegated: systemd around linux admits a profile with both executable lists, requiring exec_subpaths and exec_denied_paths."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-11-21T10:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, exec_denied_paths, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T10:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: linux
+      required_families: [process_run, filesystem_view]
+      required_facts: [exec_subpaths, exec_denied_paths]
+      exec_subpath_entries: [/usr/bin]
+      exec_denied_path_entries: [/usr/bin/id]
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: systemd
+          inner: linux
+          families: [process_run, filesystem_view]
+          facts: [exec_subpaths, exec_denied_paths]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: systemd
+      inner: linux
+      facts: [exec_subpaths, exec_denied_paths]
+      declared_insecure: false

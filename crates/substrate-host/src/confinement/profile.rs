@@ -103,6 +103,46 @@ pub struct ConfinementProfile {
     /// where the helper is bound, is refused before dispatch by its kind's code for a mount
     /// the driver owns (D29).
     pub exec_subpaths: Vec<String>,
+    /// Paths whose execution fails, even beneath an entry of `exec_subpaths` (design 35 § 8):
+    /// at most [`MAX_EXEC_DENIED_PATHS`](super::MAX_EXEC_DENIED_PATHS) entries, each of the
+    /// form of an `exec_subpaths` entry, a file or a directory. A denied path wins over a
+    /// listed directory that holds it, over an entry that names it, over the loader and over
+    /// the program: a start whose program is denied is `exec.sandbox-program-unlisted` (422).
+    /// An entry that no listed path holds changes nothing. On `linux` an entry need not exist
+    /// at the start, and a directory mounted under two paths is denied under both, because
+    /// what lies in what is decided by place (D25).
+    ///
+    /// **A deny-list beside an empty `exec_subpaths` is refused**
+    /// `confinement.exec-denied-paths-without-subpaths` (422) on every adapter: a run that can
+    /// write and execute files in a listed directory can copy a denied program there and run
+    /// the copy, so a deny-list means something only beside an allow-list that admits no
+    /// directory the run can write.
+    ///
+    /// What it denies is `execve` of the path. An allowed interpreter still runs a denied
+    /// script, and the loader run as a program runs a denied program. On `linux`:
+    ///
+    /// - a directory that holds a denied path gets no rule of its own, so a new file in it
+    ///   is not executable, and a program a build replaces there loses the right: keep deny
+    ///   entries out of directories a build writes its programs into;
+    /// - in a listed directory the run can write, an entry holds for the files that exist at
+    ///   the start, under the names they have then. A directory inside an expanded directory
+    ///   that holds no denied path gets one rule, which moves with a rename, and what the
+    ///   run creates in it executes: a file the run creates or moves can run under any name,
+    ///   the denied name included. A deny-list is exact only where the run cannot write;
+    /// - a start reads every directory it expands and ends with status 125 where one cannot
+    ///   be read. Its standard error is then one line, which a consumer may match:
+    ///   `substrate-exec-gate: cannot read the directory "<path>": <cause>`, with the
+    ///   directory's path in the run's view as a quoted string. An earlier run of the
+    ///   workspace can cause it by taking the read permission from such a directory;
+    /// - a mount of a file-system type other than `ext4`, `overlay` and `tmpfs` that is an
+    ///   entry of a directory the start expands is `exec.sandbox-place-unserved` (501)
+    ///   before dispatch. A start expands only the directories on the way to a deny entry,
+    ///   so the same mount one directory further from the entry refuses nothing;
+    /// - a hard link to a denied program that already exists elsewhere beneath a listed path
+    ///   runs: an entry denies a path and every mount of it, not every link to the file;
+    /// - never list a lower directory of an overlay that is also in the view: the same bytes
+    ///   are then two files, and an entry that denies one does not deny the other.
+    pub exec_denied_paths: Vec<String>,
     /// A per-run `TMPDIR`, invisible to another run and gone after `wait`.
     pub private_tmpdir: bool,
     /// The network policy. Absent states none, and the adapter's facts say what the run gets:
@@ -247,6 +287,7 @@ impl ConfinementProfile {
         let implied = |fact: &Fact| match fact {
             Fact::SealedPaths => !self.sealed_paths.is_empty(),
             Fact::ExecSubpaths => !self.exec_subpaths.is_empty(),
+            Fact::ExecDeniedPaths => !self.exec_denied_paths.is_empty(),
             Fact::PrivateTmpdir => self.private_tmpdir,
             Fact::IpcSocketAllowlist => self.ipc.socket_allowlist,
             Fact::IpcSignalsContained => self.ipc.signals_contained,
@@ -397,5 +438,29 @@ mod tests {
         assert_eq!(profile.reason(), None);
         profile.local_reason = Some("why".into());
         assert_eq!(profile.reason(), Some("why"));
+    }
+
+    /// Design 35 D10: a non-empty deny-list implies its fact, as the allow-list implies its
+    /// own, and an empty one implies nothing.
+    #[test]
+    fn a_deny_list_implies_its_fact() {
+        let profile = |entries: &[&str], denied: &[&str]| ConfinementProfile {
+            exec_subpaths: entries.iter().map(|entry| (*entry).to_owned()).collect(),
+            exec_denied_paths: denied.iter().map(|entry| (*entry).to_owned()).collect(),
+            ..ConfinementProfile::default()
+        };
+        assert_eq!(profile(&[], &[]).required_facts(), []);
+        assert_eq!(
+            profile(&["bin"], &[]).required_facts(),
+            [Fact::ExecSubpaths]
+        );
+        assert_eq!(
+            profile(&["bin"], &["bin/tool"]).required_facts(),
+            [Fact::ExecSubpaths, Fact::ExecDeniedPaths]
+        );
+        assert_eq!(
+            profile(&[], &["bin/tool"]).required_facts(),
+            [Fact::ExecDeniedPaths]
+        );
     }
 }
