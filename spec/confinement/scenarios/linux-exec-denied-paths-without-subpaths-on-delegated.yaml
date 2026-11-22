@@ -1,0 +1,33 @@
+# Design 35 D13: `linux` proves both list facts and still refuses a deny-list beside no
+# allow-list: every program of the view would run, and a copy of a denied one with them.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-exec-denied-paths-without-subpaths-on-delegated
+summary: "lane delegated: a linux profile with a deny-list and no allow-list is refused confinement.exec-denied-paths-without-subpaths."
+
+timeline:
+  - at: 2026-11-21T10:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, exec_denied_paths, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T10:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [process_run]
+      required_facts: []
+      exec_denied_path_entries: [/usr/bin/id]
+    outcome: exec-denied-paths-without-subpaths
+    error:
+      name: substrate.confinement.ExecDeniedPathsWithoutSubpaths
+      fields: {adapter: linux}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

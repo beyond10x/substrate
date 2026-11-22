@@ -64,6 +64,7 @@ scenarios.
 | `ipc_signals_contained` | FALSE | UNKNOWN | TRUE | FALSE | UNKNOWN | FALSE | FALSE |
 | `sealed_paths` | FALSE | FALSE | UNKNOWN | FALSE | FALSE | FALSE | FALSE |
 | `exec_subpaths` | FALSE | UNKNOWN | UNKNOWN | FALSE | UNKNOWN | FALSE | FALSE |
+| `exec_denied_paths` | FALSE | UNKNOWN | UNKNOWN | FALSE | UNKNOWN | FALSE | FALSE |
 | `private_tmpdir` | FALSE | FALSE | UNKNOWN | FALSE | FALSE | FALSE | FALSE |
 | `host_network` | TRUE | FALSE | FALSE | TRUE | FALSE | FALSE | FALSE |
 | `image_digest_pinned` | FALSE | FALSE | FALSE | FALSE | FALSE | TRUE | TRUE |
@@ -121,9 +122,14 @@ The host driver behind the contract: bubblewrap, namespaces, cgroup v2, seccomp 
   view, where `macos` runs only the program.
   [Executable allow-lists on linux](../guides/confinement-profiles.md#executable-allow-lists-on-linux)
   has the entry rules.
+- **Executable deny-list.** `exec_denied_paths` is proved where `exec_subpaths` is and a second
+  probe held a run to both lists. A denied path is not executed, even beneath a listed
+  directory or under another name of its directory.
+  [Executable deny-lists](../guides/confinement-profiles.md#executable-deny-lists) has the
+  rules and the limits.
 - **Refuses by name.** A profile that requires `paths_are_host_paths`, `sealed_paths`,
-  `private_tmpdir` or `host_network`, or `exec_subpaths` on a host that did not prove it
-  (`confinement.fact-unserved`); a working
+  `private_tmpdir` or `host_network`, or `exec_subpaths` or `exec_denied_paths` on a host that
+  did not prove it (`confinement.fact-unserved`); a working
   directory the host has not proved (`exec.workdir-unserved`); a writable root the operator did
   not declare (`exec.writable-roots-host-unserved`); an egress aperture the host did not declare
   (`exec.aperture-undeclared`); a workspace that is not a directory directly beneath the driver's
@@ -147,6 +153,8 @@ A host process under a Seatbelt profile, run through `/usr/bin/sandbox-exec`.
 - **Declares.** `process_run`, `process_watch`, `output_read`, `wait`, `workspace`,
   `filesystem_view` and `audit`; the facts `paths_are_host_paths`, `ipc_signals_contained`,
   `stdin_pipe` and `output_live`.
+  It proves `exec_denied_paths` (a denied path is not executed, even beneath an exec subpath)
+  only when a Seatbelt probe at open saw it enforced.
   The build policy adds three facts, each only when a Seatbelt probe at open saw it enforced:
   `sealed_paths` (paths inside the workspace, and the directories above them, stay unwritable),
   `exec_subpaths` (programs beneath a declared directory may run: a workspace-relative path such as

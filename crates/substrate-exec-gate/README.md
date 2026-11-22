@@ -5,7 +5,9 @@ inside a sandbox, as the last program before the run's own, when the run's profi
 executable allow-list (`ConfinementProfile.exec_subpaths`). It applies one Landlock ruleset to
 itself and executes the run's program, so every process of the run inherits the ruleset:
 `execve` succeeds only for the program, the host's ELF loader and files that are, or lie beneath,
-a listed path. Any other execution fails inside the run with `EACCES`.
+a listed path. Any other execution fails inside the run with `EACCES`. Where the profile also
+carries a deny-list (`ConfinementProfile.exec_denied_paths`), a denied path gets no execute
+right from any of the three.
 
 ```text
 substrate-exec-gate --version
@@ -14,6 +16,7 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
 <option>  = --program  <class> <root> <rel>
           | --loader   <path>
           | --allow    <class> <root> <rel>
+          | --deny     <class> <root> <rel>
           | --writable <root>
           | --env      <name> <value>
 <class>   = follow | beneath
@@ -32,6 +35,17 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
   two paths, and a place, or where a mount beneath a `--writable` root is attached, that
   cannot be established refuses as well: nothing on a file-system type other than `ext4`,
   `overlay` and `tmpfs` has one. A path of either class is placed where it ends.
+- `--deny` names a path that gets no execute right, from an `--allow` entry, as the program or
+  as the loader. Landlock has no deny rule, so where a listed directory holds a denied path the
+  helper grants each of its entries on its own, and the directory itself gets no rule. A
+  `--deny` path need not exist. The helper stops at 65536 rules and exits 125. What is mounted
+  beneath a denied directory is denied with it, and a listed directory with a denied path in
+  a mount beneath it is expanded, into that mount: the helper reads from the view's mount
+  table what each directory reaches. Where a mount beneath a denied directory, or beneath a
+  listed directory of a run with a `--deny`, is hidden by a later mount or has a removed root,
+  the helper exits 125 with `cannot establish where <mount point> is attached: <cause>`; so
+  it does for a mount of another file-system type beneath a denied directory. A name in an
+  expanded directory that is not UTF-8 is taken as bytes and gets its rule like any other.
 - `--env` carries one variable of the program's environment. **The program starts with the
   `--env` operands as its whole environment, and nothing of the helper's own.** An empty name, a
   name that holds `=` and a name given twice are refused.
@@ -101,6 +115,62 @@ directory), the comparison cannot see that a read-only root and a mount the run 
 the same files. The only guard there is that nothing on a file system other than `ext4`,
 `overlay` and `tmpfs` is followed: a listed path that ends on one, reads a symbolic link on
 one or passes through a directory on one is refused.
+
+## Denying a program
+
+A deny entry fails `execve` of that path, and of every mount of it: with `/usr/bin` listed and
+`/bin/id` denied, `id` is denied under both names on a host whose `/bin` is a link into `/usr`.
+A symbolic link to a denied program is denied wherever it lies, and so is a hard link in the
+same directory.
+
+- **A deny-list needs an allow-list that admits no directory the run can write.** A run that
+  writes a listed directory copies a denied program there and runs the copy.
+- A hard link to a denied program that existed before the start in another listed directory
+  runs: a deny entry denies a path, not every link to the file.
+- **In a listed directory a run can write, a deny entry holds for the files that exist at the
+  start, under the names they have then.** A directory inside an expanded directory that holds
+  no denied path gets one rule: what the run creates in it executes, and the rule moves with a
+  rename. So a file the run creates or moves can run under any name, the denied name included
+  (`copied after a rename 0`; a listed program given an absent entry's name: `linked 0`,
+  `renamed 0`). Nothing runs that the run could not already run by copying it into a listed
+  directory it can write. A deny-list is exact only where the run cannot write.
+- A listed directory that holds a denied path has no rule of its own. It is expanded: one rule
+  per file in it, and one per directory in it that holds no denied path. A new file in the
+  expanded directory itself is not executable (`copied 126`), and a program removed and written
+  again there loses the right, so put no deny entry in a directory a build writes its programs
+  into.
+- **The helper reads every directory it expands. Where one cannot be read it exits 125,
+  nothing runs, and its one line names the directory.** A consumer may match the line:
+
+  ```text
+  substrate-exec-gate: cannot read the directory "<path>": <cause>
+  ```
+
+  `substrate-exec-gate: ` begins every line the helper writes, and `cannot read the directory`
+  is this failure alone. `<path>` is the directory as the helper sees it: the `--allow` entry,
+  `<root>/<rel>`, and the names walked below it, as a quoted string in which `"` and `\` have
+  a backslash before them and a control character is an escape. It is never left out or cut
+  short; a name on the way that is not UTF-8 shows U+FFFD for the bytes that are not text.
+  `<cause>` is the system's text and number, `Permission denied (os error 13)` for a
+  directory without the read permission. A run that takes the read permission from a
+  directory on the way to a deny entry causes this for every later start with that entry.
+  The line explains an end and does not prove one: a program that runs can print the same
+  line and exit 125 itself.
+- A mount of a file-system type outside the list that is an entry of a directory the helper
+  expands has no place: the helper exits 125 with `file-system-unlisted`. The host driver
+  refuses such a start before dispatch, `exec.sandbox-place-unserved`. **What decides is where
+  the deny entry is, not the mount**: the helper expands only the directories on the way to a
+  deny entry. With `k` listed and `k/tool` denied, such a mount at `k/vol` is met as an entry
+  and ends the start. With `far` listed and `far/tool` denied, the same mount at `far/in/vol`
+  is never met: `far/in` gets one rule, and the start runs.
+- A layer of an overlay is another file system to the kernel, with another place, and a program
+  denied in the overlay runs from the layer. So never list a lower directory of an overlay that
+  is also in the view.
+- The loader given a denied program runs it, and `sh` given a denied script runs it.
+- On `macos` no helper is involved: the driver renders the entries as Seatbelt deny rules.
+  Those rules were read and run only in the hosted macOS check, never on a workstation, and
+  how Seatbelt matches a deny entry in another letter case on a case-insensitive volume is
+  not verified.
 
 ## What the list does not stop
 

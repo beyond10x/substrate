@@ -7,6 +7,66 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `ConfinementProfile` carries an executable deny-list, `exec_denied_paths`, beside
+  `exec_subpaths` (design 35 § 8). `linux`, `systemd` around it and `macos` enforce it and prove
+  the new fact `exec_denied_paths`, which stands directly after `exec_subpaths`; `local`, `oci`,
+  `pod` and `systemd` around `local` refuse the profile `confinement.fact-unserved`. The wire,
+  the bundle and the daemon are unchanged, and the fact has no wire property.
+  - An entry has the form of an `exec_subpaths` entry, and a denied path wins: over a listed
+    directory that holds it, over the loader and over the program. A start whose program is
+    denied is `exec.sandbox-program-unlisted` (422) before dispatch. On `linux` an entry may be
+    absent at the start.
+  - On `linux` a denied program is found by where its file lies. It is denied under a symbolic
+    link, under a second mount of its directory (`/bin/id` for `/usr/bin/id`) and under a hard
+    link in the same directory. `substrate-exec-gate` takes the new option `--deny`.
+  - A deny entry holds across the mounts of the view: what is mounted beneath a denied
+    directory is denied with it, and a program denied in a file system mounted beneath a
+    listed directory is denied there. Where such a mount cannot be compared, a start with a
+    deny-list is `exec.sandbox-place-unserved` (501) before dispatch: `mount-covered` or
+    `mount-root-deleted` beneath a denied or a listed directory, and `file-system-unlisted`
+    beneath a denied one, or for a mount of such a type that is an entry of a directory the
+    start expands. The helper expands only the directories on the way to a deny entry, so the
+    same mount one directory further from the entry refuses nothing. An allow-list alone is
+    unchanged.
+  - New refusals at admission, on every adapter and before any fact is read:
+    `confinement.exec-denied-paths-without-subpaths` (422) for a deny-list beside an empty
+    `exec_subpaths`, and `confinement.exec-denied-paths-exceeded` (422) for more than
+    `MAX_EXEC_DENIED_PATHS` (64) entries.
+  - Limits: a deny entry fails `execve` of a path, so the loader given a denied program runs
+    it and `sh` given a denied script runs it. A run that can write a listed directory copies
+    a denied program there and runs the copy. A hard link that existed before the start in
+    another listed directory runs.
+    **In a listed directory a run can write, a deny entry holds for the files that exist at
+    the start, under the names they have then.** A listed directory that holds a denied path
+    is expanded into one rule per entry, and a directory inside it that holds no denied path
+    gets one rule: what the run creates in it executes, and the rule moves with a rename. So
+    a file the run creates or moves can run under any name, the denied name included
+    (`copied after a rename 0`, `linked 0`, `renamed 0`). A new file in the expanded directory
+    itself has no rule (`copied 126`), and a program rebuilt there loses the right. Nothing
+    runs that the run could not already run by copying it into a listed directory it can
+    write. A deny-list is exact only where the run cannot write.
+    A start with a deny-list reads every directory it expands, and ends with status 125 where
+    one cannot be read. Its standard error is then one line that names the directory in the
+    run's view, `substrate-exec-gate: cannot read the directory "<path>": <cause>`, which a
+    consumer may match.
+    **Never list a lower directory of an overlay that is also in the view**: a program denied
+    in the overlay runs from the layer.
+  - On `macos` the entries are Seatbelt deny rules after every allow. They were read and run
+    only in the hosted macOS check; how Seatbelt matches a deny entry in another letter case
+    on a case-insensitive volume is not verified.
+
+### Changed
+
+- **Breaking (`substrate-host` public API, design 35):** `FACT_ORDER` changes type from
+  `[Fact; 13]` to `[Fact; 14]`; code that names the array type or relies on its length breaks.
+  `ConfinementError` gains the variants `ExecDeniedPathsWithoutSubpaths` and
+  `ExecDeniedPathsExceeded`, so an exhaustive match gains two arms. `ConfinementProfile` gains
+  `exec_denied_paths`, `ExecListProof` gains `denied_paths`, `seatbelt::BuildProof` gains
+  `exec_denied_paths` and `substrate_exec_gate::Lists` gains `deny`, so a literal of each that
+  names every field gains one.
+
 ## [0.23.0] — 2026-11-21
 
 ### Added

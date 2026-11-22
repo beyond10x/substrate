@@ -8,9 +8,10 @@
 //! it must equal what ran.
 //!
 //! Every macos open step states the final declared set, `sealed_paths`, `exec_subpaths` and
-//! `private_tmpdir` included, and `stdin_pipe` and `output_live` since design 32, and the adapter
-//! must have proved exactly that set; each `macos-s2-*` and `macos-io-*` admission runs through
-//! the runner like every other scenario.
+//! `private_tmpdir` included, `stdin_pipe` and `output_live` since design 32 and
+//! `exec_denied_paths` since design 35, and the adapter must have proved exactly that set; each
+//! `macos-s2-*`, `macos-io-*` and `macos-lists-*` admission runs through the runner like every
+//! other scenario.
 //!
 //! Beside the suite: a run is confined to its workspace and its declared read-only roots, a root
 //! that would appear anywhere but at its host path is refused by name, and `limits`,
@@ -89,13 +90,14 @@ fn events(records: &Mutex<Vec<AuditRecord>>) -> Vec<String> {
 
 /// The authored `-on-macos` scenarios `spec/confinement-suite.json` holds. Pinned, so a scenario
 /// lost or renamed out of the lane fails here instead of shrinking what runs.
-const MACOS_DECLARED: usize = 10;
+const MACOS_DECLARED: usize = 11;
 
-/// Of those, the `macos-s1-*`, the `macos-s2-*` and the `macos-io-*` scenarios (design 32); the
-/// rest are `absent-*`.
+/// Of those, the `macos-s1-*`, the `macos-s2-*`, the `macos-io-*` (design 32) and the
+/// `macos-lists-*` (design 35) scenarios; the rest are `absent-*`.
 const MACOS_S1: usize = 4;
 const MACOS_S2: usize = 3;
 const MACOS_IO: usize = 2;
+const MACOS_LISTS: usize = 1;
 
 #[test]
 fn ess_confinement_macos_lane_executes_every_authored_macos_scenario() {
@@ -113,24 +115,27 @@ fn ess_confinement_macos_lane_executes_every_authored_macos_scenario() {
             .filter(|(id, _)| id.contains(&format!("/macos-{stage}-")))
             .count()
     };
-    let (s1, s2, io) = (count("s1"), count("s2"), count("io"));
+    let (s1, s2, io, lists) = (count("s1"), count("s2"), count("io"), count("lists"));
     assert_eq!(s1, MACOS_S1, "the macos-s1 scenarios this lane pins");
     assert_eq!(s2, MACOS_S2, "the macos-s2 scenarios for {S2_STORY}");
     assert_eq!(io, MACOS_IO, "the macos-io scenarios of design 32");
+    assert_eq!(lists, MACOS_LISTS, "the macos-lists scenarios of design 35");
     assert!(
         scenarios.iter().all(|(id, _)| id.contains("/macos-s1-")
             || id.contains("/macos-s2-")
             || id.contains("/macos-io-")
+            || id.contains("/macos-lists-")
             || id.contains("/absent-")),
-        "a macos-lane scenario is neither S1's, S2's, the I/O stage's nor an absent adapter's: {:?}",
+        "a macos-lane scenario is neither S1's, S2's, the I/O stage's, the lists' nor an absent \
+         adapter's: {:?}",
         scenarios.iter().map(|(id, _)| id).collect::<Vec<_>>()
     );
     let (executed, audited, _) = support::run(&scenarios, open_macos_lane);
     assert_eq!(executed, declared, "a macos scenario did not run");
     assert!(audited > 0, "no refusal audit record was asserted");
     println!(
-        "ESS confinement macos lane: {executed} scenarios executed ({s1} macos-s1, {s2} macos-s2, {io} macos-io) \
-         of {declared} declared; {audited} refusal audit records asserted, 0 failed"
+        "ESS confinement macos lane: {executed} scenarios executed ({s1} macos-s1, {s2} macos-s2, {io} macos-io, \
+         {lists} macos-lists) of {declared} declared; {audited} refusal audit records asserted, 0 failed"
     );
 }
 
@@ -509,6 +514,100 @@ async fn only_the_program_itself_is_executable() {
     let (code, stdout, _) = run_to_end(&adapter, profile(), &bash("/bin/echo exec", &[])).await;
     assert_ne!(code, Some(0));
     assert_eq!(stdout, "", "an unlisted executable ran");
+}
+
+/// Design 35 § 8.3 and the check of `story:executable-deny-list`: `/usr/bin` allowed and one
+/// program beneath it denied. Another program of `/usr/bin` runs and the denied one does not.
+/// A symbolic link to the denied program is denied, because Seatbelt matches the resolved
+/// path; a deny entry that does not exist at the start denies the file once the run creates
+/// it; and a file entry in `exec_subpaths` admits that file and not its neighbour (D2).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_denied_program_beneath_an_allowed_directory_does_not_run() {
+    let adapter = macos();
+    assert!(
+        adapter.facts().proves(&Fact::ExecDeniedPaths),
+        "the Seatbelt build probe did not prove exec_denied_paths: {:?}",
+        adapter.facts()
+    );
+    let root = tempfile::tempdir().expect("workspace");
+    let workspace = root.path().canonicalize().expect("canonical workspace");
+    std::fs::create_dir(workspace.join("bin")).expect("bin");
+    std::os::unix::fs::symlink("/usr/bin/true", workspace.join("link")).expect("a link");
+    let profile = |allowed: &[&str], denied: &[&str]| ConfinementProfile {
+        workspace: Some(workspace.clone()),
+        exec_subpaths: allowed.iter().map(|entry| (*entry).to_owned()).collect(),
+        exec_denied_paths: denied.iter().map(|entry| (*entry).to_owned()).collect(),
+        ..ConfinementProfile::default()
+    };
+
+    // The story's check, and a link to the denied program.
+    let (code, stdout, stderr) = run_to_end(
+        &adapter,
+        profile(&["/usr/bin"], &["/usr/bin/true"]),
+        &bash(
+            "/usr/bin/false; echo $?; /usr/bin/true 2>/dev/null; echo $?; \
+             ./link 2>/dev/null; echo $?",
+            &[],
+        ),
+    )
+    .await;
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{stdout}{stderr}");
+    assert_eq!(
+        lines[0], "1",
+        "the neighbour of the denied program ran: {stderr}"
+    );
+    assert_ne!(lines[1], "0", "the denied program ran");
+    assert_ne!(lines[2], "0", "a link to the denied program ran it");
+    assert_eq!(code, Some(0), "{stderr}");
+
+    // A deny entry that does not exist yet denies the file once it is created. The control is
+    // its neighbour, created the same way in the same listed directory.
+    let (_, stdout, stderr) = run_to_end(
+        &adapter,
+        profile(&["/usr/bin", "/bin", "bin"], &["bin/later"]),
+        &bash(
+            "/bin/cp /usr/bin/true bin/later && /bin/cp /usr/bin/true bin/other || exit 9; \
+             bin/other; echo $?; bin/later 2>/dev/null; echo $?",
+            &[],
+        ),
+    )
+    .await;
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{stdout}{stderr}");
+    assert_eq!(
+        lines[0], "0",
+        "a program created in the listed directory ran: {stderr}"
+    );
+    assert_ne!(lines[1], "0", "the deny entry created during the run ran");
+
+    // D2: a file entry admits that file only.
+    let (_, stdout, stderr) = run_to_end(
+        &adapter,
+        profile(&["/usr/bin/true"], &[]),
+        &bash(
+            "/usr/bin/true; echo $?; /usr/bin/false 2>/dev/null; echo $?",
+            &[],
+        ),
+    )
+    .await;
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{stdout}{stderr}");
+    assert_eq!(lines[0], "0", "the file entry's program ran: {stderr}");
+    assert!(
+        lines[1] != "0" && lines[1] != "1",
+        "the neighbour of a file entry ran: {stdout}"
+    );
+
+    // D13 on this adapter: a deny-list without an allow-list is refused by name.
+    let error = adapter
+        .admit(&profile(&[], &["/usr/bin/true"]))
+        .expect_err("a deny-list without an allow-list");
+    assert_eq!(
+        (error.code(), error.status()),
+        ("confinement.exec-denied-paths-without-subpaths", 422),
+        "{error}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

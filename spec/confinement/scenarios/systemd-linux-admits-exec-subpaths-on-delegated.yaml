@@ -17,7 +17,7 @@ timeline:
       adapter: systemd
       inner: linux
       served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
-      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, exec_denied_paths, stdin_pipe, output_live]
     outcome: opened
   - at: 2026-11-21T09:00:01Z
     command: substrate.confinement.AdmitProfile

@@ -74,6 +74,7 @@ fn run(stage: &str, entry: &str, writable: bool, script: &str) -> Result<Seen, S
         } else {
             Vec::new()
         },
+        deny: Vec::new(),
     };
     let output: Output = Command::new(unshare)
         .args(["--user", "--map-root-user", "--mount", "--"])

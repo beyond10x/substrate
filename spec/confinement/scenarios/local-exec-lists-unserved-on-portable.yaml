@@ -1,0 +1,35 @@
+# Design 35 D10: `exec_denied_paths` stands directly after `exec_subpaths` in the fact order,
+# so an adapter that proves neither refuses a profile with both lists naming `exec_subpaths`.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: local-exec-lists-unserved-on-portable
+summary: "lane portable: local with a reason and both executable lists is refused confinement.fact-unserved naming exec_subpaths."
+
+timeline:
+  - at: 2026-11-21T10:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, audit]
+      facts: [declared_insecure, paths_are_host_paths, local_permitted, host_network, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T10:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      required_families: [process_run]
+      required_facts: [exec_subpaths, exec_denied_paths]
+      local_reason: the operator runs this task on the developer's own machine
+      exec_subpath_entries: [/usr/bin]
+      exec_denied_path_entries: [/usr/bin/id]
+    outcome: fact-unserved-exec-subpaths
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: local, fact: exec_subpaths}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}
