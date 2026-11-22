@@ -32,7 +32,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  classify:
+    # `planning-only` for a pull request whose changed paths are all in
+    # `.github/planning-only-paths`, `code` for everything else, a push to `main` and a dispatch
+    # included (AGENTS.md § "The gate"). The jobs that wait for it skip only for `planning-only`.
+    name: Classify the change
+    uses: ./.github/workflows/classify-change.yml
+
   gate-tests:
+    needs: [classify]
+    if: ${{ !cancelled() && needs.classify.outputs.change != 'planning-only' }}
     name: "Gate: tests and Clippy"
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -152,6 +161,8 @@ jobs:
           echo "portable lane: ${{ steps.gate.outcome }} (the gate step). oci lane: ${{ steps.gate.outcome }} (the gate step). delegated lane: absent — not executed, not passed."
 
   gate-static:
+    needs: [classify]
+    if: ${{ !cancelled() && needs.classify.outputs.change != 'planning-only' }}
     name: "Gate: static checks"
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -210,24 +221,40 @@ jobs:
 
   gate:
     name: Full gate
-    needs: [gate-tests, gate-static]
+    needs: [classify, gate-tests, gate-static]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
     steps:
+      # Green for two green phases. Green without them only for a pull request that the
+      # classification answered `planning-only` and whose phases were both skipped for it: a
+      # phase skipped, failed or cancelled on any other run fails this job.
       - name: Require both gate phases
         env:
+          EVENT: ${{ github.event_name }}
+          CLASSIFY: ${{ needs.classify.result }}
+          CHANGE: ${{ needs.classify.outputs.change }}
           TESTS: ${{ needs.gate-tests.result }}
           STATIC: ${{ needs.gate-static.result }}
         run: |
+          echo "event: $EVENT"
+          echo "classification: $CLASSIFY, change: ${CHANGE:-none}"
           echo "tests phase: $TESTS"
           echo "static phase: $STATIC"
+          if [ "$EVENT" = pull_request ] && [ "$CLASSIFY" = success ] &&
+            [ "$CHANGE" = planning-only ] && [ "$TESTS" = skipped ] && [ "$STATIC" = skipped ]; then
+            echo "planning-only pull request: no build and no test ran"
+            echo "every changed path is in .github/planning-only-paths; the classify job lists them"
+            exit 0
+          fi
           test "$TESTS" = success
           test "$STATIC" = success
 
   pod-lane:
+    needs: [classify]
+    if: ${{ !cancelled() && needs.classify.outputs.change != 'planning-only' }}
     name: Pod lane
     runs-on: ubuntu-latest
     timeout-minutes: 45

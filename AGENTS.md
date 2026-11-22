@@ -631,12 +631,39 @@ authored source tree and never will.
 into its two phases as parallel jobs: `bash scripts/gate.sh tests` (workspace tests and Clippy) and
 `bash scripts/gate.sh static` (formatting, the `cargo xtask` checks and the Python bundle
 checkers). Every step belongs to exactly one phase, and no argument runs them all in order. The
-required `Full gate` context is a third job that needs both and succeeds only when both did. The
+required `Full gate` context is a third job that needs both and succeeds only when both did, or
+when the run is a planning-only pull request (next paragraph). The
 toolchain is pinned by `rust-toolchain.toml`, not by whatever `stable` is that day: bumping it is
 **one commit** that moves `rust-toolchain.toml`, the `rust-version` in `Cargo.toml` and the
 `Dockerfile` builder tag together, and `cargo xtask check-toolchain` fails the gate when the three
 disagree. Read the gate's own exit status, never a pipeline's (`gate.sh 2>&1 | tail` reports
 `tail`'s status, not the gate's).
+
+**A planning-only pull request passes `Full gate` without a build or a test.**
+[`.github/planning-only-paths`](.github/planning-only-paths) is the one path list: everything under
+`.engineering/`, the Markdown under `adr/`, `architecture/` and `docs/`, and `ROADMAP.md`,
+`SECURITY.md`, `STATUS.md` and `glossary.md`, except three documents a test reads by name (ADR 0047
+and designs 04 and 08). Every other path is code, Markdown included: `website/` is the built site,
+`CHANGELOG.md` is compared with its release page, `contracts/` and `xtask/bundle-source/` are
+released bundle bytes and their sources, `README.md`, `AGENTS.md` and the crate READMEs are read by
+tests or compiled as doctests, and `spec/`, `deploy/` and `vendor/` are sources. The first job of
+`gate.yml` and of `macos.yml` calls
+[`.github/workflows/classify-change.yml`](.github/workflows/classify-change.yml), which builds
+nothing: it reads the pull request's changed paths between the merge base and the head, both sides
+of every rename, against the list as the base commit holds it, prints each path with its class and
+answers `planning-only` or `code`. No changed path, one path outside the list, a commit the
+checkout does not hold, a shallow history, a list it cannot read and a job that fails are all
+`code`. For `planning-only`, `gate-tests`, `gate-static`, `pod-lane` and the macOS job are skipped
+and `Full gate` succeeds, saying that no build and no test ran. For `code` nothing changes: a
+skipped, failed or cancelled phase fails `Full gate`.
+A push to `main` and a `workflow_dispatch` always run the full gate, so every commit on `main`
+keeps the gate record `release.yml` reads. Accepted hazard: a planning-only pull request runs no
+prose check (`check-links`, `check-adrs`), so a broken link or a wrong ADR index row in a planning
+file, a design document or an ADR is first caught by the push run on `main`. It runs no
+`cargo xtask check-secrets` either; the shared `common / Security and privacy` context is not
+part of this rule and still runs on every pull request.
+`xtask/tests/planning_only_classification.rs` executes both steps offline against throwaway
+repositories, and fails when Rust source names a listed Markdown file.
 
 The monorepo-era cross-component suite (`scripts/check-local.sh` at the predecessor's root) no longer
 applies here.
