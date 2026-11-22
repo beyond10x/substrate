@@ -90,7 +90,7 @@ from (id, root name, labels, origin, owner), the entry under the workspace root,
 `Create` (only as far as adoption collides with it), `Adopt` and `Destroy`. What the green check
 establishes:
 
-- The model validates under ESS 0.86.0, and `workspaces-suite.json` is its exact synthesized suite
+- The model validates under ESS 0.97.3, and `workspaces-suite.json` is its exact synthesized suite
   (18 scenarios) plus the five authored scenarios under `workspaces/scenarios/`. Synthesis refuses
   one obligation (`ESS-SYNTH-013`: no view row asserts `.count` of `RootName`).
 - All 23 scenarios pass against ESS's `interpreted` reference. That executes the model, not the
@@ -149,14 +149,18 @@ green check establishes:
 - `ess specify validate --path spec/host-processes` resolves the model, its actors and its 21
   authored scenarios.
 - `spec/host-processes-suite.json` is the exact `ess verify conform synthesize` output;
-  `cargo xtask check-ess` fails on drift. Under ESS 0.86.0 it holds 92 synthesized scenarios
-  and records 27 refusals: 23 for seven of the eight stream bindings, whose invocation synthesis
-  cannot force and whose `drop` publishes nothing (ESS-SYNTH-010); 3 for branches and bindings
+  `cargo xtask check-ess` fails on drift. Under ESS 0.97.3 it holds 92 synthesized scenarios
+  and records 26 refusals: 23 for seven of the eight stream bindings, whose invocation synthesis
+  cannot force and whose `drop` publishes nothing (ESS-SYNTH-010); and 3 for branches and bindings
   whose arrangement passes through a row-set guard: the `AppendStreamEvent` branches `appended`
-  and `stream-closed` and the chained `stream-ended` binding (ESS-SYNTH-001); and one unwitnessed
-  connective child of `StartContainer/started` (ESS-SYNTH-022). Since 0.70.0 ESS synthesizes
-  `StartProcess/name-conflict` and both stop-by-owner branches, which 0.68.0 refused, and since
-  0.74.0 `AppendStreamEvent/unknown-process`, which earlier releases refused.
+  and `stream-closed` and the chained `stream-ended` binding (ESS-SYNTH-001). Since 0.70.0 ESS
+  synthesizes `StartProcess/name-conflict` and both stop-by-owner branches, which 0.68.0 refused,
+  since 0.74.0 `AppendStreamEvent/unknown-process`, which earlier releases refused, and since
+  0.93.0 it no longer refuses the presence child of `StartContainer/started` (ESS-SYNTH-022);
+  that scenario's bytes did not change. Since 0.88.0 a second instance is created with the
+  inputs' declared examples, so no synthesized scenario sends `k3d`, `unit` or `container`;
+  since 0.95.0 `RenewLease/not-live` also sends an ended adopted record, which `no-lease` matches
+  too, and requires `not-live`.
   An authored scenario exercises each refused branch and binding.
 - `ess verify conform run --target interpreted` passes all 113 scenarios, synthesized and
   authored, against the ESS reference. That checks the model only.
@@ -179,12 +183,12 @@ What it does not establish:
 `confinement/confinement.yaml` (domain `substrate.confinement`, ADR 0044) specifies the
 confinement contract of atlas ADR 0109 before any adapter code. What the green check establishes:
 
-- The model validates under ESS 0.86.0 with no warning, and `confinement-suite.json` is its exact
-  synthesized suite (5 scenarios, 32 refusals) plus the 65 authored scenarios under
-  `confinement/scenarios/`. Each of the 37 outcomes has at least one scenario, and each refused
+- The model validates under ESS 0.97.3 with no warning, and `confinement-suite.json` is its exact
+  synthesized suite (5 scenarios, 34 refusals) plus the 74 authored scenarios under
+  `confinement/scenarios/`. Each of the 39 outcomes has at least one scenario, and each refused
   obligation an authored one ([`confinement/README.md`](confinement/README.md) says why synthesis
   refuses them).
-- All 70 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
+- All 79 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
   adapter.
 - `OpenAdapter` refuses a `local` (or `systemd` around `local`) set without `declared_insecure` and
   an `oci` or `pod` set without `image_digest_pinned`, so no admission can report `local`
