@@ -12,7 +12,11 @@ with a design note first and a case that shows the call before and after. Decide
 `story:floor-refuses-the-ioctl-that-exchanges-file-blocks`. The design comes before code
 (invariant 8): this record changes the confinement floor and no code yet. The operator ordered
 the one request; the survey below found one more of the same kind, `XFS_IOC_SWAPEXT`, and
-decision 1 names it by the same rule.
+decision 1 names it by the same rule. The operator then ordered the rule for every confined run
+and the widening to XFS ("A: refuse both", relayed 2026-11-22). A third request,
+`F2FS_IOC_SEC_TRIM_FILE`, was found by the adversary pass on 2026-11-22. This repository's
+session added it under the same rule and reports it to the operator session with the pull
+request: the operator did not order that row.
 
 ## Context
 
@@ -56,7 +60,8 @@ size, modification time and change time. The content was read on the host after 
 
 Not staged: a session (a session is spawned through the same `command` of
 [`process.rs`](../crates/substrate-host/src/process.rs), which adds the one seccomp program;
-only the child's channel differs), a read-only root, and a scoped workspace.
+only the child's channel differs), a read-only root, and a scoped workspace. The adversary pass
+later ran a pipe session and a pty session under the program (*Proof*).
 
 ### Why the floor refuses one request today
 
@@ -111,6 +116,8 @@ where noted. "Read" is the kernel source at `v6.18`.
 | `XFS_IOC_EXCHANGE_RANGE`, `XFS_IOC_COMMIT_RANGE` | exchange ranges of two files; set modification and change time of both | XFS with the feature; both files open read and write; no capability | not filtered | read: `fs/xfs/xfs_exchrange.c` sets both times unless the descriptor came from open-by-handle, which needs `CAP_SYS_ADMIN`. `ENOTTY` on all three (ran) | not refused: the stat facts move, as for a write |
 | `FS_IOC_EXCHANGE_RANGE` | none: `include/uapi/linux/fs.h` at `v6.18` defines no such request | | | read | nothing to refuse |
 | `F2FS_IOC_MOVE_RANGE` | moves a range into another file; sets modification and change time of both | f2fs; source open read and write, destination for writing | not filtered | read: `f2fs_move_file_range` in `fs/f2fs/file.c`. `ENOTTY` on all three (ran) | not refused: the stat facts move |
+| `F2FS_IOC_SEC_TRIM_FILE` | drops the file's cached pages and zeroes or discards the blocks the file keeps mapped; sets no time and no size | f2fs; a regular file open for writing; no capability and no ownership | the request is not filtered; reachable where a writable mount is on f2fs | read by the adversary pass, 2026-11-22: `f2fs_sec_trim_file` and `f2fs_secure_erase` in `fs/f2fs/file.c`. Not run: no f2fs was at hand | **refused** |
+| `F2FS_IOC_START_ATOMIC_WRITE`, then `F2FS_IOC_ABORT_ATOMIC_WRITE` or a close | writes after the start are held apart from the file and dropped by the abort, by the close and at the writer's exit, so the file ends with the content it had | f2fs; the file open for writing by its owner (`inode_owner_or_capable`); the difference lasts only while the process that started it holds the file | not filtered | read by the adversary pass: `f2fs_ioc_start_atomic_write` and `f2fs_abort_atomic_write` in `fs/f2fs/file.c`. Not run | not refused: it needs ownership and a live writer and reverts at exit, the class of the shared mapping below |
 | `BTRFS_IOC_DEFRAG`, `BTRFS_IOC_DEFRAG_RANGE`, `F2FS_IOC_DEFRAGMENT`, `OCFS2_IOC_MOVE_EXT` | rewrite or move one file's own blocks; the content stays | write access to the file | not filtered | read: `fs/btrfs/ioctl.c`, `fs/ocfs2/move_extents.c`; not run | not refused: the content does not change |
 | `FICLONE`, `FICLONERANGE` (`BTRFS_IOC_CLONE`) | the destination takes the source's content; sets its modification and change time | a file system with reflink; destination open for writing | not filtered | `EOPNOTSUPP` on all three (ran). Read: `file_modified` in `fs/remap_range.c` | not refused: the stat facts move, and `cp --reflink` needs it |
 | `FIDEDUPERANGE` | shares blocks of two ranges only when their bytes are equal | a file system with reflink | not filtered | `EOPNOTSUPP` on `ext4` and `tmpfs`, `EINVAL` on `overlay` (ran). Read: the comparison in `fs/remap_range.c` | not refused: the content does not change |
@@ -128,20 +135,24 @@ shared mappings, so it cannot be refused.
 
 ## Decision
 
-1. **The seccomp program of every confined run and session refuses two more `ioctl` requests
+1. **The seccomp program of every confined run and session refuses three more `ioctl` requests
    with `EACCES`**, the errno the profile already answers for `TIOCSETD`:
 
    | request | number, on `x86_64` and `aarch64` | definition |
    |---|---|---|
    | `EXT4_IOC_MOVE_EXT` | `0xC028660F` | `_IOWR('f', 15, struct move_extent)`, 40 bytes |
    | `XFS_IOC_SWAPEXT` | `0xC0C0586D` | `_IOWR('X', 109, struct xfs_swapext)`, 192 bytes |
+   | `F2FS_IOC_SEC_TRIM_FILE` | `0x4018F514` | `_IOW(0xf5, 20, struct f2fs_sectrim_range)`, 24 bytes |
 
    The rule for the list: **a request is refused when a process without a capability can use it
    to change the content of a file, or exchange content between files, with no stat fact of the
    changed file moving.** `EXT4_IOC_MOVE_EXT` is the one observed. `XFS_IOC_SWAPEXT` is named
    from the source alone: no XFS was at hand, and it is the worse of the two, because the caller
    chooses the content the file ends with. It is the request `xfs_fsr` uses, and no program a
-   run is expected to start defragments a file system.
+   run is expected to start defragments a file system. `F2FS_IOC_SEC_TRIM_FILE` is named from
+   the source alone too: no f2fs was at hand. It exchanges nothing; it erases the blocks a file
+   keeps mapped, with no stat fact moving, which is the rule's first half. No program a run is
+   expected to start erases a file's blocks in place.
 2. **The refusal is the floor, for every run, whatever its profile asks.** It is not a fact and
    no profile member turns it on or off. `Fact` and `AdapterFacts` do not change. The refusal
    answers before the kernel looks at the descriptor, so it holds on every file system and for
@@ -150,8 +161,9 @@ shared mappings, so it cannot be refused.
    takes the request as an `unsigned int`, so the low word is the whole request and a value with
    high bits set is the same request and is refused too. A request number holds the direction,
    the size of its argument, a type byte and a number. Both supported targets use the generic
-   encoding, and both structures have the same size on each, so one number per request serves
-   both (compiled as static assertions for both targets with `clang`, not run on `aarch64`). A
+   encoding, and each structure has the same size on both, so one number per request serves
+   both (the first two compiled as static assertions for both targets with `clang`, not run on
+   `aarch64`; `struct f2fs_sectrim_range` is three 64-bit members). A
    32-bit caller is refused earlier: the program refuses a foreign architecture and every x32
    call before any argument check (ADR 0039 decision 4).
 4. **The requests are refused by number; `ioctl` does not become an allow-list.** An allow-list
@@ -172,9 +184,9 @@ shared mappings, so it cannot be refused.
    reader that goes by stat facts sees them as it sees a write.
 6. **The refused requests are one list in `seccomp.rs`, and the program's `ioctl` check is
    generated from it**, as the socket chain is generated from `ALLOWED_SOCKETS`: `TIOCSETD` and
-   the two requests of decision 1, each with its name and the reason it is there. A request is
-   added by adding a row and its case. The two numbers are spelled out with their definition,
-   because the `libc` crate names neither.
+   the three requests of decision 1, each with its name and the reason it is there. A request is
+   added by adding a row and its case. The three numbers are spelled out with their definition,
+   because the `libc` crate names none of them.
 7. **No wire change.** No route, schema, fact or refusal of the wire contract moves and no
    bundle is cut. A program that made one of these calls inside a run got its result before and
    gets `EACCES` now; `CHANGELOG.md` records that under *Security*, and that every release with
@@ -208,14 +220,18 @@ profile can require.
 | delegated | [`floor_refuses_block_exchange`](../crates/substrate-host/tests/floor_refuses_block_exchange.rs), required by [`scripts/delegated-lane.sh`](../scripts/delegated-lane.sh) | one run on `linux` with a writable workspace on `ext4` starts a static program that calls `EXT4_IOC_MOVE_EXT` on two workspace files; the call answers `EACCES`, and both files keep their five stat facts and their content, read on the host after the pages were dropped. Red before the change: the call answers 0 and the donor reads as zeros | 0.4 s measured, red, release build; one run |
 | unit, `seccomp.rs` (portable: a forked child under the program, no sandbox) | beside `the_line_discipline_ioctl_is_refused_and_other_terminal_ioctls_are_not` | on descriptor -1, each request of decision 1 answers `EACCES`, and so does `EXT4_IOC_MOVE_EXT` with high bits set above the low word; `FS_IOC_FIEMAP` (`0xC020660B`, the same type byte), a request with `EXT4_IOC_MOVE_EXT`'s type and number and another size, `FICLONE` and `TIOCGWINSZ` reach the kernel and answer `EBADF` | under 1 s; one fork per probe |
 | unit, `seccomp.rs` | the list | every row of the refused list has a name, a number and a reason, and the program refuses exactly the rows | no fork |
+| delegated scope | [`adversary_floor_block_exchange`](../crates/substrate-host/tests/adversary_floor_block_exchange.rs), four cases and their probe entry | an exec, a pipe session and a pty session each make the call on two allocated workspace files through every entry a process has to `ioctl` (native, the high word set, x32, the 32-bit entry) and call `XFS_IOC_SWAPEXT`, `io_uring_setup` and a `ptrace` that would suspend the program: each answers `EACCES` or fails, and both files are unchanged, read cold. One more exec asks `F2FS_IOC_SEC_TRIM_FILE` on descriptor -1 and is answered `EACCES`; red before the fourth row, where the kernel answered `EBADF`. `scripts/delegated-lane.sh` runs the root with the host crate's cases and does not require its lines | under 1 s; one run per case |
 
 The lane case is absent, and says why, without a delegated cgroup root, without bubblewrap,
 without a `cc` that links a static program, or where cargo's target directory is not on `ext4`:
 on another file system the request does not exist and the case would show nothing. The lane
 requires its `executed` line. It takes one absence instead and names it as absent, never as
 passed: the case's own line that the staging file system is not ext4, which a workstation's
-target directory may not be. Every other absence fails the lane. There is
-no case on XFS: no lane has one, and the unit case is what holds `XFS_IOC_SWAPEXT`.
+target directory may not be. Every other absence fails the lane. On a hosted runner, where
+`GITHUB_ACTIONS` is `true` and the lane records a release, that one absence is not taken either:
+the `executed` line is required. There is no case on XFS or on f2fs: no lane has either file
+system, and the unit cases and the adversary's cases hold only the program's answer for
+`XFS_IOC_SWAPEXT` and `F2FS_IOC_SEC_TRIM_FILE`.
 
 ## What stays possible
 
@@ -234,7 +250,7 @@ no case on XFS: no lane has one, and the unit case is what holds `XFS_IOC_SWAPEX
 
 - The floor of `AGENTS.md` § *Safety envelope* gains the refusal, in the story's code change.
 - ADR 0039 decided the program's socket rules and its one refused `ioctl` request. This record
-  adds two and makes the refused requests a list.
+  adds three and makes the refused requests a list.
 - ADR 0051's precondition, that every confined writer runs under a program that refuses
   `EXT4_IOC_MOVE_EXT`, is met by this record.
 - The lane case joins the delegated lane and is red until the program changes. The gate's
@@ -246,7 +262,13 @@ no case on XFS: no lane has one, and the unit case is what holds `XFS_IOC_SWAPEX
 
 - **That `XFS_IOC_SWAPEXT` works as read**: that it needs no capability, sets no time and
   exchanges the content of two files a run may write. Read from `v6.18`; never run, on any XFS.
-- That a session and a run get the same program: read from `command`, not run as a session.
+- **That `F2FS_IOC_SEC_TRIM_FILE` works as read**: that it needs only a descriptor open for
+  writing, erases the blocks the file keeps mapped and sets no time and no size. Read from
+  `v6.18` by the adversary pass; never run, on any f2fs. The same for
+  `F2FS_IOC_START_ATOMIC_WRITE`: that it needs ownership and that every way out of it leaves
+  the file's content as it was.
+- That a session gets the program through the same `command` as a run is read; that a pipe
+  session and a pty session are refused the call is run, by the adversary's cases.
 - That a read-only root, a read-only file, a capsule and the read-only part of a scoped
   workspace stop the call as a read-only workspace did: the same mount flag, one of them run.
 - That the Git change-set route misses the file as the `git` command line did: libgit2 was not
@@ -254,7 +276,7 @@ no case on XFS: no lane has one, and the unit case is what holds `XFS_IOC_SWAPEX
 - Why the donor read as zeros and not as the other file's bytes, and that every `ext4` and every
   kernel does the same: one kernel (6.18), one file system.
 - That `EXT4_IOC_SWAP_BOOT` answers `EPERM` inside a run: read, not run.
-- That the two numbers are right on `aarch64`: the structures' sizes were asserted by a compiler
+- That the three numbers are right on `aarch64`: the structures' sizes were asserted by a compiler
   for that target; no call was made there.
 - That Docker's and containerd's default profiles let the request through at run time, and what
   other runtimes' defaults do: the profiles were read at the versions named; no container was

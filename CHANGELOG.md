@@ -23,15 +23,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     driver's execs and sessions, and the `linux` confinement adapter since `0.12.0`, alone or
     inside `systemd`.
   - **Now refused:** the seccomp program of every confined run and session (exec, pipe session
-    and pty session) answers `EXT4_IOC_MOVE_EXT` (`0xC028660F`) and `XFS_IOC_SWAPEXT`
-    (`0xC0C0586D`) with `EACCES` before the kernel looks at the descriptor, on every file system
-    and whatever the profile asks. It is part of the floor: no fact, no profile member and no
-    wire change. `XFS_IOC_SWAPEXT`, which exchanges the whole content of two files and sets no
-    time, was read from the kernel source (v6.18) and not run, because no XFS file system was at
-    hand; a unit case holds only the filter's answer for it. A program that defragments a file
-    inside a run now gets `EACCES`.
+    and pty session) answers `EXT4_IOC_MOVE_EXT` (`0xC028660F`), `XFS_IOC_SWAPEXT`
+    (`0xC0C0586D`) and `F2FS_IOC_SEC_TRIM_FILE` (`0x4018F514`) with `EACCES` before the kernel
+    looks at the descriptor, on every file system and whatever the profile asks. It is part of
+    the floor: no fact, no profile member and no wire change. Two of the three were read from
+    the kernel source (v6.18) and not run, because no XFS and no f2fs file system was at hand:
+    `XFS_IOC_SWAPEXT`, which exchanges the whole content of two files and sets no time, and
+    `F2FS_IOC_SEC_TRIM_FILE`, which erases the blocks a file keeps mapped and sets no time and
+    no size. The cases hold only the filter's answer for those two. Run, each with
+    `EXT4_IOC_MOVE_EXT` called on two files of an `ext4` workspace and refused: an exec, a pipe
+    session and a pty session of the host driver, and an exec on the `linux` adapter. A program
+    that defragments a file or erases its blocks in place inside a run now gets `EACCES`.
   - **Not covered:** the `oci` and `pod` adapters and the namespace driver's exec pods, whose
-    runtimes' default seccomp profiles pass both requests
+    runtimes' default seccomp profiles pass all three requests
     (`story:oci-and-pod-refuse-the-ioctls-that-exchange-file-blocks`, a draft); `local` and
     `systemd` around `local`, which install no filter and promise no confinement; host processes,
     which are unconfined by contract; and a request of the same kind that ADR 0050's survey did

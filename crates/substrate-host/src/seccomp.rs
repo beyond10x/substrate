@@ -73,7 +73,7 @@ const ALLOWED_SOCKETS: [(&str, libc::c_int, &[libc::c_int]); 3] = [
 /// content of a file, or exchange content between files, with no stat fact of the changed file
 /// moving. A request is added by adding a row here and its case in `seccomp::tests`, which
 /// declares the set a second time.
-const REFUSED_IOCTLS: [(&str, u32, &str); 3] = [
+const REFUSED_IOCTLS: [(&str, u32, &str); 4] = [
     (
         "TIOCSETD",
         // `asm-generic/ioctls.h`; `seccomp::tests` holds it to `libc::TIOCSETD`.
@@ -98,6 +98,15 @@ const REFUSED_IOCTLS: [(&str, u32, &str); 3] = [
          Read from the kernel source (v6.18) and not run, because no XFS file system was at \
          hand: the cases hold only this program's answer for the request, not what XFS does \
          with it",
+    ),
+    (
+        "F2FS_IOC_SEC_TRIM_FILE",
+        // `_IOW(0xf5, 20, struct f2fs_sectrim_range)`, 24 bytes. The `libc` crate does not name it.
+        0x4018_F514,
+        "ADR 0050: on a file open for writing it drops the file's cached pages and zeroes or \
+         discards the blocks the file keeps mapped, and sets no time and no size. Read from the \
+         kernel source (v6.18) and not run, because no f2fs file system was at hand: the cases \
+         hold only this program's answer for the request, not what f2fs does with it",
     ),
 ];
 
@@ -198,8 +207,9 @@ pub(crate) fn profile() -> Result<File, DriverError> {
 ///   other family yields a usable pair, and each creates its sockets the way `socket(2)` does
 ///   (ADR 0039).
 /// * `ioctl`: every request in `REFUSED_IOCTLS` is refused and every other request is allowed.
-///   The list holds `TIOCSETD` (ADR 0039) and the two requests that exchange file blocks without
-///   moving a stat fact, `EXT4_IOC_MOVE_EXT` and `XFS_IOC_SWAPEXT` (ADR 0050).
+///   The list holds `TIOCSETD` (ADR 0039) and the three requests that change what a file holds on
+///   disk without moving a stat fact: `EXT4_IOC_MOVE_EXT` and `XFS_IOC_SWAPEXT`, which exchange
+///   file blocks, and `F2FS_IOC_SEC_TRIM_FILE`, which erases them (ADR 0050).
 fn filters(deny: u32) -> Vec<libc::sock_filter> {
     let mut program = vec![
         Op::Statement(LD_W_ABS, 4),
@@ -934,19 +944,21 @@ mod tests {
         );
     }
 
-    /// ADR 0050 at the profile: the two requests that exchange file blocks are refused with
-    /// `EACCES` before the kernel looks at the descriptor, and the requests beside them are not.
+    /// ADR 0050 at the profile: the two requests that exchange file blocks and the one that
+    /// erases them are refused with `EACCES` before the kernel looks at the descriptor, and the
+    /// requests beside them are not.
     ///
     /// Issued on descriptor -1 so that no file is touched: a refused request answers `EACCES`,
     /// and one the profile lets through answers `EBADF` from the kernel. The numbers are written
     /// out here and not taken from `REFUSED_IOCTLS`, so a wrong number in that list fails this
-    /// case. The third row is `EXT4_IOC_MOVE_EXT` with every bit above the low word set: the
+    /// case. The last row is `EXT4_IOC_MOVE_EXT` with every bit above the low word set: the
     /// kernel takes the request as an `unsigned int`, so it is the same request (decision 3).
     #[test]
     fn the_ioctls_that_exchange_file_blocks_are_refused_and_their_neighbours_are_not() {
         for (name, request) in [
             ("EXT4_IOC_MOVE_EXT", 0xC028_660F_u64),
             ("XFS_IOC_SWAPEXT", 0xC0C0_586D),
+            ("F2FS_IOC_SEC_TRIM_FILE", 0x4018_F514),
             (
                 "EXT4_IOC_MOVE_EXT with the high word set",
                 0xFFFF_FFFF_C028_660F,
@@ -967,6 +979,8 @@ mod tests {
             ),
             // `_IOW(0x94, 9, int)`, which `cp --reflink` makes.
             ("FICLONE", 0x4004_9409),
+            // `_IOWR(0xf5, 8, struct f2fs_defragment)`: the type byte of `F2FS_IOC_SEC_TRIM_FILE`.
+            ("F2FS_IOC_DEFRAGMENT", 0xC010_F508),
             ("TIOCGWINSZ", 0x5413),
         ] {
             assert!(
@@ -996,11 +1010,12 @@ mod tests {
                 (ARGUMENT_1, 0x5423),
                 (ARGUMENT_1, 0xC028_660F),
                 (ARGUMENT_1, 0xC0C0_586D),
+                (ARGUMENT_1, 0x4018_F514),
             ],
             "the refused requests are the confinement floor: TIOCSETD (ADR 0039), \
-             EXT4_IOC_MOVE_EXT and XFS_IOC_SWAPEXT (ADR 0050), each compared with the low word \
-             of the request and nothing else; changing the set is a deliberate act and this is \
-             where it is declared"
+             EXT4_IOC_MOVE_EXT, XFS_IOC_SWAPEXT and F2FS_IOC_SEC_TRIM_FILE (ADR 0050), each \
+             compared with the low word of the request and nothing else; changing the set is a \
+             deliberate act and this is where it is declared"
         );
         assert_eq!(
             on_arguments
@@ -1022,10 +1037,14 @@ mod tests {
     /// No fork: the program is run by `interpret`.
     #[test]
     fn every_refused_ioctl_row_is_named_reasoned_and_refused() {
-        /// `_IOWR(type, number, size)` in the generic request encoding of both targets.
-        fn iowr(kind: u8, number: u8, size: u16) -> u32 {
-            (3 << 30) | (u32::from(size) << 16) | (u32::from(kind) << 8) | u32::from(number)
+        /// `_IOC(direction, type, number, size)` in the generic request encoding of both targets.
+        fn ioc(direction: u32, kind: u8, number: u8, size: u16) -> u32 {
+            (direction << 30) | (u32::from(size) << 16) | (u32::from(kind) << 8) | u32::from(number)
         }
+        /// `_IOW`: the kernel reads the argument.
+        const WRITE: u32 = 1;
+        /// `_IOWR`: the kernel reads and writes the argument.
+        const READ_WRITE: u32 = 3;
         let deny = ERRNO | u32::try_from(libc::EACCES).unwrap_or(13);
         assert_eq!(
             REFUSED_IOCTLS
@@ -1037,9 +1056,11 @@ mod tests {
                     "TIOCSETD",
                     u32::try_from(libc::TIOCSETD).expect("TIOCSETD fits the request word")
                 ),
-                // `struct move_extent` is 40 bytes and `struct xfs_swapext` 192.
-                ("EXT4_IOC_MOVE_EXT", iowr(b'f', 15, 40)),
-                ("XFS_IOC_SWAPEXT", iowr(b'X', 109, 192)),
+                // `struct move_extent` is 40 bytes, `struct xfs_swapext` 192 and
+                // `struct f2fs_sectrim_range` 24.
+                ("EXT4_IOC_MOVE_EXT", ioc(READ_WRITE, b'f', 15, 40)),
+                ("XFS_IOC_SWAPEXT", ioc(READ_WRITE, b'X', 109, 192)),
+                ("F2FS_IOC_SEC_TRIM_FILE", ioc(WRITE, 0xf5, 20, 24)),
             ],
             "the refused requests are the confinement floor; a row is added or removed with its \
              ADR, and its number is the request's definition"

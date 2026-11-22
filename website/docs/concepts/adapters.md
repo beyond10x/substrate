@@ -106,8 +106,8 @@ The host driver behind the contract: bubblewrap, namespaces, cgroup v2, seccomp 
 - **Enforces.** An argument vector rather than a shell string, a cleared and shaped environment, a
   writable `/workspace`, read-only system inputs and declared roots, no usable network interface
   unless an operator-declared aperture is admitted, a seccomp filter on new Unix-domain sockets,
-  `io_uring_setup` and the two `ioctl` requests that exchange file blocks, PID, memory and CPU
-  bounds in its own cgroup, and whole-cgroup termination.
+  `io_uring_setup` and the three `ioctl` requests that exchange or erase file blocks, PID,
+  memory and CPU bounds in its own cgroup, and whole-cgroup termination.
 - **Declares.** Each family only when the driver's probe proved what it rests on:
   `process_run`, `process_watch` and `wait` on the confinement floor (argv-only exec and
   namespaces), `output_read` with an output limit, `workspace` with guarded I/O,

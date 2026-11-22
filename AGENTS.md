@@ -169,20 +169,22 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   atomic replacement, cleared and shaped environment, namespace no-egress, **no nested user
   namespace** — the child's own user namespace with `--disable-userns`, so it cannot create
   another one and hold `CAP_SYS_ADMIN` in it — a seccomp program that refuses the `ioctl`
-  requests that exchange file blocks, pids and memory+swap
+  requests that exchange or erase file blocks, pids and memory+swap
   bounds with cumulatively observed CPU, backend-identity-bound capability snapshots, output
   draining, timeout, whole-tree kill, exact capsule-byte verification, read-only `/runtime` beside a
   separate writable `/workspace`, owner-private durable state, and bounded normal/restart capsule
   cleanup. Removing or weakening any of these is invariant 3's named refusal, never a quiet
-  downgrade. The refused requests are `EXT4_IOC_MOVE_EXT` and `XFS_IOC_SWAPEXT`, answered `EACCES`
+  downgrade. The refused requests are `EXT4_IOC_MOVE_EXT`, `XFS_IOC_SWAPEXT` and
+  `F2FS_IOC_SEC_TRIM_FILE`, answered `EACCES`
   for every confined run and session of the host driver and the `linux` adapter, whatever the
   profile asks
   ([ADR 0050](adr/0050-the-floor-refuses-the-ioctl-requests-that-exchange-file-blocks.md)): rows
   of `REFUSED_IOCTLS` in `crates/substrate-host/src/seccomp.rs`, which the program's `ioctl`
   check is generated from and `seccomp::tests` declares a second time; the delegated lane holds
-  the first with one real run on ext4 (`floor_refuses_block_exchange`), and nothing was run on
-  XFS. The `oci` and `pod` adapters keep their runtime's default seccomp profile, which passes
-  both, and `local` has no filter.
+  the first with one real run on ext4 (`floor_refuses_block_exchange`), required on a hosted
+  runner and absent only where a workstation's staging file system is not ext4, and nothing was
+  run on XFS or f2fs. The `oci` and `pod` adapters keep their runtime's default seccomp profile,
+  which passes all three, and `local` has no filter.
 - **Execution capsules are verified read-only inputs** (`adr/0009`), and declared host roots are
   mounted read-only (`adr/0010`). A capsule's bytes are verified exactly; a mutable ref is input
   convenience and is always resolved to and recorded as an immutable commit

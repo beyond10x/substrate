@@ -307,9 +307,11 @@ require_executed security3_exec_gate \
 # The case's `executed` line is required, with one absence taken instead: the case's own line
 # that the staging file system is not ext4, which a workstation's target directory may not be.
 # It is named below as absent, never as passed. Every other absence (no delegated root, no
-# bubblewrap, no `cc` that links a static program) fails the lane. Not `require_staged`: on a
-# host that grants a user namespace no mount, its `?<name>|<reason>` form takes any `ABSENT (`
-# line of the case, and a hosted runner is such a host.
+# bubblewrap, no `cc` that links a static program) fails the lane. On a hosted runner
+# (`GITHUB_ACTIONS` is `true`) that absence is not taken either: the lane there records a
+# release, so the `executed` line is required. Not `require_staged`: on a host that grants a
+# user namespace no mount, its `?<name>|<reason>` form takes any `ABSENT (` line of the case,
+# and a hosted runner is such a host.
 require_executed_unless() {
   local binary="$1" name="$2" reason="$3"
   local log
@@ -326,7 +328,8 @@ require_executed_unless() {
     echo "delegated-lane: ${binary} executed its delegated cases"
     return
   fi
-  if [[ "${absent}" == 1 ]] && grep -qF "${name}: ABSENT (${reason}" <<<"${log}"; then
+  if [[ "${GITHUB_ACTIONS:-}" != "true" && "${absent}" == 1 ]] \
+    && grep -qF "${name}: ABSENT (${reason}" <<<"${log}"; then
     echo "delegated-lane: ${reason}; absent, not passed: ${binary}: ${name}"
     return
   fi
@@ -335,6 +338,17 @@ require_executed_unless() {
 }
 require_executed_unless floor_refuses_block_exchange \
   'floor block exchange' 'the staging file system is not ext4'
+# The adversary's cases of ADR 0050: the filter's answer for the f2fs request, and the ext4
+# request refused at every entry of an exec, a pipe session and a pty session. Required on the
+# hosted runner, which stages on ext4. Elsewhere they may be absent for the reason the case above
+# names; the host-crate run further up has run them, and an absence there is not read as run.
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  require_executed adversary_floor_block_exchange \
+    'adversary floor block exchange: f2fs survey: executed' \
+    'adversary floor block exchange: exec: executed' \
+    'adversary floor block exchange: pipe session: executed' \
+    'adversary floor block exchange: pty session: executed'
+fi
 
 # The helper's own cases start cargo's test build of `substrate-exec-gate`, which is dynamically
 # linked, with no sandbox and no driver around it: what they hold is the helper's own argument
