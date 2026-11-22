@@ -60,6 +60,56 @@ const ALLOWED_SOCKETS: [(&str, libc::c_int, &[libc::c_int]); 3] = [
     ("AF_NETLINK", libc::AF_NETLINK, &[libc::NETLINK_ROUTE]),
 ];
 
+/// **The `ioctl(2)` requests the program refuses, and the one list its `ioctl` check is generated
+/// from** (ADR 0050 decision 6): a name, the request's number and the reason it is refused.
+///
+/// `ioctl` is not an allow-list. A request absent from this list reaches the kernel, because the
+/// set of requests an ordinary program makes is open (ADR 0050 decision 4). The number is the
+/// request's low 32 bits, which is all the kernel reads of it, so a request with bits set above
+/// them is the same request and is refused too. One number serves both supported targets: they
+/// share the generic request encoding, and the two structures have the same size on each.
+///
+/// ADR 0050's rule for a row: a process without a capability can use the request to change the
+/// content of a file, or exchange content between files, with no stat fact of the changed file
+/// moving. A request is added by adding a row here and its case in `seccomp::tests`, which
+/// declares the set a second time.
+const REFUSED_IOCTLS: [(&str, u32, &str); 4] = [
+    (
+        "TIOCSETD",
+        // `asm-generic/ioctls.h`; `seccomp::tests` holds it to `libc::TIOCSETD`.
+        0x5423,
+        "ADR 0039 decision 3: it changes a terminal's line discipline, and nothing the runtime \
+         ships changes one. Asking for a discipline makes the kernel load its module on the host",
+    ),
+    (
+        "EXT4_IOC_MOVE_EXT",
+        // `_IOWR('f', 15, struct move_extent)`, 40 bytes. The `libc` crate does not name it.
+        0xC028_660F,
+        "ADR 0050: it exchanges the blocks of two files a run may write and moves no stat fact \
+         of either. Observed inside a run on ext4: the call returned 0, one file read as zeros \
+         from disk, and device, inode, size, modification time and change time of both stayed \
+         as they were, while the page cache went on serving the old content",
+    ),
+    (
+        "XFS_IOC_SWAPEXT",
+        // `_IOWR('X', 109, struct xfs_swapext)`, 192 bytes. The `libc` crate does not name it.
+        0xC0C0_586D,
+        "ADR 0050: it exchanges the whole content of two files of equal size and sets no time. \
+         Read from the kernel source (v6.18) and not run, because no XFS file system was at \
+         hand: the cases hold only this program's answer for the request, not what XFS does \
+         with it",
+    ),
+    (
+        "F2FS_IOC_SEC_TRIM_FILE",
+        // `_IOW(0xf5, 20, struct f2fs_sectrim_range)`, 24 bytes. The `libc` crate does not name it.
+        0x4018_F514,
+        "ADR 0050: on a file open for writing it drops the file's cached pages and zeroes or \
+         discards the blocks the file keeps mapped, and sets no time and no size. Read from the \
+         kernel source (v6.18) and not run, because no f2fs file system was at hand: the cases \
+         hold only this program's answer for the request, not what f2fs does with it",
+    ),
+];
+
 /// Offsets of the syscall arguments in `struct seccomp_data`. Each comparison reads the low 32
 /// bits, which is the width the kernel reads for a family, a protocol, a socket type and an
 /// ioctl request (both supported targets are little-endian).
@@ -156,7 +206,10 @@ pub(crate) fn profile() -> Result<File, DriverError> {
 ///   other type is refused. Connection-oriented pairs remain available for process-local IPC. No
 ///   other family yields a usable pair, and each creates its sockets the way `socket(2)` does
 ///   (ADR 0039).
-/// * `ioctl`: `TIOCSETD` is refused; no shipped path changes a terminal's line discipline.
+/// * `ioctl`: every request in `REFUSED_IOCTLS` is refused and every other request is allowed.
+///   The list holds `TIOCSETD` (ADR 0039) and the three requests that change what a file holds on
+///   disk without moving a stat fact: `EXT4_IOC_MOVE_EXT` and `XFS_IOC_SWAPEXT`, which exchange
+///   file blocks, and `F2FS_IOC_SEC_TRIM_FILE`, which erases them (ADR 0050).
 fn filters(deny: u32) -> Vec<libc::sock_filter> {
     let mut program = vec![
         Op::Statement(LD_W_ABS, 4),
@@ -242,13 +295,24 @@ fn filters(deny: u32) -> Vec<libc::sock_filter> {
             yes: Label::Allow,
             no: Label::Deny,
         },
-        Op::Mark(Label::Ioctl),
-        Op::Statement(LD_W_ABS, ARGUMENT_1),
-        Op::Jump {
-            value: u32::try_from(libc::TIOCSETD).expect("TIOCSETD fits the 32-bit request word"),
+    ]);
+
+    program.push(Op::Mark(Label::Ioctl));
+    program.push(Op::Statement(LD_W_ABS, ARGUMENT_1));
+    let last = REFUSED_IOCTLS.len() - 1;
+    for (index, (_, request, _)) in REFUSED_IOCTLS.iter().enumerate() {
+        program.push(Op::Jump {
+            value: *request,
             yes: Label::Deny,
-            no: Label::Allow,
-        },
+            no: if index == last {
+                Label::Allow
+            } else {
+                Label::Next
+            },
+        });
+    }
+
+    program.extend([
         Op::Mark(Label::Deny),
         Op::Statement(RET_K, deny),
         Op::Mark(Label::Allow),
@@ -567,7 +631,12 @@ fn clear_cloexec(fd: RawFd) -> Result<(), DriverError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ALLOWED_SOCKETS, ERRNO, FAMILY_POLICY, filters};
+    #[cfg(target_arch = "x86_64")]
+    use super::JMP_JSET_K;
+    use super::{
+        ALLOW, ALLOWED_SOCKETS, ALU_AND_K, ARGUMENT_0, ARGUMENT_1, AUDIT_ARCH, ERRNO,
+        FAMILY_POLICY, JMP_JEQ_K, LD_W_ABS, REFUSED_IOCTLS, RET_K, filters,
+    };
 
     #[cfg(target_arch = "x86_64")]
     const X32_SYSCALL_BIT: libc::c_long = 0x4000_0000;
@@ -873,6 +942,261 @@ mod tests {
             }),
             "ioctl(TIOCGWINSZ) must reach the kernel and answer EBADF on descriptor -1"
         );
+    }
+
+    /// ADR 0050 at the profile: the two requests that exchange file blocks and the one that
+    /// erases them are refused with `EACCES` before the kernel looks at the descriptor, and the
+    /// requests beside them are not.
+    ///
+    /// Issued on descriptor -1 so that no file is touched: a refused request answers `EACCES`,
+    /// and one the profile lets through answers `EBADF` from the kernel. The numbers are written
+    /// out here and not taken from `REFUSED_IOCTLS`, so a wrong number in that list fails this
+    /// case. The last row is `EXT4_IOC_MOVE_EXT` with every bit above the low word set: the
+    /// kernel takes the request as an `unsigned int`, so it is the same request (decision 3).
+    #[test]
+    fn the_ioctls_that_exchange_file_blocks_are_refused_and_their_neighbours_are_not() {
+        for (name, request) in [
+            ("EXT4_IOC_MOVE_EXT", 0xC028_660F_u64),
+            ("XFS_IOC_SWAPEXT", 0xC0C0_586D),
+            ("F2FS_IOC_SEC_TRIM_FILE", 0x4018_F514),
+            (
+                "EXT4_IOC_MOVE_EXT with the high word set",
+                0xFFFF_FFFF_C028_660F,
+            ),
+        ] {
+            assert!(
+                profile_child_passes(&|| ioctl_errno(request) == Some(libc::EACCES)),
+                "ioctl({name}, {request:#X}) was not refused with EACCES"
+            );
+        }
+        for (name, request) in [
+            // `_IOWR('f', 11, struct fiemap)`: the type byte of `EXT4_IOC_MOVE_EXT`.
+            ("FS_IOC_FIEMAP", 0xC020_660B_u64),
+            // `_IOWR('f', 15, <32 bytes>)`: its type and number with another argument size.
+            (
+                "the type and number of EXT4_IOC_MOVE_EXT with another size",
+                0xC020_660F,
+            ),
+            // `_IOW(0x94, 9, int)`, which `cp --reflink` makes.
+            ("FICLONE", 0x4004_9409),
+            // `_IOWR(0xf5, 8, struct f2fs_defragment)`: the type byte of `F2FS_IOC_SEC_TRIM_FILE`.
+            ("F2FS_IOC_DEFRAGMENT", 0xC010_F508),
+            ("TIOCGWINSZ", 0x5413),
+        ] {
+            assert!(
+                profile_child_passes(&|| ioctl_errno(request) == Some(libc::EBADF)),
+                "ioctl({name}, {request:#X}) must reach the kernel and answer EBADF on \
+                 descriptor -1"
+            );
+        }
+    }
+
+    /// ADR 0050 decision 6: the program's `ioctl` check compares the request's low word with
+    /// exactly the refused requests, and with nothing else.
+    ///
+    /// No fork and no installed filter: the program is run here by `interpret`. A request no row
+    /// names walks the whole chain, so the constants it was compared with are the chain.
+    #[test]
+    fn the_ioctl_check_compares_exactly_the_refused_requests() {
+        let (answer, compared) = interpret(libc::SYS_ioctl, [u64::MAX, 0, 0, 0, 0, 0]);
+        assert_eq!(answer, ALLOW, "a request no row names must be allowed");
+        let on_arguments: Vec<(u32, u32)> = compared
+            .into_iter()
+            .filter(|(loaded, _)| *loaded >= ARGUMENT_0)
+            .collect();
+        assert_eq!(
+            on_arguments,
+            vec![
+                (ARGUMENT_1, 0x5423),
+                (ARGUMENT_1, 0xC028_660F),
+                (ARGUMENT_1, 0xC0C0_586D),
+                (ARGUMENT_1, 0x4018_F514),
+            ],
+            "the refused requests are the confinement floor: TIOCSETD (ADR 0039), \
+             EXT4_IOC_MOVE_EXT, XFS_IOC_SWAPEXT and F2FS_IOC_SEC_TRIM_FILE (ADR 0050), each \
+             compared with the low word of the request and nothing else; changing the set is a \
+             deliberate act and this is where it is declared"
+        );
+        assert_eq!(
+            on_arguments
+                .iter()
+                .map(|(_, request)| *request)
+                .collect::<Vec<_>>(),
+            REFUSED_IOCTLS
+                .iter()
+                .map(|(_, request, _)| *request)
+                .collect::<Vec<_>>(),
+            "the chain is not the rows of REFUSED_IOCTLS in their order"
+        );
+    }
+
+    /// ADR 0050 decision 6: every row of `REFUSED_IOCTLS` has a name, a number and a reason, the
+    /// numbers are the requests' definitions, and the program refuses each row, with the high
+    /// word of the argument set as well.
+    ///
+    /// No fork: the program is run by `interpret`.
+    #[test]
+    fn every_refused_ioctl_row_is_named_reasoned_and_refused() {
+        /// `_IOC(direction, type, number, size)` in the generic request encoding of both targets.
+        fn ioc(direction: u32, kind: u8, number: u8, size: u16) -> u32 {
+            (direction << 30) | (u32::from(size) << 16) | (u32::from(kind) << 8) | u32::from(number)
+        }
+        /// `_IOW`: the kernel reads the argument.
+        const WRITE: u32 = 1;
+        /// `_IOWR`: the kernel reads and writes the argument.
+        const READ_WRITE: u32 = 3;
+        let deny = ERRNO | u32::try_from(libc::EACCES).unwrap_or(13);
+        assert_eq!(
+            REFUSED_IOCTLS
+                .iter()
+                .map(|(name, request, _)| (*name, *request))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "TIOCSETD",
+                    u32::try_from(libc::TIOCSETD).expect("TIOCSETD fits the request word")
+                ),
+                // `struct move_extent` is 40 bytes, `struct xfs_swapext` 192 and
+                // `struct f2fs_sectrim_range` 24.
+                ("EXT4_IOC_MOVE_EXT", ioc(READ_WRITE, b'f', 15, 40)),
+                ("XFS_IOC_SWAPEXT", ioc(READ_WRITE, b'X', 109, 192)),
+                ("F2FS_IOC_SEC_TRIM_FILE", ioc(WRITE, 0xf5, 20, 24)),
+            ],
+            "the refused requests are the confinement floor; a row is added or removed with its \
+             ADR, and its number is the request's definition"
+        );
+        for (name, request, reason) in REFUSED_IOCTLS {
+            assert!(
+                reason.starts_with("ADR "),
+                "{name} names no decision record as its reason: {reason:?}"
+            );
+            for argument in [u64::from(request), u64::from(request) | (u64::MAX << 32)] {
+                assert_eq!(
+                    interpret(libc::SYS_ioctl, [u64::MAX, argument, 0, 0, 0, 0]).0,
+                    deny,
+                    "ioctl({name}) with the argument {argument:#X} is not refused with EACCES"
+                );
+            }
+            // The same number in another argument, or as the argument of another call, is not
+            // this request.
+            assert_eq!(
+                interpret(
+                    libc::SYS_ioctl,
+                    [u64::from(request), 0, u64::from(request), 0, 0, 0]
+                )
+                .0,
+                ALLOW,
+                "ioctl refused {name}'s number outside the request argument"
+            );
+            assert_eq!(
+                interpret(libc::SYS_fcntl, [u64::MAX, u64::from(request), 0, 0, 0, 0]).0,
+                ALLOW,
+                "fcntl with {name}'s number as its second argument was refused"
+            );
+        }
+    }
+
+    /// The file `profile` hands to bubblewrap holds, byte for byte, the program these cases run:
+    /// `filters` with `EACCES` as its errno. Without it a `profile` that refused with another
+    /// errno, or wrote another program, would pass every case here.
+    #[test]
+    fn the_profile_file_holds_the_program_these_cases_run() {
+        use std::io::Read as _;
+
+        let mut written = Vec::new();
+        super::profile()
+            .expect("the profile builds")
+            .read_to_end(&mut written)
+            .expect("the profile reads");
+        let expected: Vec<u8> = filters(ERRNO | u32::try_from(libc::EACCES).unwrap_or(13))
+            .iter()
+            .flat_map(|instruction| {
+                let mut bytes = Vec::with_capacity(8);
+                bytes.extend(instruction.code.to_ne_bytes());
+                bytes.push(instruction.jt);
+                bytes.push(instruction.jf);
+                bytes.extend(instruction.k.to_ne_bytes());
+                bytes
+            })
+            .collect();
+        assert_eq!(
+            written, expected,
+            "the program bubblewrap reads is not the one the cases ran"
+        );
+    }
+
+    /// The errno a raw `ioctl(-1, request, 0)` answers, or `None` if it succeeded.
+    ///
+    /// The raw syscall and not `libc::ioctl`, so that all 64 bits of `request` reach the kernel
+    /// as written.
+    fn ioctl_errno(request: u64) -> Option<i32> {
+        let descriptor: libc::c_long = -1;
+        let argument: libc::c_long = 0;
+        // SAFETY: descriptor -1 names no file, so the kernel reads no memory through the
+        // argument.
+        let result =
+            unsafe { libc::syscall(libc::SYS_ioctl, descriptor, request.cast_signed(), argument) };
+        if result == -1 {
+            std::io::Error::last_os_error().raw_os_error()
+        } else {
+            None
+        }
+    }
+
+    /// What the program answers for one native call of `syscall` with `arguments`, and every
+    /// comparison it made on the way: the offset of the word it had loaded, and the constant.
+    ///
+    /// The program is run here over a `seccomp_data` laid out as the kernel lays it out (the
+    /// number, the architecture, the instruction pointer, six 64-bit arguments), so nothing
+    /// forks and no filter is installed. It knows the instructions `filters` emits and panics on
+    /// any other.
+    fn interpret(syscall: libc::c_long, arguments: [u64; 6]) -> (u32, Vec<(u32, u32)>) {
+        let program = filters(ERRNO | u32::try_from(libc::EACCES).unwrap_or(13));
+        let mut data = Vec::with_capacity(64);
+        data.extend(super::number(syscall).to_ne_bytes());
+        data.extend(AUDIT_ARCH.to_ne_bytes());
+        data.extend(0_u64.to_ne_bytes());
+        for argument in arguments {
+            data.extend(argument.to_ne_bytes());
+        }
+        let mut accumulator = 0_u32;
+        let mut loaded = u32::MAX;
+        let mut compared = Vec::new();
+        let mut at = 0_usize;
+        loop {
+            let instruction = program[at];
+            at += 1;
+            match instruction.code {
+                LD_W_ABS => {
+                    let from = usize::try_from(instruction.k).expect("an offset fits usize");
+                    accumulator = u32::from_ne_bytes(
+                        data[from..from + 4]
+                            .try_into()
+                            .expect("a load reads one word"),
+                    );
+                    loaded = instruction.k;
+                }
+                ALU_AND_K => accumulator &= instruction.k,
+                JMP_JEQ_K => {
+                    compared.push((loaded, instruction.k));
+                    at += usize::from(if accumulator == instruction.k {
+                        instruction.jt
+                    } else {
+                        instruction.jf
+                    });
+                }
+                #[cfg(target_arch = "x86_64")]
+                JMP_JSET_K => {
+                    at += usize::from(if accumulator & instruction.k == 0 {
+                        instruction.jf
+                    } else {
+                        instruction.jt
+                    });
+                }
+                RET_K => return (instruction.k, compared),
+                other => panic!("the program holds an instruction this case cannot run: {other}"),
+            }
+        }
     }
 
     /// ADR 0039 decision 4: every syscall carrying the x32 bit is refused with `EACCES` before any

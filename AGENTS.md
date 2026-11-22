@@ -168,12 +168,23 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
 - **The enforced isolation set is a floor, not a menu**: `openat2` beneath/no-link/no-mount I/O,
   atomic replacement, cleared and shaped environment, namespace no-egress, **no nested user
   namespace** — the child's own user namespace with `--disable-userns`, so it cannot create
-  another one and hold `CAP_SYS_ADMIN` in it — pids and memory+swap
+  another one and hold `CAP_SYS_ADMIN` in it — a seccomp program that refuses the `ioctl`
+  requests that exchange or erase file blocks, pids and memory+swap
   bounds with cumulatively observed CPU, backend-identity-bound capability snapshots, output
   draining, timeout, whole-tree kill, exact capsule-byte verification, read-only `/runtime` beside a
   separate writable `/workspace`, owner-private durable state, and bounded normal/restart capsule
   cleanup. Removing or weakening any of these is invariant 3's named refusal, never a quiet
-  downgrade.
+  downgrade. The refused requests are `EXT4_IOC_MOVE_EXT`, `XFS_IOC_SWAPEXT` and
+  `F2FS_IOC_SEC_TRIM_FILE`, answered `EACCES`
+  for every confined run and session of the host driver and the `linux` adapter, whatever the
+  profile asks
+  ([ADR 0050](adr/0050-the-floor-refuses-the-ioctl-requests-that-exchange-file-blocks.md)): rows
+  of `REFUSED_IOCTLS` in `crates/substrate-host/src/seccomp.rs`, which the program's `ioctl`
+  check is generated from and `seccomp::tests` declares a second time; the delegated lane holds
+  the first with one real run on ext4 (`floor_refuses_block_exchange`), required on a hosted
+  runner and absent only where a workstation's staging file system is not ext4, and nothing was
+  run on XFS or f2fs. The `oci` and `pod` adapters keep their runtime's default seccomp profile,
+  which passes all three, and `local` has no filter.
 - **Execution capsules are verified read-only inputs** (`adr/0009`), and declared host roots are
   mounted read-only (`adr/0010`). A capsule's bytes are verified exactly; a mutable ref is input
   convenience and is always resolved to and recorded as an immutable commit
@@ -249,6 +260,16 @@ seconds. Repetition counts, soak loops and load generators are local evidence re
 planning store, never a test, a CI step or a script the gate calls. A story whose acceptance needs
 "N runs under load" proves it on a workstation and records the run; the case it adds to the suite
 runs once.
+
+**No build or test job on the shared workstation runs over five minutes.** Timo, 2026-11-22 about
+04:55 CET, relayed by the session that maintains the build pool: "There is no good reason
+something compiles or tests longer than 5 minutes." A job known to go past that is not started.
+A mutation run does not rebuild a crate per mutant: at most one mutant per guard, each as one job
+that builds and runs only the test binary that should kill it, and the others are listed as not
+run. A cancelled mutant job leaves its mutant in the source and its binary in `target/`: compare
+the file with the tested state before anything else, and run no test binary by path afterwards
+(2026-11-22: a cancelled job left a changed constant in `crates/substrate-host/src/seccomp.rs`).
+Every sub-agent brief names this bound beside the 60 s and 120 s bounds of the collection.
 
 **The test step's budget: the run ends within 120 s on the hosted runner, and no test runs longer
 than 60 s** (`story:gate-test-step-ends-within-two-minutes`). The step is four commands:

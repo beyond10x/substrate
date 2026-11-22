@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-22T04:40:00Z",
+  "actor": "agent:substrate",
+  "artifact": "story:executable-deny-list",
+  "kind": "story",
+  "revision": 15,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate.yml and release-lanes.yml on pull request 243 at c35220096: 20 of 20 checks, test run 93 s",
+    "reference": "https://github.com/beyond10x/substrate/pull/243/checks"
+  }
+}
