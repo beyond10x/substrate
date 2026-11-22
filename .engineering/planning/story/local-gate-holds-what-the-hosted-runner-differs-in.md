@@ -2,12 +2,15 @@
 format: aep.planning-md/3
 id: story:local-gate-holds-what-the-hosted-runner-differs-in
 kind: story
-status: draft
+status: active
 title: The local gate holds what the hosted runner differs in
 summary: Runner images named by version, the 26.04 tool layout held locally, a wait script that exits non-zero on red
 tags:
 - gate
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-21T22:48:54Z", actor: "human:timo", revision: 2, executor: "agent:host-operator"}
+- {from: "proposed", to: "active", at: "2026-11-21T22:48:54Z", actor: "human:timo", revision: 3, executor: "agent:host-operator"}
 ---
 # Story: the local gate holds what the hosted runner differs in
 
