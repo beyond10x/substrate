@@ -1,0 +1,23 @@
+[profile.default]
+fail-fast = false
+test-threads = 12
+global-timeout = "120s"
+slow-timeout = { period = "30s", terminate-after = 2, grace-period = "0s" }
+final-status-level = "slow"
+
+[profile.default.junit]
+path = "junit.xml"
+
+[test-groups.oci-runtime]
+max-threads = 1
+
+[test-groups.systemd-user-manager]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = "package(b10x-substrate-host) & (binary(ess_confinement_oci) | binary(adversary_oci))"
+test-group = "oci-runtime"
+
+[[profile.default.overrides]]
+filter = "package(b10x-substrate-host) & (binary(ess_confinement_systemd) | binary(security_review_systemd) | binary(adversary_systemd))"
+test-group = "systemd-user-manager"

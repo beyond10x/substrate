@@ -1,5 +1,5 @@
 # Lanes. The suite has a portable lane and a delegated lane. `scripts/gate.sh` runs the clean-room
-# runner `crates/substrate-daemon/tests/runtime_vectors.rs` inside `cargo test --workspace`, with
+# runner `crates/substrate-daemon/tests/runtime_vectors.rs` inside its workspace test run, with
 # no `SUBSTRATE_VECTORS_CGROUP_ROOT`, so it takes its portable branch and asserts the named
 # refusal `exec.sandbox-unavailable` (501) instead of confining anything. The delegated lane
 # needs the runner to sit *inside* a delegated
@@ -88,6 +88,22 @@ jobs:
           cache-all-crates: "false"
           cache-on-failure: "false"
 
+      # The gate's test step runs under cargo-nextest, which kills a test at 60 s
+      # (`.config/nextest.toml`; AGENTS.md § "The gate"). The release archive holds the one
+      # executable; moving the pin moves the version and the archive's digest together.
+      - name: Install the pinned cargo-nextest release
+        env:
+          NEXTEST_VERSION: 0.9.143
+          NEXTEST_SHA256: 66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e
+        run: |
+          archive="cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --location --retry 3 "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/$archive" --output "$RUNNER_TEMP/$archive"
+          echo "$NEXTEST_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/nextest-bin"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/nextest-bin" cargo-nextest
+          echo "$RUNNER_TEMP/nextest-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/nextest-bin/cargo-nextest" nextest --version
+
       # Probed, not assumed: the ubuntu-24.04 image README lists no bubblewrap among its installed
       # apt packages, and a hosted runner is not inside a delegated cgroup subtree. This step
       # records what is actually there so the log carries evidence rather than a claim.
@@ -103,7 +119,7 @@ jobs:
           echo "this process cgroup: $(cat /proc/self/cgroup 2>/dev/null || echo '<unreadable>')"
           echo
           echo "== lanes this job will run =="
-          echo "portable lane:  RUNS   — cargo test runs tests/runtime_vectors.rs with no SUBSTRATE_VECTORS_CGROUP_ROOT"
+          echo "portable lane:  RUNS   — the test run executes tests/runtime_vectors.rs with no SUBSTRATE_VECTORS_CGROUP_ROOT"
           echo "delegated lane: ABSENT — no delegated cgroup root is passed; the lane is not executed and is not claimed to pass"
           echo "no-default lane: RUNS  — b10x-substrate-host without its git and kubernetes features: Clippy, and the host_features, ess_confinement_local and consumer_surface cases"
           if command -v docker >/dev/null 2>&1 && docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
@@ -111,6 +127,15 @@ jobs:
           else
             echo "oci lane:       RUNS   — SUBSTRATE_OCI_LANE=1, and no usable Docker answers here, so the oci cases fail rather than report ABSENT"
           fi
+
+      # The oci cases run real containers from one digest-pinned image. It is pulled here, so the
+      # test step makes no registry request: a case finds the image in the runtime's store and
+      # pulls only when it is absent. `xtask/tests/release_workflow.rs` holds this reference to
+      # the one the cases name.
+      - name: Pull the oci lane's pinned image
+        env:
+          OCI_LANE_IMAGE: docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+        run: docker pull "$OCI_LANE_IMAGE"
 
       # Bare invocation: the job fails with the gate's own exit status. Do not add a pipeline here.
       - name: Run the gate's tests phase
@@ -129,7 +154,7 @@ jobs:
             echo "| --- | --- |"
             echo "| portable | \`${{ steps.gate.outcome }}\` — carried by the gate step; its log shows how far the gate got |"
             echo "| delegated (bubblewrap + cgroup delegation) | **absent** — not executed on a hosted runner, and never reported as passed |"
-            echo "| oci (\`SUBSTRATE_OCI_LANE=1\`, Docker) | \`${{ steps.gate.outcome }}\` — carried by the gate step's \`cargo test\`; real containers, never ABSENT on this job |"
+            echo "| oci (\`SUBSTRATE_OCI_LANE=1\`, Docker) | \`${{ steps.gate.outcome }}\` — carried by the gate step's test run; real containers, never ABSENT on this job |"
             echo
             echo "The delegated lane needs a runner inside a delegated cgroup subtree carrying \`cpu\`, \`memory\` and \`pids\`; see README.md, section \"Serving exec\"."
           } >> "$GITHUB_STEP_SUMMARY"

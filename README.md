@@ -92,7 +92,10 @@ The table is the gate's own order (`scripts/gate.sh`).
 | step | command |
 |---|---|
 | fetch | `cargo fetch --locked` — every target's dependencies, for the offline `cargo tree --target all` cases |
-| tests | `cargo test --workspace --release --locked` |
+| test build | `cargo nextest run --workspace --release --locked --no-run` — every test binary and the binaries the tests start; its time is printed apart from the run's |
+| tests | `cargo nextest run --workspace --release --locked --test-threads 12 --retries 0` — each test in its own process, killed at 60 s, and the run cancelled and failed at 120 s (`.config/nextest.toml`, which is also where the gate reads the thread count) |
+| slowest tests | `target/release/xtask slowest-tests --junit target/nextest/default/junit.xml` — the ten slowest tests of that run |
+| doctests | `cargo test --workspace --release --locked --doc` — cargo-nextest runs none |
 | format | `cargo fmt --all --check` |
 | lint | `cargo clippy --workspace --all-targets --release --locked -- -D warnings` |
 | links | `cargo xtask check-links` — rejects machine-local and broken repository-relative links |
@@ -113,10 +116,11 @@ The table is the gate's own order (`scripts/gate.sh`).
 Rust 1.97, edition 2024 — the toolchain is pinned by `rust-toolchain.toml`, and
 `cargo xtask check-toolchain` fails when it, `Cargo.toml`'s `rust-version` and the `Dockerfile`
 builder tag disagree. `.github/workflows/gate.yml` runs the same gate on push and pull request.
+The test step needs `cargo-nextest` on `PATH`; `gate.yml` names the release it installs
+(`NEXTEST_VERSION`).
 
 Every check the gate runs is a `cargo xtask` verb — anything that runs in a b10x foundation
-repository is Rust. Two verbs are not gate steps because `cargo test --workspace --release --locked`, the
-gate's first step, already covers them:
+repository is Rust. Two verbs are not gate steps because the gate's test step already covers them:
 
 | verb | what it does |
 |---|---|
@@ -137,8 +141,8 @@ the frozen `0.4.0` byte for byte.
 
 `crates/substrate-daemon/tests/runtime_vectors.rs` is the clean-room runner — an independent
 Unix-socket HTTP lane that spawns the shipped `substrate-daemon` binary and asserts only on the
-wire, linking no implementation. It has no gate step of its own because the gate's first step,
-`cargo test --workspace --release --locked`, runs it. **`bash scripts/delegated-lane.sh` runs that lane**, and needs no privilege: it asks systemd for a
+wire, linking no implementation. It has no gate step of its own because the gate's test step,
+`cargo nextest run --workspace --release --locked`, runs it. **`bash scripts/delegated-lane.sh` runs that lane**, and needs no privilege: it asks systemd for a
 delegated scope (`systemd-run --user -p Delegate=yes --scope`), moves itself into a child group so
 the delegation root stays process-free, and sets the variable. A user session's own scope is
 root-owned, so trying to `mkdir` in it fails and the lane reports itself **absent, not passed**

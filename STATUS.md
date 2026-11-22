@@ -255,7 +255,8 @@ cargo xtask check-toolchain                          # the pinned channel
 cargo xtask package-bundle 0.27.0 --out <dir>        # the current OCI manifest digest
 ```
 
-`cargo test --workspace --release --locked` is the first step of the gate and reports its own totals. The
+`cargo nextest run --workspace --release --locked` is the gate's test step and reports its own totals; the
+command above runs the same tests under libtest, which prints what a test prints. The
 Release row's repository-controlled claims are checked by
 [`xtask/tests/release_workflow.rs`](xtask/tests/release_workflow.rs): the current bundle pin, exact
 OCI-layout copy, write-once tag checks, digest-signing and verification order, development status
