@@ -52,8 +52,69 @@ current-file reads remain lazy and paged. The observation
 does not disclose `.git`, Connector authority, remote credentials, or remote URL userinfo.
 Every byte the change-set observation returns comes from a file beneath the admitted workspace's
 root or from the baseline the daemon holds: the workspace's own repository metadata decides
-neither which directory is read nor how an entry is read, and the per-file byte bound holds for
-every file the reader opens.
+neither which directory is read nor how an entry is read.
+
+### What the change-set observation reads
+
+The answer compares the worktree beneath the admitted workspace's root with the tree of the
+baseline commit the daemon holds.
+
+- **Baseline.** The tracked set and every expected object id come from the tree of the baseline
+  commit. Each object is read by its id and checked against that id. A size in the answer is the
+  size of an object that was read whole and checked, never a size an unchecked header states.
+- **Changed or not.** A tracked file or link is unchanged only when the hash of its content, read
+  beneath the root, equals the tree's object id, and its kind and executable bit agree. No
+  modification time, no size and nothing the workspace's repository records decides it. A file
+  over the per-file bound is still hashed; only its text is withheld.
+- **The index labels a path.** The workspace's index names how a path is labelled and never
+  whether it changed: a path absent from the baseline is `added` when the index records it and
+  `untracked` when it does not, and a path the index records in conflict stages is `conflicted`.
+- **Worktree.** Every entry is opened beneath the root without following a link. A link is
+  reported as its own target text. The workspace's repository configuration is not read: its
+  attributes, filters and `core.fileMode` do not apply.
+- **Ignore rules** come from regular files beneath the root, the `.gitignore` files and
+  `.git/info/exclude`. A leading byte-order mark is skipped.
+- **Object store.** Before the Git library opens `.git/objects`, the reader walks it beneath the
+  root and refuses the observation with `workspace.git-repository-failed` when it holds a link,
+  an entry that is neither a directory nor a regular file, an `info/alternates` file,
+  directories nested deeper than eight, or more than 262,144 entries. The check holds while no
+  program runs in the workspace. While one runs, the reader may wait or fail; it still returns
+  no byte and no size that was not checked against the daemon-held commit.
+
+What bounds the reads of one observation:
+
+- `max_file_bytes` bounds the text of one worktree file or link, and of one baseline object, that
+  a patch is rendered from. A side over it has no text and `binary` set.
+- Rules beyond the first 1 MiB of an ignore file do not apply.
+- One observation hashes at most 1 GiB: the tracked files it compares and the baseline objects
+  it reads for their sizes, taken in the byte order of their paths. When that is spent, every
+  path from the first one not compared on is left out and the answer is marked `truncated`; no
+  path is reported unchanged that was not compared.
+- Directories nested deeper than 100 are not entered and the answer is marked `truncated`. A
+  changed or untracked path of more than 64 components refuses the observation
+  `workspace.path-escape`, as before: the answer cannot name it.
+- Not bounded by the observation: the Git library reads the index, the commit and tree objects
+  of the baseline, and the stored file of each object it reads, whole. Only the workspace's
+  storage limit bounds them (`story:git-read-limits-bound-the-work`).
+
+Where the answer differs from the reader that asked the Git library to compare the worktree:
+
+- An index entry flagged assume-unchanged or skip-worktree does not hide a changed file.
+- A change that is staged while the worktree holds the baseline's bytes is not listed; a path
+  the index no longer records is compared like any other tracked path.
+- The workspace's attributes and filters do not apply: a path marked `-diff` gets a textual
+  patch, and line-ending conversion is not applied before the comparison.
+- `core.fileMode` does not apply: a changed executable bit is always reported.
+- The daemon user's own ignore file and a `core.excludesFile` do not apply.
+- An ignore file over 1 MiB applies only the rules in its first 1 MiB.
+- An untracked directory that holds a `.git` entry of its own is not entered and not listed;
+  the earlier reader failed the observation.
+- A side over `max_file_bytes` has `binary` set and no text; `binary` is set for binary content.
+- `current.oid` is present whenever the worktree side was hashed.
+- A tracked path that is not UTF-8 fails the observation whether or not it changed.
+- Every tracked file is hashed in each observation, within the 1 GiB above.
+- An object store with `info/alternates`, a link or an entry that is not a regular file is
+  refused.
 
 ## Refusals
 

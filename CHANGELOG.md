@@ -7,12 +7,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The Git change-set observation compares the worktree with the tree of the baseline commit the
+  daemon holds (design 21, *What the change-set observation reads*). Its answer differs from the
+  earlier reader's in these cases:
+  - A tracked path is unchanged only when the hash of its content equals the baseline's object
+    id. Every tracked file is hashed in each observation, and an index entry flagged
+    assume-unchanged or skip-worktree does not hide a changed file.
+  - The index labels a path `added` or `conflicted` and never decides whether it changed: a
+    change that is staged while the worktree holds the baseline's bytes is not listed, and a
+    path the index no longer records is compared like any other tracked path.
+  - The workspace's attributes and filters are not applied: a path marked `-diff` gets a textual
+    patch, and no line-ending conversion precedes the comparison.
+  - `core.fileMode` is not applied: a changed executable bit is always reported.
+  - The daemon user's own ignore file and a `core.excludesFile` are not applied.
+  - Rules beyond the first 1 MiB of an ignore file do not apply.
+  - An untracked directory that holds a `.git` entry of its own is neither entered nor listed;
+    the earlier reader failed the observation.
+  - A side over `max_file_bytes` has `binary` set and no patch text.
+  - `current.oid` is present whenever the worktree side was hashed, a tracked file over
+    `max_file_bytes` included.
+  - A tracked path that is not UTF-8 fails the observation whether or not it changed.
+  - One observation hashes at most 1 GiB of tracked files and baseline objects, in the byte
+    order of their paths. When that is spent the answer ends there and is marked `truncated`.
+  - Directories nested deeper than 100 are not entered and the answer is marked `truncated`.
+  - An object store that holds `info/alternates`, a link, or an entry that is neither a
+    directory nor a regular file is refused `workspace.git-repository-failed`.
+
 ### Security
 
-- The Git change-set observation reads only the admitted workspace: every byte it returns comes
-  from a file beneath the workspace's root or from the baseline the daemon holds, the workspace's
-  own repository metadata decides neither which directory is read nor how an entry is read, and
-  the per-file byte bound holds for every file the reader opens.
+- The Git change-set observation reads only the admitted workspace. Every byte and every size
+  it returns comes from a file beneath the workspace's root or from an object checked against
+  the baseline commit the daemon holds. The workspace's own repository metadata decides neither
+  which directory is read, nor how an entry is read, nor whether a path changed.
+  `max_file_bytes` bounds the text of each worktree file, link and baseline object a patch is
+  rendered from, an ignore file is read to 1 MiB, and one observation hashes at most 1 GiB. The
+  Git library reads the index, the baseline's commit and tree objects and the stored file of
+  each object whole; only the workspace's storage limit bounds those.
 
 ## [0.23.0] — 2026-11-21
 

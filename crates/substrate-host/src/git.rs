@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::ops::Bound;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -396,13 +395,18 @@ pub(super) fn baseline_file(
     })
 }
 
+/// What one observation may hash: the tracked files it compares with the baseline, and the
+/// baseline objects it reads for their sizes.
+const COMPARISON_BUDGET: u64 = 1024 * 1024 * 1024;
+
 /// The changes of a Git workspace against the baseline commit the daemon holds for it.
 ///
-/// Every byte of the answer comes from the baseline's objects, each read by its id, or from a
-/// file beneath the workspace root, read with the guarded file system within
-/// `query.max_file_bytes`. The workspace's repository is never opened as a repository: its
-/// configuration is not read, its object store is opened beneath the pinned root, and its index
-/// only says which paths are tracked and which of them it has seen unchanged.
+/// Every byte and every size of the answer comes from the baseline's objects, each read by its
+/// id and checked against it, or from a file beneath the workspace root, read with the guarded
+/// file system. A tracked path is unchanged only when the hash of its content equals the
+/// baseline's object id. The workspace's repository is never opened as a repository: its
+/// configuration is not read, its object store is checked beneath the pinned root before the
+/// Git library opens it, and its index only labels a path.
 pub(super) fn changes(
     workspace_id: &str,
     root: &OwnedFd,
@@ -411,64 +415,103 @@ pub(super) fn changes(
     root_name: &str,
     query: GitChangesQuery,
 ) -> Result<GitChangeSet, DriverError> {
+    changes_within(
+        workspace_id,
+        root,
+        workspace,
+        baseline_root,
+        root_name,
+        query,
+        COMPARISON_BUDGET,
+    )
+}
+
+/// [`changes`] with `budget` bytes to hash. Paths are compared and listed in byte order; when
+/// the budget is spent, every path from the first one not compared on is left out and the
+/// answer is marked truncated.
+fn changes_within(
+    workspace_id: &str,
+    root: &OwnedFd,
+    workspace: &Path,
+    baseline_root: &Path,
+    root_name: &str,
+    query: GitChangesQuery,
+    budget: u64,
+) -> Result<GitChangeSet, DriverError> {
     let commit = read_baseline(baseline_root, root_name)?;
     let oid = Oid::from_str(&commit).map_err(|_| failed("workspace.git-baseline-invalid"))?;
     let workspace = guarded::pin_workspace_directory_beneath(root, workspace)
         .map_err(|_| failed("workspace.git-repository-failed"))?;
     let objects = worktree::open_directory(&workspace, ".git/objects")?
+        .filter(|objects| worktree::store_is_plain(objects).unwrap_or(false))
         .ok_or_else(|| failed("workspace.git-repository-failed"))?;
     let store = object_store(&objects).map_err(|_| failed("workspace.git-repository-failed"))?;
     let (baseline, links) = baseline_entries(&store, oid)?;
-    let staged = Staged::read(&workspace)?;
-    let reader = Reader {
-        workspace: &workspace,
-        store: &store,
-        bound: query.max_file_bytes,
-    };
-    let mut found = reader.tracked_changes(&baseline, &staged)?;
-    // A tracked file or link is compared above. A path recorded as another repository's commit
-    // is neither listed nor entered.
+    let labels = Labels::read(&workspace)?;
+    // A file or link of the baseline or the index is compared below. A path recorded as another
+    // repository's commit is neither listed nor entered.
     let claimed = |path: &str, is_directory: bool| {
         links.contains(path)
-            || staged.links.contains(path)
+            || labels.links.contains(path)
             || (!is_directory
                 && (baseline.contains_key(path)
-                    || staged.entries.contains_key(path)
-                    || staged.conflicted.contains(path)))
+                    || labels.staged.contains(path)
+                    || labels.conflicted.contains(path)))
     };
     let tracked_beneath = |directory: &str| {
         let from: (Bound<&str>, Bound<&str>) = (Bound::Included(directory), Bound::Unbounded);
         let first_baseline = baseline.range::<str, _>(from).next();
-        let first_staged = staged.entries.range::<str, _>(from).next();
+        let first_staged = labels.staged.range::<str, _>(from).next();
         first_baseline.is_some_and(|(path, _)| path.starts_with(directory))
-            || first_staged.is_some_and(|(path, _)| path.starts_with(directory))
+            || first_staged.is_some_and(|path| path.starts_with(directory))
     };
-    found.extend(
-        worktree::unclaimed(&workspace, &claimed, &tracked_beneath)?
-            .into_iter()
-            .map(|(path, observed)| Change {
-                path,
-                status: GitChangeStatus::Untracked,
-                baseline: None,
-                current: Some(observed),
-            }),
-    );
-    found.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
-    let observed_count = found.len();
-    found.truncate(usize::try_from(query.max_files).expect("public list bound fits usize"));
-    let (items, returned_bytes) = reader.items(found, query.max_total_bytes)?;
-    let truncated = observed_count > items.len() || items.iter().any(|item| item.patch.truncated);
+    let untracked = worktree::unclaimed(&workspace, &claimed, &tracked_beneath)?;
+    // Every path to look at, in byte order; an untracked one carries what the walk observed.
+    let mut candidates: Vec<(&str, Option<worktree::Observed>)> = baseline
+        .keys()
+        .chain(&labels.staged)
+        .chain(&labels.conflicted)
+        .map(|path| (path.as_str(), None))
+        .chain(
+            untracked
+                .found
+                .iter()
+                .map(|(path, observed)| (path.as_str(), Some(*observed))),
+        )
+        .collect();
+    candidates.sort_by_key(|candidate| candidate.0);
+    candidates.dedup_by_key(|candidate| candidate.0);
+    let scratch = git2::Odb::new()
+        .and_then(git2::Repository::from_odb)
+        .map_err(|_| failed("workspace.git-diff-failed"))?;
+    let scratch_objects = scratch
+        .odb()
+        .map_err(|_| failed("workspace.git-diff-failed"))?;
+    let memory = scratch_objects
+        .add_new_mempack_backend(1)
+        .map_err(|_| failed("workspace.git-diff-failed"))?;
+    let mut reader = Reader {
+        workspace: &workspace,
+        store: &store,
+        scratch: &scratch,
+        memory: &memory,
+        bound: query.max_file_bytes,
+        budget,
+        patch_bytes_left: query.max_total_bytes,
+    };
+    let item_limit = usize::try_from(query.max_files).expect("public list bound fits usize");
+    let (items, cut) = reader.answer(candidates, item_limit, &baseline, &labels)?;
     Ok(GitChangeSet {
         workspace: workspace_id.to_owned(),
         commit,
+        returned_bytes: query.max_total_bytes - reader.patch_bytes_left,
+        truncated: cut || untracked.truncated || items.iter().any(|item| item.patch.truncated),
         items,
-        returned_bytes,
-        truncated,
         observed_at: Utc::now(),
     })
 }
 
-/// A baseline or index entry of a file or a link: its Git mode and its object.
+/// A file or link of the baseline: its Git mode and its object.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Entry {
     mode: u32,
@@ -487,61 +530,43 @@ impl Entry {
     }
 }
 
-/// What the workspace's index records. It classifies paths and vouches for entries it has seen
-/// unchanged; it never chooses a directory or the way an entry is read.
+/// How the workspace's index labels paths. It never says whether a path changed, which
+/// directory is read or how an entry is read.
 #[derive(Default)]
-struct Staged {
-    entries: BTreeMap<String, StagedEntry>,
+struct Labels {
+    /// Paths the index records as files or links: absent from the baseline, such a path is
+    /// added, not untracked.
+    staged: BTreeSet<String>,
+    /// Paths the index records in conflict stages.
     conflicted: BTreeSet<String>,
     /// Paths recorded as another repository's commit: neither compared nor entered.
     links: BTreeSet<String>,
-    /// When the index file was last written, in seconds and nanoseconds.
-    written: (i64, i64),
 }
 
-struct StagedEntry {
-    entry: Entry,
-    size: u32,
-    modified: (i64, i64),
-}
-
-impl Staged {
-    /// Reads `.git/index` beneath the pinned workspace; a workspace without one tracks nothing.
+impl Labels {
+    /// Reads `.git/index` beneath the pinned workspace; a workspace without one labels nothing.
     fn read(workspace: &OwnedFd) -> Result<Self, DriverError> {
-        let mut staged = Self::default();
+        let mut labels = Self::default();
         let Some(file) = worktree::open(workspace, ".git/index")? else {
-            return Ok(staged);
+            return Ok(labels);
         };
-        let metadata = file
-            .metadata()
-            .ok()
-            .filter(std::fs::Metadata::is_file)
-            .ok_or_else(|| failed("workspace.git-repository-failed"))?;
-        staged.written = (metadata.mtime(), metadata.mtime_nsec());
+        if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+            return Err(failed("workspace.git-repository-failed"));
+        }
         let index = git2::Index::open(Path::new(&worktree::descriptor_path(&file)))
             .map_err(|_| failed("workspace.git-repository-failed"))?;
         for entry in index.iter() {
             let path = String::from_utf8(entry.path)
                 .map_err(|_| failed("workspace.git-path-unrepresentable"))?;
             if entry.flags & 0x3000 != 0 {
-                staged.conflicted.insert(path);
+                labels.conflicted.insert(path);
             } else if entry.mode == SUBMODULE {
-                staged.links.insert(path);
+                labels.links.insert(path);
             } else {
-                staged.entries.insert(
-                    path,
-                    StagedEntry {
-                        entry: Entry::of_blob(entry.mode, entry.id),
-                        size: entry.file_size,
-                        modified: (
-                            i64::from(entry.mtime.seconds()),
-                            i64::from(entry.mtime.nanoseconds()),
-                        ),
-                    },
-                );
+                labels.staged.insert(path);
             }
         }
-        Ok(staged)
+        Ok(labels)
     }
 }
 
@@ -594,215 +619,227 @@ fn baseline_entries(
     Ok((entries, links))
 }
 
-/// One path that differs from the baseline, before its bytes are read for a patch.
+/// What comparing one path gave, before its bytes are read for a patch. A `status` of `None`
+/// is a path that holds the baseline's bytes.
 struct Change {
-    path: String,
-    status: GitChangeStatus,
+    status: Option<GitChangeStatus>,
     baseline: Option<Entry>,
     current: Option<worktree::Observed>,
+    /// The object id of the current content, when comparing the path hashed it.
+    hashed: Option<Oid>,
 }
 
-/// One side of a change. `bytes` is `None` for a side larger than the per-file bound, which is
-/// not read.
+/// One side of a change. `bytes` is `None` for a side larger than the per-file bound, whose
+/// text is withheld.
 struct Side {
     record: GitChangeSide,
     bytes: Option<Vec<u8>>,
 }
 
 /// Compares and reads the two sides of a path: the baseline's objects in `store`, and the files
-/// beneath the pinned `workspace`, no file beyond `bound` bytes.
+/// beneath the pinned `workspace`. `scratch` is a repository in memory, backed by `memory`,
+/// that holds the bytes of one change while its patch is rendered. `bound` is the per-file
+/// bound on text, `budget` what is left to hash in this observation, and `patch_bytes_left`
+/// what is left of the bound on all patches together.
 struct Reader<'a> {
     workspace: &'a OwnedFd,
     store: &'a git2::Repository,
+    scratch: &'a git2::Repository,
+    memory: &'a git2::Mempack<'a>,
     bound: u64,
+    budget: u64,
+    patch_bytes_left: u64,
 }
 
 impl Reader<'_> {
-    /// The tracked paths that differ from the baseline: every path of the baseline or the
-    /// index, compared with what is beneath the workspace root.
-    fn tracked_changes(
-        &self,
+    /// The items of the answer for `candidates`, which are in byte order and of which an
+    /// untracked one carries what the walk observed, and whether the answer ends before the
+    /// last of them: at a path that was not compared, at one past `item_limit`, or at one
+    /// whose baseline object the budget no longer covers.
+    fn answer(
+        &mut self,
+        candidates: Vec<(&str, Option<worktree::Observed>)>,
+        item_limit: usize,
         baseline: &BTreeMap<String, Entry>,
-        staged: &Staged,
-    ) -> Result<Vec<Change>, DriverError> {
-        let paths: BTreeSet<&String> = baseline
-            .keys()
-            .chain(staged.entries.keys())
-            .chain(&staged.conflicted)
-            .collect();
-        let mut found = Vec::new();
-        for path in paths {
-            let before = baseline.get(path).copied();
-            let current = worktree::observe(self.workspace, path)?;
-            let status = if staged.conflicted.contains(path) {
-                (before.is_some() || current.is_some()).then_some(GitChangeStatus::Conflicted)
+        labels: &Labels,
+    ) -> Result<(Vec<GitChange>, bool), DriverError> {
+        let mut items = Vec::new();
+        for (path, observed) in candidates {
+            let change = if let Some(observed) = observed {
+                Some(Change {
+                    status: Some(GitChangeStatus::Untracked),
+                    baseline: None,
+                    current: Some(observed),
+                    hashed: None,
+                })
             } else {
-                match (before, staged.entries.get(path), current) {
-                    (Some(_), None, _) | (Some(_), Some(_), None) => Some(GitChangeStatus::Deleted),
-                    (None, _, None) | (None, None, Some(_)) => None,
-                    (None, Some(_), Some(_)) => Some(GitChangeStatus::Added),
-                    (Some(before), Some(recorded), Some(current)) => {
-                        if self.unchanged(path, before, recorded, staged.written, current)? {
-                            None
-                        } else if (before.mode == worktree::LINK)
-                            == (current.mode == worktree::LINK)
-                        {
+                self.compare(path, baseline.get(path).copied(), labels)?
+            };
+            let item = match change {
+                Some(change) if change.status.is_none() => continue,
+                Some(change) if items.len() < item_limit => self.item(path, &change)?,
+                _ => None,
+            };
+            let Some(item) = item else {
+                return Ok((items, true));
+            };
+            items.push(item);
+        }
+        Ok((items, false))
+    }
+
+    /// Compares the path of the baseline or the index with what is beneath the workspace root.
+    /// `None` is a path that was not compared because the budget is spent.
+    ///
+    /// A file or link of the baseline is unchanged only when the hash of its content is the
+    /// baseline's object id and its mode agrees. The index decides a label only: added for a
+    /// path the baseline does not hold, conflicted for a path it records in conflict stages.
+    fn compare(
+        &mut self,
+        path: &str,
+        before: Option<Entry>,
+        labels: &Labels,
+    ) -> Result<Option<Change>, DriverError> {
+        let current = worktree::observe(self.workspace, path)?;
+        let mut hashed = None;
+        let status = if labels.conflicted.contains(path) {
+            (before.is_some() || current.is_some()).then_some(GitChangeStatus::Conflicted)
+        } else {
+            match (before, current) {
+                (None, None) => None,
+                (Some(_), None) => Some(GitChangeStatus::Deleted),
+                (None, Some(_)) => Some(GitChangeStatus::Added),
+                (Some(before), Some(current)) if before.mode != current.mode => {
+                    let links = (
+                        before.mode == worktree::LINK,
+                        current.mode == worktree::LINK,
+                    );
+                    Some(if links.0 == links.1 {
+                        GitChangeStatus::Modified
+                    } else {
+                        GitChangeStatus::TypeChanged
+                    })
+                }
+                (Some(before), Some(current)) => {
+                    match worktree::blob_id(self.workspace, path, current, &mut self.budget)? {
+                        worktree::Hashed::OverBudget => return Ok(None),
+                        worktree::Hashed::Id(id) if id == before.id => None,
+                        worktree::Hashed::Id(id) => {
+                            hashed = Some(id);
                             Some(GitChangeStatus::Modified)
-                        } else {
-                            Some(GitChangeStatus::TypeChanged)
                         }
+                        worktree::Hashed::Unstable => Some(GitChangeStatus::Modified),
                     }
                 }
-            };
-            if let Some(status) = status {
-                found.push(Change {
-                    path: path.clone(),
-                    status,
-                    baseline: before,
-                    current: current.filter(|_| status != GitChangeStatus::Deleted),
-                });
             }
-        }
-        Ok(found)
-    }
-
-    /// Whether the file or link observed at `path` still holds the baseline's bytes.
-    ///
-    /// The index vouches for an entry it records with the baseline's object, this size and this
-    /// modification time, unless the index was written no later than the entry was modified.
-    /// Anything else within the per-file bound is read and compared. A larger file is never
-    /// read: it is unchanged only when the index records its time and the baseline object has
-    /// its size.
-    fn unchanged(
-        &self,
-        path: &str,
-        before: Entry,
-        recorded: &StagedEntry,
-        written: (i64, i64),
-        current: worktree::Observed,
-    ) -> Result<bool, DriverError> {
-        if before.mode != current.mode {
-            return Ok(false);
-        }
-        let vouched = recorded.entry == before
-            && recorded.modified.0 == current.modified.0
-            && (recorded.modified.1 == 0 || recorded.modified.1 == current.modified.1);
-        if current.size > self.bound {
-            return Ok(vouched && self.blob_size(before.id)? == current.size);
-        }
-        if vouched && u64::from(recorded.size) == current.size && current.modified < written {
-            return Ok(true);
-        }
-        Ok(
-            worktree::read(self.workspace, path, current, self.bound)?.is_some_and(|bytes| {
-                Oid::hash_object(ObjectType::Blob, &bytes).ok() == Some(before.id)
-            }),
-        )
-    }
-
-    /// The changes as the wire names them, each with Git's patch while the patches rendered so
-    /// far fit `max_total_bytes`. A side that was not read, being over the per-file bound, has
-    /// no patch. The bytes of one change are held only until the next one.
-    fn items(
-        &self,
-        changes: Vec<Change>,
-        max_total_bytes: u64,
-    ) -> Result<(Vec<GitChange>, u64), DriverError> {
-        let scratch = git2::Odb::new()
-            .and_then(git2::Repository::from_odb)
-            .map_err(|_| failed("workspace.git-diff-failed"))?;
-        let scratch_objects = scratch
-            .odb()
-            .map_err(|_| failed("workspace.git-diff-failed"))?;
-        let memory = scratch_objects
-            .add_new_mempack_backend(1)
-            .map_err(|_| failed("workspace.git-diff-failed"))?;
-        let mut items = Vec::with_capacity(changes.len());
-        let mut returned_bytes = 0_u64;
-        for change in changes {
-            validate_git_path(&change.path)?;
-            let baseline = change
-                .baseline
-                .map(|entry| self.baseline_side(&change.path, entry))
-                .transpose()?;
-            let current = change
-                .current
-                .map(|observed| self.current_side(&change.path, observed))
-                .transpose()?;
-            let mut patch = UnifiedDiff {
-                text: String::new(),
-                truncated: false,
-                binary: true,
-            };
-            if [&baseline, &current]
-                .into_iter()
-                .flatten()
-                .all(|side| side.bytes.is_some())
-            {
-                let (patch_bytes, binary) =
-                    render(&scratch, &change.path, baseline.as_ref(), current.as_ref())
-                        .and_then(|rendered| memory.reset().map(|()| rendered))
-                        .map_err(|_| failed("workspace.git-diff-failed"))?;
-                patch.binary = binary;
-                let remaining = max_total_bytes.saturating_sub(returned_bytes);
-                let patch_len = u64::try_from(patch_bytes.len()).expect("patch length fits u64");
-                if patch_len <= remaining {
-                    patch.text = String::from_utf8(patch_bytes).map_err(|_| {
-                        DriverError::failed(
-                            "workspace.git-diff-encoding",
-                            "Git produced a non-UTF-8 textual patch.",
-                        )
-                    })?;
-                    returned_bytes = returned_bytes.saturating_add(patch_len);
-                } else {
-                    patch.truncated = true;
-                }
-            }
-            items.push(GitChange {
-                status: change.status,
-                baseline: baseline.map(|side| side.record),
-                current: current.map(|side| side.record),
-                patch,
-            });
-        }
-        Ok((items, returned_bytes))
-    }
-
-    fn blob_size(&self, id: Oid) -> Result<u64, DriverError> {
-        self.store
-            .odb()
-            .and_then(|objects| objects.read_header(id))
-            .map(|(size, _)| u64::try_from(size).expect("object size fits u64"))
-            .map_err(|_| failed("workspace.git-baseline-read-failed"))
-    }
-
-    fn baseline_side(&self, path: &str, entry: Entry) -> Result<Side, DriverError> {
-        let size = self.blob_size(entry.id)?;
-        let bytes = if size > self.bound {
-            None
-        } else {
-            let blob = self
-                .store
-                .find_blob(entry.id)
-                .map_err(|_| failed("workspace.git-baseline-read-failed"))?;
-            Some(blob.content().to_vec())
         };
-        Ok(Side {
+        Ok(Some(Change {
+            status,
+            baseline: before,
+            current,
+            hashed,
+        }))
+    }
+
+    /// The change as the wire names it, with Git's patch while the patches rendered so far fit
+    /// the bound on all of them. A side over the per-file bound has no text. `None` is a change
+    /// whose baseline object the budget no longer covers.
+    fn item(&mut self, path: &str, change: &Change) -> Result<Option<GitChange>, DriverError> {
+        let Some(status) = change.status else {
+            return Ok(None);
+        };
+        validate_git_path(path)?;
+        let baseline = if let Some(entry) = change.baseline {
+            let Some(side) = self.baseline_side(path, entry)? else {
+                return Ok(None);
+            };
+            Some(side)
+        } else {
+            None
+        };
+        let current = change
+            .current
+            .map(|observed| self.current_side(path, observed, change.hashed))
+            .transpose()?;
+        let mut diff = UnifiedDiff {
+            text: String::new(),
+            truncated: false,
+            binary: true,
+        };
+        if [&baseline, &current]
+            .into_iter()
+            .flatten()
+            .all(|side| side.bytes.is_some())
+        {
+            let (patch_bytes, binary) =
+                render(self.scratch, path, baseline.as_ref(), current.as_ref())
+                    .and_then(|rendered| self.memory.reset().map(|()| rendered))
+                    .map_err(|_| failed("workspace.git-diff-failed"))?;
+            diff.binary = binary;
+            let patch_len = u64::try_from(patch_bytes.len()).expect("patch length fits u64");
+            if let Some(left) = self.patch_bytes_left.checked_sub(patch_len) {
+                diff.text = String::from_utf8(patch_bytes).map_err(|_| {
+                    DriverError::failed(
+                        "workspace.git-diff-encoding",
+                        "Git produced a non-UTF-8 textual patch.",
+                    )
+                })?;
+                self.patch_bytes_left = left;
+            } else {
+                diff.truncated = true;
+            }
+        }
+        Ok(Some(GitChange {
+            status,
+            baseline: baseline.map(|side| side.record),
+            current: current.map(|side| side.record),
+            patch: diff,
+        }))
+    }
+
+    /// The baseline side of a path, or `None` when the budget no longer covers its object.
+    ///
+    /// The size reported is the length of the object the Git library read whole and checked
+    /// against its id. The size the object's header states is only taken from the budget
+    /// before that read.
+    fn baseline_side(&mut self, path: &str, entry: Entry) -> Result<Option<Side>, DriverError> {
+        let stated = self
+            .store
+            .odb()
+            .and_then(|objects| objects.read_header(entry.id))
+            .map(|(size, _)| u64::try_from(size).unwrap_or(u64::MAX))
+            .map_err(|_| failed("workspace.git-baseline-read-failed"))?;
+        let Some(left) = self.budget.checked_sub(stated) else {
+            return Ok(None);
+        };
+        self.budget = left;
+        let blob = self
+            .store
+            .find_blob(entry.id)
+            .map_err(|_| failed("workspace.git-baseline-read-failed"))?;
+        let size = u64::try_from(blob.content().len()).expect("object size fits u64");
+        Ok(Some(Side {
             record: GitChangeSide {
                 path: path.to_owned(),
                 mode: entry.mode,
                 size,
                 oid: Some(entry.id.to_string()),
             },
-            bytes,
-        })
+            bytes: (size <= self.bound).then(|| blob.content().to_vec()),
+        }))
     }
 
-    fn current_side(&self, path: &str, observed: worktree::Observed) -> Result<Side, DriverError> {
+    fn current_side(
+        &self,
+        path: &str,
+        observed: worktree::Observed,
+        hashed: Option<Oid>,
+    ) -> Result<Side, DriverError> {
         let bytes = worktree::read(self.workspace, path, observed, self.bound)?;
         let oid = bytes
             .as_deref()
             .and_then(|bytes| Oid::hash_object(ObjectType::Blob, bytes).ok())
+            .or(hashed)
             .map(|id| id.to_string());
         let size = bytes.as_ref().map_or(observed.size, |bytes| {
             u64::try_from(bytes.len()).expect("file length fits u64")
@@ -995,8 +1032,8 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        baseline_file, changes, finish_materialization, materialize, sync_and_bounded_usage,
-        write_baseline,
+        baseline_file, changes, changes_within, finish_materialization, materialize,
+        sync_and_bounded_usage, write_baseline,
     };
     use crate::GitSourceBinding;
 
@@ -1269,9 +1306,9 @@ mod tests {
         );
     }
 
-    /// The per-file byte bound holds for every file the reader opens.
+    /// The per-file byte bound holds for the text of every worktree file and link in a patch.
     #[test]
-    fn the_per_file_byte_bound_holds_for_every_file_the_reader_opens() {
+    fn the_per_file_byte_bound_holds_for_the_text_of_every_worktree_file_and_link() {
         let (workspace, commit) = source_repository();
         let baselines = baseline_root(commit);
         let elsewhere = tempdir().expect("directory outside the workspace");
@@ -1393,6 +1430,97 @@ mod tests {
                 .text
                 .contains("-bounded git workspace\n+changed workspace\n"),
             "{observed:#?}"
+        );
+    }
+
+    /// The loose object file of the baseline's `README.md` in the workspace's object store.
+    fn baseline_object(workspace: &std::path::Path, commit: git2::Oid) -> std::path::PathBuf {
+        let repository = Repository::open(workspace).expect("repository");
+        let id = repository
+            .find_commit(commit)
+            .expect("baseline commit")
+            .tree()
+            .expect("baseline tree")
+            .get_path(std::path::Path::new("README.md"))
+            .expect("baseline entry")
+            .id()
+            .to_string();
+        workspace.join(".git/objects").join(&id[..2]).join(&id[2..])
+    }
+
+    /// A size the reader reports for a baseline entry is the size of the object the daemon-held
+    /// commit names, whatever the workspace's object store holds in that object's place.
+    #[test]
+    fn changes_report_a_baseline_size_only_from_the_baseline_the_daemon_holds() {
+        let (workspace, commit) = source_repository();
+        let baselines = baseline_root(commit);
+        let object = baseline_object(workspace.path(), commit);
+        let elsewhere = tempdir().expect("directory outside the workspace");
+        let outside = elsewhere.path().join("outside");
+        std::fs::write(&outside, [0xb7, 0x55, 0x00, 0x00]).expect("file outside the workspace");
+        std::fs::remove_file(&object).expect("object removed");
+        std::os::unix::fs::symlink(&outside, &object).expect("link");
+        std::fs::remove_file(workspace.path().join("README.md")).expect("tracked file removed");
+
+        // A refusal holds the rule. An answer carries the baseline's own size: 22 bytes.
+        if let Ok(observed) = observe(workspace.path(), baselines.path(), 16) {
+            let sizes: Vec<u64> = observed
+                .items
+                .iter()
+                .filter_map(|item| item.baseline.as_ref())
+                .map(|side| side.size)
+                .collect();
+            assert_eq!(sizes, [22], "{observed:#?}");
+        }
+    }
+
+    /// The baseline's objects are read only from the store beneath the workspace root.
+    #[test]
+    fn changes_take_baseline_objects_only_from_the_store_beneath_the_workspace_root() {
+        let (workspace, commit) = source_repository();
+        let baselines = baseline_root(commit);
+        let elsewhere = tempdir().expect("directory outside the workspace");
+        let store = workspace.path().join(".git/objects");
+        let outside = elsewhere.path().join("objects");
+        std::fs::rename(&store, &outside).expect("object store moved out");
+        std::fs::create_dir_all(store.join("info")).expect("empty object store");
+        std::fs::write(
+            store.join("info/alternates"),
+            format!("{}\n", outside.display()),
+        )
+        .expect("object store named by a file");
+
+        observe(workspace.path(), baselines.path(), 1024)
+            .expect_err("an object store outside the workspace root is not read");
+    }
+
+    /// The reader opens no entry of the workspace in a way that waits: the observation answers
+    /// when the object store holds an entry that is not a regular file.
+    #[test]
+    fn changes_answer_when_the_object_store_holds_an_entry_that_is_not_a_regular_file() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let (workspace, commit) = source_repository();
+        let baselines = baseline_root(commit);
+        let object = baseline_object(workspace.path(), commit);
+        std::fs::remove_file(&object).expect("object removed");
+        nix::unistd::mkfifo(&object, nix::sys::stat::Mode::from_bits_truncate(0o600))
+            .expect("entry that is not a regular file");
+        std::fs::remove_file(workspace.path().join("README.md")).expect("tracked file removed");
+
+        let (answer, answered) = std::sync::mpsc::channel();
+        let (root, baseline) = (workspace.path().to_owned(), baselines.path().to_owned());
+        std::thread::spawn(move || {
+            let _ = answer.send(observe(&root, &baseline, 1024).is_ok());
+        });
+        let outcome = answered.recv_timeout(std::time::Duration::from_secs(2));
+        // Lets a reader that waits return, so the test process keeps no thread.
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&object);
+        assert!(
+            outcome.is_ok(),
+            "the observation waited on an entry that is not a regular file"
         );
     }
 
@@ -1536,7 +1664,6 @@ mod tests {
                 ("nested/deep/new.txt", Untracked),
                 ("new.txt", Untracked),
                 ("src/gone.txt", Deleted),
-                ("src/unstaged.txt", Deleted),
                 ("staged.txt", Added),
                 ("tool.sh", Modified),
                 ("ulink", Untracked),
@@ -1559,7 +1686,6 @@ mod tests {
                 .text
                 .contains("deleted file mode 100644")
         );
-        assert!(item(&observed, "src/unstaged.txt").current.is_none());
         assert!(
             item(&observed, "staged.txt")
                 .patch
@@ -1574,14 +1700,152 @@ mod tests {
         assert_eq!(link.current.as_ref().expect("link").mode, 0o120_000);
         assert!(link.patch.text.contains("+README.md\n"), "{link:#?}");
         assert!(item(&observed, "blob.bin").patch.binary);
-        for unread in ["large.txt", "wide.txt"] {
+        // A tracked file over the bound was hashed to compare it; an untracked one was not.
+        for (unread, hashed) in [("large.txt", false), ("wide.txt", true)] {
             let change = item(&observed, unread);
             assert!(
                 change.patch.binary && change.patch.text.is_empty(),
                 "{change:#?}"
             );
-            assert_eq!(change.current.as_ref().expect("current side").oid, None);
+            let current = change.current.as_ref().expect("current side");
+            assert_eq!(current.oid.is_some(), hashed, "{change:#?}");
         }
+    }
+
+    /// A path of the baseline whose bytes are the baseline's is not reported, whatever the
+    /// index records for it.
+    #[test]
+    fn a_tracked_file_that_holds_the_baseline_bytes_is_not_reported_whatever_the_index_records() {
+        let (workspace, first) = source_repository();
+        let root = workspace.path();
+        std::fs::write(root.join("kept.txt"), b"kept\n").expect("baseline file");
+        let commit = commit_paths(root, first, &["kept.txt"]);
+        let baselines = baseline_root(commit);
+        std::fs::write(root.join("README.md"), b"staged\n").expect("other bytes");
+        {
+            let repository = Repository::open(root).expect("repository");
+            let mut index = repository.index().expect("index");
+            index
+                .add_path(std::path::Path::new("README.md"))
+                .expect("staged change");
+            index
+                .remove_path(std::path::Path::new("kept.txt"))
+                .expect("entry removed");
+            index.write().expect("write index");
+        }
+        std::fs::write(root.join("README.md"), b"bounded git workspace\n").expect("baseline bytes");
+
+        let observed = observe(root, baselines.path(), 1024).expect("change set");
+        assert!(paths(&observed).is_empty(), "{observed:#?}");
+    }
+
+    /// A tracked file over the per-file bound is compared by its content; its text is withheld
+    /// and its baseline side reports the size of the object that was read.
+    #[test]
+    fn a_tracked_file_over_the_per_file_bound_is_compared_by_content_and_its_text_withheld() {
+        let (workspace, first) = source_repository();
+        let root = workspace.path();
+        let wide = "wide line\n".repeat(512);
+        std::fs::write(root.join("big.txt"), &wide).expect("baseline file");
+        let commit = commit_paths(root, first, &["big.txt"]);
+        let baselines = baseline_root(commit);
+        std::fs::write(root.join("big.txt"), wide.replacen('w', "W", 1)).expect("one other byte");
+
+        let observed = observe(root, baselines.path(), 1024).expect("change set");
+        assert_eq!(paths(&observed), ["big.txt"], "{observed:#?}");
+        let change = &observed.items[0];
+        assert_eq!(change.status, GitChangeStatus::Modified);
+        assert_eq!(change.baseline.as_ref().expect("baseline side").size, 5120);
+        assert!(change.current.as_ref().expect("current side").oid.is_some());
+        assert!(
+            change.patch.binary && change.patch.text.is_empty(),
+            "{change:#?}"
+        );
+    }
+
+    /// When the bytes an observation may hash are spent, every path from the first one not
+    /// compared on is left out and the answer says so.
+    #[test]
+    fn a_spent_hashing_budget_leaves_out_what_was_not_compared_and_marks_the_answer() {
+        let (workspace, first) = source_repository();
+        let root = workspace.path();
+        let tracked = ["a.txt", "m.txt", "z.txt"];
+        for path in tracked {
+            std::fs::write(root.join(path), "line\n".repeat(20)).expect("baseline file");
+        }
+        let commit = commit_paths(root, first, &tracked);
+        let baselines = baseline_root(commit);
+        for path in tracked {
+            std::fs::write(root.join(path), "LINE\n".repeat(20)).expect("changed file");
+        }
+        for path in ["b-new.txt", "y-new.txt"] {
+            std::fs::write(root.join(path), b"new\n").expect("untracked file");
+        }
+        let within = |budget: u64| {
+            changes_within(
+                "ws_git",
+                &workspaces_root(root),
+                root,
+                baselines.path(),
+                "ws_git",
+                GitChangesQuery {
+                    max_files: 100,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 1024 * 1024,
+                },
+                budget,
+            )
+            .expect("change set")
+        };
+
+        let whole = within(u64::MAX);
+        assert_eq!(
+            paths(&whole),
+            ["a.txt", "b-new.txt", "m.txt", "y-new.txt", "z.txt"],
+            "{whole:#?}"
+        );
+        assert!(!whole.truncated);
+        // The budget covers `README.md`, `a.txt` and its baseline object, and not `m.txt`.
+        let cut = within(22 + 100 + 100 + 50);
+        assert_eq!(paths(&cut), ["a.txt", "b-new.txt"], "{cut:#?}");
+        assert!(cut.truncated);
+    }
+
+    /// Directories nested deeper than the walk goes are not entered: the observation answers
+    /// and marks the answer.
+    #[test]
+    fn directories_nested_deeper_than_the_walk_goes_mark_the_answer_truncated() {
+        let (workspace, commit) = source_repository();
+        let baselines = baseline_root(commit);
+        let root = workspace.path();
+        let nest = root.join(["d"; 101].join("/"));
+        std::fs::create_dir_all(&nest).expect("nested directories");
+        std::fs::write(nest.join("deep.txt"), b"deep\n").expect("file beyond the walk");
+        std::fs::write(root.join("own.txt"), b"own\n").expect("workspace file");
+
+        let observed = observe(root, baselines.path(), 1024).expect("change set");
+        assert_eq!(paths(&observed), ["own.txt"], "{observed:#?}");
+        assert!(observed.truncated);
+    }
+
+    /// An ignore file over the bound applies the rules within the bound and none beyond it.
+    #[test]
+    fn an_ignore_file_over_the_bound_applies_only_the_rules_within_the_bound() {
+        let (workspace, commit) = source_repository();
+        let baselines = baseline_root(commit);
+        let root = workspace.path();
+        let rules = format!("first.tmp\n{}last.tmp\n", "# filler line\n".repeat(80_000));
+        std::fs::write(root.join(".gitignore"), rules).expect("ignore file over the bound");
+        for path in ["first.tmp", "last.tmp"] {
+            std::fs::write(root.join(path), b"x\n").expect("workspace file");
+        }
+
+        let observed = observe(root, baselines.path(), 1024).expect("change set");
+        assert_eq!(
+            paths(&observed),
+            [".gitignore", "last.tmp"],
+            "{observed:#?}"
+        );
     }
 
     #[test]
@@ -1691,4 +1955,6 @@ mod tests {
         assert!(baseline_root.join("ws_live").exists());
         assert!(workspace_root.path().join("unrelated").exists());
     }
+
+    mod adversary_cases;
 }
