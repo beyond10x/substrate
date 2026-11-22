@@ -1,0 +1,34 @@
+# ADR 0051 decision 9: `oci` does not serve the change record. The runtime builds the view, and
+# no story proves a tree digest around a container's start and end, so a profile requiring
+# `file_changes` is refused `confinement.fact-unserved` before the runtime is asked for anything.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: oci-file-changes-unserved-on-oci
+summary: "lane oci: oci, asked for file_changes, is refused confinement.fact-unserved naming file_changes."
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: oci
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [image_digest_pinned, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: oci
+      required_families: [process_run]
+      required_facts: [file_changes]
+      image: "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    outcome: fact-unserved-file-changes
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: oci, fact: file_changes}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

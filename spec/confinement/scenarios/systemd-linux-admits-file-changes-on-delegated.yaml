@@ -1,0 +1,48 @@
+# ADR 0051 (`story:exec-file-changes-are-recorded`): `systemd` around `linux` delegates to
+# `linux`, so it proves `file_changes` where `linux` does; the declared set is `linux`'s.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: systemd-linux-admits-file-changes-on-delegated
+summary: "lane delegated: systemd around linux admits a profile requiring file_changes, reported declared_insecure: false."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live, file_changes]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: linux
+      required_families: [process_run, workspace]
+      required_facts: [file_changes]
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: systemd
+          inner: linux
+          families: [process_run, workspace]
+          facts: [file_changes]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: systemd
+      inner: linux
+      facts: [file_changes]
+      declared_insecure: false

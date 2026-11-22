@@ -1,0 +1,112 @@
+# ADR 0051 decision 2 (`story:exec-file-changes-are-recorded`): two runs that write one workspace
+# at the same time. Neither run's changes can be told from the other's, so when the first of them
+# ends beside the other, both records become unavailable with the reason `second-writer` and
+# neither lists a change. Both runs run to their end. A settle step on a record that is no longer
+# pending writes nothing.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-change-record-second-writer-unavailable-on-delegated
+summary: "lane delegated: two linux runs that write one workspace at the same time each get an unavailable record naming second-writer, and neither lists a change."
+
+arrange:
+  - instance: first-profile
+    entity: substrate.confinement.Profile
+  - instance: second-profile
+    entity: substrate.confinement.Profile
+  - instance: first
+    entity: substrate.confinement.Run
+  - instance: second
+    entity: substrate.confinement.Run
+  - instance: first-record
+    entity: substrate.confinement.ChangeRecord
+  - instance: second-record
+    entity: substrate.confinement.ChangeRecord
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live, file_changes]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [process_run, workspace], required_facts: [file_changes]}
+    outcome: admitted
+    capture: {instance: first-profile, event: substrate.confinement.ProfileAdmitted, field: profile}
+  - at: 2026-11-21T09:00:02Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [process_run, workspace], required_facts: [file_changes]}
+    outcome: admitted
+    capture: {instance: second-profile, event: substrate.confinement.ProfileAdmitted, field: profile}
+  - at: 2026-11-21T09:00:03Z
+    command: substrate.confinement.StartRun
+    actor: substrate.confinement.Embedder
+    input: {directory: shared, records_file_changes: true}
+    outcome: started
+    capture: {instance: first, event: substrate.confinement.RunStarted, field: run}
+  - at: 2026-11-21T09:00:04Z
+    command: substrate.confinement.OpenChangeRecord
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: first}, directory: shared}
+    outcome: opened
+    capture: {instance: first-record, event: substrate.confinement.ChangeRecordOpened, field: record}
+  - at: 2026-11-21T09:00:05Z
+    command: substrate.confinement.StartRun
+    actor: substrate.confinement.Embedder
+    input: {directory: shared, records_file_changes: true}
+    outcome: started
+    capture: {instance: second, event: substrate.confinement.RunStarted, field: run}
+  - at: 2026-11-21T09:00:06Z
+    command: substrate.confinement.OpenChangeRecord
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: second}, directory: shared}
+    outcome: opened
+    capture: {instance: second-record, event: substrate.confinement.ChangeRecordOpened, field: record}
+  - at: 2026-11-21T09:00:20Z
+    command: substrate.confinement.EndRun
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: first}, directory: shared}
+    outcome: ended-beside-a-writer
+  - at: 2026-11-21T09:00:30Z
+    command: substrate.confinement.EndRun
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: second}, directory: shared}
+    outcome: ended
+  - at: 2026-11-21T09:00:31Z
+    command: substrate.confinement.SettleChangeRecord
+    actor: substrate.confinement.Embedder
+    input:
+      record: {$instance: first-record}
+      started_at: 2026-11-21T09:00:03Z
+      ended_at: 2026-11-21T09:00:20Z
+      mounts: []
+      changes: []
+    outcome: already-settled
+    error:
+      name: substrate.confinement.ChangeRecordSettled
+    no_events: [substrate.confinement.FileChangesRecorded]
+
+assert:
+  - view: substrate.confinement.ChangeRecords
+    contains:
+      record: {$instance: first-record}
+      state: Unavailable
+      run: {$instance: first}
+      reason: second-writer
+      changes: []
+  - view: substrate.confinement.ChangeRecords
+    contains:
+      record: {$instance: second-record}
+      state: Unavailable
+      run: {$instance: second}
+      reason: second-writer
+      changes: []
+  - view: substrate.confinement.Runs
+    contains: {run: {$instance: first}, state: Ended}
+  - view: substrate.confinement.Runs
+    contains: {run: {$instance: second}, state: Ended}

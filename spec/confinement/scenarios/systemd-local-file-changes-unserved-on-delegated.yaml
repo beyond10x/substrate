@@ -1,0 +1,36 @@
+# ADR 0051 decision 9: `systemd` around `local` bounds the run's process tree and builds no view,
+# so the run writes wherever the user may. Its set is `local`'s plus `whole_tree_kill`, without
+# `file_changes`, and a profile requiring it is refused before anything runs.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: systemd-local-file-changes-unserved-on-delegated
+summary: "lane delegated: systemd around local, asked for file_changes, is refused confinement.fact-unserved naming file_changes."
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [declared_insecure, paths_are_host_paths, whole_tree_kill, local_permitted, host_network, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      required_families: [process_run]
+      required_facts: [file_changes]
+      local_reason: the operator bounds this run on the developer's own machine
+    outcome: fact-unserved-file-changes
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: systemd, fact: file_changes}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

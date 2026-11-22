@@ -1,0 +1,87 @@
+# ADR 0051 (`story:exec-file-changes-are-recorded`): a run that changed nothing has an empty
+# record: available, with no change listed. That a path the run wrote and restored to its
+# starting content is not listed is the two tree digests' own property and a case of the
+# delegated lane: this settle step states the record the adapter must answer after such a run.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-change-record-empty-on-delegated
+summary: "lane delegated: a linux run that changed nothing gets an available record that lists no change."
+
+arrange:
+  - instance: profile
+    entity: substrate.confinement.Profile
+  - instance: run
+    entity: substrate.confinement.Run
+  - instance: record
+    entity: substrate.confinement.ChangeRecord
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live, file_changes]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [process_run, workspace], required_facts: [file_changes]}
+    outcome: admitted
+    capture: {instance: profile, event: substrate.confinement.ProfileAdmitted, field: profile}
+  - at: 2026-11-21T09:00:02Z
+    command: substrate.confinement.StartRun
+    actor: substrate.confinement.Embedder
+    input: {directory: quiet, records_file_changes: true}
+    outcome: started
+    capture: {instance: run, event: substrate.confinement.RunStarted, field: run}
+  - at: 2026-11-21T09:00:03Z
+    command: substrate.confinement.OpenChangeRecord
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: quiet}
+    outcome: opened
+    capture: {instance: record, event: substrate.confinement.ChangeRecordOpened, field: record}
+  - at: 2026-11-21T09:00:10Z
+    command: substrate.confinement.EndRun
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: quiet}
+    outcome: ended
+  - at: 2026-11-21T09:00:11Z
+    command: substrate.confinement.SettleChangeRecord
+    actor: substrate.confinement.Embedder
+    input:
+      record: {$instance: record}
+      started_at: 2026-11-21T09:00:02Z
+      ended_at: 2026-11-21T09:00:10Z
+      mounts:
+        - {mount: /workspace, kind: workspace, name: quiet, excluded: [], before_sha256: "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0", after_sha256: "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0"}
+      changes: []
+    outcome: available
+    events:
+      - event: substrate.confinement.FileChangesRecorded
+        payload:
+          run: {$instance: run}
+  # A record is settled once: a second settle step writes nothing and no second audit record.
+  - at: 2026-11-21T09:00:12Z
+    command: substrate.confinement.SettleChangeRecord
+    actor: substrate.confinement.Embedder
+    input:
+      record: {$instance: record}
+      started_at: 2026-11-21T09:00:02Z
+      ended_at: 2026-11-21T09:00:10Z
+      mounts: []
+      changes: []
+      unavailable: walk-over-time
+    outcome: already-settled
+    error:
+      name: substrate.confinement.ChangeRecordSettled
+    no_events: [substrate.confinement.FileChangesRecorded, substrate.confinement.FileChangesUnavailable]
+
+assert:
+  - view: substrate.confinement.ChangeRecords
+    contains:
+      record: {$instance: record}
+      state: Available
+      run: {$instance: run}
+      changes: []

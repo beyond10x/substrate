@@ -1,0 +1,36 @@
+# Model only (ADR 0051 decision 9). The declared set of `linux` holds `file_changes`, so no
+# delegated scenario reaches a `linux` whose probe did not prove it. This scenario opens an
+# adapter row that holds `linux`'s other facts without `file_changes` and checks that a profile
+# requiring it is refused by that name, and that the refusal names no other fact the row holds.
+# It runs only against the interpreted reference: no adapter lane selects a `model-*` scenario.
+# The host driver's own tests hold a `linux` open whose probe fails.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: model-file-changes-unserved-on-interpreted
+summary: "lane interpreted: an adapter row without file_changes refuses a profile requiring it confinement.fact-unserved naming file_changes."
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [process_run]
+      required_facts: [whole_tree_kill, file_changes]
+    outcome: fact-unserved-file-changes
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: linux, fact: file_changes}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

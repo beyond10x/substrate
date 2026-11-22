@@ -56,6 +56,10 @@ run checks the model, not an adapter.
   Otherwise it admits the profile, `declared_insecure: true` with the reason on a `local` adapter
   and `false` elsewhere.
 
+- `StartRun`, `OpenChangeRecord`, `EndRun` and `SettleChangeRecord` are the change record of
+  [ADR 0051](../../adr/0051-a-run-has-a-change-record-made-from-two-tree-digests.md); see *The
+  change record* below.
+
 A run is `local` exactly when its opened adapter proves `declared_insecure`: `local` itself, or
 `systemd` opened around `local`. Admission reads this from the opened adapter row, not from the
 request's `adapter`, and `OpenAdapter` makes the row's facts agree with its name: no `local` row
@@ -91,6 +95,58 @@ the family or fact named). ESS refuses an event on an outcome that reports an er
 (`story:confinement-contract-on-linux-and-local`) assert that each refusal writes its audit record,
 and each later adapter's tests do the same for its own refusals.
 
+### The change record
+
+[ADR 0051](../../adr/0051-a-run-has-a-change-record-made-from-two-tree-digests.md) adds the fact
+`file_changes` and two entities. A `Run` is a run started under an admitted profile, the directory
+it writes, and whether its profile asked for the record. A `ChangeRecord` belongs to one run: it
+is `Pending` from the before side until the end walk, then `Available` with the changes (an empty
+list is a run that changed nothing) or `Unavailable` with a reason of the closed list
+`ChangeRecordUnavailable`. A run that did not ask has no row, which is the adapter API's
+`not requested` answer.
+
+- `StartRun` starts a run on a directory and states whether its profile asked for the record.
+  Asking is refused at admission on an adapter that did not prove `file_changes`
+  (`AdmitProfile`, `fact-unserved-file-changes`), so no admitted profile asks where the fact is
+  absent.
+- `OpenChangeRecord` is the driver taking the before side. It answers
+  `ChangeRecordNotRequested` for a run that did not ask, and writes no row.
+- `EndRun` ends a run. Two runs overlap exactly when the one that ends first ends while the other
+  still runs, so `ended-beside-a-writer` is where a second writer is seen: every pending record of
+  that directory becomes `Unavailable` with `second-writer` and lists no change.
+- `SettleChangeRecord` is the end walk's result. Its input states what the driver observed (the
+  two instants, the covered mounts with their tree digests, the changes, and the reason where it
+  could not say them), as `OpenAdapter`'s input states what the probe proved. A runner that holds
+  a real adapter compares the adapter's own record with it.
+
+What the model does not hold, each an **obligation for the host driver's and the `linux`
+adapter's own tests** (ADR 0051 decision 15):
+
+- that the two tree digests yield the record a settle step states: the walk, the rename rules, a
+  path restored to its starting content, the bounds and the kept content;
+- the kept manifest the digests are made from (ADR 0051 decisions 1 and 8): which files a walk
+  reads, the racy rule, where the stat facts are trusted, the first walk of a mount and the
+  reason `manifest-not-ready`, which a settle step states like every other reason;
+- the writers that have no row here: a session, a write through Substrate's own file routes, a
+  driver operation, a host process, a run whose tree is unproven;
+- a run admitted with a read-only workspace, which writes nothing and counts as no writer;
+- the link from a run to its profile. The adapter's `start` takes the admitted profile, and the
+  profile's member `ConfinementProfile.file_changes` is what asks; a profile that lists the fact
+  without the member asks for no record. In the model `StartRun` states the request as an input
+  and a `Run` row names no profile: ESS 0.86.0 synthesis arranges no admission, and a run row
+  that referred to its profile made every obligation on a run or a record unreachable and
+  synthesis three times as slow (57 s to 186 s, measured in one job). Each `*-change-record-*`
+  scenario still opens the adapter and admits the profile before it starts the run, and a runner
+  starts the run under that profile;
+- the count in the audit record. ESS 0.86.0 refuses a list's length as a payload value, so
+  `FileChangesRecorded` carries the run only;
+- the order of the before side and the launch: the driver takes the before side before it releases
+  the run's launch barrier, and the model writes `OpenChangeRecord` after `StartRun` because one
+  outcome creates one row;
+- a settle step on a run that still runs, which the driver never makes;
+- the record's own key. The adapter API reads a record by its run's identity. The model gives the
+  record a key of its own type (`ChangeRecordKey`) so that an input names one row.
+
 ## Scenarios and lanes
 
 An ESS scenario has no tag, so a scenario is named by adapter and lane: it begins with the adapter
@@ -99,8 +155,9 @@ follows:
 
 - **An adapter's own lane selects the `<adapter>-*` scenarios that end `-on-<lane>`**: `local-*`
   on `portable`, `linux-*` and `systemd-*` on `delegated`, `macos-s1-*` (S1's adapter),
-  `macos-s2-*` (the admissions S2 makes pass) and `macos-io-*` (design 32's standard input and
-  live output) on `macos`, `oci-*` on `oci`, `pod-*` on `pod`.
+  `macos-s2-*` (the admissions S2 makes pass), `macos-io-*` (design 32's standard input and
+  live output) and `macos-record-*` (ADR 0051's change record, refused) on `macos`, `oci-*` on
+  `oci`, `pod-*` on `pod`.
 - **`absent-<adapter>-*` scenarios run in the lane where that adapter is absent**:
   `absent-macos-*`, `absent-systemd-*`, `absent-oci-*` and `absent-pod-*` on `portable`,
   `absent-linux-*` on `macos`. No adapter's own selection matches them, so S1's `macos-s1-*`
@@ -110,30 +167,41 @@ follows:
   the host, so S0's tests feed it a set without the fact.
 - **`model-*` scenarios end `-on-interpreted`** and no adapter lane selects them: they reach
   branches no declared adapter set reaches, and run only against the interpreted reference.
+- **`linux-change-record-*` and `systemd-linux-change-record-*` use `StartRun`,
+  `OpenChangeRecord`, `EndRun` and `SettleChangeRecord`.** A delegated runner executes them by
+  starting real runs and comparing the adapter's own record with each settle step's input
+  (ADR 0051 decision 15); until the story that implements the record teaches the runners these
+  four commands, a runner that selects one fails on an unknown command, as it must.
 
 | lane | scenarios |
 |---|---|
-| `portable` | 20: thirteen `local-*` (admission, a missing reason, host policy, a filesystem view, four facts, both reserved fields, the open without `declared_insecure`, `stdin_pipe` admitted, `output_live` admitted), three `*-open-without-*` for `systemd` around `local`, `oci` and `pod`, and four `absent-*` (`macos`, `systemd`, `oci`, `pod`) with their setup in the summary |
-| `delegated` | 22: twelve `linux-*`, ten `systemd-*` (four around `local`, six around `linux`, one of them requested on a scope opened around `local`); `stdin_pipe` and `output_live` each admitted on `linux` and on `systemd` around each, and `exec_subpaths` on `linux` and on `systemd` around it (design 35: the open step states it, so the lane's adapter is opened with the helper `HostConfig.exec_gate` names) |
-| `macos` | 10: `absent-linux-*`, four `macos-s1-*`, three `macos-s2-*`, two `macos-io-*` (`stdin_pipe` admitted, `output_live` admitted) |
-| `oci` | 7: admission by digest, `stdin_pipe` admitted on the lane's pinned runtime, `output_live` admitted, egress refused, three images refused `image-unpinned` (a tag, `@sha256:` with no digest, a short digest) |
-| `pod` | 5: admission by digest, a filesystem view refused, `stdin_pipe` and `output_live` each refused `fact-unserved`, `@sha256:latest` refused `image-unpinned` |
-| `interpreted` | 3: `model-*`, the six families every declared adapter serves, each refused by name, and `stdin_pipe` and `output_live` each refused by name on a row that holds `linux`'s other facts |
+| `portable` | 21: fourteen `local-*` (admission, a missing reason, host policy, a filesystem view, five facts, both reserved fields, the open without `declared_insecure`, `stdin_pipe` admitted, `output_live` admitted), three `*-open-without-*` for `systemd` around `local`, `oci` and `pod`, and four `absent-*` (`macos`, `systemd`, `oci`, `pod`) with their setup in the summary |
+| `delegated` | 32: nineteen `linux-*`, thirteen `systemd-*` (five around `local`, eight around `linux`, one of them requested on a scope opened around `local`); `stdin_pipe` and `output_live` each admitted on `linux` and on `systemd` around each, and `exec_subpaths` on `linux` and on `systemd` around it (design 35: the open step states it, so the lane's adapter is opened with the helper `HostConfig.exec_gate` names); `file_changes` admitted on `linux` and on `systemd` around it and refused on `systemd` around `local`; six `linux-change-record-*` (two runs in two workspaces, two writers of one workspace, an empty record, a writable root with a file over the content bound and a binary file, a tree over the bound, a run that did not ask) and one `systemd-linux-change-record-*` |
+| `macos` | 11: `absent-linux-*`, four `macos-s1-*`, three `macos-s2-*`, two `macos-io-*` (`stdin_pipe` admitted, `output_live` admitted), one `macos-record-*` (`file_changes` refused) |
+| `oci` | 8: admission by digest, `stdin_pipe` admitted on the lane's pinned runtime, `output_live` admitted, egress refused, `file_changes` refused, three images refused `image-unpinned` (a tag, `@sha256:` with no digest, a short digest) |
+| `pod` | 6: admission by digest, a filesystem view refused, `stdin_pipe`, `output_live` and `file_changes` each refused `fact-unserved`, `@sha256:latest` refused `image-unpinned` |
+| `interpreted` | 4: `model-*`, the six families every declared adapter serves, each refused by name, and `stdin_pipe`, `output_live` and `file_changes` each refused by name on a row that holds `linux`'s other facts |
 
 **Synthesized scenarios check the model against the interpreted reference only.** ESS names them
 by command and outcome (`substrate.confinement.OpenAdapter/outcome/opened`) and cannot rename
 them, so they carry no adapter and no lane, and no adapter lane selects them. Adapter lanes run the
 authored scenarios above.
 
-Synthesis writes 5 scenarios, all on `OpenAdapter`, and refuses 32 obligations, every one on
-`AdmitProfile`. The open refusals that keep a `local` row declared insecure and an `oci` or `pod`
-row digest-pinned are guards on the adapter identity, and with them ESS 0.81.0 synthesis arranges
-no adapter row for an admission (`ESS-SYNTH-003`, "no candidate of the 15 tried satisfies
-`substrate.confinement.Adapter` stored related row selecting this branch", and `ESS-SYNTH-001` for
-the reserved fields and `adapter-not-open`). The model
-keeps the refusals and the authored scenarios carry admission: each of the 37 outcomes of the two
-commands has at least one scenario among the 67 authored. All 72 scenarios pass against ESS
-0.81.0's `interpreted` target.
+Synthesis writes 20 scenarios, five on `OpenAdapter` and fifteen on the run and record commands,
+and refuses 35 obligations: 33 on `AdmitProfile` and two on `EndRun`. The open refusals that keep a
+`local` row declared insecure and an `oci` or `pod` row digest-pinned are guards on the adapter
+identity, and with them ESS synthesis arranges no adapter row for an admission (`ESS-SYNTH-003`,
+"no candidate of the 15 tried satisfies `substrate.confinement.Adapter` stored related row
+selecting this branch", and `ESS-SYNTH-001` for the reserved fields and `adapter-not-open`). The
+two on `EndRun` are `ended-beside-a-writer` and the refusal of an ended run (`ESS-SYNTH-008`: the
+branch is selected by a second running row, which synthesis does not arrange). The model keeps the
+refusals and the authored scenarios carry admission and the second writer: each of the 50 outcomes
+of the six commands has at least one scenario among the 82 authored and the 20 synthesized. All
+102 scenarios pass against ESS 0.86.0's `interpreted` target.
+
+Synthesis of this model took 111 s where the model before ADR 0051 took 78 s in the same loaded
+job (42 s on a quieter machine), about 1.4 times. It runs once per `cargo xtask check-ess`, never
+per test.
 
 ## Open questions (`UNMAPPED:` in `confinement.yaml`)
 
@@ -142,6 +210,7 @@ commands has at least one scenario among the 67 authored. All 72 scenarios pass 
   (`ESS-SYNTH-002`). Admission refuses a requested `inner` that differs from the opened row's,
   which the model decides without a source.
 - The audit record of a refusal (`ProfileRefused`): an adapter-test obligation, above.
+- Everything listed under *The change record* above as the driver's and the adapter's obligation.
 - What an image beside `local`, `linux`, `macos` or `systemd` means. The model ignores it.
 - The shape of an ingress route and a rate bound. Any value is refused.
 - An `oci` or `pod` profile with no image is refused as unpinned. This fails closed, and no source

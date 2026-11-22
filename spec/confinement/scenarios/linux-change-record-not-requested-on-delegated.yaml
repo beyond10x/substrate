@@ -1,0 +1,64 @@
+# ADR 0051 decision 10 (`story:exec-file-changes-are-recorded`): a run whose profile did not ask
+# for the record. The profile is admitted and the run starts and ends as before this story; no
+# record is opened, and asking for one answers `not requested`, which is neither an empty record
+# nor an unavailable one.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-change-record-not-requested-on-delegated
+summary: "lane delegated: a linux run whose profile did not require file_changes runs as before, has no change record, and is answered not requested."
+
+arrange:
+  - instance: profile
+    entity: substrate.confinement.Profile
+  - instance: run
+    entity: substrate.confinement.Run
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live, file_changes]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [process_run, workspace], required_facts: []}
+    outcome: admitted
+    capture: {instance: profile, event: substrate.confinement.ProfileAdmitted, field: profile}
+  - at: 2026-11-21T09:00:02Z
+    command: substrate.confinement.StartRun
+    actor: substrate.confinement.Embedder
+    input: {directory: plain, records_file_changes: false}
+    outcome: started
+    capture: {instance: run, event: substrate.confinement.RunStarted, field: run}
+  - at: 2026-11-21T09:00:03Z
+    command: substrate.confinement.OpenChangeRecord
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: plain}
+    outcome: not-requested
+    error:
+      name: substrate.confinement.ChangeRecordNotRequested
+    no_events: [substrate.confinement.ChangeRecordOpened]
+  - at: 2026-11-21T09:00:10Z
+    command: substrate.confinement.EndRun
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: plain}
+    outcome: ended
+  # A run ends once: a second end names a run that no longer runs.
+  - at: 2026-11-21T09:00:11Z
+    command: substrate.confinement.EndRun
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: plain}
+    outcome: already-ended
+    error:
+      name: substrate.confinement.RunNotFound
+    no_events: [substrate.confinement.RunEnded]
+
+assert:
+  - view: substrate.confinement.Runs
+    contains: {run: {$instance: run}, state: Ended, records_file_changes: false}
+  - view: substrate.confinement.ChangeRecords
+    counts: {at_most: 0}

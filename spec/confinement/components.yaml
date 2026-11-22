@@ -3,14 +3,23 @@
 # the wire: `reached_by` stays the in-process default, and no route or bundle is derived from it.
 components:
   - component: substrate-host
-    summary: Opens a confinement adapter, proves its contract families and facts, and admits or refuses a profile against them.
+    summary: Opens a confinement adapter, proves its contract families and facts, admits or refuses a profile against them, and records what a run changed in the mounts it may write.
     owns:
       domains: [substrate.confinement]
     accepts:
       commands:
         - substrate.confinement.OpenAdapter
         - substrate.confinement.AdmitProfile
+        - substrate.confinement.StartRun
+        - substrate.confinement.OpenChangeRecord
+        - substrate.confinement.EndRun
+        - substrate.confinement.SettleChangeRecord
     publishes:
       events:
         - substrate.confinement.AdapterOpened
         - substrate.confinement.ProfileAdmitted
+        - substrate.confinement.RunStarted
+        - substrate.confinement.ChangeRecordOpened
+        - substrate.confinement.RunEnded
+        - substrate.confinement.FileChangesRecorded
+        - substrate.confinement.FileChangesUnavailable

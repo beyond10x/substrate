@@ -1,0 +1,78 @@
+# ADR 0051 decision 5 (`story:exec-file-changes-are-recorded`): a workspace above the size bound.
+# The before walk stops at the bound, the run starts and runs to its end, and the record is
+# unavailable with the reason `tree-over-bound` and lists no change. The same step carries every
+# reason of the closed list that a walk gives.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-change-record-tree-over-bound-unavailable-on-delegated
+summary: "lane delegated: a linux run in a workspace above the size bound runs to its end and gets an unavailable record naming tree-over-bound."
+
+arrange:
+  - instance: profile
+    entity: substrate.confinement.Profile
+  - instance: run
+    entity: substrate.confinement.Run
+  - instance: record
+    entity: substrate.confinement.ChangeRecord
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live, file_changes]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [process_run, workspace], required_facts: [file_changes]}
+    outcome: admitted
+    capture: {instance: profile, event: substrate.confinement.ProfileAdmitted, field: profile}
+  - at: 2026-11-21T09:00:02Z
+    command: substrate.confinement.StartRun
+    actor: substrate.confinement.Embedder
+    input: {directory: large, records_file_changes: true}
+    outcome: started
+    capture: {instance: run, event: substrate.confinement.RunStarted, field: run}
+  - at: 2026-11-21T09:00:03Z
+    command: substrate.confinement.OpenChangeRecord
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: large}
+    outcome: opened
+    capture: {instance: record, event: substrate.confinement.ChangeRecordOpened, field: record}
+  - at: 2026-11-21T09:00:10Z
+    command: substrate.confinement.EndRun
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: large}
+    outcome: ended
+  - at: 2026-11-21T09:00:11Z
+    command: substrate.confinement.SettleChangeRecord
+    actor: substrate.confinement.Embedder
+    input:
+      record: {$instance: record}
+      started_at: 2026-11-21T09:00:02Z
+      ended_at: 2026-11-21T09:00:10Z
+      mounts:
+        - {mount: /workspace, kind: workspace, name: large, excluded: []}
+      changes: []
+      unavailable: tree-over-bound
+    outcome: unavailable
+    events:
+      - event: substrate.confinement.FileChangesUnavailable
+        payload:
+          run: {$instance: run}
+          reason: tree-over-bound
+    no_events: [substrate.confinement.FileChangesRecorded]
+
+assert:
+  - view: substrate.confinement.ChangeRecords
+    contains:
+      record: {$instance: record}
+      state: Unavailable
+      run: {$instance: run}
+      reason: tree-over-bound
+      changes: []
+  - view: substrate.confinement.Runs
+    contains: {run: {$instance: run}, state: Ended, records_file_changes: true}

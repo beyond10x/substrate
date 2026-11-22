@@ -1,0 +1,75 @@
+# ADR 0051 decision 9 (`story:exec-file-changes-are-recorded`): `systemd` around `linux` starts
+# its runs through `linux`, so a run there has the record `linux` makes.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: systemd-linux-change-record-lists-changes-on-delegated
+summary: "lane delegated: a run on systemd around linux gets an available record that lists its change."
+
+arrange:
+  - instance: profile
+    entity: substrate.confinement.Profile
+  - instance: run
+    entity: substrate.confinement.Run
+  - instance: record
+    entity: substrate.confinement.ChangeRecord
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live, file_changes]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: systemd, inner: linux, required_families: [process_run, workspace], required_facts: [file_changes]}
+    outcome: admitted
+    capture: {instance: profile, event: substrate.confinement.ProfileAdmitted, field: profile}
+  - at: 2026-11-21T09:00:02Z
+    command: substrate.confinement.StartRun
+    actor: substrate.confinement.Embedder
+    input: {directory: scoped, records_file_changes: true}
+    outcome: started
+    capture: {instance: run, event: substrate.confinement.RunStarted, field: run}
+  - at: 2026-11-21T09:00:03Z
+    command: substrate.confinement.OpenChangeRecord
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: scoped}
+    outcome: opened
+    capture: {instance: record, event: substrate.confinement.ChangeRecordOpened, field: record}
+  - at: 2026-11-21T09:00:10Z
+    command: substrate.confinement.EndRun
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: scoped}
+    outcome: ended
+  - at: 2026-11-21T09:00:11Z
+    command: substrate.confinement.SettleChangeRecord
+    actor: substrate.confinement.Embedder
+    input:
+      record: {$instance: record}
+      started_at: 2026-11-21T09:00:02Z
+      ended_at: 2026-11-21T09:00:10Z
+      mounts:
+        - {mount: /workspace, kind: workspace, name: scoped, excluded: [], before_sha256: "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0", after_sha256: "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"}
+      changes:
+        - mount: /workspace
+          path: notes.txt
+          operation: create
+          after: {kind: file, sha256: "abababababababababababababababababababababababababababababababab", size: 12, mode: 420, content: kept}
+          fs_mtime: 2026-11-21T09:00:05Z
+    outcome: available
+    events:
+      - event: substrate.confinement.FileChangesRecorded
+        payload:
+          run: {$instance: run}
+
+assert:
+  - view: substrate.confinement.ChangeRecords
+    contains:
+      record: {$instance: record}
+      state: Available
+      run: {$instance: run}

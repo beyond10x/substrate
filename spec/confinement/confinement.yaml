@@ -50,6 +50,9 @@ types:
   # - output_live: the run's output reaches the embedder while the run runs, in order and
   #   contiguous per stream, from a bounded queue whose stall ends the run (design 32, section 3).
   #   Without it output is read from the run's record.
+  # - file_changes: the adapter records what a run changed in the mounts it may write, from a
+  #   digest of each mount's tree before the run starts and after it ends, and keeps the content
+  #   of both sides where no run can reach it (ADR 0051). Without it a run has no change record.
   - name: substrate.confinement.Fact
     kind: enum
     variants:
@@ -66,6 +69,7 @@ types:
       - image_digest_pinned
       - stdin_pipe
       - output_live
+      - file_changes
   # The two profile fields ADR 0109 F1 B reserves: setting either is refused until a later story
   # fills it. Spelled with `-` because ESS reads a bare `ingress_routes` in a payload as the input
   # of that name.
@@ -80,6 +84,115 @@ types:
   - name: substrate.confinement.ProfileId
     kind: newtype
     of: Uuid
+  # The adapter mints one per start. Under `linux` it is the host driver's exec identity, `ex_`
+  # and a lowercase ULID (`crates/substrate-host/src/confinement/linux.rs`, `start_run`).
+  - name: substrate.confinement.RunId
+    kind: newtype
+    of: String
+  # The key of a run's change record. The adapter's API reads a record by its run's identity and
+  # has no second key; the model types the record's own identity apart from the run's so that an
+  # input names one row.
+  - name: substrate.confinement.ChangeRecordKey
+    kind: newtype
+    of: String
+  # The directory a run may write, as the host driver names it: a workspace's root name, or the
+  # name of an operator-declared writable root (ADR 0038 kind 1). Two runs that name the same
+  # one write the same directory.
+  - name: substrate.confinement.WrittenDirectory
+    kind: newtype
+    of: String
+  # What a run did to one path, read from the two tree digests (ADR 0051 decision 4). A path that
+  # ends as it started is not listed and has no operation.
+  - name: substrate.confinement.ChangeOperation
+    kind: enum
+    variants: [create, modify, delete, rename]
+  # What a path names on one side. `special` is a FIFO, a socket or a device node: listed, never
+  # opened and never digested.
+  - name: substrate.confinement.EntryKind
+    kind: enum
+    variants: [file, symlink, directory, special]
+  # Whether the content of one side can be read back (ADR 0051 decision 5): `kept`; `over-bound`,
+  # a file over the per-file bound; `binary`; `run-bound`, the run's content bound was spent on
+  # earlier paths; `not-content`, a directory or a special file.
+  - name: substrate.confinement.ContentAvailability
+    kind: enum
+    variants: [kept, over-bound, binary, run-bound, not-content]
+  # Why a run that asked for a change record has none (ADR 0051 decision 2), a closed list:
+  # - second-writer: another start with write access to a covered mount ran while the run did.
+  # - outside-writer-detected: a walk saw a file change while it read it, and Substrate started
+  #   no writer.
+  # - tree-over-bound: the covered tree holds more entries, bytes or levels than the bound.
+  # - manifest-not-ready: the before walk did not finish within the start wait, because the
+  #   mount's kept manifest is missing or still being made; a later run can have a record.
+  # - walk-over-time: a walk that has to read its files did not finish within its time bound.
+  # - paths-over-bound: the run changed more paths than one record lists.
+  # - entry-unreadable: the walk could not open or read an entry.
+  # - mount-crossed: a directory beneath a covered mount is another file system's mount point.
+  # - path-unrepresentable: a changed path is not UTF-8.
+  # - content-store-failed: a side's content could not be kept.
+  # - run-tree-unproven: the run's process tree was not proved gone before the end walk.
+  - name: substrate.confinement.ChangeRecordUnavailable
+    kind: enum
+    variants:
+      - second-writer
+      - outside-writer-detected
+      - tree-over-bound
+      - manifest-not-ready
+      - walk-over-time
+      - paths-over-bound
+      - entry-unreadable
+      - mount-crossed
+      - path-unrepresentable
+      - content-store-failed
+      - run-tree-unproven
+  # What a covered mount shows (ADR 0051 decision 7): the start's workspace, an operator-declared
+  # host root or a Git checkout (ADR 0038).
+  - name: substrate.confinement.MountKind
+    kind: enum
+    variants: [workspace, host-root, git-root]
+  # One mount a record covers (ADR 0051 decision 4). `mount` is the path in the run's view,
+  # `name` the workspace's root name, the declared root's name or the workspace id, and `excluded`
+  # the names left out at any depth, `.git` not among them because it is always left out. The
+  # two tree digests are the SHA-256 over the mount's manifest before the run and after it; a
+  # record that is unavailable states the ones its walks reached.
+  - name: substrate.confinement.CoveredMount
+    kind: struct
+    fields:
+      - {name: mount, type: String}
+      - {name: kind, type: substrate.confinement.MountKind}
+      - {name: name, type: String}
+      - {name: excluded, type: "List<String>"}
+      - {name: before_sha256, type: "Optional<String>"}
+      - {name: after_sha256, type: "Optional<String>"}
+  # One side of a changed path. `sha256` is the lowercase hexadecimal SHA-256 of a file's bytes or
+  # of a symlink's target; a directory and a special file have none. `mode` is the permission
+  # bits.
+  - name: substrate.confinement.ChangeSide
+    kind: struct
+    fields:
+      - {name: kind, type: substrate.confinement.EntryKind}
+      - {name: sha256, type: "Optional<String>"}
+      - {name: size, type: "Optional<Integer>"}
+      - {name: mode, type: Integer}
+      - {name: content, type: substrate.confinement.ContentAvailability}
+  # One changed path of a run (ADR 0051 decision 4). `mount` is the mount as the run's view names
+  # it (`/workspace`, or a writable root's mount) and `path` is relative to it. `before` is
+  # absent for a create and `after` for a delete. A rename is listed once, at its new path:
+  # `from` is the path it left, `before` the side that was at `from`, and `replaced` the side
+  # that was at `path` when the rename landed on an existing entry. `fs_mtime` is the file
+  # system's modification time of the after side as the end walk read it: a time a process
+  # inside the run can set, never an observed instant, and absent for a delete.
+  - name: substrate.confinement.FileChange
+    kind: struct
+    fields:
+      - {name: mount, type: String}
+      - {name: path, type: String}
+      - {name: operation, type: substrate.confinement.ChangeOperation}
+      - {name: from, type: "Optional<String>"}
+      - {name: before, type: "Optional<substrate.confinement.ChangeSide>"}
+      - {name: after, type: "Optional<substrate.confinement.ChangeSide>"}
+      - {name: replaced, type: "Optional<substrate.confinement.ChangeSide>"}
+      - {name: fs_mtime, type: "Optional<Timestamp>"}
 
 entities:
   # The adapter as opened on this host: one row per adapter name, written by OpenAdapter, which is
@@ -119,6 +232,61 @@ entities:
       states: [Admitted]
       terminal: [Admitted]
 
+  # A run started under an admitted profile (`ConfinementAdapter::start`). `Running` is the time
+  # the run counts as a writer of its directory; `Ended` is after its process tree is gone.
+  # UNMAPPED: a run admitted with a read-only workspace writes nothing and counts as no writer;
+  # the model gives every run one written directory. A session and a write through Substrate's
+  # own file routes count as writers too and have no row here; the host driver's tests hold them.
+  # UNMAPPED: the run's profile and adapter. `ConfinementAdapter::start` takes the admitted
+  # profile, and the profile's member is what asks for the record (ADR 0051 decision 10). ESS
+  # 0.86.0 synthesis arranges no admission (README.md, *Scenarios and lanes*), so a run row that
+  # referred to its profile made every obligation on a run or a record unreachable and synthesis
+  # three times as slow (57 s to 186 s in one job). The row therefore holds what the start
+  # states, and each `*-change-record-*` scenario still opens the adapter and admits the profile.
+  - name: substrate.confinement.Run
+    naming:
+      summary: A run started under an admitted profile, and the directory it writes.
+    identity: {name: run, type: substrate.confinement.RunId}
+    fields:
+      - {name: directory, type: substrate.confinement.WrittenDirectory}
+      # The run's profile asked for the record.
+      - {name: records_file_changes, type: Boolean}
+    lifecycle:
+      initial: Running
+      states: [Running, Ended]
+      terminal: [Ended]
+      transitions:
+        - {name: end, from: [Running], to: Ended}
+
+  # The change record of one run (ADR 0051): what the run changed in the mounts it may write.
+  # One row per run that asked for it, opened when the driver takes the before side. `Pending`
+  # while the run runs and until the end walk settles it. `Available` with an empty `changes` is
+  # a run that changed nothing; `Unavailable` carries the reason and lists no change. A run that
+  # did not ask has no row: that is the adapter API's `not requested` answer.
+  - name: substrate.confinement.ChangeRecord
+    naming:
+      summary: What one run changed in the mounts it may write, or the named reason it cannot be said.
+    identity: {name: record, type: substrate.confinement.ChangeRecordKey}
+    fields:
+      - {name: run, type: substrate.confinement.RunId}
+      - {name: directory, type: substrate.confinement.WrittenDirectory}
+      # The instants the driver observed: the launch barrier's release, and the proof that no
+      # process of the run remains. Absent until the record leaves `Pending`.
+      - {name: started_at, type: "Optional<Timestamp>"}
+      - {name: ended_at, type: "Optional<Timestamp>"}
+      - {name: mounts, type: "List<substrate.confinement.CoveredMount>"}
+      - {name: changes, type: "List<substrate.confinement.FileChange>"}
+      - {name: reason, type: "Optional<substrate.confinement.ChangeRecordUnavailable>"}
+    relations:
+      - {name: of_run, kind: references, target: substrate.confinement.Run, cardinality: one, via: run}
+    lifecycle:
+      initial: Pending
+      states: [Pending, Available, Unavailable]
+      terminal: [Available, Unavailable]
+      transitions:
+        - {name: settle, from: [Pending], to: Available}
+        - {name: withhold, from: [Pending], to: Unavailable}
+
 views:
   - name: substrate.confinement.Adapters
     source: substrate.confinement.Adapter
@@ -141,6 +309,27 @@ views:
       - {name: facts, type: "List<substrate.confinement.Fact>"}
       - {name: declared_insecure, type: Boolean}
       - {name: local_reason, type: "Optional<String>"}
+  - name: substrate.confinement.Runs
+    source: substrate.confinement.Run
+    consistency: read_your_writes
+    fields:
+      - {name: run, type: substrate.confinement.RunId}
+      - {name: state, type: substrate.confinement.Run.State}
+      - {name: directory, type: substrate.confinement.WrittenDirectory}
+      - {name: records_file_changes, type: Boolean}
+  - name: substrate.confinement.ChangeRecords
+    source: substrate.confinement.ChangeRecord
+    consistency: read_your_writes
+    fields:
+      - {name: record, type: substrate.confinement.ChangeRecordKey}
+      - {name: state, type: substrate.confinement.ChangeRecord.State}
+      - {name: run, type: substrate.confinement.RunId}
+      - {name: directory, type: substrate.confinement.WrittenDirectory}
+      - {name: started_at, type: "Optional<Timestamp>"}
+      - {name: ended_at, type: "Optional<Timestamp>"}
+      - {name: mounts, type: "List<substrate.confinement.CoveredMount>"}
+      - {name: changes, type: "List<substrate.confinement.FileChange>"}
+      - {name: reason, type: "Optional<substrate.confinement.ChangeRecordUnavailable>"}
 
 actors:
   # A substrate-host embedder (loom-sdk, takt, the daemon). The API is in process; no subject is
@@ -149,6 +338,10 @@ actors:
     may:
       - substrate.confinement.OpenAdapter
       - substrate.confinement.AdmitProfile
+      - substrate.confinement.StartRun
+      - substrate.confinement.OpenChangeRecord
+      - substrate.confinement.EndRun
+      - substrate.confinement.SettleChangeRecord
 
 errors:
   # Each error is one named refusal; the code and the status are the contract's.
@@ -182,6 +375,18 @@ errors:
     summary: "`confinement.reserved-field-unserved`, 501. An ingress route or a rate bound was set; both are reserved (ADR 0109 F1 B)."
     fields:
       - {name: field, type: substrate.confinement.ReservedField}
+  - name: substrate.confinement.RunNotFound
+    summary: "`resource.not-found`, 404. No run of this adapter has the identity: it never started here, it has ended, or the adapter no longer tracks it."
+    fields:
+      - {name: run, type: substrate.confinement.RunId}
+  - name: substrate.confinement.ChangeRecordNotRequested
+    summary: "The run's profile did not ask for a change record, so none is opened. It is the adapter API's `not requested` answer: distinct from an empty record and from an unavailable one, and no refusal of the run."
+    fields:
+      - {name: run, type: substrate.confinement.RunId}
+  - name: substrate.confinement.ChangeRecordSettled
+    summary: "The change record is no longer pending: it was settled, or it became unavailable when a second writer was seen. Nothing is written twice."
+    fields:
+      - {name: record, type: substrate.confinement.ChangeRecordKey}
 
 commands:
   # `confinement::open` (S0 contract). The adapter probes at open; the input states the families
@@ -199,7 +404,9 @@ commands:
   #   stdin_pipe and output_live (design 32: the host driver's pipe channel, with a live sender
   #   for output_live, each proved with the floor), exec_subpaths (design 35: the Landlock
   #   execute right, applied inside the sandbox by the helper `HostConfig.exec_gate` names, and
-  #   proved by the driver's probe; the delegated lane opens its adapter with that helper). The S0
+  #   proved by the driver's probe; the delegated lane opens its adapter with that helper),
+  #   file_changes (ADR 0051: the floor, cgroup kill and guarded I/O, and one throwaway run whose
+  #   change record the driver's probe checked). The S0
   #   story: paths_are_host_paths, sealed_paths and host_network are not proved.
   #   UNMAPPED: private_tmpdir. The bwrap argv mounts a fresh `/tmp`
   #   (`crates/substrate-host/src/process.rs`), but no story declares the fact for `linux`;
@@ -612,6 +819,15 @@ commands:
         error: substrate.confinement.FactUnserved
         payload:
           substrate.confinement.FactUnserved: {adapter: input.adapter, fact: output_live}
+      # ADR 0051 decision 10: a profile asking for a change record requires `file_changes`.
+      - name: fact-unserved-file-changes
+        when: {exists: {in: required_facts, as: needed, that: needed == file_changes}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == file_changes}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: file_changes}
       # Decision 4: `local` is a configuration, not an absence. It runs only with a reason, and the
       # admission records it as declared insecure.
       - name: admitted-insecure
@@ -659,7 +875,192 @@ commands:
             declared_insecure: false
             local_reason: input.local_reason
 
+  # `ConfinementAdapter::start` on an admitted profile, as far as the change record needs it: the
+  # run becomes a writer of one directory, and the start states whether its profile asked for the
+  # record. Admission is where asking is refused on an adapter that did not prove `file_changes`
+  # (`AdmitProfile`, `fact-unserved-file-changes`), so no admitted profile asks where the fact is
+  # absent; the model does not repeat that here (see the UNMAPPED note on `Run`).
+  - name: substrate.confinement.StartRun
+    input:
+      - {name: directory, type: substrate.confinement.WrittenDirectory}
+      - {name: records_file_changes, type: Boolean}
+    outcomes:
+      - name: started
+        creates: substrate.confinement.Run
+        instance: run
+        sets:
+          directory: input.directory
+          records_file_changes: input.records_file_changes
+        emits: [substrate.confinement.RunStarted]
+        payload:
+          substrate.confinement.RunStarted:
+            run: {generated: true}
+            directory: input.directory
+            records_file_changes: input.records_file_changes
+
+  # The driver takes the before side of a run that asked for the record: it digests every covered
+  # mount and keeps the content the bounds admit (ADR 0051 decisions 1 and 6). The driver does
+  # this before it releases the run's launch barrier; the model writes it as a step after
+  # `StartRun` because one outcome creates one row. A run whose profile did not ask gets the
+  # `not requested` answer and no row.
+  - name: substrate.confinement.OpenChangeRecord
+    input:
+      - {name: run, type: substrate.confinement.RunId}
+      - {name: directory, type: substrate.confinement.WrittenDirectory}
+    outcomes:
+      - name: unknown-run
+        when_related: {via: input.run, exists: false}
+        error: substrate.confinement.RunNotFound
+        payload:
+          substrate.confinement.RunNotFound: {run: input.run}
+      - name: not-requested
+        when_related: {via: input.run, predicate: records_file_changes == false}
+        error: substrate.confinement.ChangeRecordNotRequested
+        payload:
+          substrate.confinement.ChangeRecordNotRequested: {run: input.run}
+      - name: opened
+        creates: substrate.confinement.ChangeRecord
+        instance: record
+        sets:
+          run: input.run
+          directory: input.directory
+          mounts: []
+          changes: []
+        emits: [substrate.confinement.ChangeRecordOpened]
+        payload:
+          substrate.confinement.ChangeRecordOpened:
+            record: {generated: true}
+            run: input.run
+            directory: input.directory
+
+  # The run's end as the adapter observes it: no process of the run remains, so it writes its
+  # directory no longer. Two runs overlap exactly when the one that ends first ends while the
+  # other still runs, so this is where a second writer is seen: every pending record of that
+  # directory, the ending run's own and the other's, becomes unavailable with the reason
+  # `second-writer` and lists no change (ADR 0051 decision 2).
+  - name: substrate.confinement.EndRun
+    input:
+      - {name: run, type: substrate.confinement.RunId}
+      - {name: directory, type: substrate.confinement.WrittenDirectory}
+    outcomes:
+      - name: ended-beside-a-writer
+        when_related:
+          entity: substrate.confinement.Run
+          where: {all: [directory == input.directory, state == Running]}
+          count: {gte: 2}
+        moves: substrate.confinement.Run.end
+        instance: run
+        affects:
+          - entity: substrate.confinement.ChangeRecord
+            where: {all: [directory == input.directory, state == Pending]}
+            moves: substrate.confinement.ChangeRecord.withhold
+            sets:
+              reason: second-writer
+        emits: [substrate.confinement.RunEnded]
+        payload:
+          substrate.confinement.RunEnded: {run: input.run}
+      - name: ended
+        moves: substrate.confinement.Run.end
+        instance: run
+        emits: [substrate.confinement.RunEnded]
+        payload:
+          substrate.confinement.RunEnded: {run: input.run}
+      - name: unknown-run
+        unknown_instance: true
+        error: substrate.confinement.RunNotFound
+        payload:
+          substrate.confinement.RunNotFound: {run: input.run}
+      - name: already-ended
+        wrong_state: true
+        error: substrate.confinement.RunNotFound
+        payload:
+          substrate.confinement.RunNotFound: {run: input.run}
+
+  # The end walk's result, written once per pending record. The input states what the driver
+  # observed (the two instants, the changes its two tree digests differ by, and the reason it
+  # could not say them, where it could not), so a scenario's settle step is the record a runner
+  # holding a real adapter compares the adapter's own record with. A record a second writer
+  # already made unavailable is not written again.
+  # UNMAPPED: the bounds (paths per run, content bytes, tree size, walk time) are the driver's
+  # named constants (ADR 0051 decision 5); the model takes the reason an overrun gives as input.
+  # UNMAPPED: the driver settles only after the run ended. The model does not refuse a settle
+  # step on a running run: its guard would read the run's row beside the record's own state.
+  - name: substrate.confinement.SettleChangeRecord
+    input:
+      - {name: record, type: substrate.confinement.ChangeRecordKey}
+      - {name: started_at, type: Timestamp}
+      - {name: ended_at, type: Timestamp}
+      - {name: mounts, type: "List<substrate.confinement.CoveredMount>"}
+      - {name: changes, type: "List<substrate.confinement.FileChange>"}
+      - {name: unavailable, type: "Optional<substrate.confinement.ChangeRecordUnavailable>"}
+    outcomes:
+      - name: unavailable
+        when: {unavailable: {defined: true}}
+        moves: substrate.confinement.ChangeRecord.withhold
+        instance: record
+        sets:
+          started_at: input.started_at
+          ended_at: input.ended_at
+          mounts: input.mounts
+          reason: input.unavailable
+        emits: [substrate.confinement.FileChangesUnavailable]
+        payload:
+          substrate.confinement.FileChangesUnavailable:
+            run: {subject: run}
+            reason: input.unavailable
+      - name: available
+        moves: substrate.confinement.ChangeRecord.settle
+        instance: record
+        sets:
+          started_at: input.started_at
+          ended_at: input.ended_at
+          mounts: input.mounts
+          changes: input.changes
+        emits: [substrate.confinement.FileChangesRecorded]
+        payload:
+          substrate.confinement.FileChangesRecorded:
+            run: {subject: run}
+      - name: unknown-record
+        unknown_instance: true
+        error: substrate.confinement.ChangeRecordSettled
+        payload:
+          substrate.confinement.ChangeRecordSettled: {record: input.record}
+      - name: already-settled
+        wrong_state: true
+        error: substrate.confinement.ChangeRecordSettled
+        payload:
+          substrate.confinement.ChangeRecordSettled: {record: input.record}
+
 events:
+  # The audit record of a start (`AuditRecord::RunStarted`), as far as the model reads it.
+  - name: substrate.confinement.RunStarted
+    fields:
+      - {name: run, type: substrate.confinement.RunId}
+      - {name: directory, type: substrate.confinement.WrittenDirectory}
+      - {name: records_file_changes, type: Boolean}
+  # The model's own marks of a run's end and of a record's opening. Neither is an audit record:
+  # the record of a run's end is another design's, and ADR 0051 adds none for the before side.
+  - name: substrate.confinement.RunEnded
+    fields:
+      - {name: run, type: substrate.confinement.RunId}
+  - name: substrate.confinement.ChangeRecordOpened
+    fields:
+      - {name: record, type: substrate.confinement.ChangeRecordKey}
+      - {name: run, type: substrate.confinement.RunId}
+      - {name: directory, type: substrate.confinement.WrittenDirectory}
+  # The audit record of a complete change record (ADR 0051 decision 12). The audit record
+  # carries the run and the count of changed paths, never a path and never content.
+  # UNMAPPED: the count. ESS 0.86.0 refuses a list's length as a payload value
+  # (`input.changes.count`: `undeclared_reference`), so the model's event carries the run only
+  # and the adapter's tests hold the count.
+  - name: substrate.confinement.FileChangesRecorded
+    fields:
+      - {name: run, type: substrate.confinement.RunId}
+  # The audit record of a change record that could not be made, with the named reason.
+  - name: substrate.confinement.FileChangesUnavailable
+    fields:
+      - {name: run, type: substrate.confinement.RunId}
+      - {name: reason, type: substrate.confinement.ChangeRecordUnavailable}
   - name: substrate.confinement.AdapterOpened
     fields:
       - {name: adapter, type: substrate.confinement.AdapterName}

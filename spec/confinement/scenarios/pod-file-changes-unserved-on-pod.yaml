@@ -1,0 +1,34 @@
+# ADR 0051 decision 9: `pod` does not serve the change record. The run's workspace is a volume
+# the adapter's host does not hold, so there is no tree to digest; a profile requiring
+# `file_changes` is refused `confinement.fact-unserved` before any API call.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: pod-file-changes-unserved-on-pod
+summary: "lane pod: pod, asked for file_changes, is refused confinement.fact-unserved naming file_changes."
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [image_digest_pinned]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      required_families: [process_run]
+      required_facts: [file_changes]
+      image: "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    outcome: fact-unserved-file-changes
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: pod, fact: file_changes}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

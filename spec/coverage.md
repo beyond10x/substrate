@@ -180,12 +180,15 @@ What it does not establish:
 confinement contract of atlas ADR 0109 before any adapter code. What the green check establishes:
 
 - The model validates under ESS 0.86.0 with no warning, and `confinement-suite.json` is its exact
-  synthesized suite (5 scenarios, 32 refusals) plus the 65 authored scenarios under
-  `confinement/scenarios/`. Each of the 37 outcomes has at least one scenario, and each refused
+  synthesized suite (20 scenarios, 35 refusals) plus the 82 authored scenarios under
+  `confinement/scenarios/`. Each of the 50 outcomes has at least one scenario, and each refused
   obligation an authored one ([`confinement/README.md`](confinement/README.md) says why synthesis
   refuses them).
-- All 70 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
+- All 102 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
   adapter.
+- A run's change record (ADR 0051) has a typed home: `Run`, `ChangeRecord`, the closed list of
+  reasons a record is unavailable, and the rule that two runs writing one directory at the same
+  time both get an unavailable record that lists no change.
 - `OpenAdapter` refuses a `local` (or `systemd` around `local`) set without `declared_insecure` and
   an `oci` or `pod` set without `image_digest_pinned`, so no admission can report `local`
   confined or skip `oci`'s digest check.
@@ -194,6 +197,10 @@ confinement contract of atlas ADR 0109 before any adapter code. What the green c
 
 What it does not establish:
 
+- **No change record is computed.** `SettleChangeRecord` takes what the driver's two tree digests
+  yielded as its input. That a walk yields that record, the rename rules, the bounds, the kept
+  content, and every writer other than a run are the host driver's and the `linux` adapter's own
+  cases ([`confinement/README.md`](confinement/README.md), *The change record*).
 - **No adapter conformance.** Nothing runs these scenarios against `local`, `linux`, `macos`,
   `systemd`, `oci` or `pod` yet. Each adapter's story adds the test file that runs the scenarios of
   its lane against the adapter: its own `<adapter>-*` scenarios ending `-on-<lane>`, and the

@@ -1,0 +1,176 @@
+# ADR 0051 (`story:exec-file-changes-are-recorded`), the story's acceptance: two runs that run at
+# the same time in two workspaces each create, modify, delete and rename files, and each run's
+# record lists exactly its own changes with the before and after digests. Each settle step
+# states the record the delegated lane's adapter must answer for that run; the lane makes the
+# changes with a tool, a shell script and a formatter inside the one run.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-change-record-two-runs-two-directories-on-delegated
+summary: "lane delegated: two linux runs in two workspaces at the same time each get an available record that lists exactly their own create, modify, delete and rename."
+
+arrange:
+  - instance: alpha-profile
+    entity: substrate.confinement.Profile
+  - instance: beta-profile
+    entity: substrate.confinement.Profile
+  - instance: alpha
+    entity: substrate.confinement.Run
+  - instance: beta
+    entity: substrate.confinement.Run
+  - instance: alpha-record
+    entity: substrate.confinement.ChangeRecord
+  - instance: beta-record
+    entity: substrate.confinement.ChangeRecord
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live, file_changes]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [process_run, workspace], required_facts: [file_changes]}
+    outcome: admitted
+    capture: {instance: alpha-profile, event: substrate.confinement.ProfileAdmitted, field: profile}
+  - at: 2026-11-21T09:00:02Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [process_run, workspace], required_facts: [file_changes]}
+    outcome: admitted
+    capture: {instance: beta-profile, event: substrate.confinement.ProfileAdmitted, field: profile}
+  - at: 2026-11-21T09:00:03Z
+    command: substrate.confinement.StartRun
+    actor: substrate.confinement.Embedder
+    input: {directory: alpha, records_file_changes: true}
+    outcome: started
+    capture: {instance: alpha, event: substrate.confinement.RunStarted, field: run}
+  - at: 2026-11-21T09:00:04Z
+    command: substrate.confinement.OpenChangeRecord
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: alpha}, directory: alpha}
+    outcome: opened
+    capture: {instance: alpha-record, event: substrate.confinement.ChangeRecordOpened, field: record}
+  - at: 2026-11-21T09:00:05Z
+    command: substrate.confinement.StartRun
+    actor: substrate.confinement.Embedder
+    input: {directory: beta, records_file_changes: true}
+    outcome: started
+    capture: {instance: beta, event: substrate.confinement.RunStarted, field: run}
+  - at: 2026-11-21T09:00:06Z
+    command: substrate.confinement.OpenChangeRecord
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: beta}, directory: beta}
+    outcome: opened
+    capture: {instance: beta-record, event: substrate.confinement.ChangeRecordOpened, field: record}
+  - at: 2026-11-21T09:00:20Z
+    command: substrate.confinement.EndRun
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: alpha}, directory: alpha}
+    outcome: ended
+  - at: 2026-11-21T09:00:21Z
+    command: substrate.confinement.SettleChangeRecord
+    actor: substrate.confinement.Embedder
+    input:
+      record: {$instance: alpha-record}
+      started_at: 2026-11-21T09:00:03Z
+      ended_at: 2026-11-21T09:00:20Z
+      mounts:
+        - {mount: /workspace, kind: workspace, name: alpha, excluded: [], before_sha256: "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0", after_sha256: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"}
+      changes:
+        - mount: /workspace
+          path: docs/guide.md
+          operation: rename
+          from: docs/howto.md
+          before: {kind: file, sha256: "4444444444444444444444444444444444444444444444444444444444444444", size: 310, mode: 420, content: kept}
+          after: {kind: file, sha256: "4444444444444444444444444444444444444444444444444444444444444444", size: 310, mode: 420, content: kept}
+          fs_mtime: 2026-11-20T17:30:00Z
+        - mount: /workspace
+          path: src/lib.rs
+          operation: modify
+          before: {kind: file, sha256: "1111111111111111111111111111111111111111111111111111111111111111", size: 120, mode: 420, content: kept}
+          after: {kind: file, sha256: "2222222222222222222222222222222222222222222222222222222222222222", size: 148, mode: 420, content: kept}
+          fs_mtime: 2026-11-21T09:00:11Z
+        - mount: /workspace
+          path: src/new.rs
+          operation: create
+          after: {kind: file, sha256: "3333333333333333333333333333333333333333333333333333333333333333", size: 64, mode: 420, content: kept}
+          fs_mtime: 2026-11-21T09:00:09Z
+        - mount: /workspace
+          path: src/old.rs
+          operation: delete
+          before: {kind: file, sha256: "5555555555555555555555555555555555555555555555555555555555555555", size: 77, mode: 420, content: kept}
+    outcome: available
+    events:
+      - event: substrate.confinement.FileChangesRecorded
+        payload:
+          run: {$instance: alpha}
+    no_events: [substrate.confinement.FileChangesUnavailable]
+  - at: 2026-11-21T09:00:30Z
+    command: substrate.confinement.EndRun
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: beta}, directory: beta}
+    outcome: ended
+  - at: 2026-11-21T09:00:31Z
+    command: substrate.confinement.SettleChangeRecord
+    actor: substrate.confinement.Embedder
+    input:
+      record: {$instance: beta-record}
+      started_at: 2026-11-21T09:00:05Z
+      ended_at: 2026-11-21T09:00:30Z
+      mounts:
+        - {mount: /workspace, kind: workspace, name: beta, excluded: [], before_sha256: "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0", after_sha256: "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"}
+      changes:
+        - mount: /workspace
+          path: README.md
+          operation: modify
+          before: {kind: file, sha256: "6666666666666666666666666666666666666666666666666666666666666666", size: 900, mode: 420, content: kept}
+          after: {kind: file, sha256: "7777777777777777777777777777777777777777777777777777777777777777", size: 940, mode: 420, content: kept}
+          fs_mtime: 2026-11-21T09:00:25Z
+        - mount: /workspace
+          path: scripts/build.sh
+          operation: create
+          after: {kind: file, sha256: "8888888888888888888888888888888888888888888888888888888888888888", size: 40, mode: 493, content: kept}
+          fs_mtime: 2026-11-21T09:00:26Z
+        - mount: /workspace
+          path: scripts/make.sh
+          operation: delete
+          before: {kind: file, sha256: "9999999999999999999999999999999999999999999999999999999999999999", size: 38, mode: 493, content: kept}
+        - mount: /workspace
+          path: tests/it.rs
+          operation: rename
+          from: tests/integration.rs
+          before: {kind: file, sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", size: 512, mode: 420, content: kept}
+          after: {kind: file, sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", size: 512, mode: 420, content: kept}
+          fs_mtime: 2026-11-19T08:00:00Z
+    outcome: available
+    events:
+      - event: substrate.confinement.FileChangesRecorded
+        payload:
+          run: {$instance: beta}
+
+assert:
+  - view: substrate.confinement.ChangeRecords
+    contains:
+      record: {$instance: alpha-record}
+      state: Available
+      run: {$instance: alpha}
+      directory: alpha
+      started_at: 2026-11-21T09:00:03Z
+      ended_at: 2026-11-21T09:00:20Z
+  - view: substrate.confinement.ChangeRecords
+    contains:
+      record: {$instance: beta-record}
+      state: Available
+      run: {$instance: beta}
+      directory: beta
+      started_at: 2026-11-21T09:00:05Z
+      ended_at: 2026-11-21T09:00:30Z
+  - view: substrate.confinement.Runs
+    contains: {run: {$instance: alpha}, state: Ended, records_file_changes: true}
+  - view: substrate.confinement.Runs
+    contains: {run: {$instance: beta}, state: Ended, records_file_changes: true}

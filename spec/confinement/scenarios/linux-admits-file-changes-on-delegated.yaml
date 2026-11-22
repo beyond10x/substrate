@@ -1,0 +1,45 @@
+# ADR 0051 (`story:exec-file-changes-are-recorded`): `linux` proves `file_changes` where its probe
+# recorded a throwaway run's changes from two tree digests. This is the admission; what a record
+# lists is the `linux-change-record-*` scenarios and the delegated lane's own cases.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-admits-file-changes-on-delegated
+summary: "lane delegated: linux admits a profile requiring file_changes, reported declared_insecure: false."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live, file_changes]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [process_run, workspace]
+      required_facts: [file_changes]
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: linux
+          families: [process_run, workspace]
+          facts: [file_changes]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: linux
+      facts: [file_changes]
+      declared_insecure: false

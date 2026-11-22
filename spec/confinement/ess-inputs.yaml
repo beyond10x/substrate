@@ -69,3 +69,18 @@ scenarios:
   - scenarios/pod-output-live-unserved-on-pod.yaml
   - scenarios/linux-admits-exec-subpaths-on-delegated.yaml
   - scenarios/systemd-linux-admits-exec-subpaths-on-delegated.yaml
+  - scenarios/linux-change-record-two-runs-two-directories-on-delegated.yaml
+  - scenarios/linux-change-record-second-writer-unavailable-on-delegated.yaml
+  - scenarios/linux-change-record-empty-on-delegated.yaml
+  - scenarios/linux-change-record-root-and-bounds-on-delegated.yaml
+  - scenarios/linux-change-record-tree-over-bound-unavailable-on-delegated.yaml
+  - scenarios/linux-change-record-not-requested-on-delegated.yaml
+  - scenarios/systemd-linux-change-record-lists-changes-on-delegated.yaml
+  - scenarios/linux-admits-file-changes-on-delegated.yaml
+  - scenarios/systemd-linux-admits-file-changes-on-delegated.yaml
+  - scenarios/local-file-changes-unserved-on-portable.yaml
+  - scenarios/systemd-local-file-changes-unserved-on-delegated.yaml
+  - scenarios/macos-record-file-changes-unserved-on-macos.yaml
+  - scenarios/oci-file-changes-unserved-on-oci.yaml
+  - scenarios/pod-file-changes-unserved-on-pod.yaml
+  - scenarios/model-file-changes-unserved-on-interpreted.yaml

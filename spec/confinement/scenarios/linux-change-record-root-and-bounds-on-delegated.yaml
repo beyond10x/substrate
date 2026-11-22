@@ -1,0 +1,95 @@
+# ADR 0051 decisions 4, 5 and 7 (`story:exec-file-changes-are-recorded`): one record that lists
+# a change in a declared writable root with that root's mount named, a file over the per-file
+# content bound with its digests and its content marked `over-bound`, a binary file marked
+# `binary`, and a modified text file whose two sides are kept. The settle step states the record
+# the delegated lane's adapter must answer after a run that made these changes.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-change-record-root-and-bounds-on-delegated
+summary: "lane delegated: a linux run's record names the writable root a change is in, lists a file over the content bound with its digests marked over-bound, and marks a binary file binary."
+
+arrange:
+  - instance: profile
+    entity: substrate.confinement.Profile
+  - instance: run
+    entity: substrate.confinement.Run
+  - instance: record
+    entity: substrate.confinement.ChangeRecord
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live, file_changes]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [process_run, workspace, filesystem_view], required_facts: [file_changes]}
+    outcome: admitted
+    capture: {instance: profile, event: substrate.confinement.ProfileAdmitted, field: profile}
+  - at: 2026-11-21T09:00:02Z
+    command: substrate.confinement.StartRun
+    actor: substrate.confinement.Embedder
+    input: {directory: build, records_file_changes: true}
+    outcome: started
+    capture: {instance: run, event: substrate.confinement.RunStarted, field: run}
+  - at: 2026-11-21T09:00:03Z
+    command: substrate.confinement.OpenChangeRecord
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: build}
+    outcome: opened
+    capture: {instance: record, event: substrate.confinement.ChangeRecordOpened, field: record}
+  - at: 2026-11-21T09:00:40Z
+    command: substrate.confinement.EndRun
+    actor: substrate.confinement.Embedder
+    input: {run: {$instance: run}, directory: build}
+    outcome: ended
+  - at: 2026-11-21T09:00:41Z
+    command: substrate.confinement.SettleChangeRecord
+    actor: substrate.confinement.Embedder
+    input:
+      record: {$instance: record}
+      started_at: 2026-11-21T09:00:02Z
+      ended_at: 2026-11-21T09:00:40Z
+      mounts:
+        - {mount: /workspace, kind: workspace, name: build, excluded: [node_modules, target], before_sha256: "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0", after_sha256: "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"}
+        - {mount: /srv/cache, kind: host-root, name: cache, excluded: [node_modules, target], before_sha256: "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0", after_sha256: "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"}
+      changes:
+        - mount: /workspace
+          path: assets/logo.png
+          operation: create
+          after: {kind: file, sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", size: 20480, mode: 420, content: binary}
+          fs_mtime: 2026-11-21T09:00:12Z
+        - mount: /workspace
+          path: data/table.csv
+          operation: modify
+          before: {kind: file, sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", size: 2097152, mode: 420, content: over-bound}
+          after: {kind: file, sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", size: 2097200, mode: 420, content: over-bound}
+          fs_mtime: 2026-11-21T09:00:20Z
+        - mount: /workspace
+          path: src/main.rs
+          operation: modify
+          before: {kind: file, sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", size: 800, mode: 420, content: kept}
+          after: {kind: file, sha256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", size: 812, mode: 420, content: kept}
+          fs_mtime: 2026-11-21T09:00:30Z
+        - mount: /srv/cache
+          path: index/entries.json
+          operation: create
+          after: {kind: file, sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", size: 96, mode: 384, content: kept}
+          fs_mtime: 2026-11-21T09:00:33Z
+    outcome: available
+    events:
+      - event: substrate.confinement.FileChangesRecorded
+        payload:
+          run: {$instance: run}
+
+assert:
+  - view: substrate.confinement.ChangeRecords
+    contains:
+      record: {$instance: record}
+      state: Available
+      run: {$instance: run}

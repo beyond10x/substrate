@@ -1,0 +1,34 @@
+# ADR 0051 decision 9: `local` builds no view and bounds no process tree, so it cannot say which
+# run wrote a file. A profile requiring `file_changes` is refused `confinement.fact-unserved`
+# before anything runs.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: local-file-changes-unserved-on-portable
+summary: "lane portable: local with a reason, asked for file_changes, is refused confinement.fact-unserved naming file_changes."
+
+timeline:
+  - at: 2026-11-21T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, audit]
+      facts: [declared_insecure, paths_are_host_paths, local_permitted, host_network, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      required_families: [process_run]
+      required_facts: [file_changes]
+      local_reason: the operator runs this task on the developer's own machine
+    outcome: fact-unserved-file-changes
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: local, fact: file_changes}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}
