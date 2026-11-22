@@ -1851,8 +1851,15 @@ impl Driver for HostDriver {
         let workspace = self.workspace_path(&root_name)?;
         let baseline_root = self.config.git_baseline_root();
         let query = *query;
-        self.filesystem_io(move |_| {
-            git::changes(&workspace_id, &workspace, &baseline_root, &root_name, query)
+        self.filesystem_io(move |filesystem| {
+            git::changes(
+                &workspace_id,
+                &filesystem.root_descriptor()?,
+                &workspace,
+                &baseline_root,
+                &root_name,
+                query,
+            )
         })
         .await
     }

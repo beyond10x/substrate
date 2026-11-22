@@ -67,6 +67,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `exec_denied_paths` and `substrate_exec_gate::Lists` gains `deny`, so a literal of each that
   names every field gains one.
 
+- The Git change-set observation compares the worktree with the tree of the baseline commit the
+  daemon holds (design 21, *What the change-set observation reads*). Its answer differs from the
+  earlier reader's in these cases:
+  - A tracked path is unchanged only when the hash of its content equals the baseline's object
+    id. Every tracked file is hashed in each observation, and an index entry flagged
+    assume-unchanged or skip-worktree does not hide a changed file.
+  - The index labels a path `added` or `conflicted` and decides nothing else, neither whether a
+    path changed nor whether it is listed: a change that is staged while the worktree holds the
+    baseline's bytes is not listed, and a path the index no longer records is compared like any
+    other tracked path. An index entry that records another repository's commit is honoured
+    only at a path where the baseline's tree records one; elsewhere the path and everything
+    beneath it are compared and listed.
+  - The workspace's attributes and filters are not applied: a path marked `-diff` gets a textual
+    patch, and no line-ending conversion precedes the comparison.
+  - `core.fileMode` is not applied: a changed executable bit is always reported.
+  - The daemon user's own ignore file and a `core.excludesFile` are not applied.
+  - Rules beyond the first 1 MiB of an ignore file do not apply.
+  - An untracked directory that holds a `.git` entry of its own is neither entered nor listed;
+    the earlier reader failed the observation.
+  - A side over `max_file_bytes` has `binary` set and no patch text.
+  - `current.oid` is present whenever the worktree side was hashed, a tracked file over
+    `max_file_bytes` included.
+  - A tracked path that is not UTF-8 fails the observation whether or not it changed.
+  - One observation hashes at most 1 GiB of tracked files and baseline objects to compare, in
+    the byte order of their paths, and beside that the worktree side of each listed item within
+    `max_file_bytes` (at most `max_files` × `max_file_bytes` more). What could not be compared
+    is reported as changed, never as unchanged, and the answer is marked: a tracked file larger
+    than what is left of the 1 GiB is reported `modified` with `binary` set, no text and no
+    `current.oid`, the answer is marked `truncated`, and the comparison goes on with the next
+    path. A baseline object larger than what is left ends the answer there, marked `truncated`.
+  - Directories nested deeper than 100 are not entered and the answer is marked `truncated`.
+  - An object store that holds `info/alternates`, a link, an entry that is neither a directory
+    nor a regular file, directories nested deeper than eight or more than 262,144 entries is
+    refused `workspace.git-repository-failed`.
+
 ### Security
 
 - **A confined run could change what the disk holds of a file without moving any of its stat
@@ -108,6 +143,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   and the delegated cgroup root. The answers are the published `exec.read-only-root-absent` and
   `exec.read-only-file-absent` (422), each with a message that names no path; no bundle changes
   (ADR 0010 and ADR 0033, amendments of 2026-11-22).
+
+- The Git change-set observation reads only the admitted workspace. Every byte and every size
+  it returns comes from a file beneath the workspace's root or from an object checked against
+  the baseline commit the daemon holds. The workspace's own repository metadata decides neither
+  which directory is read, nor how an entry is read, nor whether a path changed, and its index
+  removes no path from the answer. `max_file_bytes` bounds the text of each worktree file, link
+  and baseline object a patch is rendered from, an ignore file is read to 1 MiB, and one
+  observation hashes at most 1 GiB to compare and at most `max_files` × `max_file_bytes` for
+  the items it lists. The Git library reads the index, the baseline's commit and tree objects
+  and the stored file of each object whole, each to its apparent size, which a storage limit
+  that counts blocks does not bound.
 
 ## [0.23.0] — 2026-11-21
 
