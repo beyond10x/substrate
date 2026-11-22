@@ -189,8 +189,8 @@ here. Decides `story:read-only-mount-sources-refuse-the-daemons-private-paths`.
    nothing.
 2. **The read set**, as the daemon computes it from its own configuration: the state directory,
    which is the parent directory of `--state`; the workspace root; the production TLS private
-   key; the static-bearer file; every secret-slot source; the API socket; and the delegated
-   cgroup root.
+   key; the static-bearer file; every secret-slot source; the namespace driver's kubeconfig; the
+   API socket; and the delegated cgroup root.
 3. **Narrower than the writable set.** The daemon executable, the bubblewrap binary, the TLS
    certificate chain and both CA bundles are protected against replacement
    ([ADR 0038](0038-writable-roots-are-named-host-paths-or-git-checkouts.md)), not against
@@ -203,10 +203,14 @@ here. Decides `story:read-only-mount-sources-refuse-the-daemons-private-paths`.
    after the lexical rules and the `exec.read-only-files` fact and before dispatch. The ledger
    records the start as refused and no driver sees it.
 6. **How it is compared.** By path component, never by string prefix, against each entry as
-   written (made absolute) and as resolved at that admission. An entry that cannot be resolved
-   at that moment is compared as written only, and the start does not fail for that. The
-   caller's path is compared as text, which is sound because the wire admits only an absolute
-   canonical `host_path` and the driver's pin, above, refuses every symlink component.
+   written (made absolute, its `.` and `..` components removed by text) and at every place it
+   names at that admission: the path resolved; where it does not resolve, its existing part
+   resolved with the rest appended; and where a link to a place not written yet stops it, also
+   the place that link names, for at most eight links. An entry that cannot be resolved at that
+   moment is compared as written only, and the start does not fail for that. The entries are
+   resolved once per start, for both lists, off the request's async worker. The caller's path is
+   compared as text, which is sound because the wire admits only an absolute canonical
+   `host_path` and the driver's pin, above, refuses every symlink component.
 7. **Every posture, daemon admission only.** There is no exception for the local Unix socket:
    the reader is the confined program, not the caller.
 
@@ -218,10 +222,15 @@ with a message of its own:
 > A declared read-only file is not admitted: its host path meets a path this host keeps private.
 
 This decision already answers `absent`, said apart in the message, for a path the daemon may not
-search; a path this host keeps private is not reachable for a caller either. The message names no
-entry of the set. No refusal code, schema or vector is added, no released bundle byte changes,
-and no successor bundle is cut. The table above gains no row: the code is the one in its seventh
-row, and only the message tells this refusal from a missing file.
+search; a path this host keeps private is not reachable for a caller either. No refusal code,
+schema or vector is added, no released bundle byte changes, and no successor bundle is cut. The
+table above gains no row: the code is the one in its seventh row.
+
+**What the answer tells.** The message names no entry of the set. A caller that may start an
+exec can still learn, one path at a time, whether a file path it names lies at or under an
+entry. This is accepted, for the reasons ADR 0010's amendment gives: the code is already the one
+a missing file is answered with, what differs is only the message, and the caller learns that a
+path is one the daemon keeps, never what it holds.
 
 ### Not decided
 

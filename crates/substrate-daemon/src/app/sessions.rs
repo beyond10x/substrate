@@ -318,7 +318,8 @@ pub(super) async fn pipe_session_start(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = validate_pipe_session_input(&app, &mutation, &request_id) {
+    let private = app.private_paths_for(&mutation.input.exec).await;
+    if let Err(response) = validate_pipe_session_input(&app, &private, &mutation, &request_id) {
         return refuse_before_dispatch_response(
             &app,
             &identity,

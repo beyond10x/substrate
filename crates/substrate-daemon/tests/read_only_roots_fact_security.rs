@@ -17,9 +17,9 @@
 //! The second half holds the amendments of 2026-11-22 to ADR 0010 and ADR 0033: a read-only root
 //! whose host path equals, lies under or contains a path the daemon keeps private, and a
 //! read-only file whose host path equals or lies under one, is refused at daemon admission. The
-//! harness gives the application the read set of a daemon configuration over its own directory
-//! (`PrivateHostPaths::of`), and the fixture also publishes `exec.read-only-files` and counts
-//! session starts.
+//! harness builds the application as the composition root does, with the read set of a daemon
+//! configuration over its own directory (`PrivateHostPaths::of`), and the fixture also publishes
+//! `exec.read-only-files` and counts session starts.
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -32,7 +32,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
 use serde_json::{Value, json};
-use substrate_daemon::{App, DaemonConfig, Identity, PrivateHostPaths, router};
+use substrate_daemon::{
+    App, DaemonConfig, DelegatedContextPolicy, Identity, PrivateHostPaths, SystemAuthority, router,
+};
 use substrate_host::{
     DispatchOutcome, Driver, DriverError, ExecObservation, GitRootBinding, HostConfig, HostDriver,
     WorkspaceDestroyProgress,
@@ -326,14 +328,16 @@ impl Harness {
             session_starts: AtomicUsize::new(0),
             execs: Mutex::new(HashMap::new()),
         });
-        let mut app = App::new(
+        // The constructor the composition root uses: the read set is its argument, so these cases
+        // fail when that constructor stops holding an application to the set it was given.
+        let app = App::with_delegated_context(
             Arc::clone(&store),
             Arc::clone(&driver) as Arc<dyn Driver>,
             "dep_rorootfact",
+            Arc::new(SystemAuthority),
+            DelegatedContextPolicy::none(),
+            PrivateHostPaths::of(&config).expect("the read set"),
         );
-        Arc::get_mut(&mut app)
-            .expect("the application is not shared yet")
-            .private_host_paths = PrivateHostPaths::of(&config).expect("the read set");
         Self {
             directory,
             driver,

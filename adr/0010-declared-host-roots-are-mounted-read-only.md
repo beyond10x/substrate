@@ -106,11 +106,11 @@ Decides `story:read-only-mount-sources-refuse-the-daemons-private-paths`.
    lies under one.
 2. **The read set**, as the daemon computes it from its own configuration:
    - the state directory, which is the parent directory of `--state`: the durable ledger and what
-     is keyed beside it, the aperture and host-process state and the instance lock;
-   - the workspace root: every subject's workspaces, and the capsule, scratch, aperture and
-     Git-baseline directories the host driver keeps under it;
-   - the production TLS private key, the static-bearer file, every secret-slot source, the API
-     socket and the delegated cgroup root.
+     is keyed beside it, the aperture directory, the host-process state and the instance lock;
+   - the workspace root: every subject's workspaces, and the capsule, scratch and Git-baseline
+     directories the host driver keeps under it;
+   - the production TLS private key, the static-bearer file, every secret-slot source, the
+     namespace driver's kubeconfig, the API socket and the delegated cgroup root.
 
    Each entry is something only the daemon, or the one subject it serves a workspace to, may
    read or reach. A workspace is given to a run by its identifier, never by host path, so the
@@ -133,17 +133,31 @@ Decides `story:read-only-mount-sources-refuse-the-daemons-private-paths`.
    the capability fact and before dispatch, so the ledger records the start as refused and no
    driver sees it. The fact stays first: a host that publishes none says nothing about a path.
 6. **How it is compared.** By path component, never by string prefix, against each entry as
-   written (made absolute) and as resolved at that admission, because a secret-slot file may be
-   replaced without a restart ([ADR 0012](0012-secret-slots-are-sealed-memfds.md)). An entry that
-   cannot be resolved at that moment is compared as written only, and the start does not fail for
-   that. The caller's path is compared as text. That is sound with two existing rules: the wire
-   admits only an absolute canonical `host_path`, and the driver pins it with `openat2`
-   `RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS` and binds that descriptor, so a path that binds
-   has no symlink in any component and its text is its place in the daemon's mount namespace.
+   written and at every place it names at that admission, because a secret-slot file may be
+   replaced without a restart ([ADR 0012](0012-secret-slots-are-sealed-memfds.md)).
+   - As written: made absolute, with its `.` and `..` components removed by text, so a directory
+     the configured path only passes through is not taken for one that holds the entry.
+   - As resolved: the whole path with every link followed. Where it does not resolve, its
+     existing part resolved with the rest appended; and where what stops it is a link to a place
+     not written yet, also the place that link names, followed by hand for at most eight links.
+     The resolved forms are what protects an entry reached through a link.
+   - An entry that cannot be resolved at that moment is compared as written only, and the start
+     does not fail for that.
+
+   The entries are resolved once per start, for both lists, off the request's async worker and
+   under the daemon's bound for blocking I/O. The caller's path is compared as text. That is
+   sound with two existing rules: the wire admits only an absolute canonical `host_path`, and
+   the driver pins it with `openat2` `RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS` and binds
+   that descriptor, so a path that binds has no symlink in any component and its text is its
+   place in the daemon's mount namespace.
 7. **Every posture, daemon admission only.** There is no exception for the local Unix socket:
    the reader is the confined program, not the caller. The set exists in the daemon
-   (`PrivateHostPaths` in `crates/substrate-daemon/src/runtime.rs`), which is where it is
-   enforced. The Kubernetes driver serves neither list.
+   (`PrivateHostPaths` in `crates/substrate-daemon/src/app/private_paths.rs`), which is where it
+   is enforced, and the daemon cannot be composed without it: the application's constructor
+   takes the set, and outside the test harness a set is only ever the one of a daemon
+   configuration. The Kubernetes driver serves neither list, so the kubeconfig entry is not
+   reachable by a start today; it is in the set because the set is what the daemon keeps
+   private.
 
 ### Refusal
 
@@ -153,11 +167,19 @@ The published code for a root this host cannot give is reused: `exec.read-only-r
 > A declared read-only root is not admitted: its host path meets a path this host keeps private.
 
 The wire crate already reads that code as "not present, or not reachable, on this host", and for
-a caller a private path is not reachable. The message names no entry of the set, so a refusal
-says nothing about where this host keeps what. No refusal code, schema or vector is added, no
-released bundle byte changes, and no successor bundle is cut. Only the message tells this refusal
-from a missing root. A code of its own needs a successor bundle and is left to the story named
-below.
+a caller a private path is not reachable. No refusal code, schema or vector is added, no released
+bundle byte changes, and no successor bundle is cut. A code of its own needs a successor bundle
+and is left to the story named below.
+
+**What the answer tells.** The message names no entry of the set. A caller that may start an
+exec can still learn, one path at a time, whether a path it names meets the set: for a root in
+both directions, that the path lies at or under an entry or that it holds one, and for a file
+that it lies at or under one. This is accepted. The code is already the one a missing path is
+answered with, so a client that reads codes cannot tell the two apart; what differs is only the
+message. Giving a private path the missing path's message as well was not chosen: it would tell
+the caller something false, that nothing is there, and send an operator looking for a directory
+that exists. What a caller learns is that a path is one the daemon keeps, never what it holds:
+the rule exists so that such a path is not mounted.
 
 ### Not decided
 

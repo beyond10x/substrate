@@ -15,7 +15,7 @@ use crate::app::{
 use crate::delegation::{DelegatedContextPolicy, TrustedKey};
 use crate::hosted::{HostedAdmission, HostedIdentityConfig, require_hosted_authority};
 use crate::tls::{TlsDaemonConfig, load_server_config};
-use crate::{App, Identity, SystemAuthority, router};
+use crate::{App, Identity, PrivateHostPaths, SystemAuthority, router};
 use anyhow::{Context as _, anyhow, bail};
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
@@ -744,11 +744,11 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         config.deployment,
         Arc::new(SystemAuthority),
         delegated_context,
+        private_host_paths,
     );
-    let configured = Arc::get_mut(&mut app)
-        .context("configure capture policy before sharing the application")?;
-    configured.allow_unrecorded_sessions = config.allow_unrecorded_sessions;
-    configured.private_host_paths = private_host_paths;
+    Arc::get_mut(&mut app)
+        .context("configure capture policy before sharing the application")?
+        .allow_unrecorded_sessions = config.allow_unrecorded_sessions;
     // S7: without a driver, the logs an earlier run left are still read from the state
     // directory; nothing is created there and nothing runs.
     let host_process_logs = if host_processes.is_none() {
@@ -1158,7 +1158,7 @@ fn resolve_egress_apertures(
 
 /// The directory holding the durable state database and everything keyed beside it: the
 /// aperture and host-process state roots and the instance lock.
-fn state_directory(state: &Path) -> anyhow::Result<&Path> {
+pub(crate) fn state_directory(state: &Path) -> anyhow::Result<&Path> {
     state
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1167,7 +1167,7 @@ fn state_directory(state: &Path) -> anyhow::Result<&Path> {
 
 /// `path` with every symlink in its existing prefix resolved, and the part that does not exist yet
 /// appended as written: what a later `create_dir_all` would make.
-fn resolved_prefix(path: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn resolved_prefix(path: &Path) -> anyhow::Result<PathBuf> {
     let absolute =
         std::path::absolute(path).with_context(|| format!("make {} absolute", path.display()))?;
     let mut existing = absolute.as_path();
@@ -1355,101 +1355,6 @@ fn check_writable_roots_clear_of(
         }
     }
     Ok(())
-}
-
-/// The read set: the host paths this daemon keeps private, which the source of a read-only root
-/// (ADR 0010) or a read-only file (ADR 0033) must not meet (their amendments of 2026-11-22).
-///
-/// - the state directory, the parent of the durable state database: the ledger and what is keyed
-///   beside it (the aperture and host-process state roots and the instance lock);
-/// - the workspace root: every subject's workspaces and the directories the host driver keeps
-///   under it;
-/// - the production TLS private key, the static-bearer file, every secret-slot source, the API
-///   socket (a read-only bind does not stop a connect) and the delegated cgroup root.
-///
-/// Narrower than what a writable root is kept clear of (`protected_host_paths`): the daemon
-/// executable, the bubblewrap binary, the TLS certificate chain and the CA bundles are protected
-/// against replacement, not against reading, and a toolchain root such as `/usr` may hold them.
-///
-/// The default is the empty set, which meets nothing: an [`App`] built without a daemon
-/// configuration, as a test harness builds one, has no path of its own. [`serve`] always sets
-/// the set of its configuration.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PrivateHostPaths {
-    /// Each entry as the configuration writes it, made absolute.
-    entries: Vec<PathBuf>,
-}
-
-impl PrivateHostPaths {
-    /// The read set of `config`. A path the configuration leaves empty names nothing: the
-    /// workspace root of a daemon that opens the Kubernetes driver.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the state path has no parent directory, or a relative entry cannot
-    /// be made absolute.
-    pub fn of(config: &DaemonConfig) -> anyhow::Result<Self> {
-        let mut written = vec![
-            state_directory(&config.state)?.to_path_buf(),
-            config.workspaces.clone(),
-            config.socket.clone(),
-        ];
-        written.extend(config.tls.iter().map(|tls| tls.private_key.clone()));
-        written.extend(config.tcp.iter().map(|tcp| tcp.bearer_file.clone()));
-        written.extend(config.secret_slots.iter().map(|slot| slot.path.clone()));
-        written.extend(config.cgroup_root.clone());
-        let entries = written
-            .iter()
-            .filter(|path| !path.as_os_str().is_empty())
-            .map(|path| {
-                std::path::absolute(path)
-                    .with_context(|| format!("make {} absolute", path.display()))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        Ok(Self { entries })
-    }
-
-    /// Every entry as written and, where it resolves now, as resolved ([`resolved_prefix`]).
-    ///
-    /// Resolved at each admission, never once at startup: an operator may replace a secret-slot
-    /// source without a restart (ADR 0012). An entry that cannot be resolved at this moment is
-    /// compared as written only; the admission does not fail for it.
-    fn forms(&self) -> Vec<PathBuf> {
-        self.entries
-            .iter()
-            .flat_map(|written| {
-                let resolved = resolved_prefix(written)
-                    .ok()
-                    .filter(|resolved| resolved != written);
-                std::iter::once(written.clone()).chain(resolved)
-            })
-            .collect()
-    }
-
-    /// Whether the host path of any declared read-only root equals, lies under or contains an
-    /// entry of the set.
-    ///
-    /// Compared by path component, never by string prefix. The caller's path is compared as
-    /// text: the wire admits only an absolute canonical host path, and the driver pins it
-    /// without following a symlink in any component, so a path that binds is its own place.
-    pub(crate) fn meets_a_root<'a>(&self, host_paths: impl IntoIterator<Item = &'a str>) -> bool {
-        let forms = self.forms();
-        host_paths.into_iter().map(Path::new).any(|source| {
-            forms
-                .iter()
-                .any(|private| source.starts_with(private) || private.starts_with(source))
-        })
-    }
-
-    /// Whether the host path of any declared read-only file equals or lies under an entry of the
-    /// set. A regular file contains nothing, so that direction is not asked.
-    pub(crate) fn meets_a_file<'a>(&self, host_paths: impl IntoIterator<Item = &'a str>) -> bool {
-        let forms = self.forms();
-        host_paths
-            .into_iter()
-            .map(Path::new)
-            .any(|source| forms.iter().any(|private| source.starts_with(private)))
-    }
 }
 
 /// The trust anchor must exist and be readable now, not on the first run that needs it.
@@ -2998,12 +2903,17 @@ mod tests {
         PrivateHostPaths::of(config).expect("the read set of a configuration with a state parent")
     }
 
+    /// One admission: the set resolved at this moment, then compared.
     fn meets_root(private: &PrivateHostPaths, path: &Path) -> bool {
-        private.meets_a_root([path.to_str().expect("a UTF-8 fixture path")])
+        private
+            .resolve()
+            .meets_a_root([path.to_str().expect("a UTF-8 fixture path")])
     }
 
     fn meets_file(private: &PrivateHostPaths, path: &Path) -> bool {
-        private.meets_a_file([path.to_str().expect("a UTF-8 fixture path")])
+        private
+            .resolve()
+            .meets_a_file([path.to_str().expect("a UTF-8 fixture path")])
     }
 
     #[test]
@@ -3027,7 +2937,7 @@ mod tests {
             assert!(meets_root(&private, &path), "a root that {relation}");
         }
         assert!(
-            private.meets_a_root(
+            private.resolve().meets_a_root(
                 [base.join("cache"), base.join("state")]
                     .iter()
                     .map(|path| path.to_str().unwrap())
@@ -3035,7 +2945,13 @@ mod tests {
             "one root of several meets the set"
         );
         assert!(!meets_root(&private, &base.join("cache")));
-        assert!(!private.meets_a_root([]));
+        assert!(!private.resolve().meets_a_root([]));
+        // What a start naming no source is given compares the entries as written.
+        assert!(
+            private
+                .as_written()
+                .meets_a_root([base.join("state").to_str().unwrap()])
+        );
     }
 
     #[test]
@@ -3237,8 +3153,46 @@ mod tests {
         std::fs::remove_file(&source).unwrap();
         std::os::unix::fs::symlink(base.join("cache/second"), &source).unwrap();
         assert!(meets_file(&private, &base.join("cache/second")));
-        assert!(!meets_file(&private, &base.join("cache/first")));
         assert!(meets_file(&private, &source), "the entry as written");
+    }
+
+    /// Decision 6: an entry that is a link to a place not written yet is followed by hand, link
+    /// by link and a bounded number of them, with a relative target read beside its link.
+    #[test]
+    fn a_private_link_chain_to_a_place_not_written_yet_is_followed_a_bounded_number_of_links() {
+        let (_directory, base) = writable_root_tree();
+        std::fs::create_dir(base.join("cache/slots")).unwrap();
+        let source = base.join("other/token");
+        std::os::unix::fs::symlink("next", &source).unwrap();
+        std::os::unix::fs::symlink("../cache/slots/token", base.join("other/next")).unwrap();
+        // Longer than the bound: followed as far as the bound, and never a failure.
+        for index in 0..12 {
+            std::os::unix::fs::symlink(
+                format!("long{}", index + 1),
+                base.join(format!("other/long{index}")),
+            )
+            .unwrap();
+        }
+        let mut config = protected_config(&base);
+        config.secret_slots = vec![
+            SecretSlot {
+                name: "token".to_owned(),
+                path: source.clone(),
+            },
+            SecretSlot {
+                name: "long".to_owned(),
+                path: base.join("other/long0"),
+            },
+        ];
+        let private = private_paths(&config);
+        assert!(meets_file(&private, &source), "the entry as written");
+        assert!(meets_file(&private, &base.join("other/next")));
+        assert!(meets_file(&private, &base.join("cache/slots/token")));
+        assert!(meets_root(&private, &base.join("cache/slots")));
+        assert!(!meets_file(&private, &base.join("cache/slots/other")));
+        assert!(meets_file(&private, &base.join("other/long0")));
+        assert!(meets_file(&private, &base.join("other/long8")));
+        assert!(!meets_file(&private, &base.join("other/long12")));
     }
 
     /// Decision 6: an entry that cannot be resolved at an admission is compared as written only,
@@ -3284,6 +3238,8 @@ mod tests {
         assert!(!meets_root(&private, &current.join("src")));
         assert!(!meets_root(&private, &base.join("workspaces")));
         assert!(meets_root(&private, &base.join("state")));
+        // The namespace driver's kubeconfig is a credential file of the daemon's.
+        assert!(meets_file(&private, &base.join("other/kubeconfig.json")));
         assert!(
             PrivateHostPaths::of(&DaemonConfig::minimum(
                 "s.sock",
@@ -3616,5 +3572,178 @@ mod tests {
             "the ended upgraded socket returns its stream slot, so the same uid upgrades again; \
              it answered: {answer}"
         );
+    }
+
+    // Adversary case: the state directory and the workspace root behind a linked ancestor are private at their real place, by component.
+    #[test]
+    fn adversary_private_directories_behind_a_linked_ancestor_are_met_at_their_real_place() {
+        let (_directory, base) = writable_root_tree();
+        for child in ["state", "workspaces"] {
+            std::fs::create_dir_all(base.join("cache/real").join(child)).unwrap();
+        }
+        std::os::unix::fs::symlink(base.join("cache/real"), base.join("other/daemon")).unwrap();
+        let private = private_paths(&DaemonConfig::minimum(
+            base.join("other/api.sock"),
+            base.join("other/daemon/state/state.db"),
+            base.join("other/daemon/workspaces"),
+            "d",
+            vec![1],
+        ));
+        assert!(meets_file(
+            &private,
+            &base.join("cache/real/state/state.db")
+        ));
+        assert!(meets_file(
+            &private,
+            &base.join("cache/real/state/state.processes/log")
+        ));
+        assert!(meets_root(
+            &private,
+            &base.join("cache/real/workspaces/one")
+        ));
+        assert!(meets_root(&private, &base.join("cache/real")));
+        assert!(meets_root(&private, &base.join("cache")));
+        for clear in [
+            "cache/real/state-tools",
+            "cache/real/stat",
+            "cache/real/workspaces2",
+            "cache/tools",
+        ] {
+            let path = base.join(clear);
+            assert!(!meets_root(&private, &path), "{clear} as a root");
+            assert!(!meets_file(&private, &path), "{clear} as a file");
+        }
+    }
+
+    // Adversary case: an entry written with `..`, `.`, a doubled or a trailing slash is private at the place it names.
+    #[test]
+    fn adversary_an_entry_written_in_an_unusual_form_is_met_at_the_place_it_names() {
+        let (_directory, base) = writable_root_tree();
+        let text = base.to_str().unwrap();
+        let private = private_paths(&DaemonConfig::minimum(
+            format!("{text}/other/../other//api.sock"),
+            format!("{text}/cache/..//state/./state.db"),
+            format!("/{text}/workspaces/./"),
+            "d",
+            vec![1],
+        ));
+        assert!(meets_file(&private, &base.join("other/api.sock")));
+        assert!(meets_root(&private, &base.join("other")));
+        assert!(meets_file(&private, &base.join("state/state.db")));
+        assert!(meets_root(&private, &base.join("state")));
+        assert!(meets_root(&private, &base.join("workspaces")));
+        assert!(meets_file(&private, &base.join("workspaces/inner/file")));
+        assert!(meets_root(&private, &base));
+        assert!(!meets_file(&private, &base.join("cache/tool")));
+        assert!(!meets_root(&private, &base.join("cache/tools")));
+    }
+
+    // Adversary case: a directory that an entry's text only passes through with `..` holds nothing private and is not refused.
+    #[test]
+    fn adversary_a_directory_an_entry_only_passes_through_with_dot_dot_is_clear() {
+        let (_directory, base) = writable_root_tree();
+        let text = base.to_str().unwrap();
+        let private = private_paths(&DaemonConfig::minimum(
+            base.join("other/api.sock"),
+            format!("{text}/cache/../state/state.db"),
+            base.join("workspaces"),
+            "d",
+            vec![1],
+        ));
+        assert!(meets_root(&private, &base.join("state")));
+        assert!(
+            !meets_root(&private, &base.join("cache")),
+            "the state directory is not in this directory"
+        );
+    }
+
+    // Adversary case: a slot source reached through a re-pointed directory link is private at the new place before the file is written there.
+    #[test]
+    fn adversary_a_private_file_behind_a_repointed_directory_link_is_met_before_it_is_written() {
+        let (_directory, base) = writable_root_tree();
+        for version in ["first", "second"] {
+            std::fs::create_dir(base.join("cache").join(version)).unwrap();
+        }
+        std::fs::write(base.join("cache/first/token"), "x").unwrap();
+        let current = base.join("other/current");
+        std::os::unix::fs::symlink(base.join("cache/first"), &current).unwrap();
+        let mut config = protected_config(&base);
+        config.secret_slots = vec![SecretSlot {
+            name: "token".to_owned(),
+            path: current.join("token"),
+        }];
+        let private = private_paths(&config);
+        assert!(meets_file(&private, &base.join("cache/first/token")));
+        std::fs::remove_file(&current).unwrap();
+        std::os::unix::fs::symlink(base.join("cache/second"), &current).unwrap();
+        assert!(meets_file(&private, &base.join("cache/second/token")));
+        assert!(meets_root(&private, &base.join("cache/second")));
+        assert!(meets_file(&private, &current.join("token")));
+    }
+
+    // Adversary case: a slot source that is a link to a file not written yet keeps the place the link names private.
+    #[test]
+    fn adversary_a_private_link_whose_target_is_not_written_yet_keeps_the_named_place_private() {
+        let (_directory, base) = writable_root_tree();
+        std::fs::create_dir(base.join("cache/slots")).unwrap();
+        let source = base.join("other/token");
+        std::os::unix::fs::symlink(base.join("cache/slots/token"), &source).unwrap();
+        let mut config = protected_config(&base);
+        config.secret_slots = vec![SecretSlot {
+            name: "token".to_owned(),
+            path: source.clone(),
+        }];
+        let private = private_paths(&config);
+        assert!(meets_file(&private, &source), "the entry as written");
+        assert!(
+            meets_file(&private, &base.join("cache/slots/token")),
+            "the file the link names"
+        );
+        assert!(
+            meets_root(&private, &base.join("cache/slots")),
+            "the directory the file is written into"
+        );
+    }
+
+    // Adversary case: an entry whose bytes are not UTF-8 is compared by component without a panic.
+    #[test]
+    fn adversary_an_entry_that_is_not_utf8_is_compared_by_component() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let (_directory, base) = writable_root_tree();
+        let mut config = protected_config(&base);
+        config.secret_slots = vec![SecretSlot {
+            name: "token".to_owned(),
+            path: base
+                .join("cache")
+                .join(std::ffi::OsStr::from_bytes(b"sl\xffts"))
+                .join("token"),
+        }];
+        let private = private_paths(&config);
+        assert!(meets_root(&private, &base.join("cache")));
+        assert!(!meets_root(&private, &base.join("cache/slots")));
+        assert!(!meets_file(&private, &base.join("cache/slots/token")));
+    }
+
+    // Adversary case: sixty-four slot sources are resolved for one admission and every one is still met.
+    #[test]
+    fn adversary_many_private_entries_are_all_compared_at_one_admission() {
+        let (_directory, base) = writable_root_tree();
+        std::fs::create_dir(base.join("cache/slots")).unwrap();
+        let mut config = protected_config(&base);
+        config.secret_slots = (0..64)
+            .map(|index| SecretSlot {
+                name: format!("slot{index}"),
+                path: base.join(format!("cache/slots/slot{index}")),
+            })
+            .collect();
+        let private = private_paths(&config);
+        for index in 0..64 {
+            assert!(meets_file(
+                &private,
+                &base.join(format!("cache/slots/slot{index}"))
+            ));
+        }
+        assert!(!meets_file(&private, &base.join("cache/slots/slot64")));
+        assert!(meets_root(&private, &base.join("cache/slots")));
     }
 }
