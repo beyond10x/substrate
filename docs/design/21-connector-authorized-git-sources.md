@@ -44,6 +44,63 @@ not dial the configured endpoint: source readiness depends on per-request author
 make daemon readiness depend on a remote service. An unconfigured deployment rejects Git sources
 before allocation. Empty-source workspace behavior is unchanged.
 
+## The baseline store
+
+Amendment of 2026-11-22 (`story:daemon-holds-the-baseline-objects-of-a-git-workspace`). It changes
+no route, no schema and no refusal code.
+
+The driver keeps, for each Git workspace, the objects of its baseline commit in a store of its
+own: the commit, every tree it reaches and every file and link object those trees name. No
+history, and no object of another repository's commit a tree records. Both observations read the
+baseline from this store and open nothing beneath the workspace's `.git/objects`.
+
+- **Where.** `.substrate-git-baselines/<root name>.objects/` under the workspace root, beside the
+  file `<root name>` that holds the commit id. A root name has no `.`, so the two names cannot
+  meet. The directory is mode 0700 and its files 0400, owned by the daemon's user. It lies in no
+  workspace, so no view binds it, and the workspace root is one of the daemon's private paths: a
+  read-only root or file cannot name it either.
+- **Form.** One pack and its index, written by the driver. Each object is read by its id from the
+  staging repository, checked against that id and then written. The store is written into a
+  directory of a name no root name can have, synced, and renamed into place.
+- **When.** After the checkout is verified against the admitted commit and before the commit-id
+  file is written and the workspace is installed. A workspace is `ready` only with its store. A
+  failure writes nothing: the workspace is proved absent, as for every failure before the rename,
+  and the refusal is `workspace.git-baseline-write-failed`.
+- **What it costs.** The compressed size of one commit's files. Measured on 2026-11-22 with
+  `git pack-objects` on one commit of three repositories: 7.1 MB for 73.2 MB of files (15,691
+  files), 28.9 MB for 113.5 MB (10,316), 6.4 MB for 21.7 MB (2,890).
+- **Its bound.** A store larger than the workspace's admitted byte limit is not written and the
+  create is refused `workspace.git-storage-limit`. The store is not part of the workspace's
+  reported usage and is not under its project quota: it is written once and never grows. A Git
+  workspace therefore holds at most twice its byte limit on disk, and in the three measurements
+  above 10 % to 30 % more than its files.
+- **Removal.** Wherever the commit-id file is removed, the store is removed with it. At start the
+  driver removes every entry of `.substrate-git-baselines` that is neither the commit-id file nor
+  the store of a workspace directory that exists.
+
+**A workspace materialized before the store existed** has a commit-id file and no store. The first
+observation that finds no store builds it once:
+
+1. It copies the workspace's `.git/objects` into a private directory beside the stores. The copy
+   is made beneath the workspace root with plain reads. It follows no link, opens only regular
+   files without blocking, and refuses an `info/alternates` file, directories nested deeper than
+   eight, more than 262,144 entries, and more bytes than the workspace's byte limit.
+2. It opens the copy, not the workspace, and writes the store from it as a materialization does:
+   each object by its id, checked.
+3. It removes the copy. Of two observations that build at once, the first rename stays and the
+   other discards its own.
+
+When an object is absent or fails its check, no store is kept and the observation is refused
+`workspace.git-baseline-missing`; a copy over its bound is refused `workspace.git-storage-limit`.
+A later observation tries again, and each attempt reads at most the byte limit. A program that
+runs in the workspace during the copy can make an attempt fail. It cannot make the store hold an
+object that is not the baseline's, because every object is bound to the daemon-held commit id by
+its hash. A store that does not hold the commit the commit-id file names is treated as absent and
+replaced the same way.
+
+Not decided here: comparing the worktree by kept stat facts instead of hashing each tracked file
+(ADR 0051's manifest). The observation hashes as before.
+
 ## Observations
 
 Substrate publishes a bounded baseline-file read and a path-sorted bounded Git change-set
@@ -52,7 +109,8 @@ current-file reads remain lazy and paged. The observation
 does not disclose `.git`, Connector authority, remote credentials, or remote URL userinfo.
 Every byte the change-set observation returns comes from a file beneath the admitted workspace's
 root or from the baseline the daemon holds: the workspace's own repository metadata decides
-neither which directory is read nor how an entry is read.
+neither which directory is read nor how an entry is read. The baseline-file read returns an
+object of the baseline store and opens nothing in the workspace.
 
 ### What the change-set observation reads
 
@@ -60,7 +118,7 @@ The answer compares the worktree beneath the admitted workspace's root with the 
 baseline commit the daemon holds.
 
 - **Baseline.** The tracked set and every expected object id come from the tree of the baseline
-  commit. Each object is read by its id and checked against that id. A size in the answer is the
+  commit, read from the baseline store. Each object is read by its id and checked against that id. A size in the answer is the
   size of an object that was read whole and checked, never a size an unchecked header states.
 - **Changed or not.** A tracked file or link is unchanged only when the hash of its content, read
   beneath the root, equals the tree's object id, and its kind and executable bit agree. No
@@ -79,13 +137,10 @@ baseline commit the daemon holds.
   attributes, filters and `core.fileMode` do not apply.
 - **Ignore rules** come from regular files beneath the root, the `.gitignore` files and
   `.git/info/exclude`. A leading byte-order mark is skipped.
-- **Object store.** Before the Git library opens `.git/objects`, the reader walks it beneath the
-  root and refuses the observation with `workspace.git-repository-failed` when it holds a link,
-  an entry that is neither a directory nor a regular file, an `info/alternates` file,
-  directories nested deeper than eight, or more than 262,144 entries. The check holds while no
-  program runs in the workspace. While one runs, the observation gives no guarantee of an
-  answer, and it still returns no byte and no size that was not checked against the daemon-held
-  commit.
+- **Object store.** The workspace's `.git/objects` is not opened. What it holds, and what a
+  program running in the workspace does to it during an observation, changes neither the answer
+  nor whether there is one. The one exception is the single build of a store for a workspace
+  that predates it (§ *The baseline store*).
 
 What bounds the reads of one observation:
 
@@ -97,19 +152,18 @@ What bounds the reads of one observation:
   - A tracked file larger than what is left of it is not hashed. It is reported `modified` with
     `binary` set, no text and no `current.oid`, the answer is marked `truncated`, nothing is
     taken from the 1 GiB for it, and the comparison goes on with the next path.
-  - A baseline object whose stated size is over what is left ends the answer there, marked
-    `truncated`. That is no more than the writer of a workspace can already do to its own
-    object store.
+  - A baseline object whose size is over what is left ends the answer there, marked
+    `truncated`. The size is the baseline store's, which no writer of the workspace can change.
 - Beside that 1 GiB, each listed item reads and hashes its worktree side when that is within
   `max_file_bytes`: at most `max_files` × `max_file_bytes` more, 1,000 MiB at the largest
   bounds a query may name.
 - Directories nested deeper than 100 are not entered and the answer is marked `truncated`. A
   changed or untracked path of more than 64 components refuses the observation
   `workspace.path-escape`, as before: the answer cannot name it.
-- Not bounded by the observation: the Git library reads the index, the commit and tree objects
-  of the baseline, and the stored file of each object it reads, whole, each to its apparent
-  size. A storage limit that counts blocks does not bound an apparent size
-  (`story:git-read-limits-bound-the-work`).
+- Not bounded by the observation: the Git library reads the workspace's index whole, to its
+  apparent size. A storage limit that counts blocks does not bound an apparent size
+  (`story:git-read-limits-bound-the-work`). The baseline's objects come from the baseline store,
+  whose files the driver wrote within the workspace's byte limit.
 
 Where the answer differs from the reader that asked the Git library to compare the worktree:
 
@@ -130,8 +184,8 @@ Where the answer differs from the reader that asked the Git library to compare t
   larger than what is left of it is reported `modified` without being read.
 - An index entry that records another repository's commit, at a path where the baseline
   records none, hides neither that path nor what lies beneath it.
-- An object store with `info/alternates`, a link, an entry that is not a regular file,
-  directories nested deeper than eight or more than 262,144 entries is refused.
+- What the workspace's `.git/objects` holds does not matter: a workspace whose object store was
+  emptied, replaced or filled with links still gets its observation and its baseline files.
 
 ## Refusals
 
