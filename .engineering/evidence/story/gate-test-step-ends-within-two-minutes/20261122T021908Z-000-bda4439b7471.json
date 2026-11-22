@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-22T02:19:08Z",
+  "actor": "agent:substrate",
+  "artifact": "story:gate-test-step-ends-within-two-minutes",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate.yml, job Gate: tests and Clippy, pull request 250 at a36c5b261: test run 98 s, 2963 tests, slowest 37.2 s, test build 743 s",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/44972774819/job/137059551399"
+  }
+}
