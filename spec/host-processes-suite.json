@@ -4522,11 +4522,11 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-1"
+              "value": "survivor of the host review"
             },
             "source": {
               "kind": "literal",
-              "value": "unit"
+              "value": "pid"
             },
             "source_ref": {
               "kind": "literal",
@@ -11463,7 +11463,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -11483,7 +11483,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-1"
+              "value": "database for the preview"
             }
           }
         },
@@ -11615,7 +11615,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -11663,7 +11663,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-1"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -12385,7 +12385,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -12405,7 +12405,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-1"
+              "value": "database for the preview"
             }
           }
         },
@@ -12521,7 +12521,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -12561,7 +12561,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-1"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -14382,7 +14382,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -14402,7 +14402,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-1"
+              "value": "database for the preview"
             }
           }
         },
@@ -14487,7 +14487,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -14527,7 +14527,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-1"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -15668,7 +15668,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-6"
+              "value": "database for the preview"
             }
           }
         },
@@ -15905,7 +15905,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-6"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -17938,7 +17938,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -17958,7 +17958,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-1"
+              "value": "database for the preview"
             }
           }
         },
@@ -18300,11 +18300,11 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-2"
+              "value": "survivor of the host review"
             },
             "source": {
               "kind": "literal",
-              "value": "container"
+              "value": "pid"
             },
             "source_ref": {
               "kind": "literal",
@@ -20107,7 +20107,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-6"
+              "value": "database for the preview"
             }
           }
         },
@@ -20320,7 +20320,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-6"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -22482,6 +22482,361 @@
         },
         {
           "step": "execute_command",
+          "command": "substrate.host_processes.AdoptProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "name": {
+              "kind": "literal",
+              "value": "name-17"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "survivor of the host review"
+            },
+            "source": {
+              "kind": "literal",
+              "value": "pid"
+            },
+            "source_ref": {
+              "kind": "literal",
+              "value": "source_ref-17"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-18",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessAdopted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RecordExit",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "exit_code": {
+              "kind": "literal",
+              "value": 101.0
+            },
+            "exit_signal": {
+              "kind": "literal",
+              "value": "exit_signal"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process-18"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-18"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ended"
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.host_processes.HostProcesses",
+          "subject": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process-18"
+            }
+          },
+          "shape": {
+            "identity_field": "process",
+            "fields": [
+              {
+                "name": "process",
+                "type": "String"
+              },
+              {
+                "name": "name",
+                "type": "String"
+              },
+              {
+                "name": "state",
+                "type": "substrate.host_processes.HostProcess.State"
+              },
+              {
+                "name": "owner_session_id",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "owner_session_name",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "reason",
+                "type": "String"
+              },
+              {
+                "name": "cwd",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "argv",
+                "type": "List<String>"
+              },
+              {
+                "name": "env_passthrough",
+                "type": "List<String>"
+              },
+              {
+                "name": "env_digest",
+                "type": "Optional<substrate.host_processes.EnvDigest>"
+              },
+              {
+                "name": "profile",
+                "type": "Optional<substrate.host_processes.ConfinementProfile>"
+              },
+              {
+                "name": "confinement",
+                "type": "Optional<substrate.host_processes.Confinement>"
+              },
+              {
+                "name": "started_at",
+                "type": "Timestamp"
+              },
+              {
+                "name": "lease_ttl_ms",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "lease_expires_at",
+                "type": "Optional<Timestamp>"
+              },
+              {
+                "name": "keep",
+                "type": "Boolean"
+              },
+              {
+                "name": "keep_reason",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "timeout_ms",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "expires_at",
+                "type": "Optional<Timestamp>"
+              },
+              {
+                "name": "deadline_at",
+                "type": "Optional<Timestamp>"
+              },
+              {
+                "name": "ended_by",
+                "type": "Optional<substrate.host_processes.EndedBy>"
+              },
+              {
+                "name": "exit_code",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "exit_signal",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "cpu_usec",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "memory_bytes",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "listening_ports",
+                "type": "List<Integer>"
+              },
+              {
+                "name": "log_discarded_bytes",
+                "type": "Integer"
+              },
+              {
+                "name": "container_kind",
+                "type": "Optional<substrate.host_processes.ContainerKind>"
+              },
+              {
+                "name": "restart",
+                "type": "Optional<substrate.host_processes.RestartPolicy>"
+              },
+              {
+                "name": "adopted_from",
+                "type": "Optional<substrate.host_processes.AdoptSource>"
+              },
+              {
+                "name": "adopted_ref",
+                "type": "Optional<String>"
+              }
+            ],
+            "declarations": {
+              "substrate.host_processes.AdoptSource": {
+                "kind": "enum",
+                "variants": [
+                  "pid",
+                  "unit",
+                  "container"
+                ]
+              },
+              "substrate.host_processes.Confinement": {
+                "kind": "enum",
+                "variants": [
+                  "none"
+                ]
+              },
+              "substrate.host_processes.ConfinementProfile": {
+                "kind": "enum",
+                "variants": [
+                  "host"
+                ]
+              },
+              "substrate.host_processes.ContainerKind": {
+                "kind": "enum",
+                "variants": [
+                  "docker",
+                  "k3d"
+                ]
+              },
+              "substrate.host_processes.EndedBy": {
+                "kind": "enum",
+                "variants": [
+                  "exit",
+                  "stop",
+                  "lease-expiry",
+                  "timeout",
+                  "expires-at",
+                  "vanished"
+                ]
+              },
+              "substrate.host_processes.EnvDigest": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.host_processes.HostProcess.State": {
+                "kind": "enum",
+                "variants": [
+                  "Ended",
+                  "Running",
+                  "Starting",
+                  "Stopping"
+                ]
+              },
+              "substrate.host_processes.RestartPolicy": {
+                "kind": "enum",
+                "variants": [
+                  "no"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RenewLease",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 1.0
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process-18"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RenewLease",
+            "outcome": "not-live"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.host_processes.NotLive",
+          "fields": {
+            "state": "Ended"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-18"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ended"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "execute_command",
           "command": "substrate.host_processes.StartContainer",
           "actor": "substrate.host_processes.Subject",
           "input": {
@@ -22501,7 +22856,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -22521,7 +22876,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-1"
+              "value": "database for the preview"
             }
           }
         },
@@ -22876,6 +23231,10 @@
         },
         {
           "kind": "command",
+          "name": "substrate.host_processes.AdoptProcess"
+        },
+        {
+          "kind": "command",
           "name": "substrate.host_processes.ExpireLease"
         },
         {
@@ -22889,6 +23248,13 @@
         {
           "kind": "command",
           "name": "substrate.host_processes.StartContainer"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
         },
         {
           "kind": "outcome",
@@ -28746,7 +29112,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -28766,7 +29132,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-1"
+              "value": "database for the preview"
             }
           }
         },
@@ -28795,11 +29161,11 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-2"
+              "value": "survivor of the host review"
             },
             "source": {
               "kind": "literal",
-              "value": "container"
+              "value": "pid"
             },
             "source_ref": {
               "kind": "literal",
@@ -28832,7 +29198,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-3"
+              "value": "survivor of the host review"
             },
             "source": {
               "kind": "literal",
@@ -28925,7 +29291,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-4"
+              "value": "database for the preview"
             }
           }
         },
@@ -28964,7 +29330,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -28984,7 +29350,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-5"
+              "value": "database for the preview"
             }
           }
         },
@@ -29013,7 +29379,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-6"
+              "value": "survivor of the host review"
             },
             "source": {
               "kind": "literal",
@@ -29050,11 +29416,11 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-7"
+              "value": "survivor of the host review"
             },
             "source": {
               "kind": "literal",
-              "value": "unit"
+              "value": "pid"
             },
             "source_ref": {
               "kind": "literal",
@@ -30393,7 +30759,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -30413,7 +30779,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-1"
+              "value": "database for the preview"
             }
           }
         },
@@ -30442,11 +30808,11 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-2"
+              "value": "survivor of the host review"
             },
             "source": {
               "kind": "literal",
-              "value": "container"
+              "value": "pid"
             },
             "source_ref": {
               "kind": "literal",
@@ -30479,7 +30845,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-3"
+              "value": "survivor of the host review"
             },
             "source": {
               "kind": "literal",
@@ -31075,7 +31441,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -31095,7 +31461,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-1"
+              "value": "database for the preview"
             }
           }
         },
@@ -31154,7 +31520,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-2"
+              "value": "database for the preview"
             }
           }
         },
@@ -31193,7 +31559,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -31213,7 +31579,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-3"
+              "value": "database for the preview"
             }
           }
         },
@@ -31272,7 +31638,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-4"
+              "value": "database for the preview"
             }
           }
         },
@@ -31311,7 +31677,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -31331,7 +31697,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-5"
+              "value": "database for the preview"
             }
           }
         },
@@ -31469,7 +31835,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -31509,7 +31875,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-1"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -31576,7 +31942,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-2"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -31603,7 +31969,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -31643,7 +32009,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-3"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -31706,7 +32072,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-4"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -31733,7 +32099,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -31781,7 +32147,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-5"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -31888,7 +32254,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -31928,7 +32294,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-1"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -31995,7 +32361,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-2"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -32022,7 +32388,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -32062,7 +32428,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-3"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -32125,7 +32491,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-4"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -32152,7 +32518,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -32200,7 +32566,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-5"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -32326,7 +32692,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -32346,7 +32712,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-1"
+              "value": "database for the preview"
             }
           }
         },
@@ -32405,7 +32771,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-2"
+              "value": "database for the preview"
             }
           }
         },
@@ -32444,7 +32810,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "lease_ttl_ms": {
               "kind": "literal",
@@ -32464,7 +32830,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-3"
+              "value": "database for the preview"
             }
           }
         },
@@ -32523,7 +32889,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-4"
+              "value": "database for the preview"
             }
           }
         },
@@ -32562,7 +32928,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "k3d"
+              "value": "docker"
             },
             "name": {
               "kind": "literal",
@@ -32578,7 +32944,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-5"
+              "value": "database for the preview"
             }
           }
         },
@@ -32637,7 +33003,7 @@
             },
             "reason": {
               "kind": "literal",
-              "value": "reason-6"
+              "value": "database for the preview"
             }
           }
         },
@@ -32775,7 +33141,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -32815,7 +33181,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-1"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -32882,7 +33248,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-2"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -32909,7 +33275,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -32949,7 +33315,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-3"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -33012,7 +33378,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-4"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -33039,7 +33405,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "keep": {
                 "kind": "literal",
@@ -33075,7 +33441,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-5"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -33150,7 +33516,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-6"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -33257,7 +33623,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -33297,7 +33663,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-1"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -33364,7 +33730,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-2"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -33391,7 +33757,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "ended_by": {
                 "kind": "literal",
@@ -33431,7 +33797,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-3"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -33494,7 +33860,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-4"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -33521,7 +33887,7 @@
               },
               "container_kind": {
                 "kind": "literal",
-                "value": "k3d"
+                "value": "docker"
               },
               "keep": {
                 "kind": "literal",
@@ -33557,7 +33923,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-5"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",
@@ -33632,7 +33998,7 @@
               },
               "reason": {
                 "kind": "literal",
-                "value": "reason-6"
+                "value": "database for the preview"
               },
               "restart": {
                 "kind": "literal",

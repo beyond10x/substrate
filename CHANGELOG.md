@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The ESS pin is 0.97.4, from 0.86.0 (the six `ess-inputs.yaml` under `spec/`, and `ESS_VERSION`
+  and `ESS_SHA256` in `gate.yml`). The host-process suite is regenerated: its 92 scenarios keep
+  their ids and twelve change. Eleven create their second instance with the inputs' declared
+  examples, `RenewLease/not-live` also sends an ended adopted record, and synthesis records 26
+  refusals where it recorded 27. The other suites and the CLI contract keep their bytes, and the
+  generated types change only in their header. Measured on a workstation under ESS 0.97.4:
+  synthesis of the confinement suite took 28 s (0.86.0: 92 s) and `cargo xtask check-ess` as a
+  whole 54 s.
+
 ## [0.24.0] — 2026-11-22
 
 ### Added
