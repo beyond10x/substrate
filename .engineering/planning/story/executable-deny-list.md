@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:executable-deny-list
 kind: story
-status: active
+status: implemented
 title: A profile names executables that never run
 summary: ConfinementProfile gains a deny-list and a fact for it; linux and macos enforce it, the other adapters refuse it by name.
 owner: substrate
@@ -41,10 +41,11 @@ scope:
   path: spec/generated
 - confidence: inferred
   path: website/docs
-revision: 15
+revision: 17
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"review_outcome":1}}, correlation: "run-governance-first-slice-accepted"}
+- {from: "active", to: "implemented", at: "2026-11-22T06:01:55Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"test_result":1,"review_outcome":3}}, executor: "agent:substrate"}
 ---
 # Story: A profile names executables that never run
 
@@ -151,3 +152,23 @@ After `story:linux-executable-allow-list`: it uses that story's mechanism and de
 - `crates/substrate-host/tests/confinement-public-items.txt`. Cited: `:1-3`.
 - `crates/substrate-host/src/confinement/linux.rs`, `crates/substrate-host/src/confinement/macos.rs`,
   `crates/substrate-host/src/seatbelt.rs`, `crates/substrate-host/src/probe.rs`. Inferred.
+
+## As built
+
+Merged as `b280c4ca7706338e869e5ec43903aecd1ce7bf0d` (pull request 243), 2026-11-22.
+
+- `linux`, `systemd` around it and `macos` enforce `exec_denied_paths`. On `macos` the limit is the
+  one design 35 § 8 states for Seatbelt.
+- A deny-list is exact only where the run cannot write. In a directory the run can write, the
+  entry holds for the files that exist at the start under the names they have then (design 35
+  § 18, decided by the stakeholder session `runbook`).
+- A start whose mounts the helper could not place is refused before dispatch,
+  `exec.sandbox-place-unserved`, naming the path. The driver is stricter than the helper in one
+  stated case (design 35 §§ 6 and 18).
+- A start with a deny-list reads every directory it expands and ends 125 where one is unreadable;
+  the run's stderr then holds `substrate-exec-gate: cannot read the directory "<path>": <cause>`.
+- Reviews: two adversary passes, three security looks; none found a way to execute a denied
+  file. Round 4 was not reviewed again.
+- The stakeholder's acceptance is open: `runbook` gives it after a confined Runbook step has run
+  on a Substrate that contains the merge.
+- Not built: `story:caller-learns-which-deny-entries-lie-where-a-run-can-write`.

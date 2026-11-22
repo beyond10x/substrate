@@ -2,16 +2,17 @@
 format: aep.planning-md/3
 id: story:floor-refuses-the-ioctl-that-exchanges-file-blocks
 kind: story
-status: active
+status: implemented
 title: The confinement floor refuses the ioctl that exchanges file blocks
 summary: EXT4_IOC_MOVE_EXT succeeds inside a linux run and changes content with every stat fact unchanged; the floor refuses it
 tags:
 - defect
 - security
-revision: 3
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-22T01:11:05Z", actor: "human:timo", revision: 2, executor: "agent:substrate"}
 - {from: "proposed", to: "active", at: "2026-11-22T01:11:06Z", actor: "human:timo", revision: 3, executor: "agent:substrate"}
+- {from: "active", to: "implemented", at: "2026-11-22T06:01:55Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}, executor: "agent:substrate"}
 ---
 # Story: the confinement floor refuses the ioctl that exchanges file blocks
 
@@ -94,3 +95,17 @@ In the delegated lane a confined run that calls `EXT4_IOC_MOVE_EXT` on two files
 workspace gets `EACCES`, both files keep their content and their five stat facts, read cold on
 the host; before the change the same case shows the content changed. The ADR is accepted and
 indexed before the code.
+
+## As built
+
+Merged as `79e0260f680bda8a677b1780032afdae4a78af73` (pull request 254), 2026-11-22.
+
+- The seccomp program answers `EACCES` for `EXT4_IOC_MOVE_EXT`, `XFS_IOC_SWAPEXT` and
+  `F2FS_IOC_SEC_TRIM_FILE`. The first was run, in an exec, a pipe session and a pty session; the
+  other two were read from the kernel source (v6.18) and not run.
+- The f2fs request was found by the adversary pass and added under the operator's rule; the
+  operator kept it.
+- Named in ADR 0050 and not refused: `F2FS_IOC_START_ATOMIC_WRITE` with abort or close.
+- Not covered: `story:oci-and-pod-refuse-the-ioctls-that-exchange-file-blocks`; `local`; host
+  processes. The driver's own probes: `story:probe-sandboxes-run-under-the-floors-seccomp-program`.
+- First in a release: 0.24.0, not cut yet.

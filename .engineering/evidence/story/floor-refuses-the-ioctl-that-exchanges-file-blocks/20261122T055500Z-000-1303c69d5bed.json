@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-22T05:55:00Z",
+  "actor": "agent:substrate",
+  "artifact": "story:floor-refuses-the-ioctl-that-exchanges-file-blocks",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate.yml and release-lanes.yml on pull request 254 at 2dc0caaa9: 20 of 20 checks after one rerun of the tests job, 3068 passed, test run 100 s",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/44987749387"
+  }
+}
