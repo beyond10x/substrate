@@ -21,7 +21,7 @@ use super::{
     commit_paths, objects_of, observe, paths, remove_store, source_repository, store_of, target,
     tracked_workspace, write_baseline,
 };
-use crate::git_baselines::{BuildTurn, DEFAULT_BYTE_LIMIT};
+use crate::git_baselines::{BuildTurns, DEFAULT_BYTE_LIMIT};
 use crate::{DriverError, DriverErrorClass};
 
 pub(super) const QUERY: GitChangesQuery = GitChangesQuery {
@@ -735,7 +735,7 @@ fn a_store_is_built_from_an_object_store_with_directories_nested_eight_deep() {
 fn no_store_is_built_from_an_object_store_with_more_entries_than_the_bound() {
     let (workspace, baselines, commit) = predating();
     let (entries, _) = entries_and_bytes(&workspace.path().join(".git/objects"));
-    let turn = BuildTurn::taken_blocking();
+    let turn = BuildTurns::default().taken_blocking();
     let held = |max_entries: usize| {
         target(
             workspace.path(),
@@ -767,19 +767,21 @@ fn no_store_is_built_from_an_object_store_of_more_bytes_than_the_bound() {
     assert_no_store_and_no_copy(baselines.path());
 
     let pinned: OwnedFd = std::fs::File::open(&objects).expect("object store").into();
+    // The object store here holds loose objects alone, so every byte of it is copied.
     let copy = |max_bytes: u64| {
         let copy = tempdir().expect("copy");
-        worktree::copy_store(&pinned, copy.path(), usize::MAX, max_bytes)
-            .map(|()| entries_and_bytes(copy.path()))
+        let (loose, packs) = (copy.path().join("objects"), copy.path().join("packs"));
+        for directory in [&loose, &packs] {
+            std::fs::create_dir(directory).expect("directory");
+        }
+        worktree::copy_store(&pinned, &loose, &packs, usize::MAX, max_bytes)
+            .map(|()| entries_and_bytes(copy.path()).1)
     };
     assert_eq!(
         copy(bytes - 1).expect_err("one byte over").code,
         "workspace.git-storage-limit"
     );
-    assert_eq!(
-        copy(bytes).expect("exactly the bound"),
-        entries_and_bytes(&objects)
-    );
+    assert_eq!(copy(bytes).expect("exactly the bound"), bytes);
 
     answer_within(workspace.path(), baselines.path(), bytes + 64 * 1024)
         .expect("an object store within the bound");

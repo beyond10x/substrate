@@ -25,14 +25,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     installs the workspace. Each object is read by its id and checked against it. The store
     is made in a staging directory inside `.substrate-git-baselines` and renamed into place.
   - A workspace materialized before the store existed gets its store at its first observation.
-    The driver copies the workspace's `.git/objects` beneath the pinned workspace directory,
-    with plain reads that do not wait, into a directory of its own, writes the store from the
-    copy, and removes the copy whatever the outcome. One build runs at a time in a daemon; an
-    observation that needs one waits for its turn, and while it waits it holds none of the
-    places the driver keeps for file operations. The turn ends when the store is in place or
-    the build is refused, before the observation compares anything. An observation that has
-    waited 10 s for its turn is refused `workspace.git-baseline-missing`; a later one tries
-    again.
+    The driver copies the pack files and the loose objects of the workspace's `.git/objects`
+    beneath the pinned workspace directory, with plain reads that do not wait, into a
+    directory of its own, and nothing else of it: no pack index, no multi-pack index, no
+    commit graph, nothing under `info/`. It indexes each copied pack itself, and a pack whose
+    objects do not all resolve ends the attempt `workspace.git-baseline-missing`. It then
+    writes the store from the copy, and removes the copy whatever the outcome. One build runs
+    at a time in a daemon; an observation that needs one waits for its turn, and while it
+    waits it holds none of the places the driver keeps for file operations. The turn ends when
+    the store is in place or the build is refused, before the observation compares anything.
+    An observation that has waited 10 s for its turn is refused
+    `workspace.git-baseline-missing`; a later one tries again.
     A link, another entry that is neither a directory nor a regular file, an
     `info/alternates` file, directories nested deeper than eight or more than 262,144 entries
     end the attempt `workspace.git-repository-failed`. More bytes than the copy's bound, or a
@@ -78,6 +81,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   place the baseline names it, a directory that holds nothing included. The build of a store
   refuses such a baseline the same way, against the inode limit of the workspace's project
   quota where it has one, else 200,000.
+- A Git create whose baseline holds a name longer than 255 bytes or a path longer than 4,096
+  bytes is refused `workspace.git-path-unrepresentable`. One whose paths together are longer
+  than 256 bytes for each path its inode limit admits, or which holds a tree whose header
+  states more than 283 bytes for each such path, is refused `workspace.git-storage-limit`.
+  Each is refused before anything is checked out, and the workspace is proved absent. The
+  build of a store refuses such a baseline the same way.
 - A Git workspace's baseline objects are on disk a second time, compressed, outside its
   reported usage: a Git workspace under a project quota holds at most twice its byte limit.
 - Once a workspace's store exists, the changes observation answers whatever the workspace's

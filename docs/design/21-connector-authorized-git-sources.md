@@ -98,16 +98,19 @@ keeps for file operations. The turn ends when the store is in place or the build
 before the observation compares anything. An observation that has waited 10 s for its turn is
 refused `workspace.git-baseline-missing`; a later one tries again.
 
-1. It copies the workspace's `.git/objects` into a staging directory inside
-   `.substrate-git-baselines`. The copy is made beneath the admitted workspace's own directory,
+1. It copies the pack files and the loose objects of the workspace's `.git/objects` into a
+   staging directory inside `.substrate-git-baselines`, and nothing else of it: no pack index,
+   no multi-pack index, no commit graph, nothing under `info/`. The copy is made beneath the
+   admitted workspace's own directory,
    pinned as the reader pins it, with plain reads that do not block. An entry that is neither a
    directory nor a regular file, a link among them, an `info/alternates` file, directories nested
    deeper than eight, or more than 262,144 entries ends the attempt
    `workspace.git-repository-failed`. More bytes than the copy's bound end it
    `workspace.git-storage-limit`; the bound is the limit of the workspace's project quota where
    it has one, else 2 GiB.
-2. It opens the copy, not the workspace, and writes the store from it as a materialization does:
-   each object by its id, checked. An object of the baseline whose header states a size over the
+2. It indexes each copied pack itself; a pack whose objects do not all resolve ends the attempt
+   `workspace.git-baseline-missing`. It then opens the copy, not the workspace, and writes the
+   store from it as a materialization does: each object by its id, checked. An object of the baseline whose header states a size over the
    copy's bound is not read and ends the attempt `workspace.git-storage-limit`; a create checks
    the same against its byte limit.
 3. It removes the copy, whatever the outcome.
@@ -123,10 +126,18 @@ holding the commit. A store that cannot be opened for any other reason is not re
 observation is refused `workspace.git-baseline-read-failed`.
 
 **The shape of a baseline is checked before anything walks it.** The check reads each tree of
-the baseline once, however often the baseline names it, and holds two bounds:
+the baseline once, however often the baseline names it, and holds these bounds:
 
 - **Nesting.** A baseline whose directories nest deeper than 1,024 is refused
   `workspace.git-path-unrepresentable`.
+- **Names and path lengths.** A name longer than 255 bytes, or a path longer than 4,096 bytes,
+  is refused `workspace.git-path-unrepresentable`: no checkout can make it. A baseline whose
+  paths together are longer than 256 bytes for each path the inode limit admits is refused
+  `workspace.git-storage-limit`.
+- **Object sizes.** The commit, a tree or a file object whose header states more than the byte
+  limit is not read and is refused `workspace.git-storage-limit`. A tree is also not read when
+  its header states more than 283 bytes for each path the inode limit admits, the most one
+  entry with a 255-byte name takes.
 - **Paths.** A baseline that names more paths than the inode limit is refused
   `workspace.git-storage-limit`. Every entry of every tree counts once for each place the
   baseline names it, a directory that holds nothing included. The inode limit is the one the
@@ -134,7 +145,7 @@ the baseline once, however often the baseline names it, and holds two bounds:
   the workspace's project quota where it has one, else 200,000.
 
 A create runs the check on the fetched commit before it checks anything out, and a build runs it
-on the copy before it writes the store. Every store therefore holds a baseline within both
+on the copy before it writes the store. Every store therefore holds a baseline within these
 bounds, and what a create, a build or an observation does with a baseline is bounded by them,
 not by the number of places a tree is named in.
 

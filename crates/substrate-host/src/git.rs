@@ -259,10 +259,9 @@ pub(super) fn reconcile(workspace_root: &Path, baseline_root: &Path) -> Result<(
 ///
 /// # Errors
 ///
-/// `workspace.git-storage-limit` for a baseline that names more paths than `limit.max_inodes`
-/// or holds an object whose header states more than `limit.max_bytes`, and
-/// `workspace.git-path-unrepresentable` for one whose directories nest deeper than
-/// [`store::MAX_BASELINE_DEPTH`], each before anything is checked out.
+/// `workspace.git-storage-limit` and `workspace.git-path-unrepresentable` for a baseline
+/// outside the bounds of [`store::check_baseline`], each before anything is checked out. The
+/// commit's header is compared with `limit.max_bytes` before the commit is read.
 fn finish_materialization(
     repository: &git2::Repository,
     destination: &str,
@@ -279,14 +278,24 @@ fn finish_materialization(
             "workspace.git",
         ));
     }
-    let commit = repository
-        .find_commit(expected)
-        .map_err(|_| failed("workspace.git-commit-missing"))?;
+    let missing = || failed("workspace.git-commit-missing");
+    let stated = repository
+        .odb()
+        .and_then(|objects| objects.read_header(expected));
+    match stated {
+        Ok((size, ObjectType::Commit)) => {
+            if u64::try_from(size).unwrap_or(u64::MAX) > limit.max_bytes {
+                return Err(storage_limit());
+            }
+        }
+        _ => return Err(missing()),
+    }
+    let commit = repository.find_commit(expected).map_err(|_| missing())?;
     let checked =
         store::check_baseline(repository, expected, limit).map_err(
             |unwritten| match unwritten {
                 store::Unwritten::Limit => storage_limit(),
-                store::Unwritten::Nesting => failed("workspace.git-path-unrepresentable"),
+                store::Unwritten::Path => failed("workspace.git-path-unrepresentable"),
                 store::Unwritten::Object | store::Unwritten::Exists | store::Unwritten::Write => {
                     failed("workspace.git-checkout-failed")
                 }
@@ -296,6 +305,8 @@ fn finish_materialization(
         stage = "git_baseline_check",
         trees = checked.trees,
         paths = checked.paths,
+        path_bytes = checked.path_bytes,
+        longest_path = checked.longest,
         "Git materialization stage completed"
     );
     let mut checkout = git2::build::CheckoutBuilder::new();
@@ -343,7 +354,7 @@ pub(super) fn write_baseline(
     )
     .map_err(|unwritten| match unwritten {
         store::Unwritten::Limit => storage_limit(),
-        store::Unwritten::Nesting => failed("workspace.git-path-unrepresentable"),
+        store::Unwritten::Path => failed("workspace.git-path-unrepresentable"),
         store::Unwritten::Exists => target_exists(),
         store::Unwritten::Object | store::Unwritten::Write => failed(CODE),
     })?;
@@ -1144,7 +1155,7 @@ mod tests {
 
     use super::{finish_materialization, materialize, sync_and_bounded_usage};
     use crate::git_baselines::{
-        BuildTurn, DEFAULT_BYTE_LIMIT, DEFAULT_INODE_LIMIT, DEFAULT_LIMIT, GitWorkspace, Observed,
+        BuildTurns, DEFAULT_BYTE_LIMIT, DEFAULT_INODE_LIMIT, DEFAULT_LIMIT, GitWorkspace, Observed,
     };
     use crate::{DriverError, GitSourceBinding};
 
@@ -1158,7 +1169,7 @@ mod tests {
         if let Observed::Answer(answer) = observe()? {
             return Ok(answer);
         }
-        super::build_store(held, &BuildTurn::taken_blocking())?;
+        super::build_store(held, &BuildTurns::default().taken_blocking())?;
         match observe()? {
             Observed::Answer(answer) => Ok(answer),
             Observed::NeedsBuild => panic!("the workspace has no store after its build"),
@@ -2328,6 +2339,7 @@ mod tests {
     }
 
     mod adversary_cases;
+    mod copy_cases;
     pub(super) mod shape_cases;
     mod store_cases;
     pub(super) mod store_failure_cases;

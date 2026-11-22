@@ -584,16 +584,27 @@ async fn real_quota_byte_and_inode_limits_enforce_later_workspace_mutations() {
     }
 }
 
+/// The files of the checkout of [`repository_with_large_checkout`], each of
+/// [`LARGE_CHECKOUT_FILE_BYTES`] bytes: 2 MiB together.
+const LARGE_CHECKOUT_FILES: [&str; 4] =
+    ["large-0.txt", "large-1.txt", "large-2.txt", "large-3.txt"];
+const LARGE_CHECKOUT_FILE_BYTES: u64 = 512 * 1024;
+
+/// A repository whose newest commit checks out to 2 MiB in four files of 512 KiB. No object of
+/// it and no count of its paths is over a limit of 1 MiB and the inodes of [`LIMIT`]: only the
+/// bytes of the files together are, so a create under a 1 MiB quota meets the quota in its
+/// checkout.
 fn repository_with_large_checkout() -> (TempDir, git2::Oid) {
     let (source, parent) = repository(0);
     let repository = git2::Repository::open(source.path()).expect("large checkout source");
+    let length = usize::try_from(LARGE_CHECKOUT_FILE_BYTES).expect("file length");
     let blob = repository
-        .blob(&vec![b'Q'; 2 * 1024 * 1024])
+        .blob(&vec![b'Q'; length])
         .expect("compressible blob");
     let mut builder = repository.treebuilder(None).expect("tree builder");
-    builder
-        .insert("large.txt", blob, 0o100_644)
-        .expect("large file");
+    for name in LARGE_CHECKOUT_FILES {
+        builder.insert(name, blob, 0o100_644).expect("large file");
+    }
     let tree = repository
         .find_tree(builder.write().expect("tree write"))
         .expect("large checkout tree");
@@ -640,12 +651,13 @@ async fn real_quota_checkout_exhaustion_cannot_release_another_live_session() {
     );
     let live_path = fixture.root.path().join("ws_live");
     let live_project = project_id(&live_path);
-    assert_eq!(
-        std::fs::metadata(live_path.join("large.txt"))
-            .unwrap()
-            .len(),
-        2 * 1024 * 1024
-    );
+    for name in LARGE_CHECKOUT_FILES {
+        assert_eq!(
+            std::fs::metadata(live_path.join(name)).unwrap().len(),
+            LARGE_CHECKOUT_FILE_BYTES,
+            "{name}"
+        );
+    }
     let small_limit = StorageLimit {
         max_bytes: 1024 * 1024,
         ..LIMIT

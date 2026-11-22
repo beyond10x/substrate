@@ -41,21 +41,11 @@ fn holding(repository: &Repository, directory: Oid) -> Oid {
     builder.write().expect("directory")
 }
 
-/// A repository whose branch `provider-default` holds one commit: a file, and the directories
-/// `directories` writes, by name.
-pub(super) fn repository_of(
-    directories: impl FnOnce(&Repository) -> Vec<(&'static str, Oid)>,
-) -> (TempDir, Oid) {
+/// A repository whose branch `provider-default` holds one commit, of the tree `root` writes.
+pub(super) fn repository_holding(root: impl FnOnce(&Repository) -> Oid) -> (TempDir, Oid) {
     let directory = tempdir().expect("repository directory");
     let repository = Repository::init(directory.path()).expect("repository");
-    let file = repository.blob(b"bounded git workspace\n").expect("file");
-    let mut top = repository.treebuilder(None).expect("tree builder");
-    top.insert("README.md", file, 0o100_644).expect("file");
-    for (name, tree) in directories(&repository) {
-        top.insert(name, tree, 0o040_000).expect("directory");
-    }
-    let root = top.write().expect("root tree");
-    drop(top);
+    let root = root(&repository);
     let signature =
         Signature::now("Substrate Test", "substrate@example.invalid").expect("signature");
     let commit = repository
@@ -75,10 +65,26 @@ pub(super) fn repository_of(
     (directory, commit)
 }
 
+/// A repository whose branch `provider-default` holds one commit: the file `README.md`, and
+/// the directories `directories` writes, by name.
+pub(super) fn repository_of(
+    directories: impl FnOnce(&Repository) -> Vec<(String, Oid)>,
+) -> (TempDir, Oid) {
+    repository_holding(|repository| {
+        let file = repository.blob(b"bounded git workspace\n").expect("file");
+        let mut top = repository.treebuilder(None).expect("tree builder");
+        top.insert("README.md", file, 0o100_644).expect("file");
+        for (name, tree) in directories(repository) {
+            top.insert(name, tree, 0o040_000).expect("directory");
+        }
+        top.write().expect("root tree")
+    })
+}
+
 /// A repository whose branch `provider-default` holds one commit: a file, and `levels`
 /// directories nested in each other.
 pub(in crate::git) fn nested_repository(levels: usize) -> (TempDir, Oid) {
-    repository_of(|repository| vec![("d", nested(repository, levels))])
+    repository_of(|repository| vec![("d".to_owned(), nested(repository, levels))])
 }
 
 /// Copies the directory `from` and everything in it to `to`, which does not exist yet.
@@ -160,7 +166,10 @@ fn a_directory_the_baseline_holds_twice_is_bounded_at_its_deeper_place() {
     let twice = |levels: usize| {
         repository_of(|repository| {
             let nested = nested(repository, levels);
-            vec![("a", holding(repository, nested)), ("d", nested)]
+            vec![
+                ("a".to_owned(), holding(repository, nested)),
+                ("d".to_owned(), nested),
+            ]
         })
     };
     let write = |levels: usize| {

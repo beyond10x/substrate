@@ -13,7 +13,7 @@
 
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use substrate_wire::StorageLimit;
@@ -57,33 +57,41 @@ pub(crate) struct GitWorkspace<'a> {
     pub(crate) build_limit: &'a dyn Fn() -> StorageLimit,
 }
 
-/// One build of a store runs at a time in a daemon: whoever holds this builds.
-static BUILD_TURN: LazyLock<Arc<tokio::sync::Mutex<()>>> = LazyLock::new(Arc::default);
+/// The turns to build a store. One build runs at a time in a daemon: its driver keeps these,
+/// and whoever holds the turn builds.
+#[derive(Clone, Default)]
+pub(crate) struct BuildTurns(Arc<tokio::sync::Mutex<()>>);
 
 /// The turn to build a store. It ends when this is dropped.
 pub(crate) struct BuildTurn(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>);
 
-impl BuildTurn {
+impl BuildTurns {
     /// Waits for the turn, at most `wait`; `None` when the wait ended first. An observation
     /// waits here and nowhere else, so while it waits it holds none of the places the driver
     /// keeps for file operations.
-    pub(crate) async fn taken_within(wait: Duration) -> Option<Self> {
-        tokio::time::timeout(wait, Arc::clone(&BUILD_TURN).lock_owned())
+    pub(crate) async fn taken_within(&self, wait: Duration) -> Option<BuildTurn> {
+        tokio::time::timeout(wait, Arc::clone(&self.0).lock_owned())
             .await
             .ok()
-            .map(Self)
+            .map(BuildTurn)
     }
 
     /// Waits for the turn however long that takes.
     #[cfg(all(test, feature = "git"))]
-    pub(crate) async fn taken() -> Self {
-        Self(Arc::clone(&BUILD_TURN).lock_owned().await)
+    pub(crate) async fn taken(&self) -> BuildTurn {
+        BuildTurn(Arc::clone(&self.0).lock_owned().await)
     }
 
     /// Waits for the turn on a thread that runs no task of the driver.
     #[cfg(all(test, feature = "git"))]
-    pub(crate) fn taken_blocking() -> Self {
-        Self(Arc::clone(&BUILD_TURN).blocking_lock_owned())
+    pub(crate) fn taken_blocking(&self) -> BuildTurn {
+        BuildTurn(Arc::clone(&self.0).blocking_lock_owned())
+    }
+
+    /// The turn, when nobody holds it now.
+    #[cfg(all(test, feature = "git"))]
+    pub(crate) fn free(&self) -> Option<BuildTurn> {
+        Arc::clone(&self.0).try_lock_owned().ok().map(BuildTurn)
     }
 }
 

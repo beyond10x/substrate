@@ -8,7 +8,7 @@
 //! tree of a create, or the copy a store is built from. It is never pointed at a workspace.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
 
@@ -29,15 +29,32 @@ const READ_FAILED: &str = "workspace.git-baseline-read-failed";
 /// path of a directory of the baseline has at most this many components.
 pub(super) const MAX_BASELINE_DEPTH: usize = 1024;
 
+/// The bytes a name of the baseline may have: no checkout can make a longer one.
+pub(super) const MAX_NAME_BYTES: usize = 255;
+
+/// The bytes a path of the baseline may have: no checkout can make a longer one.
+pub(super) const MAX_PATH_BYTES: u64 = 4096;
+
+/// The bytes the paths of a baseline may take together, for each path the inode limit admits.
+pub(super) const PATH_BYTES_PER_PATH: u64 = 256;
+
+/// The bytes the header of a tree may state, for each path the inode limit admits: the most
+/// one entry with a name of [`MAX_NAME_BYTES`] takes, which is a mode of six digits, a space,
+/// the name, a zero byte and an id of twenty bytes.
+pub(super) const TREE_BYTES_PER_PATH: u64 = 283;
+
 /// Why a store was not written.
 pub(super) enum Unwritten {
     /// An object of the baseline is absent from the source, or is not what its id names.
     Object,
-    /// The store, or an object of the baseline, is over the byte bound, or the baseline names
-    /// more paths than the inode limit.
+    /// The store, or an object of the baseline, is over the byte bound; or the baseline names
+    /// more paths than the inode limit, or its paths together or one of its trees take more
+    /// bytes than that limit admits.
     Limit,
-    /// The directories of the baseline nest deeper than [`MAX_BASELINE_DEPTH`].
-    Nesting,
+    /// The baseline names a path no checkout can make: its directories nest deeper than
+    /// [`MAX_BASELINE_DEPTH`], a name is longer than [`MAX_NAME_BYTES`] or a path longer than
+    /// [`MAX_PATH_BYTES`].
+    Path,
     /// The root name already has a store.
     Exists,
     /// The store could not be written, synced or put into place.
@@ -158,10 +175,10 @@ fn readable(store: &Path) -> Result<(), DriverError> {
     opened().map_err(|_| failed(READ_FAILED))
 }
 
-/// Builds the store of a workspace, in the three steps of the design: copy the workspace's
-/// object store beneath its pinned directory, write the store from the copy, and remove the
-/// copy whatever the outcome. What stands in the store's place is replaced only by the
-/// finished store.
+/// Builds the store of a workspace, in the three steps of the design: copy the pack files and
+/// the loose objects of the workspace's object store beneath its pinned directory, index the
+/// copied packs and write the store from the copy, and remove the copy whatever the outcome.
+/// What stands in the store's place is replaced only by the finished store.
 fn build(
     workspace: &GitWorkspace<'_>,
     store: &Path,
@@ -178,12 +195,23 @@ fn build(
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in(workspace.baseline_root)
         .map_err(|_| failed(WRITE_FAILED))?;
-    let built =
-        worktree::copy_store(&objects, copy.path(), max_entries, limit.max_bytes).and_then(|()| {
+    // The object store the Git library is pointed at, and beside it the packs as they were
+    // copied, which it is not pointed at.
+    let (source, packs) = (copy.path().join("objects"), copy.path().join("packs"));
+    let indexed = source.join("pack");
+    let built = [&source, &packs, &indexed]
+        .into_iter()
+        .try_for_each(|directory| std::fs::DirBuilder::new().mode(0o700).create(directory))
+        .map_err(|_| failed(WRITE_FAILED))
+        .and_then(|()| {
+            worktree::copy_store(&objects, &source, &packs, max_entries, limit.max_bytes)
+        })
+        .and_then(|()| index_packs(&packs, &indexed))
+        .and_then(|()| {
             let written = write(
                 workspace.baseline_root,
                 store,
-                copy.path(),
+                &source,
                 commit,
                 limit,
                 Place::Taken,
@@ -191,7 +219,7 @@ fn build(
             written.map_err(|unwritten| match unwritten {
                 Unwritten::Object => failed("workspace.git-baseline-missing"),
                 Unwritten::Limit => storage_limit(),
-                Unwritten::Nesting => failed("workspace.git-path-unrepresentable"),
+                Unwritten::Path => failed("workspace.git-path-unrepresentable"),
                 Unwritten::Exists | Unwritten::Write => failed(WRITE_FAILED),
             })
         });
@@ -206,6 +234,43 @@ fn build(
             named.and(Err(failed("workspace.git-baseline-missing")))
         }
     }
+}
+
+/// Indexes each pack in `packs`, the packs as they were copied, into the directory `target`
+/// of the copy. The driver reads the pack and hands its bytes to the Git library's indexer,
+/// which writes the pack and an index of its own. The indexer names every object by the hash
+/// of what it read or resolved, and ends in an error for a pack that is not whole or holds an
+/// object it cannot resolve. No index a workspace wrote is read.
+///
+/// # Errors
+///
+/// `workspace.git-baseline-missing` for a pack whose objects do not all resolve.
+fn index_packs(packs: &Path, target: &Path) -> Result<(), DriverError> {
+    let unwritten = || failed(WRITE_FAILED);
+    let unresolved = || failed("workspace.git-baseline-missing");
+    let mut buffer = vec![0; 64 * 1024];
+    for entry in std::fs::read_dir(packs).map_err(|_| unwritten())? {
+        let path = entry.map_err(|_| unwritten())?.path();
+        let mut pack = std::fs::File::open(&path).map_err(|_| unwritten())?;
+        // A pack of a workspace need not hold the history of its commits, so the indexer does
+        // not look for the objects its commits and trees refer to.
+        let mut indexer =
+            git2::Indexer::new(None, target, 0o600, false).map_err(|_| unwritten())?;
+        loop {
+            let read = match pack.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(unwritten()),
+            };
+            indexer
+                .write_all(&buffer[..read])
+                .map_err(|_| unresolved())?;
+        }
+        indexer.commit().map_err(|_| unresolved())?;
+        std::fs::remove_file(&path).map_err(|_| unwritten())?;
+    }
+    Ok(())
 }
 
 /// Writes the store `store` of `commit` from the object store at `source`, a directory the
@@ -246,14 +311,18 @@ pub(super) fn write(
 /// A directory of the baseline the check is in.
 struct Directory {
     id: Oid,
-    /// Its directories the check has not entered yet, one for each name it holds one by.
-    pending: Vec<Oid>,
+    /// The bytes of the name the directory it lies in holds it by; none for the root.
+    name: u64,
+    /// Its directories the check has not entered yet, each with the bytes of its name: one
+    /// for each name it holds a directory by.
+    pending: Vec<(Oid, u64)>,
     /// What is known of it so far: its own entries, and what the directories the check has
     /// left hold.
     shape: Shape,
 }
 
-/// What a tree of the baseline holds, wherever the baseline names it.
+/// What a tree of the baseline holds, wherever the baseline names it. Paths are relative to
+/// the tree: what they come to at a place follows from the path of that place.
 #[derive(Clone, Copy)]
 struct Shape {
     /// How many directories nest beneath it.
@@ -261,14 +330,67 @@ struct Shape {
     /// How many paths it names: each of its entries, and each path of each directory it holds,
     /// once for each name it holds that directory by.
     paths: u64,
+    /// The bytes of those paths together.
+    path_bytes: u64,
+    /// The bytes of the longest of them.
+    longest: u64,
 }
 
 impl Shape {
-    /// Adds a directory this one holds by one name.
-    fn hold(&mut self, held: Shape) {
+    /// Adds a directory this one holds by a name of `name` bytes: each of its paths is here
+    /// that name, a separator and the path.
+    fn hold(&mut self, name: u64, held: Shape) {
         self.beneath = self.beneath.max(held.beneath + 1);
         self.paths = self.paths.saturating_add(held.paths);
+        self.path_bytes = self
+            .path_bytes
+            .saturating_add(held.path_bytes)
+            .saturating_add(held.paths.saturating_mul(name + 1));
+        if held.paths > 0 {
+            self.longest = self.longest.max(name + 1 + held.longest);
+        }
     }
+
+    /// Whether the paths of the tree are within the bounds of `limit`: none longer than
+    /// [`MAX_PATH_BYTES`], no more than the inode limit, and together no more than
+    /// [`PATH_BYTES_PER_PATH`] for each path that limit admits.
+    fn within(&self, limit: StorageLimit) -> Result<(), Unwritten> {
+        if self.longest > MAX_PATH_BYTES {
+            return Err(Unwritten::Path);
+        }
+        if self.paths > limit.max_inodes
+            || self.path_bytes > PATH_BYTES_PER_PATH.saturating_mul(limit.max_inodes)
+        {
+            return Err(Unwritten::Limit);
+        }
+        Ok(())
+    }
+}
+
+/// Reads the header of the object `id` and nothing more of it: the object is of `kind`, and
+/// states no more than `limit.max_bytes`; a tree also no more than [`TREE_BYTES_PER_PATH`] for
+/// each path the inode limit admits.
+fn stated_within(
+    objects: &git2::Odb<'_>,
+    id: Oid,
+    kind: ObjectType,
+    limit: StorageLimit,
+) -> Result<(), Unwritten> {
+    let (size, found) = objects.read_header(id).map_err(|_| Unwritten::Object)?;
+    if found != kind {
+        return Err(Unwritten::Object);
+    }
+    let bound = if kind == ObjectType::Tree {
+        limit
+            .max_bytes
+            .min(TREE_BYTES_PER_PATH.saturating_mul(limit.max_inodes))
+    } else {
+        limit.max_bytes
+    };
+    if u64::try_from(size).unwrap_or(u64::MAX) > bound {
+        return Err(Unwritten::Limit);
+    }
+    Ok(())
 }
 
 /// What a check that passed read.
@@ -278,38 +400,39 @@ pub(super) struct Checked {
     pub(super) trees: usize,
     /// The paths the baseline names.
     pub(super) paths: u64,
+    /// The bytes of those paths together.
+    pub(super) path_bytes: u64,
+    /// The bytes of the longest of them.
+    pub(super) longest: u64,
 }
 
 /// Checks the baseline of `commit` before anything walks it, and before any of its objects is
 /// read whole (design 21, § *The baseline store*).
 ///
-/// - The header of every object is read first: the commit, every tree it reaches and every
-///   file and link object those trees name. A tree entry that records another repository's
-///   commit names no object of the baseline.
-/// - No directory lies deeper than [`MAX_BASELINE_DEPTH`].
-/// - The baseline names at most `limit.max_inodes` paths. Every entry of every tree counts
-///   once for each place the baseline names it, a directory that holds nothing included.
+/// - **Object sizes.** The header of every object is read before the object is: the commit,
+///   every tree it reaches and every file and link object those trees name. None states more
+///   than `limit.max_bytes`, and no tree more than [`TREE_BYTES_PER_PATH`] for each path the
+///   inode limit admits. A tree entry that records another repository's commit names no
+///   object of the baseline.
+/// - **Nesting.** No directory lies deeper than [`MAX_BASELINE_DEPTH`].
+/// - **Names and path lengths.** No name is longer than [`MAX_NAME_BYTES`] and no path longer
+///   than [`MAX_PATH_BYTES`], and the paths together take at most [`PATH_BYTES_PER_PATH`] for
+///   each path the inode limit admits.
+/// - **Paths.** The baseline names at most `limit.max_inodes` paths. Every entry of every tree
+///   counts once for each place the baseline names it, a directory that holds nothing
+///   included.
 ///
 /// The check reads each tree once, however often the baseline names it: what it found in a
-/// tree it has left it keeps by the tree's id. It keeps the directories it is in as a list,
-/// never longer than the nesting bound. So its work follows the objects of the baseline, not
-/// the paths those objects name.
+/// tree it has left it keeps by the tree's id, relative to the tree. It keeps the directories
+/// it is in as a list, never longer than the nesting bound. So its work follows the objects of
+/// the baseline, not the paths those objects name.
 pub(super) fn check_baseline(
     repository: &git2::Repository,
     commit: Oid,
     limit: StorageLimit,
 ) -> Result<Checked, Unwritten> {
     let objects = repository.odb().map_err(|_| Unwritten::Object)?;
-    let within = |id: Oid, kind: ObjectType| {
-        let (size, found) = objects.read_header(id).map_err(|_| Unwritten::Object)?;
-        if found != kind {
-            return Err(Unwritten::Object);
-        }
-        if u64::try_from(size).unwrap_or(u64::MAX) > limit.max_bytes {
-            return Err(Unwritten::Limit);
-        }
-        Ok(())
-    };
+    let within = |id: Oid, kind: ObjectType| stated_within(&objects, id, kind, limit);
     within(commit, ObjectType::Commit)?;
     let root = repository
         .find_commit(commit)
@@ -317,14 +440,27 @@ pub(super) fn check_baseline(
         .tree_id();
     let mut files = HashSet::new();
     let mut trees = 0_usize;
-    let mut enter = |id: Oid| {
+    let mut enter = |id: Oid, name: u64| {
         within(id, ObjectType::Tree)?;
         let tree = repository.find_tree(id).map_err(|_| Unwritten::Object)?;
         trees += 1;
         let mut pending = Vec::new();
+        let mut shape = Shape {
+            beneath: 0,
+            paths: u64::try_from(tree.len()).unwrap_or(u64::MAX),
+            path_bytes: 0,
+            longest: 0,
+        };
         for entry in &tree {
+            let bytes = entry.name_bytes().len();
+            if bytes > MAX_NAME_BYTES {
+                return Err(Unwritten::Path);
+            }
+            let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+            shape.path_bytes = shape.path_bytes.saturating_add(bytes);
+            shape.longest = shape.longest.max(bytes);
             match entry.kind() {
-                Some(ObjectType::Tree) => pending.push(entry.id()),
+                Some(ObjectType::Tree) => pending.push((entry.id(), bytes)),
                 Some(ObjectType::Blob) if files.insert(entry.id()) => {
                     within(entry.id(), ObjectType::Blob)?;
                 }
@@ -333,50 +469,52 @@ pub(super) fn check_baseline(
         }
         Ok(Directory {
             id,
+            name,
             pending,
-            shape: Shape {
-                beneath: 0,
-                paths: u64::try_from(tree.len()).unwrap_or(u64::MAX),
-            },
+            shape,
         })
     };
     // Every tree the check has left, with what it holds.
     let mut left: HashMap<Oid, Shape> = HashMap::new();
-    let mut inside = vec![enter(root)?];
+    let mut inside = vec![enter(root, 0)?];
     loop {
         // The path of a directory of the innermost one has this many components.
         let depth = inside.len();
         let Some(innermost) = inside.last_mut() else {
             break;
         };
-        let Some(next) = innermost.pending.pop() else {
-            let shape = innermost.shape;
-            if shape.paths > limit.max_inodes {
-                return Err(Unwritten::Limit);
-            }
+        let Some((next, name)) = innermost.pending.pop() else {
+            let (shape, name) = (innermost.shape, innermost.name);
+            // A path that is too long relative to its tree is too long wherever the tree is.
+            shape.within(limit)?;
             left.insert(innermost.id, shape);
             inside.pop();
             if let Some(parent) = inside.last_mut() {
-                parent.shape.hold(shape);
+                parent.shape.hold(name, shape);
             }
             continue;
         };
         if let Some(&shape) = left.get(&next) {
             if depth + shape.beneath > MAX_BASELINE_DEPTH {
-                return Err(Unwritten::Nesting);
+                return Err(Unwritten::Path);
             }
-            innermost.shape.hold(shape);
+            innermost.shape.hold(name, shape);
         } else {
             if depth > MAX_BASELINE_DEPTH {
-                return Err(Unwritten::Nesting);
+                return Err(Unwritten::Path);
             }
-            let entered = enter(next)?;
+            let entered = enter(next, name)?;
             inside.push(entered);
         }
     }
     // The root's tree was left last.
-    let paths = left.get(&root).ok_or(Unwritten::Object)?.paths;
-    Ok(Checked { trees, paths })
+    let shape = left.get(&root).ok_or(Unwritten::Object)?;
+    Ok(Checked {
+        trees,
+        paths: shape.paths,
+        path_bytes: shape.path_bytes,
+        longest: shape.longest,
+    })
 }
 
 /// Writes the pack of `commit` and its index into the directory `pack`. The pack builder reads

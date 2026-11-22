@@ -1034,6 +1034,8 @@ pub struct HostDriver {
     capability: CapabilitySnapshot,
     processes: process::ProcessRuntime,
     blocking_slots: Arc<Semaphore>,
+    /// One build of a baseline store runs at a time in a daemon (design 21).
+    build_turns: git_baselines::BuildTurns,
     workspace_destroy_namespace: (libc::dev_t, libc::ino_t),
     quotas: Option<Arc<quota::ProjectQuotas>>,
     /// What the open's probe proved of the executable lists (design 35 D14): host-private, never
@@ -1325,6 +1327,7 @@ impl HostDriver {
             capability,
             processes,
             blocking_slots: Arc::new(Semaphore::new(16)),
+            build_turns: git_baselines::BuildTurns::default(),
             workspace_destroy_namespace,
             quotas,
             exec_lists,
@@ -1543,7 +1546,9 @@ impl HostDriver {
                 "The Git baseline store was not built.",
             )
         };
-        let turn = git_baselines::BuildTurn::taken_within(wait)
+        let turn = self
+            .build_turns
+            .taken_within(wait)
             .await
             .ok_or_else(unbuilt)?;
         let building = Arc::clone(&observed);
