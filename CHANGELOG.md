@@ -189,6 +189,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     (`story:git-read-limits-bound-the-work`, a draft). The baseline-file observation is
     unchanged; it returns only the object the daemon-held commit names.
 
+- `url` moves from 2.5.8 to 2.5.9 in `Cargo.lock`, and `form_urlencoded` from 1.2.2 to 1.2.3
+  with it, for [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592.html): in
+  2.5.8 `Url::origin()` on a deeply nested `blob:` URL overflows the stack, which ends the
+  process. The host driver's Git transport calls `Url::origin()` on the URL of each transport
+  request (`crates/substrate-host/src/git/network.rs`), in a build with the `git` feature.
+  Whether a Git server can make that URL a nested one was not established. Affected: every
+  earlier release with a Git source, `0.23.0` included.
+
 ## [0.23.0] — 2026-11-21
 
 ### Added
