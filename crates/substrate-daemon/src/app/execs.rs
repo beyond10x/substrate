@@ -49,7 +49,9 @@ pub(super) async fn exec_start(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = validate_exec_input(&app, &mutation, &request_id) {
+    // Resolved once for this start, off the async worker, before the checks that compare with it.
+    let private = app.private_paths_for(&mutation.input).await;
+    if let Err(response) = validate_exec_input(&app, &private, &mutation, &request_id) {
         return refuse_before_dispatch_response(
             &app,
             &identity,

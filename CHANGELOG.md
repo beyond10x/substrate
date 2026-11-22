@@ -101,6 +101,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     which are unconfined by contract; and a request of the same kind that ADR 0050's survey did
     not find.
 
+- The daemon refuses a start before dispatch when a read-only root's host path equals, lies under
+  or contains a path it keeps private, or a read-only file's host path equals or lies under one:
+  the state directory (the parent of `--state`), the workspace root, the TLS private key, the
+  static-bearer file, every secret-slot source, the namespace driver's kubeconfig, the API socket
+  and the delegated cgroup root. The answers are the published `exec.read-only-root-absent` and
+  `exec.read-only-file-absent` (422), each with a message that names no path; no bundle changes
+  (ADR 0010 and ADR 0033, amendments of 2026-11-22).
+
 ## [0.23.0] — 2026-11-21
 
 ### Added

@@ -21,6 +21,7 @@ mod git_roots;
 mod health;
 mod metrics;
 mod operations;
+mod private_paths;
 mod process_events;
 mod processes;
 mod responses;
@@ -36,6 +37,7 @@ pub(crate) use self::health::{
     Admission, ConnectionGauge, Listener, MaintenanceTask, Operations, RequestMetrics,
     StartupFacts, Telemetry, is_capability_fact_name, record_request,
 };
+pub use self::private_paths::PrivateHostPaths;
 pub use self::routes::router;
 pub(crate) use self::routes::{development_router, hosted_router};
 pub(crate) use self::service::SessionTransport;

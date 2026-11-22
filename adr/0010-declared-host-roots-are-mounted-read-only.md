@@ -89,3 +89,106 @@ record and the `exec.read-only-roots` fact's `max_roots` state it from bundle `0
 above is unchanged — each root is read-only, declared, pinned without a symlink and reported — and
 eight is still a list a reviewer reads. Bundles `0.23.0` to `0.26.0` keep their bytes and state
 four. (Decided 2026-11-20, issue #236.)
+
+## Amendment, 2026-11-22: a root that meets a path this host keeps private is refused
+
+A declared root admits host state into a confined process, and the caller chooses the host path.
+[ADR 0038](0038-writable-roots-are-named-host-paths-or-git-checkouts.md) decision 2 refuses a
+writable root that meets a path the daemon keeps for itself. This amendment states the same kind
+of rule for a read-only source: a root here, and a single file in
+[ADR 0033](0033-a-single-host-file-is-admitted-read-only.md), which carries the same amendment.
+Decides `story:read-only-mount-sources-refuse-the-daemons-private-paths`.
+
+### Decision
+
+1. **The rule.** A start is refused when a read-only root's `host_path` equals, lies under or
+   contains an entry of the read set. A read-only file's `host_path` is refused when it equals or
+   lies under one.
+2. **The read set**, as the daemon computes it from its own configuration:
+   - the state directory, which is the parent directory of `--state`: the durable ledger and what
+     is keyed beside it, the aperture directory, the host-process state and the instance lock;
+   - the workspace root: every subject's workspaces, and the capsule, scratch and Git-baseline
+     directories the host driver keeps under it;
+   - the production TLS private key, the static-bearer file, every secret-slot source, the
+     namespace driver's kubeconfig, the API socket and the delegated cgroup root.
+
+   Each entry is something only the daemon, or the one subject it serves a workspace to, may
+   read or reach. A workspace is given to a run by its identifier, never by host path, so the
+   workspace root holds nothing a start needs to name. The API socket is in the set because a
+   read-only bind does not stop a connect.
+3. **Narrower than the writable set.** ADR 0038 also keeps a writable root clear of the daemon
+   executable, the bubblewrap binary, the TLS certificate chain and both CA bundles. Those are
+   protected against replacement, not against reading, and they are not in the read set: a
+   toolchain root such as `/usr` may hold them and must still mount.
+4. **The set is the daemon's, not an embedder's.** Nothing is in it for lying under an embedding
+   application's directory. With `--state <E>/substrate/state.db` and
+   `--workspaces <E>/workspaces`, those two directories, everything under them and every
+   ancestor, `<E>` among them, are refused as a root, and `<E>/presets/<name>/<version>/tools`
+   mounts. With `--state <E>/state.db` the state directory is `<E>` and all of it is refused:
+   the daemon already requires that directory to be its own and owner-only. An embedder gives
+   Substrate a directory of its own.
+5. **Where and when.** At daemon admission, in `check_read_only_roots` and
+   `check_read_only_files` (`crates/substrate-daemon/src/app/operations.rs`), for `exec.start`
+   and, through its embedded exec input, `session.start`. It comes after the lexical rules and
+   the capability fact and before dispatch, so the ledger records the start as refused and no
+   driver sees it. The fact stays first: a host that publishes none says nothing about a path.
+6. **How it is compared.** By path component, never by string prefix, against each entry as
+   written and at every place it names at that admission, because a secret-slot file may be
+   replaced without a restart ([ADR 0012](0012-secret-slots-are-sealed-memfds.md)).
+   - As written: made absolute, with its `.` and `..` components removed by text, so a directory
+     the configured path only passes through is not taken for one that holds the entry.
+   - As resolved: the whole path with every link followed. Where it does not resolve, its
+     existing part resolved with the rest appended; and where what stops it is a link to a place
+     not written yet, also the place that link names, followed by hand for at most eight links.
+     The resolved forms are what protects an entry reached through a link.
+   - An entry that cannot be resolved at that moment is compared as written only, and the start
+     does not fail for that.
+
+   The entries are resolved once per start, for both lists, off the request's async worker and
+   under the daemon's bound for blocking I/O. The caller's path is compared as text. That is
+   sound with two existing rules: the wire admits only an absolute canonical `host_path`, and
+   the driver pins it with `openat2` `RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS` and binds
+   that descriptor, so a path that binds has no symlink in any component and its text is its
+   place in the daemon's mount namespace.
+7. **Every posture, daemon admission only.** There is no exception for the local Unix socket:
+   the reader is the confined program, not the caller. The set exists in the daemon
+   (`PrivateHostPaths` in `crates/substrate-daemon/src/app/private_paths.rs`), which is where it
+   is enforced, and the daemon cannot be composed without it: the application's constructor
+   takes the set, and outside the test harness a set is only ever the one of a daemon
+   configuration. The Kubernetes driver serves neither list, so the kubeconfig entry is not
+   reachable by a start today; it is in the set because the set is what the daemon keeps
+   private.
+
+### Refusal
+
+The published code for a root this host cannot give is reused: `exec.read-only-root-absent`,
+422 `refused`, at `read_only_roots`, with a message of its own:
+
+> A declared read-only root is not admitted: its host path meets a path this host keeps private.
+
+The wire crate already reads that code as "not present, or not reachable, on this host", and for
+a caller a private path is not reachable. No refusal code, schema or vector is added, no released
+bundle byte changes, and no successor bundle is cut. A code of its own needs a successor bundle
+and is left to the story named below.
+
+**What the answer tells.** The message names no entry of the set. A caller that may start an
+exec can still learn, one path at a time, whether a path it names meets the set: for a root in
+both directions, that the path lies at or under an entry or that it holds one, and for a file
+that it lies at or under one. This is accepted. The code is already the one a missing path is
+answered with, so a client that reads codes cannot tell the two apart; what differs is only the
+message. Giving a private path the missing path's message as well was not chosen: it would tell
+the caller something false, that nothing is there, and send an operator looking for a directory
+that exists. What a caller learns is that a path is one the daemon keeps, never what it holds:
+the rule exists so that such a path is not mounted.
+
+### Not decided
+
+- **The embedded library.** A consumer that opens the host driver in process is its own caller
+  and is not reached by decision 7. The driver knows its workspace root, its capsule and
+  aperture roots and its secret-slot sources, and knows no ledger and no listener key.
+- **A second name for a private object.** The rule compares paths. A hard link to a private
+  object, or a bind mount of one, elsewhere on the host is a name the host's operator made.
+  Telling it apart needs the pinned descriptor's device and inode, which is the driver's half
+  and answers after dispatch.
+- **Which sources may be named at all.** That is
+  `story:read-only-mount-sources-are-declared-by-the-operator`.
