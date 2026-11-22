@@ -4,7 +4,7 @@
     "page:concepts/adapters": {
       "reading_load.max": {
         "tolerance": 0,
-        "value": 122.0
+        "value": 104.0
       },
       "reading_load.median": {
         "tolerance": 0,
@@ -74,7 +74,7 @@
     "page:guides/confinement-profiles": {
       "reading_load.max": {
         "tolerance": 0,
-        "value": 109.0
+        "value": 108.0
       },
       "reading_load.median": {
         "decision": "story:linux-adapter-serves-scoped-workspace-write",
@@ -85,7 +85,7 @@
     "page:guides/deployment": {
       "reading_load.max": {
         "tolerance": 0,
-        "value": 119.0
+        "value": 103.0
       },
       "reading_load.median": {
         "tolerance": 0,
@@ -115,7 +115,7 @@
     "page:guides/run-a-command": {
       "reading_load.max": {
         "tolerance": 0,
-        "value": 56.0
+        "value": 55.0
       },
       "reading_load.median": {
         "tolerance": 0,
@@ -129,7 +129,7 @@
       },
       "reading_load.median": {
         "tolerance": 0,
-        "value": 39.5
+        "value": 39.0
       }
     },
     "page:guides/storage-and-metrics": {
@@ -155,7 +155,7 @@
     "page:reference/contract": {
       "reading_load.max": {
         "tolerance": 0,
-        "value": 235.0
+        "value": 87.0
       },
       "reading_load.median": {
         "tolerance": 0,

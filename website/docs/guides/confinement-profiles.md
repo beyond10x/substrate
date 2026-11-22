@@ -9,17 +9,18 @@ description: Open the adapters a host offers, read the families and facts each p
 embedder uses to run a command under confinement without a daemon. It is the host crate's API, not
 the wire contract: no contract bundle changes with it, and it is a development surface.
 
-A run takes three steps. Open an adapter, which proves what it can do. Describe what the run needs
-as a `ConfinementProfile`. Have the adapter admit the profile, then start the command under it.
-Anything the adapter did not prove is refused by name. Nothing falls back to another adapter, and
-nothing is quietly dropped.
+To run a command, open an adapter, which proves what it can do. Describe what the run needs as a
+`ConfinementProfile`. Have the adapter admit the profile, then start the command under it. Anything
+the adapter did not prove is refused with a code. Nothing falls back to another adapter, and nothing
+is dropped.
 
 ## Open what the host offers
 
 `confinement::open` takes one `AdapterRequest`: `Local`, `Linux`, `Macos`, `Systemd`, `Oci` or
 `Pod`, each carrying its own settings. An adapter that cannot open on this host answers
 `confinement.adapter-unserved`. Open every adapter your configuration offers and keep the ones that
-opened; which one opened is not something to branch on.
+opened. Do not branch on which one opened. [Confinement adapters](../concepts/adapters.md) explains
+what each adapter enforces, declares and refuses.
 
 | Adapter | What it is |
 |---|---|
@@ -29,9 +30,6 @@ opened; which one opened is not something to branch on.
 | `systemd` | a transient systemd scope around `local` or `linux` |
 | `oci` | one Docker or podman container per run, the image named by digest |
 | `pod` | one Kubernetes Pod per run, the image named by digest |
-
-[Confinement adapters](../concepts/adapters.md) explains what each one enforces, declares and
-refuses.
 
 ## Read the facts
 
@@ -46,7 +44,7 @@ refuses.
   `image_digest_pinned`.
   `proves(&fact)` asks for one.
 
-Two facts change how you write the profile and the command:
+`declared_insecure` and `paths_are_host_paths` change how you write the profile and the command:
 
 - `declared_insecure`: the run is not confined. The profile must carry a `local_reason` that is not
   blank, and every observation of the run carries that reason.
@@ -56,7 +54,7 @@ Two facts change how you write the profile and the command:
 What each adapter serves depends on the host. `linux` serves a family only when the driver's probe
 proved the mechanism behind it at open, so `limits` is absent without a delegated cgroup v2 root,
 and `filesystem_view` is absent without proven read-only roots and files. `local` serves
-`process_run`, `process_watch`, `output_read`, `wait`, `workspace` and `audit`, and nothing that
+`process_run`, `process_watch`, `output_read`, `wait`, `workspace` and `audit`, and no family that
 would claim confinement. No adapter serves `network_ingress`.
 
 ## Describe the run
@@ -87,22 +85,23 @@ Each profile field needs the family or the fact beside it.
 `ingress_routes` and `rate_bounds` are reserved: any value is
 `confinement.reserved-field-unserved`. `profile.required_facts()` lists the facts a profile
 requires, in the order above. `profile.required_families()` lists the families its `families` and
-its fields imply, in the order above, except two that depend on more than the profile's fields:
-`audit` for an `audit` sink, and `network_egress` for `network: Isolated` on an adapter that proves
-`host_network`. Admission requires both, so add them yourself (see `needed` below).
+its fields imply, in the order above. It leaves out two that depend on more than the profile's
+fields: `audit` for an `audit` sink, and `network_egress` for `network: Isolated` on an adapter that
+proves `host_network`. Admission requires both, so add them yourself (see `needed` below).
 
 A workspace is the directory the run starts in and may write, so a build that writes `target/`
 inside it needs no more than `workspace`. A directory outside it is a declared root:
 `read_only_roots` for a toolchain, `writable_roots` for an install root the operator declared by
 name.
 
-`workspace_access: Scoped` names the subtrees a run may write; the rest of the workspace is
-read-only. `linux` and `systemd` around it serve it. The run cannot write the root's `.git`, and a
+`workspace_access: Scoped` lists the subtrees a run may write. The rest of the workspace is
+read-only. `linux` and `systemd` around it serve it. The run cannot write the root's `.git`. A
 subtree that is `.git`, lies beneath it or holds a submodule the root's `.gitmodules` registers is
-refused (`confinement.writable-subtree-git`). Limits: an unregistered nested `.git` stays writable,
-and host Git run inside a subtree reads a repository the run created there, so run it in the root.
-A hard link made on the host before the run stays writable through a subtree; the run cannot
-create one (`EXDEV`).
+refused (`confinement.writable-subtree-git`).
+
+Limits: an unregistered nested `.git` stays writable. Host Git run inside a subtree reads a
+repository the run created there, so run it in the root. A hard link made on the host before the
+run stays writable through a subtree. The run cannot create one (`EXDEV`).
 
 ## Choose an adapter by its facts
 
@@ -144,14 +143,15 @@ let chosen = offered
     .min_by_key(|adapter| adapter.facts().declared_insecure());
 ```
 
-`covers` is a preselection; admission is the answer. An adapter can refuse what its families do
+`covers` is a preselection, and admission decides. An adapter can refuse what its families do
 not show: `linux` refuses a `workdir` its host has not proved with `exec.workdir-unserved`, and a
-writable root the operator did not declare with `exec.writable-roots-host-unserved`. When an
-adapter does not cover a profile, admitting it there is refused in the order of the refusals table
-below. Past its first seven rows, that is `confinement.family-unserved` naming the first family of
-`needed` the adapter does not serve, or, when it serves them all,
-`confinement.fact-unserved` naming the first fact of `required_facts()` it did not prove. Either
-can be read from the facts before the call.
+writable root the operator did not declare with `exec.writable-roots-host-unserved`.
+
+An adapter that does not cover a profile refuses to admit it, in the order of the refusals table.
+Past its first seven rows, the refusal is `confinement.family-unserved`, which reports the first
+family of `needed` the adapter does not serve. When the adapter serves them all, it is
+`confinement.fact-unserved`, which reports the first fact of `required_facts()` it did not prove.
+Either can be read from the facts before the call.
 
 ## Admit, start and observe
 
@@ -162,15 +162,15 @@ let ended = adapter.wait(&run).await?;
 let output = adapter.output(&run).await?;
 ```
 
-`Command` holds the `argv` and the whole environment; nothing is inherited from the embedding
+`Command` holds the `argv` and the whole environment. Nothing is inherited from the embedding
 process. A profile admitted by one adapter starts only on that adapter, and a start decides the
-profile again against the adapter's own facts. `observe`, `signal` and `render` (the program and
-arguments a start would run, without running it) take the same run or admitted profile.
+profile again against the adapter's own facts. `observe`, `signal` and `render` take the same run or
+admitted profile. `render` gives the program and arguments a start would run, without running it.
 
 ## Executable allow-lists on linux
 
-`exec_subpaths` names what a run may execute. The two adapters that prove the fact differ on an
-empty list, and the difference is deliberate:
+`exec_subpaths` lists what a run may execute. The two adapters that prove the fact differ on an
+empty list:
 
 | `exec_subpaths` | `linux` | `macos` |
 |---|---|---|
@@ -178,8 +178,8 @@ empty list, and the difference is deliberate:
 | not empty | the program and what the entries name | the program and what the entries name |
 
 On `linux` the fact needs a helper. Build `substrate-exec-gate` from the revision you pin the
-host crate at, install a copy, and name it in `HostConfig.exec_gate` as an absolute path. Without
-it the adapter opens and a profile with a list is `confinement.fact-unserved` (501).
+host crate at, install a copy, and set `HostConfig.exec_gate` to its absolute path. Without it
+the adapter opens and a profile with a list is `confinement.fact-unserved` (501).
 
 An entry names a directory, which admits every file beneath it, or one file:
 
@@ -194,22 +194,22 @@ An entry names a directory, which admits every file beneath it, or one file:
 | a link whose target passes through a writable mount | `exec.sandbox-path-unrepresentable` (422) |
 
 - Entries are paths the run sees, not host paths. A toolchain in a home directory is declared as
-  a read-only root, and the entry names its mount.
+  a read-only root, and the entry is the path of its mount.
 - The program is an absolute path when the list is not empty.
 - List the directory that holds the programs, not one above it. With `/usr` listed, `/bin/sh` is
-  denied on a host whose `/bin` is a link into `/usr`; with `/usr/bin` listed both names run.
+  denied on a host whose `/bin` is a link into `/usr`. With `/usr/bin` listed both names run.
 - An entry admits a file by where the file itself lies. A symbolic link in a listed directory
   that points outside it is not admitted. On Ubuntu 26.04, `ln`, `env`, `cat`, `ls` and `mkdir`
   in `/usr/bin` are links into `/usr/lib/cargo/bin/coreutils` and are denied with only
-  `/usr/bin` listed; `mv`, `cp`, `rm` and `true` are links to `gnu*` names in `/usr/bin` and
-  run. List the directory the tools really lie in as well, or the tool itself.
+  `/usr/bin` listed. `mv`, `cp`, `rm` and `true` are links to `gnu*` names in `/usr/bin` and
+  run. Also list the directory the tools lie in, or the tool itself.
 - A declared root or file mounted at or beneath `/.substrate-exec-gate` is refused when the
   profile has a list: the helper is bound there.
 - Create `target` or `node_modules` before the start: an entry must exist.
 - The list limits which files are executed. An allowed interpreter still runs any script it can
   read, and the loader run as a program loads any file.
 - The run's variables are not filtered. An object that `LD_PRELOAD` names is loaded into every
-  allowed dynamic program and runs its code there; an execution it makes of an unlisted path
+  allowed dynamic program and runs its code there. An execution it makes of an unlisted path
   still fails. Leave such names out of `Command.env` where that is not wanted.
 - An entry, or the program, whose path in the run's view is longer than 4095 bytes is refused
   `exec.sandbox-path-unrepresentable` (422).
@@ -222,7 +222,7 @@ and `tmpfs`. Where that cannot be established the answer names one of ten causes
 
 A file system mounted beneath a location a run can write (`workspace_root`, a declared writable
 root, a workspace) lies in that location: a read-only root declared on it counts as one a run
-can write, and a helper installed on it is refused. `mount-covered` names such a mount that a
+can write, and a helper installed on it is refused. `mount-covered` reports such a mount that a
 later mount hides, or two mounts on one mount point: unmount one, or declare another directory.
 
 A listed path is refused where it ends on another file-system type, reads a symbolic link
@@ -231,7 +231,7 @@ there or passes through a directory there, with `file-system-unlisted`.
 A read-only root that shows a location a run can write is one itself from then on. A mount
 beneath it that cannot be compared refuses the start, as beneath a workspace.
 
-One limit: a file system that shows under two device numbers, such as a network file system
+One limit is a file system that shows under two device numbers, such as a network file system
 mounted twice with different options or two FUSE mounts of one directory. The comparison of
 mounts cannot see that a read-only root and a writable location hold the same files. The only
 guard is that nothing on a file system other than `ext4`, `overlay` and `tmpfs` is followed.
@@ -247,15 +247,15 @@ text repeats the cause. A profile without a list asks for no place and runs as b
 
 ## Executable deny-lists
 
-`exec_denied_paths` names what a run never executes, even beneath an `exec_subpaths` entry.
+`exec_denied_paths` lists what a run never executes, even beneath an `exec_subpaths` entry.
 `linux`, `systemd` around it and `macos` prove the fact `exec_denied_paths`. Every other adapter
 refuses the profile `confinement.fact-unserved` (501).
 
 - An entry has the form of an `exec_subpaths` entry: a file or a directory, relative beneath
   the workspace or absolute in the same locations. A profile holds at most 64. An entry may
   be absent when the run starts.
-- A denied path wins over a listed directory that holds it, over an entry that names it and
-  over the program. A start whose program is denied is `exec.sandbox-program-unlisted` (422).
+- A denied path wins over a listed directory that contains it, over an entry for the same path
+  and over the program. A start whose program is denied is `exec.sandbox-program-unlisted` (422).
 - A deny-list needs an allow-list. Without `exec_subpaths` the profile is
   `confinement.exec-denied-paths-without-subpaths` (422) on every adapter.
 - What fails is `execve` of the path. The loader given a denied program runs it, and `sh` given
@@ -264,12 +264,13 @@ refuses the profile `confinement.fact-unserved` (501).
   no directory the run can write beside a deny-list.
 
 On `linux` a denied program is found by where its file lies, not by the text of a path, and
-across mounts. Where a mount beneath a denied directory, or beneath a listed directory of a
-profile with a deny-list, cannot be compared, the start is `exec.sandbox-place-unserved` (501):
-`mount-covered`, `mount-root-deleted`, and `file-system-unlisted` beneath a denied directory or
-as an entry of a directory that holds a denied path. For that last case, what decides is where
-the deny entry is, not the mount: the helper expands only the directories on the way to a deny
-entry.
+across mounts.
+
+Where a mount beneath a denied directory, or beneath a listed directory of a profile with a
+deny-list, cannot be compared, the start is `exec.sandbox-place-unserved` (501): `mount-covered`,
+`mount-root-deleted`, and `file-system-unlisted` beneath a denied directory or as an entry of a
+directory that holds a denied path. For that last case, what decides is where the deny entry is,
+not the mount: the helper expands only the directories on the way to a deny entry.
 
 | A mount of a type other than `ext4`, `overlay` and `tmpfs` | The start |
 |---|---|
@@ -301,7 +302,7 @@ entry.
   write. **A deny-list is exact only where the run cannot write.** The figures in the table
   are measured statuses.
 - A layer of an overlay is another file system to the kernel, and a program denied in the
-  overlay runs from the layer. So never list a lower directory of an overlay that is also in the
+  overlay runs from the layer. Do not list a lower directory of an overlay that is also in the
   view.
 - A start with a deny-list reads every directory it expands and writes at most 65536 rules.
   Where a directory cannot be read, or beyond that number, the run ends with status 125 and
@@ -314,18 +315,20 @@ entry.
 
 On `macos` the entries are Seatbelt deny rules after every allow. A hard link to a denied
 program under another path runs. **A limit on `macos`:** the deny rules were read and run only
-in the hosted macOS check, never on a workstation, and how Seatbelt matches a deny entry
-written in another letter case on a case-insensitive volume is not verified.
+in the hosted macOS check, not on a workstation. How Seatbelt matches a deny entry written in
+another letter case on a case-insensitive volume is not verified.
 
 ## Build with the macOS developer tools
 
 Inside the Seatbelt policy, the `/usr/bin/cc` and `xcrun` shims cannot find the compiler or the
 SDK: they ask `xcodebuild` through `/bin/sh`, which no exec subpath allows. So `macos` resolves the
-selected developer tools once, when it opens. It runs `/usr/bin/xcrun --sdk macosx` outside the
-sandbox for the SDK path, `clang` and `ar`, with a cleared environment (`PATH=/usr/bin:/bin` and
-nothing else) and `/` as its working directory, so no `DEVELOPER_DIR` or `TOOLCHAINS` of the
-embedding process chooses the answer. Each answer must be an absolute path that resolves beneath
-the selected developer tools. On a host without developer tools, `xcrun` is not run.
+selected developer tools once, when it opens.
+
+It runs `/usr/bin/xcrun --sdk macosx` outside the sandbox for the SDK path, `clang` and `ar`, with
+a cleared environment (`PATH=/usr/bin:/bin` and nothing else) and `/` as its working directory. So
+no `DEVELOPER_DIR` or `TOOLCHAINS` of the embedding process chooses the answer. Each answer must be
+an absolute path that resolves beneath the selected developer tools. On a host without developer
+tools, `xcrun` is not run.
 
 A start then gets these variables, each only when its path lies beneath one of the profile's
 `exec_subpaths`, and only when the command's environment does not name it:
@@ -339,12 +342,12 @@ A start then gets these variables, each only when its path lies beneath one of t
 | `AR` | `ar` |
 
 A confined `cargo build` or `cargo test`, and a build script that compiles C, then link without
-reaching the shim. A linker variable outranks a linker a cargo configuration file names; to use
+reaching the shim. A linker variable outranks a linker a cargo configuration file names. To use
 another, set the variable in the command's environment. Nothing is resolved again at a start, and
 the Seatbelt policy gains no rule.
 
 A start whose exec subpaths reach the developer tools is refused
-`exec.sandbox-developer-tools-unresolved` (501), naming why, before anything runs, when:
+`exec.sandbox-developer-tools-unresolved` (501) with the reason, before anything runs, when:
 
 - the open could not resolve the SDK, `clang` or `ar`;
 - other developer tools are selected than at open, including when the open found none;
@@ -354,7 +357,7 @@ A start whose exec subpaths reach the developer tools is refused
 
 ## Refusals
 
-Admission refuses in this order and names the first refusal it meets:
+Admission checks in this order and returns the first refusal it meets:
 
 | Order | Code | Status | When |
 |---|---|---|---|
@@ -376,7 +379,7 @@ on every adapter that runs the program in a host directory. `pod` runs it in its
 `/workspace` instead.
 
 The host's operator can forbid `local` by setting `SUBSTRATE_CONFINEMENT_LOCAL` to any value other
-than `permit`; an embedder can only tighten that, with `LocalPolicy::Refuse`.
+than `permit`. An embedder can only tighten that, with `LocalPolicy::Refuse`.
 
 Read [confinement and refusal](../concepts/confinement.md) for the guarantees the `linux` adapter's
 host driver enforces.

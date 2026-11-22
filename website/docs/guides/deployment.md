@@ -47,15 +47,14 @@ substrate-daemon \
   --hosted-identity-ca-bundle /run/substrate-identity/ca.pem
 ```
 
-The certificate chain and key must be non-empty regular files rather than symlinks. The key must
+The certificate chain and key must be non-empty regular files and not symlinks. The key must
 belong to the daemon's effective user and carry no group or other permission bits. Startup validates
 the leaf certificate's time window and its agreement with the key before binding.
 
 To rotate the identity, replace both files completely and send the daemon SIGHUP. New connections
-use the replacement only after the complete pair validates; existing connections keep the snapshot
-under which they connected. If a replacement is invalid, new connections continue to use the last
-valid pair and the daemon emits the safe condition `tls.reload-invalid` without certificate or key
-bytes.
+use the replacement only after the complete pair validates. Existing connections keep the snapshot
+under which they connected. If a replacement is invalid, new connections keep using the last valid
+pair and the daemon emits the safe condition `tls.reload-invalid` without certificate or key bytes.
 
 The listener authenticates the daemon with its server certificate, then authenticates each caller
 from a short-lived opaque Identity access credential. Configure Identity's deployment-owned
@@ -96,16 +95,20 @@ the handler can write durable state:
 Missing, invalid, under-scoped and temporarily unavailable authority returns
 `auth.credential-absent`, `auth.authority-invalid`, `auth.scope-denied` or
 `auth.authority-unavailable`. No stale authority is cached, so a completed Identity revocation
-applies to the next request. The per-request cost is one HTTP round trip to Identity: Substrate
-keeps at most 8 idle keep-alive connections to the Identity origin, closes one after 30 seconds
-idle, and never reuses a connection after an error, a refusal or a response that asked to close it.
-A TCP and TLS handshake happens only when no idle connection is available. Caller-written subject, tenant, actor, UID and forwarded-address
-headers do not become identity. There is no production plaintext fallback, mutual-TLS identity
-mapping, trusted forwarded address, redirect, proxy, or verification-disable switch.
+applies to the next request.
+
+The per-request cost is one HTTP round trip to Identity. Substrate keeps at most 8 idle keep-alive
+connections to the Identity origin, closes one after 30 seconds idle, and never reuses a connection
+after an error, a refusal or a response that asked to close it. A TCP and TLS handshake happens
+only when no idle connection is available.
+
+Caller-written subject, tenant, actor, UID and forwarded-address headers do not become identity.
+There is no production plaintext fallback, mutual-TLS identity mapping, trusted forwarded address,
+redirect, proxy, or verification-disable switch.
 
 ## Static-bearer TCP is development-only
 
-The currently implemented TCP transport is deliberately restricted. It requires all of:
+The currently implemented TCP transport requires all of:
 
 - an explicit development-only acknowledgement;
 - an explicit private-overlay acknowledgement;
@@ -118,12 +121,13 @@ for local development.
 
 ## Operational health and metrics
 
-`--ops-listen <address:port>` (or `SUBSTRATE_OPS_LISTEN`) starts a separate operational listener.
-It is off by default, and it must use a different address from every control listener. It is
+`--ops-listen <address:port>`, or `SUBSTRATE_OPS_LISTEN`, starts a separate operational listener.
+It is off by default and must use a different address from every control listener. It is
 plaintext and unauthenticated, so bind it to loopback or a network only your monitoring can reach.
-It answers `GET` on three paths. Every other path and method, a request body and an upgrade get
-`404` with an empty body. It serves at most 8 connections, at most 4 of them from one source
-address, and gives each 2 seconds to send its request head.
+
+The listener answers `GET` on three paths. Every other path and method, a request body and an
+upgrade get `404` with an empty body. It serves at most 8 connections, at most 4 of them from one
+source address, and gives each 2 seconds to send its request head.
 
 | Path | Answer |
 |---|---|
@@ -131,7 +135,7 @@ address, and gives each 2 seconds to send its request head.
 | `/readyz` | `200` when every check passes, otherwise `503`; one `<check> ok` or `<check> failed` line each for `store`, `schema`, `maintenance` and `driver` |
 | `/metrics` | OpenMetrics text, `application/openmetrics-text; version=1.0.0` |
 
-The four readiness checks:
+The readiness checks:
 
 - `store`: one read-only statement returns within 1 second.
 - `schema`: that statement reads the schema version this binary expects. The daemon refuses to
@@ -140,8 +144,8 @@ The four readiness checks:
   directory before upgrading if you may roll back.
 - `maintenance`: each maintenance task completed a round in the last 5 seconds.
 - `driver`: the startup capability snapshot publishes every `--ops-require-fact <fact>`. The flag is
-  repeatable (or `SUBSTRATE_OPS_REQUIRE_FACT`, comma-separated). Startup refuses a name that is not
-  a capability fact.
+  repeatable, or set `SUBSTRATE_OPS_REQUIRE_FACT`, comma-separated. Startup refuses a name that is
+  not a capability fact.
 
 `/readyz` never calls Identity. It answers `503` from the moment shutdown begins, before any
 listener closes.
@@ -152,10 +156,11 @@ path, address or credential appears in a label or a value. A scrape carries at m
 a host daemon and at most 585 samples on a daemon running `--driver kubernetes`.
 
 - **Build and readiness:** `substrate_build_info`, `substrate_ready`.
-- **Host daemon only:** `substrate_adapter_info{adapter}`, always `1`, naming the confinement
-  adapter that confines this daemon's runs (`linux` for the host driver). Only the operator sees
-  the name: the API states which confinement families and properties the daemon proved, never the
-  adapter. A `--driver kubernetes` daemon opens no adapter and does not publish it.
+- **Host daemon only:** `substrate_adapter_info{adapter}`, always `1`, labeled with the
+  confinement adapter that confines this daemon's runs (`linux` for the host driver). Only the
+  operator sees the name: the API states which confinement families and properties the daemon
+  proved, never the adapter. A `--driver kubernetes` daemon opens no adapter and does not publish
+  it.
 - **Requests:** `substrate_http_requests_total`, `substrate_http_request_duration_seconds`,
   `substrate_refusals_total`.
 - **Dispatch:** `substrate_dispatch_total`, `substrate_dispatch_duration_seconds`.
@@ -213,12 +218,12 @@ The chart refuses to render until you supply each of these:
 | `identity.egress` | Identity's address range and port |
 | `cidr` of each Git source and aperture | the range its egress rule admits |
 
-The certificate names each pod's host and nothing else. `helm template` prints the names, and the
-chart writes them to the ConfigMap `<release>-certificate-names`.
+The certificate carries only each pod's host name. `helm template` prints the names, and the chart
+writes them to the ConfigMap `<release>-certificate-names`.
 
 ### Address one pod, never the Service
 
-Every pod has its own name:
+A pod has its own name:
 `<release>-<ordinal>.<release>.<namespace>.svc.<cluster domain>`. Send a client's requests to one
 pod by that name. The Service name resolves to every ready pod. A workspace or operation created on
 one pod does not exist on another, and the certificate does not name the Service.
@@ -267,17 +272,16 @@ first released in 0.16.1.
 What it does not do yet:
 
 - **Exec is served only on observed confinement.** From 0.18.0 the probe publishes the confinement
-  families, `confinement.whole-tree-kill` and `confinement.no-egress` from what it observed, and an
-  exec start is admitted only when all six facts of design 34 § 6.4 are present; otherwise it is
+  families, `confinement.whole-tree-kill` and `confinement.no-egress` from what it observed. An
+  exec start is admitted only when all six facts of design 34 § 6.4 are present. Otherwise it is
   refused `exec.sandbox-unavailable`. The four Linux confinement facts are never published.
 - **Exec needs a network plugin that denies locally.** `confinement.no-egress` needs each of the
-  probe's three egress attempts denied inside the Pod (`EPERM` or `EACCES`); a timed-out or
-  no-route attempt never counts. A plugin that drops denied packets silently,
-  kind's default plugin among them, leaves the fact absent, and exec stays refused as in 0.17.0.
-  On kind a Pod under the default-deny policy still reached the API server, and another probe
-  timed out all three attempts. No plugin that denies locally has been observed by the lane yet.
-  Inferred, not verified: kind's plugin may enforce NetworkPolicy only after a Pod's first
-  moments.
+  probe's three egress attempts denied inside the Pod (`EPERM` or `EACCES`). A timed-out or
+  no-route attempt does not count. A plugin that only drops denied packets, kind's default plugin
+  among them, leaves the fact absent, and exec stays refused as in 0.17.0. On kind a Pod under
+  the default-deny policy still reached the API server, and another probe timed out all three
+  attempts. The lane has not yet observed a plugin that denies locally. Inferred, not verified:
+  kind's plugin may enforce NetworkPolicy only after a Pod's first moments.
 - **Shared clean-room conformance follows in the next release.** The namespace lane reports that
   step absent until `story:remote-clean-room-conformance` lands.
 
@@ -313,7 +317,7 @@ Name it by digest as `executor_image`.
 | keeper Pod | `sbx-ws-<h>-keeper` | every file route, through the executor over `pods/exec` |
 | exec Pod | `sbx-ex-<h>` | one exec, once an exec is admitted |
 
-Every object carries the deployment's labels, and every delete names the uid the create answered.
+Every object carries the deployment's labels, and every delete gives the uid the create answered.
 The driver never modifies or deletes an object of another deployment, or one it has no record of.
 
 ### The Role
@@ -342,17 +346,17 @@ wildcard or any verb on `secrets` is refused at startup (`kubernetes.rbac-excess
 | The probe passes | probed facts published |
 | A probe fails or lapses | those facts absent again |
 
-The log names each failure's code. The cluster check repeats every 10 s; a failed probe after 60 s.
-It refuses a Lease another instance holds, a policy that is not default-deny, a namespace that
-admits a `privileged` Pod, and an executor that fails its handshake.
+The log gives each failure's code. The cluster check repeats every 10 s, and a failed probe repeats
+after 60 s. It refuses a Lease another instance holds, a policy that is not default-deny, a
+namespace that admits a `privileged` Pod, and an executor that fails its handshake.
 
 The probe creates a claim, a keeper and a Pod, then deletes them. It proves
 `workspace.guarded-io`, `workspace.openat2-beneath`, `workspace.atomic-replace` and
 `exec.argv-only`, each from its own observation.
 
 Readiness reads one snapshot, taken after the first probe, or when the cluster check fails for a
-reason a retry cannot clear (RBAC, NetworkPolicy, Pod Security). A held Lease or an unanswering API
-is retried and keeps the daemon unready until then. A fact named by `--ops-require-fact` and
+reason a retry cannot clear: RBAC, NetworkPolicy or Pod Security. A held Lease or an unanswering
+API is retried and keeps the daemon unready until then. A fact named by `--ops-require-fact` and
 absent from the snapshot keeps the daemon unready until it restarts.
 
 ### What it answers
@@ -366,14 +370,14 @@ absent from the snapshot keeps the daemon unready until it restarts.
 | an exec start whose snapshot lacks any of the six observed confinement facts | `exec.sandbox-unavailable` (501) |
 
 A lost Lease makes every fact absent. After a restart, a workspace whose claim is found and whose
-keeper answers its handshake is ready again, and an exec still running reads `unknown` and its Pod
-is deleted.
+keeper answers its handshake is ready again. An exec still running then reads `unknown`, and its
+Pod is deleted.
 
 ## Rules that do not change by posture
 
-- Never bind a reachable unauthenticated control listener.
-- Never infer a capability from a posture name.
-- Never weaken a requested sandbox because the selected machine lacks enforcement.
+- Do not bind a reachable unauthenticated control listener.
+- Do not infer a capability from a posture name.
+- Do not weaken a requested sandbox because the selected machine lacks enforcement.
 - Keep fleet scheduling, membership, rich grants, product quotas, and billing outside the daemon.
 - Keep continuous session bytes off an ordinary governance or invocation proxy.
 - Scope resources and operation IDs to the authenticated subject.
@@ -394,7 +398,7 @@ If any answer relies on “the surrounding network is probably safe,” keep the
 
 ## Unrecorded interactive sessions
 
-`--allow-unrecorded-sessions` (or `SUBSTRATE_ALLOW_UNRECORDED_SESSIONS=true`) explicitly permits
+`--allow-unrecorded-sessions`, or `SUBSTRATE_ALLOW_UNRECORDED_SESSIONS=true`, permits
 authorized clients to select live-only terminal output. It defaults to disabled and does not
 change ordinary session capture. The same confinement, identity, scope and attachment checks apply.
 See the [Rust SDK guide](./rust-sdk.md#stream-terminal-output-without-recording-it) for selection,
