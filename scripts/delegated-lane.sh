@@ -490,6 +490,11 @@ require_staged security5_exec_denied \
 require_staged adversary5_exec_denied_round2 \
   '=adversary5 exec deny routes' \
   'adversary5 exec deny beside unlisted mount'
+# The third security look's root (S9-1, S9-2): one staged case of fourteen starts. The
+# refusal before dispatch for a mount among the entries of an expanded directory is what the
+# helper would end with status 125, and no start the helper would run.
+require_staged security6_exec_denied \
+  'security6 exec denied the refusal for a mount among the entries'
 require_staged adversary4_exec_denied \
   '=adversary4 exec deny other names' \
   '=adversary4 exec deny limit created later' \

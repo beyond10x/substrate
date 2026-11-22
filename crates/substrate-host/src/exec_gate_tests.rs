@@ -2630,6 +2630,7 @@ fn sighted_at(
             .table()
             .place_of(&seen(path, mount_id))
             .expect("the place of a path of the table"),
+        mount: Some(mount_id),
         file,
     }
 }
@@ -2911,6 +2912,269 @@ fn an_unlisted_mount_among_the_entries_of_an_expanded_directory_refuses_the_star
         &[sighted_at(&tree, 70, "/usr/local/src", None)],
     )
     .expect("a holder the listed directory does not reach is not asked");
+}
+
+/// The root file system of the cases on entered mounts, and `rows` beneath it.
+fn host_with(rows: &str) -> MountTree {
+    tree(&format!(
+        "31 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw\n{rows}"
+    ))
+}
+
+/// What `judge_denied` answers for `/usr/bin/sh` on the root file system of `tree`.
+fn judged_on(
+    tree: &MountTree,
+    denied: &[(&str, Sighted)],
+    listed: &[Sighted],
+) -> Result<(), DriverError> {
+    let program = sighted_at(tree, 31, "/usr/bin/sh", Some((7, 5)));
+    judge_denied(tree, "/usr/bin/sh", &program, denied, listed)
+}
+
+/// The refusal before dispatch of a start whose helper would ask what the root of a mount
+/// reaches and could not have it: the covered mount at `mount_point`.
+fn assert_root_unreached(answer: Result<(), DriverError>, mount_point: &str, what: &str) {
+    let error = answer.expect_err(what);
+    assert_eq!(error.code, PLACE_UNSERVED, "{what}: {error}");
+    assert_eq!(error.class, DriverErrorClass::Unserved, "{what}: {error}");
+    assert_eq!(
+        error.address.as_deref(),
+        Some("exec_subpaths"),
+        "{what}: {error}"
+    );
+    let line = format!("cannot establish where {mount_point} is attached: mount-covered");
+    assert!(error.message.contains(&line), "{what}: {error}");
+}
+
+/// **What the root of a mount reaches is asked where the helper would step that mount as a
+/// directory** (D30 with D11 step 3; security review S9-1). `/opt/k/a/back` is a second
+/// mount of `/opt/k/b`, and two tmpfs are stacked on `/opt/k/b/sub`. The stack is not
+/// beneath `/opt/k/a`: it is attached under the root file system, not under the bind. It is
+/// beneath the place of `/opt/k/b`, which the helper asks about when it steps `a/back`.
+/// Dispatched, that start ends with the helper's status; here it is refused first.
+///
+/// Only where the helper would step the mount: the directory that holds its mount point is
+/// expanded. Beside a deny entry elsewhere, and one directory below the expanded one, the
+/// mount lies in a directory that gets one rule, and nothing is asked of its root.
+#[test]
+fn the_root_of_a_mount_among_the_entries_of_an_expanded_directory_is_asked_what_it_reaches() {
+    let tree = host_with(
+        "\
+90 31 259:2 /opt/k/b /opt/k/a/back rw - ext4 /dev/nvme0n1p2 rw
+91 31 0:70 / /opt/k/b/sub rw - tmpfs tmpfs rw
+92 91 0:71 / /opt/k/b/sub rw - tmpfs tmpfs rw
+93 31 259:2 /opt/k/b /opt/k/far/in/back rw - ext4 /dev/nvme0n1p2 rw
+",
+    );
+    let at = |path: &str| sighted_at(&tree, 31, path, None);
+    let file = |mount_id: u64, path: &str| sighted_at(&tree, mount_id, path, Some((7, 9)));
+    let judged =
+        |denied: Sighted, listed: &[Sighted]| judged_on(&tree, &[("denied", denied)], listed);
+    let stack = "/opt/k/b/sub";
+
+    // The staged shape: the listed directory holds the bind and the denied file.
+    assert_root_unreached(
+        judged(
+            file(31, "/opt/k/a/tool"),
+            &[at("/opt/k/a"), at("/opt/k/bin")],
+        ),
+        stack,
+        "the deny entry beside the mount",
+    );
+    assert_root_unreached(
+        judged(at("/opt/k/a/later"), &[at("/opt/k/a")]),
+        stack,
+        "a deny entry that does not exist yet",
+    );
+    // The denied file lies in the bind itself: the listed directory reaches it there.
+    assert_root_unreached(
+        judged(file(90, "/opt/k/a/back/tool"), &[at("/opt/k/a")]),
+        stack,
+        "the deny entry in the mount",
+    );
+    // The listed directory is above the one that holds the mount: both are expanded.
+    assert_root_unreached(
+        judged(file(31, "/opt/k/far/in/tool"), &[at("/opt/k/far")]),
+        stack,
+        "the holder below the listed directory",
+    );
+
+    // The deny entry elsewhere: each listed directory gets one rule.
+    judged(
+        file(31, "/opt/k/bin/tool"),
+        &[at("/opt/k/a"), at("/opt/k/far"), at("/opt/k/bin")],
+    )
+    .expect("a deny entry beside the listed directories expands none of them");
+    // One directory deeper than the deny entry: `far` is expanded, `far/in` gets one rule.
+    judged(file(31, "/opt/k/far/tool"), &[at("/opt/k/far")])
+        .expect("the mount is an entry of a directory that is not expanded");
+    // A listed file is asked nothing, as before.
+    judged(file(31, "/opt/k/a/tool"), &[file(31, "/opt/k/a/prog")])
+        .expect("a listed file reaches nothing");
+}
+
+/// **The walk across the mounts asks nothing of a mount in a denied place** (S9-1, the
+/// other direction). Two shapes in which the root of a mount beneath the listed directory
+/// reaches a covered mount, and the helper never asks:
+///
+/// - the root lies in a denied place: step 1, no rule, and nothing asked;
+/// - the directory that holds the mount point lies in a denied place: it is not expanded.
+///
+/// Each with the start beside it that the helper would end: the same root, not denied, and
+/// the same holder, expanded.
+#[test]
+fn the_walk_across_the_mounts_asks_nothing_of_a_mount_in_a_denied_place() {
+    // The root in a denied place. The device `8:49` shows at `/opt/k/d/y`, whole, and its
+    // directory `/in` at `/opt/k/g/back`; the stack is under a third mount of it.
+    let tree = host_with(
+        "\
+94 31 8:49 / /opt/k/d/y rw - ext4 /dev/sdd1 rw
+95 31 8:49 /in /opt/k/g/back rw - ext4 /dev/sdd1 rw
+96 31 8:49 / /srv/z rw - ext4 /dev/sdd1 rw
+97 96 0:72 / /srv/z/in/sub rw - tmpfs tmpfs rw
+98 97 0:73 / /srv/z/in/sub rw - tmpfs tmpfs rw
+",
+    );
+    let at = |path: &str| sighted_at(&tree, 31, path, None);
+    let tool = || ("tool", sighted_at(&tree, 31, "/opt/k/g/tool", Some((7, 9))));
+    judged_on(
+        &tree,
+        &[("directory", at("/opt/k/d")), tool()],
+        &[at("/opt/k/g")],
+    )
+    .expect("a mount whose root lies in a denied place gets no rule and is asked nothing");
+    assert_root_unreached(
+        judged_on(&tree, &[tool()], &[at("/opt/k/g")]),
+        "/srv/z/in/sub",
+        "the same root, not denied",
+    );
+
+    // The holder in a denied place. `/opt/k/d/y` shows `/deep` of the device, which is
+    // whole at `/opt/k/g/vol`; a bind of `/srv/e` is attached there in `deep`.
+    let tree = host_with(
+        "\
+94 31 8:49 /deep /opt/k/d/y rw - ext4 /dev/sdd1 rw
+95 31 8:49 / /opt/k/g/vol rw - ext4 /dev/sdd1 rw
+96 95 259:2 /srv/e /opt/k/g/vol/deep/x rw - ext4 /dev/nvme0n1p2 rw
+97 31 0:72 / /srv/e/sub rw - tmpfs tmpfs rw
+98 97 0:73 / /srv/e/sub rw - tmpfs tmpfs rw
+",
+    );
+    let at = |path: &str| sighted_at(&tree, 31, path, None);
+    let tool = || ("tool", sighted_at(&tree, 31, "/opt/k/g/tool", Some((7, 9))));
+    judged_on(
+        &tree,
+        &[("directory", at("/opt/k/d")), tool()],
+        &[at("/opt/k/g")],
+    )
+    .expect("a mount in a directory that lies in a denied place is never met");
+    // The walk goes on in a mount it steps: `g`, then `g/vol`, then `g/vol/deep/x`.
+    let deep = sighted_at(&tree, 95, "/opt/k/g/vol/deep/tool", Some((7, 10)));
+    assert_root_unreached(
+        judged_on(&tree, &[("deep", deep)], &[at("/opt/k/g")]),
+        "/srv/e/sub",
+        "the same holder, expanded, two mounts down",
+    );
+}
+
+/// **The walk across the mounts is by the mount tree** (S9-1, the other direction). A mount
+/// attached under a second mount of the listed directory's file system is beneath the
+/// listed directory by place. The walk of that directory, on its own mount, sees a plain
+/// directory there and gives it one rule: the root of the mount is not asked. Listed
+/// through the second mount, the same mount is stepped, and its root is asked.
+#[test]
+fn the_walk_across_the_mounts_meets_a_mount_only_in_the_mount_it_is_attached_in() {
+    let tree = host_with(
+        "\
+94 31 259:2 /opt/k/b /opt/k/c/back rw - ext4 /dev/nvme0n1p2 rw
+95 94 259:2 /srv/e /opt/k/c/back/y rw - ext4 /dev/nvme0n1p2 rw
+97 31 0:72 / /srv/e/sub rw - tmpfs tmpfs rw
+98 97 0:73 / /srv/e/sub rw - tmpfs tmpfs rw
+",
+    );
+    let at = |path: &str| sighted_at(&tree, 31, path, None);
+    let tool = || ("tool", sighted_at(&tree, 31, "/opt/k/b/tool", Some((7, 9))));
+    judged_on(&tree, &[tool()], &[at("/opt/k/b")])
+        .expect("a mount attached under a second mount of the directory is not met in it");
+    assert_root_unreached(
+        judged_on(&tree, &[tool()], &[at("/opt/k/c")]),
+        "/srv/e/sub",
+        "the same mount, walked through the mount it is attached in",
+    );
+
+    // A mount in a mount the helper gives one rule. `c` is expanded for `c/tool`; `c/in`
+    // reaches no denied place and gets one rule, so the bind in it is never stepped and the
+    // mount at `c/in/back/y` never met. Its holder, the place of `/opt/k/b`, does reach a
+    // denied place, through the tmpfs at `/opt/k/b/sub`, which is attached elsewhere.
+    let tree = host_with(
+        "\
+94 31 259:2 /opt/k/b /opt/k/c/in/back rw - ext4 /dev/nvme0n1p2 rw
+95 94 259:2 /srv/e /opt/k/c/in/back/y rw - ext4 /dev/nvme0n1p2 rw
+96 31 0:80 / /opt/k/b/sub rw - tmpfs tmpfs rw
+97 31 0:72 / /srv/e/sub rw - tmpfs tmpfs rw
+98 97 0:73 / /srv/e/sub rw - tmpfs tmpfs rw
+",
+    );
+    let at = |path: &str| sighted_at(&tree, 31, path, None);
+    let denied = || {
+        [
+            ("tool", sighted_at(&tree, 31, "/opt/k/c/tool", Some((7, 9)))),
+            (
+                "elsewhere",
+                sighted_at(&tree, 96, "/opt/k/b/sub/tool", Some((7, 10))),
+            ),
+        ]
+    };
+    judged_on(&tree, &denied(), &[at("/opt/k/c")])
+        .expect("a mount in a mount that gets one rule is never met");
+    // With the deny entry in `c/in`, the bind is stepped, then the mount in it.
+    let mut with_one_within = Vec::from(denied());
+    with_one_within.push((
+        "within",
+        sighted_at(&tree, 31, "/opt/k/c/in/tool", Some((7, 11))),
+    ));
+    assert_root_unreached(
+        judged_on(&tree, &with_one_within, &[at("/opt/k/c")]),
+        "/srv/e/sub",
+        "the same mounts, with the directory that holds the first one expanded",
+    );
+}
+
+/// **The walk across the mounts asks nothing of a mount that shows a file** (S9-1, the other
+/// direction): the helper gives such an entry one rule or none. The mount points are a real
+/// file and a real directory: the table is text, and what a mount point is the driver asks
+/// the host.
+#[test]
+fn the_walk_across_the_mounts_asks_nothing_of_a_mount_that_shows_a_file() {
+    let scratch = tempfile::tempdir().expect("a directory");
+    let root = scratch.path().canonicalize().expect("canonical");
+    std::fs::create_dir_all(root.join("d/vol")).expect("a directory as mount point");
+    std::fs::create_dir_all(root.join("f")).expect("a directory");
+    write(&root.join("f/su"), b"a file as mount point");
+    let root = root.to_str().expect("UTF-8");
+    let escaped = root.replace('\\', "\\134").replace(' ', "\\040");
+    let tree = host_with(&format!(
+        "\
+94 31 259:2 /opt/k/b {escaped}/f/su rw - ext4 /dev/nvme0n1p2 rw
+95 31 259:2 /opt/k/b {escaped}/d/vol rw - ext4 /dev/nvme0n1p2 rw
+97 31 0:72 / /opt/k/b/sub rw - tmpfs tmpfs rw
+98 97 0:73 / /opt/k/b/sub rw - tmpfs tmpfs rw
+"
+    ));
+    let at = |name: &str| sighted_at(&tree, 31, &format!("{root}/{name}"), None);
+    let tool = |name: &str| {
+        (
+            "tool",
+            sighted_at(&tree, 31, &format!("{root}/{name}"), Some((7, 9))),
+        )
+    };
+    judged_on(&tree, &[tool("f/tool")], &[at("f")])
+        .expect("a mount that shows a file gets one rule and is asked nothing");
+    assert_root_unreached(
+        judged_on(&tree, &[tool("d/tool")], &[at("d")]),
+        "/opt/k/b/sub",
+        "the same mount point as a directory",
+    );
 }
 
 /// The three guards of a deny entry's sighting, each on real directories.

@@ -481,12 +481,13 @@ beneath a denied directory. The deny probe binds a directory no entry lists bene
 listed directory (`PROBE_HELD_MOUNT`), and
 `ESS confinement linux exec deny probe held mount` holds that a helper which misses it proves
 the allow-list alone. Both functions are held on every host by cases on mount tables written
-as text (`landlock::tests`, `exec_gate::tests`). **Nine more roots are required through
+as text (`landlock::tests`, `exec_gate::tests`). **Ten more roots are required through
 `require_staged`**, by the rule of the eleven above: the helper package's `namespace_gate`
 (a host bind mount, a tmpfs, an overlay, and the limit of an overlay listed beside its lower
 directory), `adversary4_namespace_gate`, `adversary5_denied_reach_gate` and `security4_gate`,
 and the host crate's `security4_exec_denied`, `security5_exec_denied`,
-`adversary4_exec_denied`, `adversary5_exec_denied_round2` and `exec_denied_view_mounts`.
+`security6_exec_denied`, `adversary4_exec_denied`, `adversary5_exec_denied_round2` and
+`exec_denied_view_mounts`.
 Their cases
 that mount do so in a user and mount namespace of their own. Where that is granted no mount
 they print `ABSENT (` and the lane names them in its one line: on `release-lanes.yml` and
@@ -509,7 +510,15 @@ that is an entry of a directory a start expands refuses the start before dispatc
 `exec.sandbox-place-unserved` at `exec_subpaths` (`judge_denied` in
 `crates/substrate-host/src/exec_gate.rs`). What decides is where the deny entry is: the
 helper expands only the directories on the way to one, so the same mount one directory
-further away refuses nothing (design 35 § 6, amended 2026-11-22). A start with a deny-list
+further away refuses nothing (design 35 § 6, amended 2026-11-22). Nor does one whose mount
+point is gone beneath a mount laid over a directory above: the helper never meets it. **The
+driver also asks what the root of a mount of a listed type reaches where the helper would
+step that mount as a directory**, and refuses the start the same way where that cannot be
+established: by place the root holds the mounts attached in its file system under another
+mount of it, which are not beneath the listed directory. The walk is by the mount tree
+(`MountTree::listed_entries` in `crates/substrate-exec-gate/src/place.rs`), so a mount the
+helper's walk would not meet is not asked. `security6_exec_denied` holds both directions in
+fourteen starts of one staged case. A start with a deny-list
 reads every directory it expands, and ends with status 125 where one cannot be read; its
 standard error is then the one line
 `substrate-exec-gate: cannot read the directory "<path>": <cause>`, a form consumers match,

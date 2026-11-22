@@ -1135,9 +1135,12 @@ fn file_identity(descriptor: &OwnedFd) -> Option<(libc::dev_t, libc::ino_t)> {
     (status.st_mode & libc::S_IFMT != libc::S_IFDIR).then_some((status.st_dev, status.st_ino))
 }
 
-/// Where a path of the view is on the host: its place, and for a file its device and inode.
+/// Where a path of the view is on the host: its place, the mount the kernel reported for what
+/// was opened, and for a file its device and inode.
 struct Sighted {
     place: Place,
+    /// The ID of the mount the place was read from: the mount a walk of the path is on.
+    mount: Option<u64>,
     file: Option<(libc::dev_t, libc::ino_t)>,
 }
 
@@ -1625,6 +1628,7 @@ impl<'a> Mounts<'a> {
         }
         Ok(Sighted {
             place,
+            mount: object.mount_id,
             file: reached.file,
         })
     }
@@ -1690,7 +1694,18 @@ impl<'a> Mounts<'a> {
             place: absent
                 .iter()
                 .fold(opened.place, |place, name| place.entry(name)),
+            mount: opened.mount,
             file: opened.file.filter(|_| absent.is_empty()),
+        };
+        // What was opened beneath the mount's directory, placed.
+        let placed = |descriptor: &OwnedFd| {
+            let opened = Opened::of_descriptor(descriptor.as_raw_fd(), text);
+            let place = self.tree.table().place_of(&opened).map_err(unplaced)?;
+            Ok::<_, DriverError>(Sighted {
+                place,
+                mount: opened.mount_id,
+                file: file_identity(descriptor),
+            })
         };
         let sighted = match mount.class {
             Class::Beneath => {
@@ -1698,18 +1713,10 @@ impl<'a> Mounts<'a> {
                 let mut existing = rel.clone();
                 loop {
                     if existing.is_empty() {
-                        let opened = Opened::of_descriptor(directory.as_raw_fd(), text);
-                        let place = self.tree.table().place_of(&opened).map_err(unplaced)?;
-                        let file = file_identity(directory);
-                        break named(Sighted { place, file }, &rel);
+                        break named(placed(directory)?, &rel);
                     }
                     match open_beneath(directory, &existing.join("/"), 0) {
-                        Ok(object) => {
-                            let opened = Opened::of_descriptor(object.as_raw_fd(), text);
-                            let place = self.tree.table().place_of(&opened).map_err(unplaced)?;
-                            let file = file_identity(&object);
-                            break named(Sighted { place, file }, &rel[existing.len()..]);
-                        }
+                        Ok(object) => break named(placed(&object)?, &rel[existing.len()..]),
                         Err(error)
                             if matches!(
                                 error.raw_os_error(),
@@ -1773,12 +1780,14 @@ impl<'a> Mounts<'a> {
                     )
                 };
                 let descriptor = object.as_ref().unwrap_or(directory);
+                let opened = Opened::of_descriptor(descriptor.as_raw_fd(), text);
                 Ok(Sighted {
                     place: self
                         .tree
                         .table()
-                        .place_of(&Opened::of_descriptor(descriptor.as_raw_fd(), text))
+                        .place_of(&opened)
                         .map_err(|why| start_unplaced(address, &why))?,
+                    mount: opened.mount_id,
                     file: file_identity(descriptor),
                 })
             }
@@ -1880,7 +1889,19 @@ fn check_openable(located: &Located) -> Result<(), String> {
 ///   helper expands it. An entry that is a mount point has the place its own row gives it,
 ///   and such a row gives none: dispatched, the start would end with the helper's status
 ///   and nothing run. Anywhere else beneath a listed directory such a mount refuses nothing:
-///   its directory gets one rule and the helper never asks for its place.
+///   its directory gets one rule and the helper never asks for its place. Nor does one that
+///   is hidden: covered at its mount point, or with a mount point that is gone beneath a
+///   mount laid over a directory above.
+/// - **So must what the root of a mount reaches that the helper would step as a directory**
+///   (D11 step 3; security review S9-1). An entry that is a mount point has the place its
+///   own row gives it, the root of the mount, and the helper asks what that reaches as it
+///   does of the listed directory. By place that holds the mounts attached in the same file
+///   system under another mount of it, which are not beneath the listed directory: a
+///   covered one there would end the run with the helper's status. The walk is the
+///   helper's, on the tree ([`MountTree::listed_entries`]): from the listed directory into
+///   each mount of a listed type whose mount point is an entry of a directory the helper
+///   expands, one that lies in no denied place and reaches one. A root in a denied place
+///   gets no rule and a mount that shows a file one rule or none; neither is asked.
 ///
 /// `denied` holds every deny entry, the ones that do not exist too, each where its name is:
 /// the helper expands the directory that is to hold an absent entry as it does any other.
@@ -1889,8 +1910,9 @@ fn check_openable(located: &Located) -> Result<(), String> {
 ///
 /// [`PROGRAM_UNLISTED`] (address `argv`) for a denied program, and [`PLACE_UNSERVED`] with
 /// D30's cause where a reach cannot be established: address `exec_denied_paths` for a denied
-/// directory, `exec_subpaths` for a listed one, and for a mount of a type outside the list
-/// among the entries of a directory the start expands.
+/// directory, `exec_subpaths` for a listed one, for a mount of a type outside the list among
+/// the entries of a directory the start expands, and for the root of a mount of a listed
+/// type among them.
 fn judge_denied(
     tree: &MountTree,
     asked: &str,
@@ -1919,8 +1941,12 @@ fn judge_denied(
         tree.reaches(place, Unlisted::Skipped)
             .map_err(|why| start_unplaced(ENTRY, &why))
     };
+    // D11 step 1, no rule and nothing asked: the place lies in a denied place.
+    let denied_place = |place: &Place| reaches.iter().any(|reach| reach.holds(place));
+    // D11 step 3: the directory reaches a denied place, so the helper walks its entries.
+    let expanded = |reach: &Reach| reaches.iter().any(|denied| reach.overlaps(denied));
     for entry in listed {
-        if entry.file.is_some() || reaches.iter().any(|reach| reach.holds(&entry.place)) {
+        if entry.file.is_some() || denied_place(&entry.place) {
             continue;
         }
         let reach = asked_of(&entry.place)?;
@@ -1930,13 +1956,44 @@ fn judge_denied(
             if !reach.holds(&odd.holder) {
                 continue;
             }
-            let around = asked_of(&odd.holder)?;
-            if reaches.iter().any(|denied| around.overlaps(denied)) {
+            if expanded(&asked_of(&odd.holder)?) {
                 return Err(start_unplaced(ENTRY, &odd.unplaced()));
+            }
+        }
+        // The helper's walk across the mounts of a listed type, mount by mount: the listed
+        // directory first, then the root of each mount it steps as a directory.
+        let mut walk: Vec<(u64, Place)> = entry
+            .mount
+            .map(|mount| (mount, entry.place.clone()))
+            .into_iter()
+            .collect();
+        while let Some((mount, directory)) = walk.pop() {
+            for met in tree.listed_entries(mount, &directory) {
+                // Met only where the helper expands the directory that holds the mount
+                // point: one that lies in no denied place and reaches one.
+                if denied_place(&met.holder) || !expanded(&asked_of(&met.holder)?) {
+                    continue;
+                }
+                // Stepped with the place its row gives it. In a denied place it gets no
+                // rule, and a file one rule or none: nothing is asked of either.
+                if denied_place(&met.root) || shows_a_file(&met.mount_point) {
+                    continue;
+                }
+                // The question the helper would end the run with: what the root reaches,
+                // by place, the mounts attached in that file system elsewhere among them.
+                asked_of(&met.root)?;
+                walk.push((met.mount, met.root));
             }
         }
     }
     Ok(())
+}
+
+/// Whether the mount at `mount_point` shows a file: the helper gives such an entry one rule
+/// or none, and asks the table nothing about it. A mount point that cannot be asked is taken
+/// for a directory, whose root is asked.
+fn shows_a_file(mount_point: &str) -> bool {
+    std::fs::symlink_metadata(mount_point).is_ok_and(|shown| !shown.is_dir())
 }
 
 /// One start's lists as the helper takes them: the program, the host's loader, every entry of
