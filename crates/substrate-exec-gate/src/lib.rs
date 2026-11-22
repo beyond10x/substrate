@@ -30,8 +30,13 @@
 //!
 //! The program and the loader go through the same steps, so a denied program is not executed
 //! (status 126) and a denied loader starts no dynamically linked program. A directory that was
-//! expanded has no rule of its own: a file created in it during the run is not executable, and
-//! a program replaced in it by a rename loses the right. The walk stops at 65536 rules.
+//! expanded has no rule of its own: a new file in it is not executable, and a program
+//! replaced in it by a rename loses the right. A directory inside it that holds no denied
+//! path has one rule, which moves with a rename: what the run creates in it executes, under
+//! any name the run gives the directory. So where the run can write a listed directory, a
+//! deny entry holds for the files that exist at the start, under the names they have then.
+//! The walk reads every directory it expands and stops at 65536 rules; a directory it cannot
+//! read, or an entry that is a mount of a file-system type outside the list, ends it (125).
 //!
 //! The ruleset handles the execute and refer rights and nothing else: reading, writing and the
 //! network behave as before.

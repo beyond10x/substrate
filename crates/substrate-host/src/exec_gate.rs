@@ -1676,13 +1676,22 @@ impl<'a> Mounts<'a> {
     }
 
     /// One entry of the deny-list, located in the view (design 35 § 8), and where it is on the
-    /// host when it exists. An entry need not exist at the start: it is then kept as a name,
-    /// its nearest existing ancestor is held to the rules of an entry, and the place of that
-    /// ancestor must be one this host can establish (D26).
-    fn denied(&self, text: &str) -> Result<(Located, Option<Sighted>), DriverError> {
+    /// host. An entry need not exist at the start: it is then kept as a name, its nearest
+    /// existing ancestor is held to the rules of an entry, and the place of that ancestor must
+    /// be one this host can establish (D26). Such an entry is sighted where its name is, the
+    /// ancestor's place and the names after it, and is no file: the ancestor is not what it
+    /// denies, and the directory that is to hold it is expanded like any other.
+    fn denied(&self, text: &str) -> Result<(Located, Sighted), DriverError> {
         let (mount, path, rel) = self.eligible(text, DENIED)?;
         let refuse = |why: String| unrepresentable(text, why, DENIED);
         let unplaced = |why: Unestablished| denied_unplaced(&why);
+        // What was opened, and the names of the entry after it: none for an entry that exists.
+        let named = |opened: Sighted, absent: &[String]| Sighted {
+            place: absent
+                .iter()
+                .fold(opened.place, |place, name| place.entry(name)),
+            file: opened.file.filter(|_| absent.is_empty()),
+        };
         let sighted = match mount.class {
             Class::Beneath => {
                 let directory = mount.descriptor().expect("an eligible mount is walked");
@@ -1691,19 +1700,15 @@ impl<'a> Mounts<'a> {
                     if existing.is_empty() {
                         let opened = Opened::of_descriptor(directory.as_raw_fd(), text);
                         let place = self.tree.table().place_of(&opened).map_err(unplaced)?;
-                        break rel.is_empty().then(|| Sighted {
-                            place,
-                            file: file_identity(directory),
-                        });
+                        let file = file_identity(directory);
+                        break named(Sighted { place, file }, &rel);
                     }
                     match open_beneath(directory, &existing.join("/"), 0) {
                         Ok(object) => {
                             let opened = Opened::of_descriptor(object.as_raw_fd(), text);
                             let place = self.tree.table().place_of(&opened).map_err(unplaced)?;
-                            break (existing.len() == rel.len()).then(|| Sighted {
-                                place,
-                                file: file_identity(&object),
-                            });
+                            let file = file_identity(&object);
+                            break named(Sighted { place, file }, &rel[existing.len()..]);
                         }
                         Err(error)
                             if matches!(
@@ -1724,7 +1729,7 @@ impl<'a> Mounts<'a> {
                     match self.follow(&join(&existing), text) {
                         Ok(reached) => {
                             let sighted = self.check_reached(text, reached, DENIED)?;
-                            break (existing.len() == all.len()).then_some(sighted);
+                            break named(sighted, &all[existing.len()..]);
                         }
                         Err(Unfollowed::Absent(_)) if existing.len() > mount.names.len() => {
                             existing.pop();
@@ -1867,14 +1872,25 @@ fn check_openable(located: &Located) -> Result<(), String> {
 ///   outside the list refuses the start. The helper would end the run for it after dispatch.
 /// - **So must what a listed directory reaches**, because the helper asks it of every listed
 ///   directory of a start with a deny-list, to see whether a denied place lies in a mount
-///   beneath it. A mount of a type outside the list is compared with nothing there and does
-///   not refuse. A listed entry that is a file, or lies in a denied place, is asked nothing.
+///   beneath it. A mount of a type outside the list is compared with nothing there. A listed
+///   entry that is a file, or lies in a denied place, is asked nothing.
+/// - **A mount of a type outside the list refuses where the helper would meet it as an
+///   entry** (D11 step 3): the directory that holds its mount point lies in what the listed
+///   directory reaches, and what that directory reaches overlaps a denied reach, so the
+///   helper expands it. An entry that is a mount point has the place its own row gives it,
+///   and such a row gives none: dispatched, the start would end with the helper's status
+///   and nothing run. Anywhere else beneath a listed directory such a mount refuses nothing:
+///   its directory gets one rule and the helper never asks for its place.
+///
+/// `denied` holds every deny entry, the ones that do not exist too, each where its name is:
+/// the helper expands the directory that is to hold an absent entry as it does any other.
 ///
 /// # Errors
 ///
 /// [`PROGRAM_UNLISTED`] (address `argv`) for a denied program, and [`PLACE_UNSERVED`] with
 /// D30's cause where a reach cannot be established: address `exec_denied_paths` for a denied
-/// directory, `exec_subpaths` for a listed one.
+/// directory, `exec_subpaths` for a listed one, and for a mount of a type outside the list
+/// among the entries of a directory the start expands.
 fn judge_denied(
     tree: &MountTree,
     asked: &str,
@@ -1899,12 +1915,26 @@ fn judge_denied(
         }
         reaches.push(reach);
     }
+    let asked_of = |place: &Place| {
+        tree.reaches(place, Unlisted::Skipped)
+            .map_err(|why| start_unplaced(ENTRY, &why))
+    };
     for entry in listed {
         if entry.file.is_some() || reaches.iter().any(|reach| reach.holds(&entry.place)) {
             continue;
         }
-        tree.reaches(&entry.place, Unlisted::Skipped)
-            .map_err(|why| start_unplaced(ENTRY, &why))?;
+        let reach = asked_of(&entry.place)?;
+        for odd in tree.unlisted_entries(&entry.place) {
+            // The helper walks only what the listed directory reaches, and expands only a
+            // directory that reaches a denied place.
+            if !reach.holds(&odd.holder) {
+                continue;
+            }
+            let around = asked_of(&odd.holder)?;
+            if reaches.iter().any(|denied| around.overlaps(denied)) {
+                return Err(start_unplaced(ENTRY, &odd.unplaced()));
+            }
+        }
     }
     Ok(())
 }
@@ -1954,9 +1984,9 @@ pub(crate) fn plan(
     let mut deny = Vec::with_capacity(denied.len());
     let mut sighted = Vec::new();
     for entry in denied {
-        let (located, existing) = mounts.denied(entry)?;
+        let (located, on_host) = mounts.denied(entry)?;
         deny.push(located);
-        sighted.extend(existing.map(|existing| (entry.as_str(), existing)));
+        sighted.push((entry.as_str(), on_host));
     }
     if !denied.is_empty() {
         let program = mounts.sighted(asked, PROGRAM)?;

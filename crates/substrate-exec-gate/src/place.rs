@@ -499,10 +499,33 @@ pub enum Unlisted {
     Skipped,
     /// It refuses, `file-system-unlisted`: beneath a denied directory, whose files the
     /// profile denies wherever else that file system is mounted.
-    // No caller on this branch: the deny-list (`story:executable-deny-list`) asks this of
-    // every denied directory. Held here by the unit cases, so the two stories share one
-    // function.
+    // The deny-list asks this of every denied directory, in the helper and in the driver.
     Refused,
+}
+
+/// A mount of a file-system type outside [`LISTED_FILE_SYSTEMS`] as an entry of a directory
+/// (D30, D11 step 3): what the kernel shows at its mount point, and the directory that
+/// holds the mount point. An entry that is a mount point has the place its own row gives it,
+/// and this row gives none, so a walk of the holder cannot place the entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlistedEntry {
+    /// The place of the directory the mount point is an entry of.
+    pub holder: Place,
+    /// The mount point, as the table names it.
+    pub mount_point: String,
+    /// The file-system type of the mount.
+    pub file_system: String,
+}
+
+impl UnlistedEntry {
+    /// What a walk of the holder ends with at this entry: no place, `file-system-unlisted`.
+    #[must_use]
+    pub fn unplaced(&self) -> Unestablished {
+        Unestablished::place(
+            self.mount_point.clone(),
+            Cause::FileSystemUnlisted(self.file_system.clone()),
+        )
+    }
 }
 
 /// What the kernel reports at a mount point: the ID of the mount that shows there, or why
@@ -807,6 +830,60 @@ impl MountTree {
             }
         }
         reach
+    }
+
+    /// **The mounts of a type outside the list beneath `directory`, each as the entry of
+    /// the directory that holds its mount point** (D30, D11 step 3). [`Self::reaches`] skips
+    /// such a mount for a listed directory, because nothing is compared with it. A start
+    /// that expands the holder meets it all the same, as an entry it cannot place: the
+    /// caller asks whether the holder is expanded, and refuses there.
+    ///
+    /// A mount is counted where the kernel shows it at its mount point, or cannot be asked.
+    /// One that another mount covers is no entry: the covering mount is. Of a stack the
+    /// holder is the directory the lowest mount is attached in. "Beneath" is by place, as
+    /// everywhere in D30: a mount attached in the directory's file system counts wherever
+    /// that file system shows. It never refuses.
+    #[must_use]
+    pub fn unlisted_entries(&self, directory: &Place) -> Vec<UnlistedEntry> {
+        let rows = &self.table.rows;
+        let mut entries = Vec::new();
+        for (index, _) in self
+            .beneath(directory)
+            .into_iter()
+            .enumerate()
+            .filter(|(_, beneath)| *beneath)
+        {
+            let row = &rows[index];
+            if LISTED_FILE_SYSTEMS.contains(&row.file_system.as_str())
+                || (self.reported)(&row.mount_point).is_ok_and(|shown| shown != row.id)
+            {
+                continue;
+            }
+            // Down a stack, to the mount that is attached in a directory: each mount above
+            // it is attached on the root of the one below, at the same mount point.
+            let mut at = index;
+            let attached = loop {
+                let Some(parent) = self.parents[at] else {
+                    break None;
+                };
+                if rows[parent].mount_point == rows[at].mount_point {
+                    at = parent;
+                } else {
+                    break self.attachment(at, parent);
+                }
+            };
+            let Some(mut holder) = attached else {
+                continue;
+            };
+            if holder.names.pop().is_some() {
+                entries.push(UnlistedEntry {
+                    holder,
+                    mount_point: row.mount_point.clone(),
+                    file_system: row.file_system.clone(),
+                });
+            }
+        }
+        entries
     }
 }
 
@@ -1962,6 +2039,79 @@ mod tests {
             tree.reaches(&on(&tree, 500, "/opt"), Unlisted::Refused)
                 .map(|reach| reach.places().to_vec()),
             Ok(vec![on(&tree, 500, "/opt")])
+        );
+    }
+
+    /// D30 with D11 step 3, a mount of a type outside the list as an entry: each is named
+    /// with the directory that holds its mount point, where the kernel shows it there.
+    ///
+    /// - one mount: the holder is the directory above the mount point, in the parent mount;
+    /// - a stack of two: the upper one is the entry, and its holder is where the lower one
+    ///   is attached. The lower one is covered and is no entry;
+    /// - a mount of a listed type on top of one: no entry, the listed mount is shown;
+    /// - one attached in a mount beneath the directory: counted, with its holder on that
+    ///   mount's device;
+    /// - a mount whose mount point cannot be asked is counted: it fails closed.
+    #[test]
+    fn an_unlisted_mount_is_named_as_an_entry_of_the_directory_that_holds_it() {
+        const ROWS: &str = "\
+620 500 0:70 / /srv/odd/media rw - ramfs ramfs rw
+621 500 0:71 / /srv/st/m rw - ramfs ramfs rw
+622 621 0:72 / /srv/st/m rw - proc proc rw
+623 500 0:73 / /srv/cov/m rw - ramfs ramfs rw
+624 623 0:74 / /srv/cov/m rw - tmpfs tmpfs rw
+625 500 8:17 /data /srv/far rw - ext4 /dev/sdb1 rw
+626 625 0:75 /null /srv/far/in/null rw - devtmpfs devtmpfs rw
+627 500 0:76 / /opt/elsewhere rw - ramfs ramfs rw
+";
+        let tree = tree(ROWS);
+        let named = |tree: &MountTree, id: u64, path: &str| -> Vec<String> {
+            tree.unlisted_entries(&on(tree, id, path))
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} {} in {} /{}",
+                        entry.mount_point,
+                        entry.file_system,
+                        entry.holder.device,
+                        entry.holder.names.join("/")
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            named(&tree, 500, "/srv"),
+            [
+                "/srv/odd/media ramfs in 259:2 /srv/odd",
+                "/srv/st/m proc in 259:2 /srv/st",
+                "/srv/far/in/null devtmpfs in 8:17 /data/in",
+            ]
+        );
+        assert_eq!(
+            named(&tree, 500, "/srv/odd"),
+            ["/srv/odd/media ramfs in 259:2 /srv/odd"]
+        );
+        // By place: the mount attached in `/data/in` of the second file system is beneath
+        // that directory under whatever name it is asked.
+        assert_eq!(
+            named(&tree, 625, "/srv/far/in"),
+            ["/srv/far/in/null devtmpfs in 8:17 /data/in"]
+        );
+        assert!(named(&tree, 500, "/srv/cov").is_empty());
+        assert!(named(&tree, 500, "/srv/far/in").is_empty());
+        let entries = tree.unlisted_entries(&on(&tree, 500, "/srv/odd"));
+        assert_eq!(
+            entries[0].unplaced().to_string(),
+            "cannot establish the place of /srv/odd/media: file-system-unlisted ramfs"
+        );
+        // Where the kernel cannot be asked at a mount point, the mount is counted.
+        let unasked = MountTable::parse(&format!("{BESIDE}{ROWS}"))
+            .expect("the table parses")
+            .into_tree_reported_by(|_| Err(Cause::PathUnopenable))
+            .expect("every row is attached");
+        assert_eq!(
+            named(&unasked, 500, "/srv/cov"),
+            ["/srv/cov/m ramfs in 259:2 /srv/cov"]
         );
     }
 

@@ -2,28 +2,48 @@
 //! tmpfs and an overlay (§ 16, *D25, a host bind mount* and *D26, the file systems*), and the
 //! limit an overlay beside its lower directory has (§ 8.5, L1).
 //!
-//! No case has a privilege. Each run makes its mounts in a user and mount namespace of its own,
-//! `unshare --user --map-root-user --mount`, and starts the shipped `substrate-exec-gate` there
-//! with an empty environment, so the helper reads that namespace's mount table as it reads a
-//! view's. The cases drive the helper and not the driver: a driver opened inside such a
-//! namespace was not probed (design 35 § 18).
+//! No case has a privilege. Each case makes its mounts once, in a user and mount namespace of
+//! its own, `unshare --user --map-root-user --mount`, and starts the shipped
+//! `substrate-exec-gate` there once per list, each time with an empty environment, so the
+//! helper reads that namespace's mount table as it reads a view's. The cases drive the helper
+//! and not the driver: a driver opened inside such a namespace was not probed (design 35
+//! § 18).
 //!
 //! Where the namespace cannot be created, a mount is refused there, the kernel has no Landlock
 //! or the scratch directory is on a file-system type outside the list, a case prints
-//! `ABSENT` and the reason and is **not passed**. `scripts/delegated-lane.sh` requires each
-//! case by name: its `executed` line where a user namespace is granted a mount, and its own
-//! `ABSENT` line where it is not, as on a hosted runner, whose `AppArmor` policy grants a
-//! user namespace none. There these cases are workstation evidence.
+//! `ABSENT` and the reason and is **not passed**. An overlay that cannot be mounted has its
+//! own reason, `no overlay mount in a user namespace on this host`, and every other command
+//! of a stage `the stage failed`. `scripts/delegated-lane.sh` requires each case by name: its
+//! `executed` line where a user namespace is granted a mount, and its own `ABSENT` line where
+//! it is not, as on a hosted runner, whose `AppArmor` policy grants a user namespace none.
+//! There these cases are workstation evidence.
 
 #![cfg(target_os = "linux")]
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 
 use substrate_exec_gate::{Class, Lists, Located, REFUSED};
 
 /// What a stage exits with when one of its own commands failed, before the helper starts.
 const STAGE_FAILED: i32 = 97;
+
+/// What a stage exits with when the overlay itself could not be mounted: the one thing an
+/// overlay case needs beyond what the other cases need.
+const OVERLAY_REFUSED: i32 = 96;
+
+/// One argument as a word of shell text.
+fn quoted(argument: &str) -> String {
+    format!("'{}'", argument.replace('\'', "'\\''"))
+}
+
+/// What one start of the helper came to inside a case's namespace.
+struct Seen {
+    status: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
 
 /// A tool of the host, where this distribution keeps it.
 fn find(name: &str) -> Option<PathBuf> {
@@ -108,8 +128,9 @@ impl Scratch {
                 format!("{mkdir} fs && {mount} -t tmpfs tmpfs fs && {cp} -RP src/. fs/")
             }
             Kind::Overlay => format!(
-                "{mkdir} fs upper work && {mount} -t overlay overlay \
-                 -o lowerdir={at}/src,upperdir={at}/upper,workdir={at}/work fs"
+                "{mkdir} fs upper work && {{ {mount} -t overlay overlay \
+                 -o lowerdir={at}/src,upperdir={at}/upper,workdir={at}/work fs \
+                 || exit {OVERLAY_REFUSED}; }}"
             ),
         };
         let stage = format!(
@@ -139,91 +160,102 @@ impl Scratch {
         }
     }
 
-    /// Makes the namespace and the mounts, then starts the helper with `lists` and
-    /// `sh -c script` in this root, with an empty environment.
-    fn run(&self, lists: &Lists, script: &str) -> Output {
-        let stage = &self.stage;
-        Command::new(tool("unshare"))
+    /// Makes the namespace and the mounts once, then starts the helper once per row, with
+    /// the row's lists and `sh -c script`, in this root and with an empty environment. One
+    /// stage serves every row: the mounts are the same for each, and a stage per row was
+    /// most of what a case cost. The standard streams and the exit status of each start are
+    /// kept beneath `rows/`. Returns the exit status and the diagnostics of the namespace's
+    /// own shell, and what each start came to.
+    fn run(&self, rows: &[(Lists, &str)]) -> (Option<i32>, String, Vec<Seen>) {
+        let kept = self.root.join("rows");
+        std::fs::create_dir(&kept).expect("the directory of the rows");
+        let word = |path: PathBuf| quoted(path.to_str().expect("UTF-8"));
+        let (env, shell) = (word(tool("env")), word(tool("sh")));
+        let helper = quoted(env!("CARGO_BIN_EXE_substrate-exec-gate"));
+        let mut script = format!("{{ {}; }} >&2 || exit {STAGE_FAILED}\n", self.stage);
+        for (index, (lists, row)) in rows.iter().enumerate() {
+            let options: Vec<String> = lists
+                .options()
+                .iter()
+                .map(|option| quoted(option))
+                .collect();
+            let _ = writeln!(
+                script,
+                "{env} -i {helper} {} {shell} -c {} >rows/{index}.out 2>rows/{index}.err\n\
+                 echo $? >rows/{index}.status",
+                options.join(" "),
+                quoted(row)
+            );
+        }
+        let output = Command::new(tool("unshare"))
             .args(["--user", "--map-root-user", "--mount", "--"])
             .arg(tool("sh"))
             .arg("-c")
-            .arg(format!(
-                "{{ {stage}; }} >&2 || exit {STAGE_FAILED}; exec \"$@\""
-            ))
-            .arg("sh")
-            .arg(tool("env"))
-            .arg("-i")
-            .arg(env!("CARGO_BIN_EXE_substrate-exec-gate"))
-            .args(lists.options())
-            .arg(tool("sh"))
-            .args(["-c", script])
+            .arg(script)
             .current_dir(&self.root)
             .env_clear()
             .output()
-            .expect("unshare starts")
+            .expect("unshare starts");
+        let read = |name: String| std::fs::read_to_string(kept.join(name)).unwrap_or_default();
+        let seen = (0..rows.len())
+            .map(|index| Seen {
+                status: read(format!("{index}.status")).trim().parse().ok(),
+                stdout: read(format!("{index}.out")),
+                stderr: read(format!("{index}.err")),
+            })
+            .collect();
+        (output.status.code(), text(&output.stderr), seen)
     }
-}
-
-/// Why this host cannot run a case, if it cannot: no `unshare`, or no namespace.
-fn unavailable() -> Option<String> {
-    let Some(unshare) = find("unshare") else {
-        return Some("no unshare on this host".to_owned());
-    };
-    let probe = Command::new(unshare)
-        .args(["--user", "--map-root-user", "--mount", "--"])
-        .arg(tool("true"))
-        .output()
-        .expect("unshare starts");
-    (!probe.status.success()).then(|| {
-        format!(
-            "unshare cannot create the namespace: {}",
-            text(&probe.stderr).trim()
-        )
-    })
-}
-
-/// The standard output of one run, or `None` after printing the case as absent: the stage
-/// failed, the kernel has no Landlock, or a place could not be established on this host.
-fn observed(name: &str, output: &Output) -> Option<String> {
-    let diagnostic = text(&output.stderr);
-    let reason = match output.status.code() {
-        Some(STAGE_FAILED) => Some(format!("the stage failed: {}", diagnostic.trim())),
-        Some(REFUSED)
-            if diagnostic.contains("Landlock is unavailable")
-                || diagnostic.contains("cannot establish the place") =>
-        {
-            Some(diagnostic.trim().to_owned())
-        }
-        _ => None,
-    };
-    if let Some(reason) = reason {
-        println!("exec gate namespace {name}: ABSENT ({reason})");
-        return None;
-    }
-    Some(text(&output.stdout))
 }
 
 /// The entries of one run beneath its root: the allow-list, the deny-list, the writable mounts.
 type Entries<'a> = (&'a [&'a str], &'a [&'a str], &'a [&'a str]);
 
-/// One run on a fresh root of `kind`: its standard output, or `None` after printing the case
-/// as absent.
-fn run(
-    name: &str,
-    kind: Kind,
-    (allow, deny, writable): Entries<'_>,
-    script: &str,
-) -> Option<(Output, String)> {
+/// Every row on one fresh root of `kind`, in one namespace: what each start came to, or
+/// `None` after printing the case as absent. A case is absent where this host has no tool
+/// the stage needs, the namespace cannot be created, the overlay cannot be mounted, another
+/// command of the stage failed, the kernel has no Landlock, or a place could not be
+/// established on this host; each has its own reason.
+fn run(name: &str, kind: Kind, rows: &[(Entries<'_>, &str)]) -> Option<Vec<Seen>> {
+    let absent = |reason: &str| {
+        println!("exec gate namespace {name}: ABSENT ({reason})");
+        None
+    };
+    if find("unshare").is_none() {
+        return absent("no unshare on this host");
+    }
     let scratch = match Scratch::new(kind) {
         Ok(scratch) => scratch,
-        Err(reason) => {
-            println!("exec gate namespace {name}: ABSENT ({reason})");
-            return None;
-        }
+        Err(reason) => return absent(&reason),
     };
-    let output = scratch.run(&scratch.lists(allow, deny, writable), script);
-    let stdout = observed(name, &output)?;
-    Some((output, stdout))
+    let listed: Vec<(Lists, &str)> = rows
+        .iter()
+        .map(|((allow, deny, writable), script)| (scratch.lists(allow, deny, writable), *script))
+        .collect();
+    let (status, diagnostic, seen) = scratch.run(&listed);
+    let diagnostic = diagnostic.trim();
+    match status {
+        Some(OVERLAY_REFUSED) => {
+            return absent(&format!(
+                "no overlay mount in a user namespace on this host: {diagnostic}"
+            ));
+        }
+        Some(STAGE_FAILED) => return absent(&format!("the stage failed: {diagnostic}")),
+        Some(1) if diagnostic.starts_with("unshare:") => {
+            return absent(&format!(
+                "unshare cannot create the namespace: {diagnostic}"
+            ));
+        }
+        _ => {}
+    }
+    if let Some(unplaced) = seen.iter().find(|seen| {
+        seen.status == Some(REFUSED)
+            && (seen.stderr.contains("Landlock is unavailable")
+                || seen.stderr.contains("cannot establish the place"))
+    }) {
+        return absent(unplaced.stderr.trim());
+    }
+    Some(seen)
 }
 
 /// The lists of design 35 § 3.9 that end in a run (F1 to F6, and the control of F7), and one
@@ -302,42 +334,34 @@ fn lists_that_run() -> [(&'static str, Entries<'static>, String, &'static str); 
     ]
 }
 
-/// The lists of design 35 § 3.9 (F1 to F7) on one file system. Returns whether every run ran.
+/// The lists of design 35 § 3.9 (F1 to F7) on one file system, every list in the one
+/// namespace of the case. Returns whether the case ran.
 fn the_lists_hold(name: &str, kind: Kind) -> bool {
-    if let Some(reason) = unavailable() {
-        println!("exec gate namespace {name}: ABSENT ({reason})");
-        return false;
-    }
-    for (what, lists, script, expected) in lists_that_run() {
-        let Some((output, stdout)) = run(name, kind, lists, &script) else {
-            return false;
-        };
-        assert_eq!(
-            stdout,
-            expected,
-            "{kind:?}: {what}: {}",
-            text(&output.stderr)
-        );
-    }
+    let lists = lists_that_run();
+    let mut rows: Vec<(Entries<'_>, &str)> = lists
+        .iter()
+        .map(|(_, entries, script, _)| (*entries, script.as_str()))
+        .collect();
     // F7: the same link with its target's directory as a mount the run can write is refused,
     // and nothing runs.
-    let Some((output, stdout)) = run(
-        name,
-        kind,
-        (&["fs/one/into"], &[], &["fs/tree"]),
-        "echo ran",
-    ) else {
+    rows.push(((&["fs/one/into"], &[], &["fs/tree"]), "echo ran"));
+    let Some(seen) = run(name, kind, &rows) else {
         return false;
     };
-    let diagnostic = text(&output.stderr);
+    for ((what, _, _, expected), seen) in lists.iter().zip(&seen) {
+        assert_eq!(seen.stdout, *expected, "{kind:?}: {what}: {}", seen.stderr);
+    }
+    let refused = seen.last().expect("the row of F7");
     assert_eq!(
-        (output.status.code(), stdout.as_str()),
+        (refused.status, refused.stdout.as_str()),
         (Some(REFUSED), ""),
-        "{kind:?}: F7: {diagnostic}"
+        "{kind:?}: F7: {}",
+        refused.stderr
     );
     assert!(
-        diagnostic.contains("in the writable mount"),
-        "{kind:?}: F7: the line of D24: {diagnostic}"
+        refused.stderr.contains("in the writable mount"),
+        "{kind:?}: F7: the line of D24: {}",
+        refused.stderr
     );
     true
 }
@@ -383,25 +407,22 @@ fn the_place_rule_holds_on_an_overlay() {
 fn limit_an_overlay_and_its_lower_directory_both_listed_run_the_denied_program_from_the_lower_one()
 {
     const NAME: &str = "limit overlay lower directory";
-    if let Some(reason) = unavailable() {
-        println!("exec gate namespace {NAME}: ABSENT ({reason})");
-        return;
-    }
-    let Some((output, stdout)) = run(
+    let Some(seen) = run(
         NAME,
         Kind::Overlay,
-        (&["fs", "src"], &["fs/tree/bin/tool"], &[]),
-        "fs/tree/bin/tool 2>/dev/null; echo $?; src/tree/bin/tool; echo $?; \
-         fs/tree/bin/other; echo $?",
+        &[(
+            (&["fs", "src"], &["fs/tree/bin/tool"], &[]),
+            "fs/tree/bin/tool 2>/dev/null; echo $?; src/tree/bin/tool; echo $?; \
+             fs/tree/bin/other; echo $?",
+        )],
     ) else {
         return;
     };
     assert_eq!(
-        stdout,
-        "126\n0\n0\n",
+        seen[0].stdout, "126\n0\n0\n",
         "denied in the overlay, run from its lower directory, and the neighbour: the limit \
          holds as stated: {}",
-        text(&output.stderr)
+        seen[0].stderr
     );
     println!(
         "exec gate namespace {NAME}: executed, the denied program runs from the lower directory"

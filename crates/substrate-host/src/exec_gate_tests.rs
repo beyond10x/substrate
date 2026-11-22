@@ -2799,14 +2799,129 @@ fn a_reach_the_deny_list_needs_and_cannot_have_refuses_the_start() {
     .expect("listed directories whose mounts beneath can be compared");
 }
 
+/// A host with mounts of a type outside the list beneath `/opt/k`: a ramfs that is an entry
+/// of `odd`, one a directory deeper in `far`, one in `nest` with a second file system
+/// mounted in it, which is also at `/opt/k/held/sub`, and one in `cov` that a tmpfs covers.
+/// The file system at `/usr/local/src` is at `/srv/again` too, under a ramfs stacked on it.
+const HOST_WITH_UNLISTED_ENTRIES: &str = "\
+31 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw
+70 31 8:33 / /usr/local/src rw - ext4 /dev/sdc1 rw
+71 31 8:33 / /srv/again rw - ext4 /dev/sdc1 rw
+80 31 0:60 / /opt/k/odd/media rw - ramfs ramfs rw
+81 31 0:61 / /opt/k/far/in/media rw - ramfs ramfs rw
+82 31 0:62 / /opt/k/nest/media rw - ramfs ramfs rw
+83 82 8:49 / /opt/k/nest/media/inner rw - ext4 /dev/sdd1 rw
+84 31 8:49 / /opt/k/held/sub rw - ext4 /dev/sdd1 rw
+85 31 0:63 / /opt/k/cov/media rw - ramfs ramfs rw
+86 85 0:64 / /opt/k/cov/media rw - tmpfs tmpfs rw
+87 71 0:65 / /srv/again rw - ramfs ramfs rw
+";
+
+/// **A mount of a type outside the list that is an entry of a directory the start expands
+/// refuses before dispatch** (D30 with D11 step 3; security review S8-2). The helper gives an
+/// entry that is a mount point the place its own row gives it, and such a row gives none:
+/// dispatched, the start would end with the helper's status and nothing run. The driver has
+/// the row, the listed place and the denied place in its own table.
+///
+/// It refuses only where the helper would meet the mount: the directory that holds the
+/// mount point lies in what the listed directory reaches, and what that directory reaches
+/// overlaps a denied reach, so the helper expands it. Beside a deny entry elsewhere, one
+/// directory below the expanded one, under a mount of a listed type that covers it, and
+/// stacked on another mount of the listed directory's file system, it refuses nothing.
+#[test]
+fn an_unlisted_mount_among_the_entries_of_an_expanded_directory_refuses_the_start() {
+    let tree = tree(HOST_WITH_UNLISTED_ENTRIES);
+    let at = |path: &str| sighted_at(&tree, 31, path, None);
+    let file = |mount_id: u64, path: &str| sighted_at(&tree, mount_id, path, Some((7, 9)));
+    let program = sighted_at(&tree, 31, "/usr/bin/sh", Some((7, 5)));
+    let judged = |denied: Sighted, listed: &[Sighted]| {
+        judge_denied(
+            &tree,
+            "/usr/bin/sh",
+            &program,
+            &[("denied", denied)],
+            listed,
+        )
+    };
+    let unserved = |denied: Sighted, listed: &[Sighted], mount_point: &str| {
+        let error = judged(denied, listed).expect_err(mount_point);
+        assert_eq!(error.code, PLACE_UNSERVED, "{mount_point}: {error}");
+        assert_eq!(
+            error.class,
+            DriverErrorClass::Unserved,
+            "{mount_point}: {error}"
+        );
+        assert_eq!(
+            error.address.as_deref(),
+            Some("exec_subpaths"),
+            "{mount_point}: {error}"
+        );
+        let line =
+            format!("cannot establish the place of {mount_point}: file-system-unlisted ramfs");
+        assert!(error.message.contains(&line), "{mount_point}: {error}");
+    };
+    // The deny entry beside the mount, in the listed directory: a file that exists, and a
+    // name that does not exist yet, which is a place all the same.
+    unserved(
+        file(31, "/opt/k/odd/prog"),
+        &[at("/opt/k/odd"), at("/opt/k/bin")],
+        "/opt/k/odd/media",
+    );
+    unserved(
+        at("/opt/k/odd/later"),
+        &[at("/opt/k/odd")],
+        "/opt/k/odd/media",
+    );
+    // The listed directory is above the one that holds the mount: both are expanded.
+    unserved(
+        file(31, "/opt/k/odd/prog"),
+        &[at("/opt/k")],
+        "/opt/k/odd/media",
+    );
+    unserved(
+        file(31, "/opt/k/far/in/tool"),
+        &[at("/opt/k/far")],
+        "/opt/k/far/in/media",
+    );
+    // The denied file lies in a mount of a listed type that is mounted in the ramfs: the
+    // listed directory reaches it, is expanded, and meets the ramfs first.
+    unserved(
+        file(84, "/opt/k/held/sub/prog"),
+        &[at("/opt/k/nest")],
+        "/opt/k/nest/media",
+    );
+
+    // The deny entry elsewhere: the directory gets one rule and the mount is never met.
+    judged(
+        file(31, "/opt/k/bin/tool"),
+        &[at("/opt/k/odd"), at("/opt/k/nest"), at("/opt/k/bin")],
+    )
+    .expect("a deny entry beside the listed directory expands nothing in it");
+    // One directory deeper than the deny entry: `far` is expanded, `far/in` gets one rule.
+    judged(file(31, "/opt/k/far/tool"), &[at("/opt/k/far")])
+        .expect("the mount is an entry of a directory that is not expanded");
+    // A tmpfs covers the ramfs: the tmpfs is the entry, and it has a place.
+    judged(file(31, "/opt/k/cov/prog"), &[at("/opt/k/cov")])
+        .expect("a covered mount of a type outside the list is no entry");
+    // The ramfs at `/srv/again` is stacked on a mount of the listed file system, so by
+    // place it is beneath the listed directory. Its holder, `/srv`, is not: the helper never
+    // walks there from `/usr/local/src`, whatever is denied in `/srv`.
+    judged(
+        file(31, "/srv/tool"),
+        &[sighted_at(&tree, 70, "/usr/local/src", None)],
+    )
+    .expect("a holder the listed directory does not reach is not asked");
+}
+
 /// The three guards of a deny entry's sighting, each on real directories.
 ///
 /// - **Only an absent name is absent.** A deny entry whose path fails for another reason, a
 ///   link that never ends or one that leaves the view, refuses the start; it is not kept as
 ///   a name beneath the directory above it. Read as absent it would deny nothing.
-/// - **An entry that does not exist is sighted nowhere.** Its nearest ancestor is placed,
-///   and the ancestor is not what the entry denies: a program beside the absent name, in a
-///   mount classed `beneath` and in the workspace itself, is planned.
+/// - **An entry that does not exist is sighted where its name is.** Its nearest ancestor is
+///   placed, and the ancestor is not what the entry denies: a program beside the absent
+///   name, in a mount classed `beneath`, in the workspace itself and in a followed mount, is
+///   planned.
 /// - **A deny entry is measured like an entry**: one whose path in the view is longer than
 ///   the kernel takes is refused by name, because the helper could not open it.
 #[test]
@@ -2846,6 +2961,10 @@ fn a_deny_entry_is_absent_only_where_its_name_is_and_then_denies_no_ancestor() {
     .expect("a program beside names that do not exist");
     assert_eq!(lists.deny.len(), 3);
     plan(&["later"], "/workspace/top").expect("a program of the workspace beside an absent name");
+    // The same in a mount that is followed: the absent name is sighted where it is, beside
+    // the program, and not as the directory above both.
+    plan(&["/opt/t/bin/later"], "/opt/t/bin/other")
+        .expect("a program of a declared root beside an absent name");
     assert_refused(
         plan(&["bin"], "/workspace/bin/tool"),
         "exec.sandbox-program-unlisted",

@@ -551,6 +551,78 @@ async fn limit_a_program_replaced_in_an_expanded_directory_no_longer_runs() {
     println!("{NAME}: executed, a replaced program is no longer executable");
 }
 
+/// The limit of design 35 § 8.2 (security review S8-3, and the stakeholder's condition on
+/// it): **a directory the expansion cannot read ends the run with status 125 and one line
+/// that names it.** `bin` is listed and `bin/held/tool` is denied, so the helper expands
+/// `bin` and then `bin/held`. `bin/held` has lost its read permission, as an earlier run of
+/// the same workspace can leave it: its names still open, so the driver places the deny
+/// entry and dispatches. The run's standard error is then one line, and nothing else:
+///
+/// ```text
+/// substrate-exec-gate: cannot read the directory "/workspace/bin/held": Permission denied (os error 13)
+/// ```
+///
+/// The prefix, the phrase, the directory's path in the run's view as a quoted string, and
+/// the system's cause. Nothing of the run's executes: no output, no marker. An embedder
+/// tells "an earlier run made this" from a broken profile by that line.
+#[tokio::test(flavor = "multi_thread")]
+async fn limit_a_directory_the_expansion_cannot_read_ends_the_run_125_and_names_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    const NAME: &str = "ESS confinement linux exec deny limit unreadable directory";
+    const LINE: &str = "substrate-exec-gate: cannot read the directory \"/workspace/bin/held\": \
+                        Permission denied (os error 13)\n";
+    let Some(lane) = lane(NAME) else {
+        return;
+    };
+    let held = lane.workspace.join("bin/held");
+    std::fs::create_dir_all(&held).expect("held");
+    std::fs::copy(tool("true"), held.join("tool")).expect("copy true");
+    let permit = |mode: u32| {
+        std::fs::set_permissions(&held, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+    // Write and search, no read: what `chmod u-r` in a run leaves.
+    permit(0o300);
+    if std::fs::read_dir(&held).is_ok() {
+        permit(0o700);
+        println!("{NAME}: ABSENT (this user reads a directory without the read permission)");
+        return;
+    }
+    let admitted = lane
+        .adapter
+        .admit(&base_listed_and_denied(
+            &lane.workspace,
+            &["bin"],
+            &["bin/held/tool"],
+        ))
+        .expect("admitted");
+    let started = lane
+        .adapter
+        .start(&admitted, &shell(": > /workspace/ran; bin/tool; echo ran"))
+        .await;
+    let run = match started {
+        Ok(run) => run,
+        Err(error) => {
+            permit(0o700);
+            panic!("the start was not dispatched: {error}");
+        }
+    };
+    let ended = lane.adapter.wait(&run).await.expect("waited");
+    let output = lane.adapter.output(&run).await.expect("output");
+    permit(0o700);
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    assert_eq!(
+        (
+            ended.exit.as_ref().and_then(|exit| exit.code),
+            String::from_utf8_lossy(&output.stdout).as_ref(),
+            String::from_utf8_lossy(&output.stderr).as_ref(),
+        ),
+        (Some(125), "", LINE),
+        "the helper's status, no output of the run's, and the one line that names the directory"
+    );
+    assert!(!lane.workspace.join("ran").exists(), "the program ran");
+    println!("{NAME}: executed");
+}
+
 /// D15 with D30 (§ 9): **`exec_denied_paths` is proved only where the helper held a deny
 /// entry in a mount beneath a listed directory.** The deny probe binds a directory no entry
 /// lists at `apart/held`, beneath its listed `apart`, and denies `apart/held/tool`. By place

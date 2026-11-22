@@ -481,20 +481,41 @@ beneath a denied directory. The deny probe binds a directory no entry lists bene
 listed directory (`PROBE_HELD_MOUNT`), and
 `ESS confinement linux exec deny probe held mount` holds that a helper which misses it proves
 the allow-list alone. Both functions are held on every host by cases on mount tables written
-as text (`landlock::tests`, `exec_gate::tests`). **Six more roots are required through
+as text (`landlock::tests`, `exec_gate::tests`). **Nine more roots are required through
 `require_staged`**, by the rule of the eleven above: the helper package's `namespace_gate`
 (a host bind mount, a tmpfs, an overlay, and the limit of an overlay listed beside its lower
-directory), `adversary4_namespace_gate` and `security4_gate`, and the host crate's
-`security4_exec_denied`, `adversary4_exec_denied` and `exec_denied_view_mounts`. Their cases
+directory), `adversary4_namespace_gate`, `adversary5_denied_reach_gate` and `security4_gate`,
+and the host crate's `security4_exec_denied`, `security5_exec_denied`,
+`adversary4_exec_denied`, `adversary5_exec_denied_round2` and `exec_denied_view_mounts`.
+Their cases
 that mount do so in a user and mount namespace of their own. Where that is granted no mount
 they print `ABSENT (` and the lane names them in its one line: on `release-lanes.yml` and
 `gate.yml` they are workstation evidence, never a passed case. The cases of those roots that
 make no mount are required on every host, and so is `adversary4_gate`, with no `ABSENT` line.
 One case is absent on every host, `adversary4 exec deny nested host mount`, which mounts in
-the test process itself; `exec_denied_view_mounts` stages its shape. **A deny entry that does
-not exist at the start denies a new file under its name, not the name** (§ 8.5):
-`limit_a_deny_entry_the_run_creates_by_a_link_or_a_rename_runs` in `adversary4_exec_denied`
-holds `copied 126`, `linked 0`, `renamed 0`. `macos` renders the list as Seatbelt deny rules
+the test process itself; `exec_denied_view_mounts` stages its shape. An absence a case
+names for something else the host lacks is taken only with that reason: an overlay case with
+`no overlay mount in a user namespace on this host`, never with `the stage failed`. **In a
+listed directory a run can write, a deny entry holds for the files that exist at the start,
+under the names they have then** (§ 8.2, § 8.5). A directory inside an expanded directory
+that holds no denied path gets one rule, what the run creates in it executes, and the rule
+moves with a rename, so a file the run creates or moves can run under any name, the denied
+name included. A deny-list is exact only where the run cannot write. Two `limit_` cases hold
+the figures: `limit_a_deny_entry_the_run_creates_by_a_link_or_a_rename_runs` in
+`adversary4_exec_denied` (`copied 126`, `linked 0`, `renamed 0`) and
+`limit_a_file_the_run_creates_or_moves_runs_under_a_denied_name` in `security5_exec_denied`
+(`copied after a rename 0` and eight more). **A mount of a file-system type outside the list
+that is an entry of a directory a start expands refuses the start before dispatch**,
+`exec.sandbox-place-unserved` at `exec_subpaths` (`judge_denied` in
+`crates/substrate-host/src/exec_gate.rs`). What decides is where the deny entry is: the
+helper expands only the directories on the way to one, so the same mount one directory
+further away refuses nothing (design 35 § 6, amended 2026-11-22). A start with a deny-list
+reads every directory it expands, and ends with status 125 where one cannot be read; its
+standard error is then the one line
+`substrate-exec-gate: cannot read the directory "<path>": <cause>`, a form consumers match,
+held by `limit_a_directory_the_expansion_cannot_read_ends_the_run_125_and_names_it` in the
+lane (`ESS confinement linux exec deny limit unreadable directory`).
+`macos` renders the list as Seatbelt deny rules
 after every allow (`render_exec_denied` in `crates/substrate-host/src/seatbelt.rs`); its cases
 run only in the hosted macOS check, and how Seatbelt matches a deny entry in another letter
 case on a case-insensitive volume is not verified.

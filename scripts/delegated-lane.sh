@@ -261,6 +261,7 @@ require_executed ess_confinement_linux \
   'ESS confinement linux exec deny limit loader: executed' \
   'ESS confinement linux exec deny limit script: executed' \
   'ESS confinement linux exec deny limit replaced: executed' \
+  'ESS confinement linux exec deny limit unreadable directory: executed' \
   'ESS confinement linux exec deny probe held mount: executed'
 require_executed ess_confinement_systemd \
   'ESS confinement systemd local scoped write: executed' \
@@ -474,8 +475,21 @@ require_staged exec_denied_view_mounts \
   'ESS confinement linux exec deny view mounts'
 require_staged security4_exec_denied \
   '?security4 exec denied host mount|this host has no /usr/local/src' \
-  '?security4 exec denied unplaced|this host' \
+  '?security4 exec denied unplaced|this host has no vfat mount at /boot/efi' \
   '=security4 exec denied trace'
+# The second security review's root. Its first case is the stated limit of a deny entry in a
+# listed directory the run can write (design 35 § 8.2): it holds the measured figures. Three
+# cases make no mount; the fourth stages its mounts in a namespace of its own.
+require_staged security5_exec_denied \
+  '=security5 exec denied limit created or moved by the run' \
+  '=security5 exec denied unreadable expanded directory' \
+  '=security5 exec denied program in a declared mount' \
+  'security5 exec denied names across mounts'
+# The adversary's second round. Its routes case makes no mount. The other stages a mount of a
+# type outside the list beside, one directory below and beneath the deny entry.
+require_staged adversary5_exec_denied_round2 \
+  '=adversary5 exec deny routes' \
+  'adversary5 exec deny beside unlisted mount'
 require_staged adversary4_exec_denied \
   '=adversary4 exec deny other names' \
   '=adversary4 exec deny limit created later' \
@@ -490,8 +504,8 @@ require_staged adversary4_exec_denied \
 require_staged -p b10x-substrate-exec-gate namespace_gate \
   'exec gate namespace host bind mount' \
   'exec gate namespace tmpfs' \
-  '?exec gate namespace overlay|the stage failed' \
-  '?exec gate namespace limit overlay lower directory|the stage failed'
+  '?exec gate namespace overlay|no overlay mount in a user namespace on this host' \
+  '?exec gate namespace limit overlay lower directory|no overlay mount in a user namespace on this host'
 require_staged -p b10x-substrate-exec-gate adversary4_namespace_gate \
   'adversary4 exec gate namespace second mount nested in a listed directory' \
   'adversary4 exec gate namespace deny entry beneath a nested mount' \
@@ -502,6 +516,14 @@ require_staged -p b10x-substrate-exec-gate security4_gate \
   'security4 exec gate deny in a mount beneath a listed directory' \
   'security4 exec gate listed mount beneath a denied directory' \
   '=security4 exec gate rule bound'
+# The adversary's second round on the helper alone: every case makes its namespace.
+require_staged -p b10x-substrate-exec-gate adversary5_denied_reach_gate \
+  'adversary5 exec gate denied reach probe shape, second listed directory' \
+  'adversary5 exec gate denied reach probe shape, the expanded directory' \
+  'adversary5 exec gate denied reach unlisted mount among the entries' \
+  'adversary5 exec gate denied reach listed mount above an unlisted one' \
+  'adversary5 exec gate denied reach denied root of a file system' \
+  'adversary5 exec gate denied reach deny entry beneath a file'
 if (( ${#unstaged[@]} > 0 )); then
   if (( mounts_granted )); then
     why="this host lacks what they need"

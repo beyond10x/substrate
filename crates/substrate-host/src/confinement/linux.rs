@@ -30,9 +30,13 @@
 //! path holds another is decided by place, so the file is denied under every mount of its
 //! directory and under a symbolic link; a hard link that existed before the start in another
 //! listed directory runs, and so does a copy in a listed directory the run can write. An entry
-//! may be absent at the start: a new file under its name is then denied, and a listed program
-//! of the same directory that the run links or renames to that name runs. A deny-list beside
-//! an empty `exec_subpaths` is refused at admission,
+//! may be absent at the start. **In a listed directory a run can write, a deny entry holds for
+//! the files that exist at the start, under the names they have then**: a directory inside an
+//! expanded directory that holds no denied path gets one rule, what the run creates in it
+//! executes, and the rule moves with a rename, so a file the run creates or moves can run
+//! under any name, the denied name included. Nothing runs that the run could not already run
+//! by copying it into a listed directory it can write, and a deny-list is exact only where
+//! the run cannot write. A deny-list beside an empty `exec_subpaths` is refused at admission,
 //! `confinement.exec-denied-paths-without-subpaths`, on every adapter.
 //!
 //! **A deny entry holds across the mounts** (D30). What is mounted beneath a denied directory

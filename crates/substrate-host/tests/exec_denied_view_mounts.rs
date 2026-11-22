@@ -13,7 +13,8 @@
 //!   is listed, a listed mount beneath a denied directory is not executed, and a start
 //!   whose program lies in a mount beneath a denied directory is refused before dispatch;
 //! - a ramfs at `odd/media`, a file-system type outside the list: beneath a denied directory
-//!   the start is refused, beneath a listed directory it is compared with nothing;
+//!   the start is refused, beneath a listed directory it is compared with nothing, and as
+//!   an entry of a listed directory the start expands it refuses the start again;
 //! - two tmpfs stacked on `stack/m`: what a denied directory reaches, and what a listed
 //!   directory of a start with a deny-list reaches, cannot be established, and the start is
 //!   refused before dispatch. With an allow-list alone the same start runs.
@@ -133,16 +134,10 @@ impl Inside<'_> {
     }
 }
 
-/// The case inside its namespace, where the five mounts beneath `<host>/tools` exist. Prints
-/// one line per observation.
-async fn inside(host: &Path) {
-    let cgroup_root = match delegated() {
-        Ok(root) => root,
-        Err(reason) => {
-            println!("{NAME} inside: ABSENT ({reason})");
-            return;
-        }
-    };
+/// The adapter opened on `<host>/workspaces` with the lane's helper and the deny-list proved,
+/// or why the case is absent.
+fn opened(host: &Path) -> Result<Arc<dyn ConfinementAdapter>, String> {
+    let cgroup_root = delegated()?;
     let mut config = HostConfig::minimum(host.join("workspaces"));
     config.exec_gate = Some(PathBuf::from(
         std::env::var_os("SUBSTRATE_EXEC_GATE").expect(
@@ -150,20 +145,27 @@ async fn inside(host: &Path) {
          substrate-exec-gate and names it",
         ),
     ));
-    let opened = confinement::open(AdapterRequest::Linux(Box::new(
+    let adapter = confinement::open(AdapterRequest::Linux(Box::new(
         LinuxRequest::new(config).with_cgroup_root(Some(cgroup_root)),
-    )));
-    let adapter = match opened {
-        Ok(adapter) if adapter.facts().proves(&Fact::ExecDeniedPaths) => adapter,
-        Ok(adapter) => {
-            println!(
-                "{NAME} inside: ABSENT (the adapter did not prove exec_denied_paths: {:?})",
-                adapter.facts()
-            );
-            return;
-        }
-        Err(error) => {
-            println!("{NAME} inside: ABSENT (linux did not open: {error})");
+    )))
+    .map_err(|error| format!("linux did not open: {error}"))?;
+    if adapter.facts().proves(&Fact::ExecDeniedPaths) {
+        Ok(adapter)
+    } else {
+        Err(format!(
+            "the adapter did not prove exec_denied_paths: {:?}",
+            adapter.facts()
+        ))
+    }
+}
+
+/// The case inside its namespace, where the five mounts beneath `<host>/tools` exist. Prints
+/// one line per observation.
+async fn inside(host: &Path) {
+    let adapter = match opened(host) {
+        Ok(adapter) => adapter,
+        Err(reason) => {
+            println!("{NAME} inside: ABSENT ({reason})");
             return;
         }
     };
@@ -220,6 +222,23 @@ async fn inside(host: &Path) {
         &tools,
     )
     .await;
+    // The same mount as an entry of a directory the start expands: the deny entry lies in
+    // the listed directory that holds the mount point, as a file and as a name that does not
+    // exist yet.
+    seen.observe(
+        "unlisted-entry",
+        &["/opt/t/odd", "/opt/t/bin"],
+        &["/opt/t/odd/tool"],
+        &tools,
+    )
+    .await;
+    seen.observe(
+        "unlisted-entry-absent",
+        &["/opt/t/odd", "/opt/t/bin"],
+        &["/opt/t/odd/later"],
+        &tools,
+    )
+    .await;
     // A stack: beneath a denied directory, beneath a listed directory of a start with a
     // deny-list, and beneath a listed directory of a start without one.
     seen.observe("covered-denied", &["/opt/t/bin"], &["/opt/t/stack"], &tools)
@@ -260,7 +279,7 @@ impl Expected {
 }
 
 /// Every observation of the case: its name, what it must be, and what that means.
-const EXPECTED: [(&str, Expected, &str); 10] = [
+const EXPECTED: [(&str, Expected, &str); 12] = [
     (
         "allow-list",
         Expected::Ran("bind:0\nbeside:0\ntmpfs:0\nbeside:0\n"),
@@ -299,6 +318,24 @@ const EXPECTED: [(&str, Expected, &str); 10] = [
         "unlisted-listed",
         Expected::Ran("denied:126\nbeside:0\n"),
         "a ramfs beneath a listed directory to refuse nothing",
+    ),
+    (
+        "unlisted-entry",
+        Expected::Refused(
+            "exec.sandbox-place-unserved",
+            "exec_subpaths",
+            "tools/odd/media: file-system-unlisted ramfs",
+        ),
+        "the start refused for the ramfs among the entries of the expanded directory",
+    ),
+    (
+        "unlisted-entry-absent",
+        Expected::Refused(
+            "exec.sandbox-place-unserved",
+            "exec_subpaths",
+            "tools/odd/media: file-system-unlisted ramfs",
+        ),
+        "the start refused for the same ramfs beside a deny entry that does not exist yet",
     ),
     (
         "covered-denied",
@@ -343,6 +380,11 @@ const EXPECTED: [(&str, Expected, &str); 10] = [
 ///   `exec.sandbox-place-unserved`, address `exec_denied_paths`, with the mount point and
 ///   `file-system-unlisted ramfs`. `unlisted-listed`: the same directory listed, beside a
 ///   deny entry elsewhere, refuses nothing, and the deny entry holds.
+/// - `unlisted-entry` and `unlisted-entry-absent`: the deny entry lies in `odd` itself, as a
+///   file and as a name that does not exist yet. The helper would expand `odd` and could not
+///   place the ramfs among its entries, so the start is refused before dispatch,
+///   `exec.sandbox-place-unserved`, address `exec_subpaths`, with the mount point and the
+///   type.
 /// - `covered-denied` and `covered-listed`: `stack` holds two mounts on one mount point.
 ///   Denied, or listed beside a deny entry, it refuses the start
 ///   `exec.sandbox-place-unserved` with `mount-covered`, address `exec_denied_paths` and
@@ -421,6 +463,7 @@ fn staged() -> Result<String, String> {
     for name in [
         "tools/bin/tool",
         "tools/bin/other",
+        "tools/odd/tool",
         "extra/prog",
         "extra/other",
     ] {

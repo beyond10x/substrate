@@ -121,9 +121,23 @@ pub struct ConfinementProfile {
     /// What it denies is `execve` of the path. An allowed interpreter still runs a denied
     /// script, and the loader run as a program runs a denied program. On `linux`:
     ///
-    /// - a directory that holds a denied path gets no rule of its own, so a file created in
-    ///   it during the run is not executable, and a program a build replaces there loses the
-    ///   right: keep deny entries out of directories a build writes its programs into;
+    /// - a directory that holds a denied path gets no rule of its own, so a new file in it
+    ///   is not executable, and a program a build replaces there loses the right: keep deny
+    ///   entries out of directories a build writes its programs into;
+    /// - in a listed directory the run can write, an entry holds for the files that exist at
+    ///   the start, under the names they have then. A directory inside an expanded directory
+    ///   that holds no denied path gets one rule, which moves with a rename, and what the
+    ///   run creates in it executes: a file the run creates or moves can run under any name,
+    ///   the denied name included. A deny-list is exact only where the run cannot write;
+    /// - a start reads every directory it expands and ends with status 125 where one cannot
+    ///   be read. Its standard error is then one line, which a consumer may match:
+    ///   `substrate-exec-gate: cannot read the directory "<path>": <cause>`, with the
+    ///   directory's path in the run's view as a quoted string. An earlier run of the
+    ///   workspace can cause it by taking the read permission from such a directory;
+    /// - a mount of a file-system type other than `ext4`, `overlay` and `tmpfs` that is an
+    ///   entry of a directory the start expands is `exec.sandbox-place-unserved` (501)
+    ///   before dispatch. A start expands only the directories on the way to a deny entry,
+    ///   so the same mount one directory further from the entry refuses nothing;
     /// - a hard link to a denied program that already exists elsewhere beneath a listed path
     ///   runs: an entry denies a path and every mount of it, not every link to the file;
     /// - never list a lower directory of an overlay that is also in the view: the same bytes

@@ -252,7 +252,8 @@ text repeats the cause. A profile without a list asks for no place and runs as b
 refuses the profile `confinement.fact-unserved` (501).
 
 - An entry has the form of an `exec_subpaths` entry: a file or a directory, relative beneath
-  the workspace or absolute in the same locations. A profile holds at most 64.
+  the workspace or absolute in the same locations. A profile holds at most 64. An entry may
+  be absent when the run starts.
 - A denied path wins over a listed directory that holds it, over an entry that names it and
   over the program. A start whose program is denied is `exec.sandbox-program-unlisted` (422).
 - A deny-list needs an allow-list. Without `exec_subpaths` the profile is
@@ -265,7 +266,16 @@ refuses the profile `confinement.fact-unserved` (501).
 On `linux` a denied program is found by where its file lies, not by the text of a path, and
 across mounts. Where a mount beneath a denied directory, or beneath a listed directory of a
 profile with a deny-list, cannot be compared, the start is `exec.sandbox-place-unserved` (501):
-`mount-covered`, `mount-root-deleted`, and beneath a denied directory `file-system-unlisted`.
+`mount-covered`, `mount-root-deleted`, and `file-system-unlisted` beneath a denied directory or
+as an entry of a directory that holds a denied path. For that last case, what decides is where
+the deny entry is, not the mount: the helper expands only the directories on the way to a deny
+entry.
+
+| A mount of a type other than `ext4`, `overlay` and `tmpfs` | The start |
+|---|---|
+| at `k/vol`, with `k` listed and `k/tool` denied: `k` is on the way to the deny entry, and its entries are walked one by one | refused |
+| at `far/in/vol`, with `far` listed and `far/tool` denied: `far/in` is not on the way, and gets one rule | runs |
+| beneath a listed directory of a profile without a deny-list | runs |
 
 | A denied program reached through | Answer |
 |---|---|
@@ -275,21 +285,32 @@ profile with a deny-list, cannot be compared, the start is `exec.sandbox-place-u
 | a hard link in the same directory | denied |
 | a hard link that existed before the start in another listed directory | runs |
 | a copy in a listed directory the run can write | runs |
-| the name of an entry that was absent at the start, as a new file: `copied 126` | denied |
-| that name, given to a listed program of the same writable directory by a hard link (`linked 0`) or a rename (`renamed 0`) | runs |
+| a new file the run writes into the listed directory that holds the deny entry itself: `copied 126` | denied |
+| a file the run writes into a directory inside it that held no denied path at the start (`new file in a directory of the expanded one 0`), also once the run renamed that directory so that the file has the denied path (`copied after a rename 0`) | runs |
+| the name of an entry that was absent at the start, given to a listed program by a hard link (`linked 0`), a rename (`renamed 0`) or a symbolic link | runs |
 
-- An entry may be absent when the run starts. **The rules are on files, not on names**: a new
-  file under that name is denied, and a listed program of the same directory that the run
-  links or renames to it runs. The three figures in the table are statuses measured in a
-  listed directory the run can write. No program outside the list runs this way, and none
-  that was denied at the start.
-- A listed directory that holds a denied path gets one rule per file. A file created there
-  during the run is not executable, and a program removed and written again no longer runs. Put
-  no deny entry in a directory a build writes its programs into.
+- A listed directory that holds a denied path is expanded: one rule per file in it, and one per
+  directory in it that holds no denied path. A new file in the expanded directory itself has
+  no rule, and a program removed and written again there no longer runs. Put no deny entry in
+  a directory a build writes its programs into.
+- **In a listed directory a run can write, a deny entry holds for the files that exist at the
+  start, under the names they have then.** A directory inside an expanded directory that holds
+  no denied path gets one rule: what the run creates in it executes, and the rule moves with a
+  rename. So a file the run creates or moves can run under any name, the denied name included.
+  Nothing runs that the run could not already run by copying it into a listed directory it can
+  write. **A deny-list is exact only where the run cannot write.** The figures in the table
+  are measured statuses.
 - A layer of an overlay is another file system to the kernel, and a program denied in the
   overlay runs from the layer. So never list a lower directory of an overlay that is also in the
   view.
-- A start writes at most 65536 rules. Beyond that the run ends with status 125.
+- A start with a deny-list reads every directory it expands and writes at most 65536 rules.
+  Where a directory cannot be read, or beyond that number, the run ends with status 125 and
+  nothing runs. An earlier run causes the first by taking the read permission from a
+  workspace directory. Standard error is then one line a consumer may match:
+  `substrate-exec-gate: cannot read the directory "<path>": <cause>`, with the path in the
+  run's view as a quoted string and the system's cause, such as
+  `Permission denied (os error 13)`. A program can print that line and exit 125 itself: it
+  explains an end and proves none.
 
 On `macos` the entries are Seatbelt deny rules after every allow. A hard link to a denied
 program under another path runs. **A limit on `macos`:** the deny rules were read and run only

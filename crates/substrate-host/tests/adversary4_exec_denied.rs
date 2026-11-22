@@ -209,10 +209,14 @@ async fn adversary4_every_other_name_of_a_denied_file_stays_denied() {
 /// `renamed 0`. A client that denies a name in a directory the run can write gets a rule
 /// about new files there, not about that name.
 ///
-/// **What runs is bounded.** Only a program the run could already start under its own name
-/// runs under the denied one. A program outside the list cannot be given the entry's name:
-/// a hard link and a rename from an unlisted directory into the listed one fail (`EXDEV`,
-/// the refer rule), and a copy of it is a new file and ends with status 126.
+/// **What runs in the expanded directory itself is bounded.** A program of an unlisted
+/// directory does not run under the entry's name there, whether the run links it, renames it
+/// or copies it to that name: `linked 126`, `renamed 126`, `copied 126`. The design expected
+/// the link and the rename to fail (`EXDEV`, the refer rule). They do not: `bin` is expanded
+/// and has no rule of its own, so a file moved into it gains no right, and the kernel lets it
+/// happen. The file is there and has no rule, which is status 126 and not 127. The wider
+/// limit, a directory inside `bin` with its own rule, is
+/// `limit_a_file_the_run_creates_or_moves_runs_under_a_denied_name` in `security5_exec_denied`.
 ///
 /// This was the adversary's `adversary4_a_deny_entry_the_run_creates_later_is_denied`, which
 /// required 126 of all three and found the two that run.
@@ -247,9 +251,9 @@ async fn limit_a_deny_entry_the_run_creates_by_a_link_or_a_rename_runs() {
     );
 
     // The bound of the limit: `outside` is not listed, and no program of it runs under the
-    // name of a deny entry, whether the run links it there, renames it there or copies it.
-    // `bin` is expanded and has no rule of its own, so the kernel may let the link and the
-    // rename happen; the file has no rule either way.
+    // name of a deny entry in `bin` itself, whether the run links it there, renames it there
+    // or copies it. `bin` is expanded and has no rule of its own, so the kernel lets the link
+    // and the rename happen, and the file is there without a rule: 126 each, as measured.
     std::fs::create_dir_all(lane.workspace.join("outside")).expect("outside");
     for name in ["a", "b", "c"] {
         std::fs::copy(tool("true"), lane.workspace.join("outside").join(name)).expect("copy true");
@@ -267,15 +271,11 @@ async fn limit_a_deny_entry_the_run_creates_by_a_link_or_a_rename_runs() {
     let Outcome::Ran(_, outside, stderr) = shell(&lane.adapter, &profile, script).await else {
         panic!("the start was refused: a deny entry need not exist at the start");
     };
-    let lines: Vec<&str> = outside.lines().collect();
-    assert_eq!(lines.len(), 3, "{outside:?}: {stderr}");
-    for (line, how) in lines.iter().zip(["linked", "renamed", "copied"]) {
-        // 126: the file is there and has no rule. 127: the kernel refused to put it there.
-        assert!(
-            *line == format!("{how} 126") || *line == format!("{how} 127"),
-            "a program outside the list ran under the name of a deny entry: {outside:?}: {stderr}"
-        );
-    }
+    assert_eq!(
+        outside, "linked 126\nrenamed 126\ncopied 126\n",
+        "a program outside the list under the name of a deny entry in the expanded directory: \
+         the file is there and has no rule: {stderr}"
+    );
     println!("{NAME}: a program outside the list: {outside:?}");
     println!("{NAME}: executed, copied 126, linked 0, renamed 0");
 }
