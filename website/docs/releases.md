@@ -10,8 +10,8 @@ fails when the two differ. Earlier releases are in the
 [full changelog](https://github.com/beyond10x/substrate/blob/main/CHANGELOG.md). The
 [confinement adapters](./concepts/adapters.md) page explains each adapter the notes name.
 
-What 0.16.1 first publishes is listed under 0.16.0 in the full changelog and summarized on the
-[status page](./status.md#new-in-0161), including the namespace driver's limits.
+The newest release is 0.24.0, published on 22 November 2026. The
+[status page](./status.md#newest-release) summarizes it.
 
 <!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->
 

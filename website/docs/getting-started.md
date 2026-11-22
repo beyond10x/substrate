@@ -20,7 +20,7 @@ process and runs the command inside it.
 From release 0.14.0, each release carries the command line and `SHA256SUMS`:
 
 ```bash
-version=0.16.1
+version=0.24.0
 asset="b10x-substrate-$version-x86_64-unknown-linux-gnu.tar.gz"
 base="https://github.com/beyond10x/substrate/releases/download/$version"
 curl -fLO "$base/$asset" -fLO "$base/SHA256SUMS"
@@ -30,10 +30,10 @@ tar -xzf "$asset"
 
 Put the `b10x-substrate` binary from the archive on your `PATH`.
 
-For an earlier release, build it from its tag with Rust 1.97 or newer:
+To build from source, install the release tag with Rust 1.97 or newer:
 
 ```bash
-cargo install --git https://github.com/beyond10x/substrate --tag 0.13.0 b10x-substrate-cli --locked
+cargo install --git https://github.com/beyond10x/substrate --tag 0.24.0 b10x-substrate-cli --locked
 ```
 
 ## Preview a run

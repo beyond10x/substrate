@@ -9,9 +9,9 @@ Substrate has a tagged, keyless-signed daemon image and a public, keyless-signed
 development contract bundle. Distribution is proven; the bundle remains a development contract
 because stability is a separate compatibility decision.
 
-Release [0.16.1](https://github.com/beyond10x/substrate/releases/tag/0.16.1), published on
-29 October 2026, ships the daemon, disposable MCP and executor images, the Helm chart and the
-signed `substrate-wire/0.25.0` development bundle. [Release notes](./releases.md) lists what changed.
+Release [0.24.0](https://github.com/beyond10x/substrate/releases/tag/0.24.0), published on 22 November 2026,
+ships the daemon, disposable MCP and executor images, the Helm chart and the
+signed `substrate-wire/0.27.0` development bundle. [Release notes](./releases.md) lists what changed.
 
 Tag 0.16.0 was not published: the gate on its commit failed a dependency advisory check, and
 release tags are write-once. 0.16.1 is the first release of everything listed under 0.16.0.
@@ -39,21 +39,21 @@ Treat every capability as deployment-specific and verify it through `GET /v1/mac
 | operational listener | opt-in `--ops-listen`: `/livez`, `/readyz` and OpenMetrics `/metrics` |
 | Kubernetes serving | a signed Helm chart running one node-bound daemon per node |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
-| distribution | Apache-2.0 source plus keyless-signed 0.16.1 daemon, MCP and executor images, chart and binaries, and the signed 0.25.0 development bundle |
+| distribution | Apache-2.0 source plus keyless-signed 0.24.0 daemon, MCP and executor images, chart and binaries, and the signed 0.27.0 development bundle |
 
-## New in 0.16.1
+## Newest release
+
+Release 0.24.0 adds:
 
 | Area | State |
 |---|---|
-| Kubernetes namespace driver | `--driver kubernetes`, a development profile serving empty workspaces |
-| exec on a cluster | unverified; every exec start is refused `exec.sandbox-unavailable` |
-| shared clean-room conformance | follows in the next release (`story:remote-clean-room-conformance`) |
-| contract | development bundle `0.25.0`: the `kubernetes` driver word, the optional `confinement.no-egress` fact and three `501` refusals |
-| executor image | `ghcr.io/beyond10x/b10x-substrate-executor`, published with the release |
-| execution profile | AppArmor `substrate-host-exec-v2` is the default; nodes must load it |
-| state store | schema 2, one-way: back up the state directory first |
+| executable deny-list | `exec_denied_paths` beside `exec_subpaths`, proved by `linux`, `systemd` around it and `macos` |
+| deny-list refusals | two at 422: `confinement.exec-denied-paths-without-subpaths` and `confinement.exec-denied-paths-exceeded` |
+| host crate API | breaking: `FACT_ORDER` is `[Fact; 14]` |
+| Git change-set observation | compares the worktree with the baseline commit's tree |
+| security | three fixes: the host driver and the `linux` adapter refuse the `ioctl` requests that exchange file blocks (ADR 0050), the daemon's private paths are refused as read-only sources, and the Git change-set observation returns no content from outside the workspace |
 
-The namespace driver's limits are in the
+The Kubernetes namespace driver's limits are in the
 [deployment guide](./guides/deployment.md#kubernetes-namespace-driver).
 
 ## Explicitly absent
@@ -81,7 +81,7 @@ in a broader architecture do not imply served endpoints.
   Identity round trip on a reused keep-alive connection (at most 8 idle, closed after 30 s idle or
   any error), so a completed revocation applies to the next request.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Release `0.16.1` advertises `substrate-wire/0.25.0` and the SHA-256 of its inner
+- Release `0.24.0` advertises `substrate-wire/0.27.0` and the SHA-256 of its inner
   `bundle.json` as one claim. The outer OCI package has its own digest. Bundle `0.15.0`
   deliberately replaced `/v1/pipe-sessions` with `/v1/sessions` and serves no compatibility alias.
 - Git materialization needs a configured source and transient Connector authority. The conditional
