@@ -173,3 +173,63 @@ The rendered `0.18.0` bundle is checked by `cargo xtask check-bundles`. Its addi
 the input field, the fact, the observation and the published refusal set to the wire crate.
 Filesystem confinement stays outside the ESS accepted-operation projection (`spec/coverage.md`), so
 no specification model changes.
+
+## Amendment, 2026-11-22: a file that meets a path this host keeps private is refused
+
+A declared file admits one host object into a confined process, and the caller chooses its host
+path. This amendment and the one of the same date in
+[ADR 0010](0010-declared-host-roots-are-mounted-read-only.md) state one rule for both read-only
+sources. ADR 0010 carries the reasons for each entry of the set; what binds a file is restated
+here. Decides `story:read-only-mount-sources-refuse-the-daemons-private-paths`.
+
+### Decision
+
+1. **The rule.** A start is refused when a read-only file's `host_path` equals or lies under an
+   entry of the read set. A root is also refused when it contains one; a regular file contains
+   nothing.
+2. **The read set**, as the daemon computes it from its own configuration: the state directory,
+   which is the parent directory of `--state`; the workspace root; the production TLS private
+   key; the static-bearer file; every secret-slot source; the API socket; and the delegated
+   cgroup root.
+3. **Narrower than the writable set.** The daemon executable, the bubblewrap binary, the TLS
+   certificate chain and both CA bundles are protected against replacement
+   ([ADR 0038](0038-writable-roots-are-named-host-paths-or-git-checkouts.md)), not against
+   reading. They are not in the read set, and a file naming one is admitted.
+4. **The set is the daemon's, not an embedder's.** A file beside the state directory or the
+   workspace root, in a directory an embedding application keeps for itself, is admitted. An
+   embedder gives Substrate a directory of its own.
+5. **Where and when.** At daemon admission, in `check_read_only_files`
+   (`crates/substrate-daemon/src/app/operations.rs`), for `exec.start` and `session.start`,
+   after the lexical rules and the `exec.read-only-files` fact and before dispatch. The ledger
+   records the start as refused and no driver sees it.
+6. **How it is compared.** By path component, never by string prefix, against each entry as
+   written (made absolute) and as resolved at that admission. An entry that cannot be resolved
+   at that moment is compared as written only, and the start does not fail for that. The
+   caller's path is compared as text, which is sound because the wire admits only an absolute
+   canonical `host_path` and the driver's pin, above, refuses every symlink component.
+7. **Every posture, daemon admission only.** There is no exception for the local Unix socket:
+   the reader is the confined program, not the caller.
+
+### Refusal
+
+The published code is reused: `exec.read-only-file-absent`, 422 `refused`, at `read_only_files`,
+with a message of its own:
+
+> A declared read-only file is not admitted: its host path meets a path this host keeps private.
+
+This decision already answers `absent`, said apart in the message, for a path the daemon may not
+search; a path this host keeps private is not reachable for a caller either. The message names no
+entry of the set. No refusal code, schema or vector is added, no released bundle byte changes,
+and no successor bundle is cut. The table above gains no row: the code is the one in its seventh
+row, and only the message tells this refusal from a missing file.
+
+### Not decided
+
+- **The embedded library.** A consumer that opens the host driver in process is its own caller
+  and is not reached by decision 7.
+- **A second name for a private object.** The rule compares paths. A hard link to a private
+  object, or a bind mount of one, elsewhere on the host is a name the host's operator made.
+  Telling it apart needs the pinned descriptor's device and inode, which is the driver's half
+  and answers after dispatch.
+- **Which sources may be named at all.** That is
+  `story:read-only-mount-sources-are-declared-by-the-operator`.

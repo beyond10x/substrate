@@ -13,6 +13,13 @@
 //! root must be answered by name without reaching the driver, as every sibling start member that
 //! requires a capability is (`check_read_only_files`, `check_workdir`, `check_writable_roots`,
 //! `check_egress_aperture`).
+//!
+//! The second half holds the amendments of 2026-11-22 to ADR 0010 and ADR 0033: a read-only root
+//! whose host path equals, lies under or contains a path the daemon keeps private, and a
+//! read-only file whose host path equals or lies under one, is refused at daemon admission. The
+//! harness gives the application the read set of a daemon configuration over its own directory
+//! (`PrivateHostPaths::of`), and the fixture also publishes `exec.read-only-files` and counts
+//! session starts.
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -25,7 +32,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
 use serde_json::{Value, json};
-use substrate_daemon::{App, Identity, router};
+use substrate_daemon::{App, DaemonConfig, Identity, PrivateHostPaths, router};
 use substrate_host::{
     DispatchOutcome, Driver, DriverError, ExecObservation, GitRootBinding, HostConfig, HostDriver,
     WorkspaceDestroyProgress,
@@ -34,8 +41,9 @@ use substrate_store::Store;
 use substrate_wire::{
     AppliedConfinement, AppliedFilesystem, AppliedNetwork, CapabilitySnapshot, Exec,
     ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState, FileAbsence, FileObservation,
-    FileReadQuery, FileReadResult, LeaseObservation, OutputSlice, ReadOnlyRootFacts,
-    SandboxProfile, Workspace, WorkspaceAbsence, WorkspaceCreateInput,
+    FileReadQuery, FileReadResult, LeaseObservation, OutputSlice, PipeSessionStartInput,
+    ReadOnlyFileFacts, ReadOnlyRootFacts, SandboxProfile, Workspace, WorkspaceAbsence,
+    WorkspaceCreateInput,
 };
 use tempfile::TempDir;
 use tower::ServiceExt as _;
@@ -49,6 +57,8 @@ struct Fixture {
     publishes_fact: AtomicBool,
     /// Every start the daemon dispatched to the driver.
     starts: AtomicUsize,
+    /// Every session start the daemon dispatched to the driver.
+    session_starts: AtomicUsize,
     execs: Mutex<HashMap<String, ExecObservation>>,
 }
 
@@ -83,6 +93,13 @@ impl Driver for Fixture {
             .then_some(ReadOnlyRootFacts {
                 max_roots: substrate_wire::MAX_READ_ONLY_ROOTS,
             });
+        // Published in every case: none here turns on its absence. With the two facts below it
+        // is what a session start needs to reach the checks of its embedded exec input.
+        capability.facts.exec_read_only_files = Some(ReadOnlyFileFacts {
+            max_files: substrate_wire::MAX_READ_ONLY_FILES,
+        });
+        capability.facts.leases_explicit = Some(true);
+        capability.facts.exec_output_limit_bytes = Some(1_048_576);
         capability
     }
 
@@ -233,6 +250,20 @@ impl Driver for Fixture {
         self.start_exec(id, workspace_root_name, input).await
     }
 
+    async fn start_pipe_session(
+        &self,
+        _id: &str,
+        _workspace_root_name: &str,
+        _input: &PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        self.session_starts.fetch_add(1, Ordering::SeqCst);
+        DispatchOutcome::NotDispatched(DriverError::unserved(
+            substrate_wire::SESSION_UNSERVED,
+            "The fixture counts a session start and runs none.",
+            "session",
+        ))
+    }
+
     async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError> {
         self.execs
             .lock()
@@ -266,33 +297,66 @@ impl Driver for Fixture {
 }
 
 struct Harness {
-    _directory: TempDir,
+    directory: TempDir,
     driver: Arc<Fixture>,
     app: Arc<App>,
 }
 
 impl Harness {
+    /// A daemon's own layout in one directory: the state directory `state`, the workspace root
+    /// `workspaces` and the socket directory `run`, with `toolchain` beside them, which the
+    /// daemon does not keep. The application holds the read set of that configuration.
     fn open(publishes_fact: bool) -> Self {
         let directory = tempfile::tempdir().expect("temporary harness");
-        std::fs::create_dir(directory.path().join("workspaces")).expect("workspace root");
-        let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
+        for child in ["state", "workspaces", "run", "toolchain"] {
+            std::fs::create_dir(directory.path().join(child)).expect("harness directory");
+        }
+        let config = DaemonConfig::minimum(
+            directory.path().join("run/api.sock"),
+            directory.path().join("state/state.db"),
+            directory.path().join("workspaces"),
+            "dep_rorootfact",
+            vec![1000],
+        );
+        let store = Arc::new(Store::open(&config.state).expect("state store"));
         let driver = Arc::new(Fixture {
-            host: HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
-                .expect("host driver"),
+            host: HostDriver::open(HostConfig::minimum(&config.workspaces)).expect("host driver"),
             publishes_fact: AtomicBool::new(publishes_fact),
             starts: AtomicUsize::new(0),
+            session_starts: AtomicUsize::new(0),
             execs: Mutex::new(HashMap::new()),
         });
-        let app = App::new(
+        let mut app = App::new(
             Arc::clone(&store),
             Arc::clone(&driver) as Arc<dyn Driver>,
             "dep_rorootfact",
         );
+        Arc::get_mut(&mut app)
+            .expect("the application is not shared yet")
+            .private_host_paths = PrivateHostPaths::of(&config).expect("the read set");
         Self {
-            _directory: directory,
+            directory,
             driver,
             app,
         }
+    }
+
+    /// A host path in the harness directory, as a start names it.
+    fn host_path(&self, relative: &str) -> String {
+        let path = if relative.is_empty() {
+            self.directory.path().to_path_buf()
+        } else {
+            self.directory.path().join(relative)
+        };
+        path.to_str().expect("a UTF-8 harness path").to_owned()
+    }
+
+    async fn operation_state(&self, operation: &str) -> Value {
+        let (status, body) = self
+            .call(Method::GET, &format!("/v1/ops/{operation}"), Body::empty())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body["result"]["state"].clone()
     }
 
     async fn call(&self, method: Method, uri: &str, body: Body) -> (StatusCode, Value) {
@@ -333,29 +397,68 @@ impl Harness {
     }
 
     async fn start(&self, operation: &str, workspace: &str, roots: Value) -> (StatusCode, Value) {
-        let body = json!({
-            "workspace": workspace,
-            "argv": ["/fixture/keep-running"],
-            "env": { "allow": [], "set": {} },
-            "sandbox": {
-                "capability_snapshot": SNAPSHOT,
-                "network": "none",
-                "profile": "workspace",
-                "require": true
-            },
-            "limits": {
-                "timeout_ms": 5000,
-                "output_bytes": 65536,
-                "processes": 16,
-                "memory_bytes": 67_108_864,
-                "cpu_millis": 1000
-            },
-            "wait": false,
-            "read_only_roots": roots
-        });
+        self.start_with(operation, workspace, roots, json!([]))
+            .await
+    }
+
+    async fn start_with(
+        &self,
+        operation: &str,
+        workspace: &str,
+        roots: Value,
+        files: Value,
+    ) -> (StatusCode, Value) {
+        let body = exec_input(workspace, roots, files);
         self.call(Method::POST, "/v1/execs", mutation(operation, body))
             .await
     }
+
+    async fn start_session(
+        &self,
+        operation: &str,
+        workspace: &str,
+        roots: Value,
+    ) -> (StatusCode, Value) {
+        let mut exec = exec_input(workspace, roots, json!([]));
+        exec["lease_ttl_ms"] = json!(60_000);
+        let body = json!({
+            "exec": exec,
+            "input_limit_bytes": 65536,
+            "frame_limit_bytes": 4096,
+            "queued_frames": 4
+        });
+        self.call(Method::POST, "/v1/sessions", mutation(operation, body))
+            .await
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn exec_input(workspace: &str, roots: Value, files: Value) -> Value {
+    let mut input = json!({
+        "workspace": workspace,
+        "argv": ["/fixture/keep-running"],
+        "env": { "allow": [], "set": {} },
+        "sandbox": {
+            "capability_snapshot": SNAPSHOT,
+            "network": "none",
+            "profile": "workspace",
+            "require": true
+        },
+        "limits": {
+            "timeout_ms": 5000,
+            "output_bytes": 65536,
+            "processes": 16,
+            "memory_bytes": 67_108_864,
+            "cpu_millis": 1000
+        },
+        "wait": false,
+        "read_only_roots": roots
+    });
+    // Absent means none, as every start before ADR 0033 wrote it.
+    if files != json!([]) {
+        input["read_only_files"] = files;
+    }
+    input
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -398,4 +501,223 @@ async fn a_root_start_is_refused_by_name_when_the_fact_is_absent() {
     );
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{refused}");
     assert_eq!(refused["error"]["class"], "unserved", "{refused}");
+}
+
+/// The message of `exec.read-only-root-absent` for a root that meets the read set (ADR 0010,
+/// amendment of 2026-11-22). It names no entry of the set.
+const PRIVATE_ROOT_MESSAGE: &str = "A declared read-only root is not admitted: its host path \
+                                    meets a path this host keeps private.";
+/// The same for `exec.read-only-file-absent` (ADR 0033, amendment of 2026-11-22).
+const PRIVATE_FILE_MESSAGE: &str = "A declared read-only file is not admitted: its host path \
+                                    meets a path this host keeps private.";
+
+fn root_at(host_path: &str) -> Value {
+    json!([{ "host_path": host_path, "mount": "/opt/toolchain" }])
+}
+
+fn file_at(host_path: &str) -> Value {
+    json!([{ "host_path": host_path, "mount": "/opt/tools/bin/tool" }])
+}
+
+/// A refusal of the amendment: 422 `refused` under the published code of its list, at the list,
+/// with the message that names no path.
+fn assert_private_source_refusal(
+    status: StatusCode,
+    refused: &Value,
+    code: &str,
+    message: &str,
+    address: &str,
+) {
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    let error = &refused["error"];
+    assert_eq!(error["class"], "refused", "{refused}");
+    assert_eq!(error["code"], code, "{refused}");
+    assert_eq!(error["message"], message, "{refused}");
+    assert_eq!(error["address"], address, "{refused}");
+    assert_eq!(error["retriable"], false, "{refused}");
+}
+
+/// A root whose host path equals or lies under the state directory or the workspace root is
+/// refused at admission: the driver receives no start and the ledger records the operation as
+/// refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_root_at_or_under_a_private_directory_is_refused_before_dispatch() {
+    let harness = Harness::open(true);
+    let workspace = harness.workspace("01JROPRIVATEROOT00000001").await;
+    for (relative, operation) in [
+        ("state", "01JROPRIVATEROOT00000002"),
+        ("state/state.processes", "01JROPRIVATEROOT00000003"),
+        ("workspaces", "01JROPRIVATEROOT00000004"),
+        ("workspaces/other", "01JROPRIVATEROOT00000005"),
+    ] {
+        let (status, refused) = harness
+            .start(operation, &workspace, root_at(&harness.host_path(relative)))
+            .await;
+        assert_eq!(
+            harness.driver.starts.load(Ordering::SeqCst),
+            0,
+            "a start naming {relative} as a read-only root reached the driver ({status} {refused})"
+        );
+        assert_private_source_refusal(
+            status,
+            &refused,
+            "exec.read-only-root-absent",
+            PRIVATE_ROOT_MESSAGE,
+            "read_only_roots",
+        );
+        assert_eq!(harness.operation_state(operation).await, "refused");
+    }
+}
+
+/// A file whose host path equals or lies under an entry of the read set is refused the same way,
+/// under the published code of its own list.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_at_or_under_a_private_path_is_refused_before_dispatch() {
+    let harness = Harness::open(true);
+    let workspace = harness.workspace("01JROPRIVATEFILE00000001").await;
+    for (relative, operation) in [
+        ("state/state.db", "01JROPRIVATEFILE00000002"),
+        ("workspaces/other/file", "01JROPRIVATEFILE00000003"),
+        ("run/api.sock", "01JROPRIVATEFILE00000004"),
+    ] {
+        let (status, refused) = harness
+            .start_with(
+                operation,
+                &workspace,
+                json!([]),
+                file_at(&harness.host_path(relative)),
+            )
+            .await;
+        assert_eq!(
+            harness.driver.starts.load(Ordering::SeqCst),
+            0,
+            "a start naming {relative} as a read-only file reached the driver ({status} {refused})"
+        );
+        assert_private_source_refusal(
+            status,
+            &refused,
+            "exec.read-only-file-absent",
+            PRIVATE_FILE_MESSAGE,
+            "read_only_files",
+        );
+        assert_eq!(harness.operation_state(operation).await, "refused");
+    }
+}
+
+/// A root that contains an entry of the read set shows it as well as one that names it: the
+/// harness directory holds the state directory and the workspace root, and `run` the API socket.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_root_that_contains_a_private_path_is_refused_before_dispatch() {
+    let harness = Harness::open(true);
+    let workspace = harness.workspace("01JROPRIVATEHOLD00000001").await;
+    for (relative, operation) in [
+        ("", "01JROPRIVATEHOLD00000002"),
+        ("run", "01JROPRIVATEHOLD00000003"),
+    ] {
+        let (status, refused) = harness
+            .start(operation, &workspace, root_at(&harness.host_path(relative)))
+            .await;
+        assert_eq!(
+            harness.driver.starts.load(Ordering::SeqCst),
+            0,
+            "a start whose read-only root holds a private path reached the driver \
+             ({status} {refused})"
+        );
+        assert_private_source_refusal(
+            status,
+            &refused,
+            "exec.read-only-root-absent",
+            PRIVATE_ROOT_MESSAGE,
+            "read_only_roots",
+        );
+        assert_eq!(harness.operation_state(operation).await, "refused");
+    }
+}
+
+/// The control: a toolchain directory beside the daemon's own, a file in it, and a directory
+/// that only shares a name prefix with the state directory are outside the read set, and each
+/// start reaches the driver.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_toolchain_directory_outside_the_read_set_reaches_the_driver() {
+    let harness = Harness::open(true);
+    let workspace = harness.workspace("01JROPRIVATECLEAR0000001").await;
+    let (status, started) = harness
+        .start_with(
+            "01JROPRIVATECLEAR0000002",
+            &workspace,
+            root_at(&harness.host_path("toolchain")),
+            file_at(&harness.host_path("toolchain/bin/tool")),
+        )
+        .await;
+    assert!(status.is_success(), "{status} {started}");
+    assert_eq!(harness.driver.starts.load(Ordering::SeqCst), 1);
+    let (status, started) = harness
+        .start(
+            "01JROPRIVATECLEAR0000003",
+            &workspace,
+            root_at(&harness.host_path("state-tools")),
+        )
+        .await;
+    assert!(status.is_success(), "{status} {started}");
+    assert_eq!(harness.driver.starts.load(Ordering::SeqCst), 2);
+}
+
+/// The fact stays first: a host that does not publish `exec.read-only-roots` says nothing about
+/// a path, so the same root is answered as the unserved capability.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_root_is_answered_by_the_absent_fact_first() {
+    let harness = Harness::open(false);
+    let workspace = harness.workspace("01JROPRIVATEFACT00000001").await;
+    let (status, refused) = harness
+        .start(
+            "01JROPRIVATEFACT00000002",
+            &workspace,
+            root_at(&harness.host_path("state")),
+        )
+        .await;
+    assert_eq!(harness.driver.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{refused}");
+    assert_eq!(
+        refused["error"]["code"], "exec.sandbox-unavailable",
+        "{refused}"
+    );
+}
+
+/// `session.start` carries the same exec input and is held to the same rule. The control first:
+/// a session naming the toolchain directory reaches the driver, so the refusal below is not the
+/// fixture refusing every session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_start_naming_a_private_root_is_refused_before_dispatch() {
+    let harness = Harness::open(true);
+    let workspace = harness.workspace("01JROPRIVATESESSION00001").await;
+    let (status, answered) = harness
+        .start_session(
+            "01JROPRIVATESESSION00002",
+            &workspace,
+            root_at(&harness.host_path("toolchain")),
+        )
+        .await;
+    assert_eq!(
+        harness.driver.session_starts.load(Ordering::SeqCst),
+        1,
+        "the control session start did not reach the driver ({status} {answered})"
+    );
+    let operation = "01JROPRIVATESESSION00003";
+    let (status, refused) = harness
+        .start_session(operation, &workspace, root_at(&harness.host_path("state")))
+        .await;
+    assert_eq!(
+        harness.driver.session_starts.load(Ordering::SeqCst),
+        1,
+        "a session start naming the state directory as a read-only root reached the driver \
+         ({status} {refused})"
+    );
+    assert_private_source_refusal(
+        status,
+        &refused,
+        "exec.read-only-root-absent",
+        PRIVATE_ROOT_MESSAGE,
+        "read_only_roots",
+    );
+    assert_eq!(harness.operation_state(operation).await, "refused");
 }

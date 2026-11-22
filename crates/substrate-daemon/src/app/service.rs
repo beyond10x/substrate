@@ -24,6 +24,7 @@ use tokio::sync::{Mutex, Notify, OwnedMutexGuard, Semaphore};
 use ulid::Ulid;
 
 use crate::delegation::DelegatedContextPolicy;
+use crate::runtime::PrivateHostPaths;
 
 use super::events::{EventStreamLimits, EventStreamPolicy, EventWakeups};
 use super::metrics::MetricsStreamPolicy;
@@ -220,6 +221,11 @@ pub struct App {
     pub(super) pipe_attachment_limits: Arc<PipeAttachmentLimits>,
     pub(super) pipe_session_policy: PipeSessionPolicy,
     pub allow_unrecorded_sessions: bool,
+    /// The host paths this daemon keeps private. A start whose read-only root or read-only file
+    /// names a source that meets one is refused before dispatch (ADR 0010 and ADR 0033,
+    /// amendments of 2026-11-22). The composition root sets it from the daemon configuration;
+    /// the empty default meets nothing.
+    pub private_host_paths: PrivateHostPaths,
     /// The host-process driver (ADR 0036), present only when the composition root opened it over
     /// a usable delegated cgroup root for a daemon whose one listener is the personal Unix socket.
     /// Absent, every start is `process.host-unserved` and nothing runs; nothing selects a
@@ -329,6 +335,7 @@ impl App {
             ),
             pipe_session_policy,
             allow_unrecorded_sessions: false,
+            private_host_paths: PrivateHostPaths::default(),
             host_processes: None,
             host_process_logs: None,
             host_process_uid: nix::unistd::geteuid().as_raw(),
