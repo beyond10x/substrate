@@ -183,7 +183,7 @@ pub(super) fn materialize(
         "Git materialization stage completed"
     );
     let checkout_started = Instant::now();
-    finish_materialization(&repository, &destination, expected)?;
+    finish_materialization(&repository, &destination, expected, limit)?;
     control.check()?;
     tracing::debug!(
         stage = "git_checkout",
@@ -253,10 +253,21 @@ pub(super) fn reconcile(workspace_root: &Path, baseline_root: &Path) -> Result<(
     baselines::reconcile(workspace_root, baseline_root)
 }
 
+/// Checks the fetched commit out, once it is the commit the branch names and its baseline is
+/// within the bounds of `limit` (design 21, § *The baseline store*): the shape of the baseline
+/// is checked before anything walks it, so a baseline that is refused is not checked out.
+///
+/// # Errors
+///
+/// `workspace.git-storage-limit` for a baseline that names more paths than `limit.max_inodes`
+/// or holds an object whose header states more than `limit.max_bytes`, and
+/// `workspace.git-path-unrepresentable` for one whose directories nest deeper than
+/// [`store::MAX_BASELINE_DEPTH`], each before anything is checked out.
 fn finish_materialization(
     repository: &git2::Repository,
     destination: &str,
     expected: Oid,
+    limit: StorageLimit,
 ) -> Result<(), DriverError> {
     let observed = repository
         .refname_to_id(destination)
@@ -271,6 +282,22 @@ fn finish_materialization(
     let commit = repository
         .find_commit(expected)
         .map_err(|_| failed("workspace.git-commit-missing"))?;
+    let checked =
+        store::check_baseline(repository, expected, limit).map_err(
+            |unwritten| match unwritten {
+                store::Unwritten::Limit => storage_limit(),
+                store::Unwritten::Nesting => failed("workspace.git-path-unrepresentable"),
+                store::Unwritten::Object | store::Unwritten::Exists | store::Unwritten::Write => {
+                    failed("workspace.git-checkout-failed")
+                }
+            },
+        )?;
+    tracing::debug!(
+        stage = "git_baseline_check",
+        trees = checked.trees,
+        paths = checked.paths,
+        "Git materialization stage completed"
+    );
     let mut checkout = git2::build::CheckoutBuilder::new();
     checkout.force().disable_filters(true);
     repository
@@ -288,7 +315,8 @@ fn finish_materialization(
 ///
 /// `workspace.path-escape` for a root name outside the root-name set, and
 /// `workspace.git-target-exists` for one that already has a commit-id file or a store, each
-/// before either is written. `workspace.git-storage-limit` for a store over `max_bytes`,
+/// before either is written. `workspace.git-storage-limit` for a store over `limit.max_bytes`
+/// and for a baseline that names more paths than `limit.max_inodes`,
 /// `workspace.git-path-unrepresentable` for a baseline whose directories nest deeper than
 /// [`store::MAX_BASELINE_DEPTH`], and `workspace.git-baseline-write-failed` for every other
 /// failure. A failure leaves neither entry of this create.
@@ -297,7 +325,7 @@ pub(super) fn write_baseline(
     root_name: &str,
     repository: &Path,
     commit: &str,
-    max_bytes: u64,
+    limit: StorageLimit,
 ) -> Result<(), DriverError> {
     const CODE: &str = "workspace.git-baseline-write-failed";
     let entries = baselines::entries(baseline_root, root_name)?;
@@ -310,7 +338,7 @@ pub(super) fn write_baseline(
         &entries.store,
         &repository.join(".git/objects"),
         commit,
-        max_bytes,
+        limit,
         store::Place::Free,
     )
     .map_err(|unwritten| match unwritten {
@@ -356,9 +384,26 @@ pub(super) fn remove_baseline(baseline_root: &Path, root_name: &str) -> Result<(
     baselines::remove(baseline_root, root_name)
 }
 
-/// One file of the baseline commit, read from the store the driver holds. Once the workspace
-/// has its store, nothing in the workspace is opened. A workspace whose store has to be built
-/// is answered [`Observed::NeedsBuild`] unless the observation holds the `turn` to build.
+/// Gives the workspace the store of its baseline commit, for the holder of the turn to build:
+/// the store a workspace materialized before the store existed lacks, or one that replaces a
+/// store that does not hold the commit (design 21, § *The baseline store*). It compares
+/// nothing; the observation that needed the store runs again afterwards, without the turn.
+///
+/// # Errors
+///
+/// The refusal that ended the build. What stood in the store's place before stands there then.
+pub(super) fn build_store(
+    workspace: &GitWorkspace<'_>,
+    turn: &BuildTurn,
+) -> Result<(), DriverError> {
+    let commit = read_baseline(workspace.baseline_root, workspace.root_name)?;
+    let oid = Oid::from_str(&commit).map_err(|_| failed("workspace.git-baseline-invalid"))?;
+    store::built(workspace, oid, worktree::MAX_STORE_ENTRIES, turn)
+}
+
+/// One file of the baseline commit, read from the store the driver holds; nothing in the
+/// workspace is opened. A workspace whose store has to be built is answered
+/// [`Observed::NeedsBuild`], and nothing is made for it here ([`build_store`]).
 ///
 /// The size the store states for the file is read before the file is: one over `max_bytes` is
 /// refused `workspace.git-baseline-limit` without being read.
@@ -366,7 +411,6 @@ pub(super) fn baseline_file(
     workspace: &GitWorkspace<'_>,
     path: &str,
     max_bytes: u64,
-    turn: Option<&BuildTurn>,
 ) -> Result<Observed<GitBaselineFileResult>, DriverError> {
     let over_limit = || {
         DriverError::exhausted(
@@ -379,7 +423,7 @@ pub(super) fn baseline_file(
     validate_git_path(path)?;
     let commit = read_baseline(workspace.baseline_root, workspace.root_name)?;
     let oid = Oid::from_str(&commit).map_err(|_| failed("workspace.git-baseline-invalid"))?;
-    let Some(repository) = store::held(workspace, oid, worktree::MAX_STORE_ENTRIES, turn)? else {
+    let Some(repository) = store::held(workspace, oid)? else {
         return Ok(Observed::NeedsBuild);
     };
     let commit_object = repository
@@ -450,16 +494,14 @@ const COMPARISON_BUDGET: u64 = 1024 * 1024 * 1024;
 /// file system. A tracked path is unchanged only when the hash of its content equals the
 /// baseline's object id. The workspace's repository is never opened as a repository: its
 /// configuration is not read, its index only labels a path, and its object store is not
-/// opened. The baseline's objects come from the store the driver holds; the one exception is
-/// the build of that store for a workspace that predates it ([`store::held`]). A workspace
-/// whose store has to be built is answered [`Observed::NeedsBuild`] unless the observation
-/// holds the `turn` to build.
+/// opened. The baseline's objects come from the store the driver holds. A workspace whose
+/// store has to be built is answered [`Observed::NeedsBuild`], and nothing is made or compared
+/// for it here ([`build_store`]).
 pub(super) fn changes(
     workspace: &GitWorkspace<'_>,
     query: GitChangesQuery,
-    turn: Option<&BuildTurn>,
 ) -> Result<Observed<GitChangeSet>, DriverError> {
-    changes_within(workspace, query, COMPARISON_BUDGET, turn)
+    changes_within(workspace, query, COMPARISON_BUDGET)
 }
 
 /// [`changes`] with `budget` bytes to hash. Paths are compared and listed in byte order. A
@@ -470,12 +512,11 @@ fn changes_within(
     held: &GitWorkspace<'_>,
     query: GitChangesQuery,
     budget: u64,
-    turn: Option<&BuildTurn>,
 ) -> Result<Observed<GitChangeSet>, DriverError> {
     let workspace_id = held.id;
     let commit = read_baseline(held.baseline_root, held.root_name)?;
     let oid = Oid::from_str(&commit).map_err(|_| failed("workspace.git-baseline-invalid"))?;
-    let Some(store) = store::held(held, oid, worktree::MAX_STORE_ENTRIES, turn)? else {
+    let Some(store) = store::held(held, oid)? else {
         return Ok(Observed::NeedsBuild);
     };
     let workspace = guarded::pin_workspace_directory_beneath(held.root, held.path)
@@ -1101,22 +1142,26 @@ mod tests {
     use tempfile::tempdir;
     use zeroize::Zeroizing;
 
-    use super::{finish_materialization, materialize, sync_and_bounded_usage, write_baseline};
-    use crate::git_baselines::{BuildTurn, DEFAULT_BYTE_LIMIT, GitWorkspace, Observed};
+    use super::{finish_materialization, materialize, sync_and_bounded_usage};
+    use crate::git_baselines::{
+        BuildTurn, DEFAULT_BYTE_LIMIT, DEFAULT_INODE_LIMIT, DEFAULT_LIMIT, GitWorkspace, Observed,
+    };
     use crate::{DriverError, GitSourceBinding};
 
-    /// An observation as the driver runs it: first with no turn to build, and, when it finds
-    /// the workspace's store has to be built, again with the turn.
-    fn in_turn<T>(
-        observe: impl Fn(Option<&BuildTurn>) -> Result<Observed<T>, DriverError>,
+    /// An observation as the driver runs it. An observation builds no store: when it finds the
+    /// workspace's store has to be built, the store is built in a turn of its own, and the
+    /// observation runs again.
+    fn observed<T>(
+        held: &GitWorkspace<'_>,
+        observe: impl Fn() -> Result<Observed<T>, DriverError>,
     ) -> Result<T, DriverError> {
-        if let Observed::Answer(answer) = observe(None)? {
+        if let Observed::Answer(answer) = observe()? {
             return Ok(answer);
         }
-        let turn = BuildTurn::taken_blocking();
-        match observe(Some(&turn))? {
+        super::build_store(held, &BuildTurn::taken_blocking())?;
+        match observe()? {
             Observed::Answer(answer) => Ok(answer),
-            Observed::NeedsBuild => panic!("an observation that held the turn built no store"),
+            Observed::NeedsBuild => panic!("the workspace has no store after its build"),
         }
     }
 
@@ -1125,14 +1170,14 @@ mod tests {
         path: &str,
         max_bytes: u64,
     ) -> Result<substrate_wire::GitBaselineFileResult, DriverError> {
-        in_turn(|turn| super::baseline_file(held, path, max_bytes, turn))
+        observed(held, || super::baseline_file(held, path, max_bytes))
     }
 
     fn changes(
         held: &GitWorkspace<'_>,
         query: GitChangesQuery,
     ) -> Result<GitChangeSet, DriverError> {
-        in_turn(|turn| super::changes(held, query, turn))
+        observed(held, || super::changes(held, query))
     }
 
     fn changes_within(
@@ -1140,7 +1185,23 @@ mod tests {
         query: GitChangesQuery,
         budget: u64,
     ) -> Result<GitChangeSet, DriverError> {
-        in_turn(|turn| super::changes_within(held, query, budget, turn))
+        observed(held, || super::changes_within(held, query, budget))
+    }
+
+    /// Writes the baseline as a create with the byte limit `max_bytes` and the inode limit of
+    /// a create that requests none.
+    fn write_baseline(
+        baseline_root: &std::path::Path,
+        root_name: &str,
+        repository: &std::path::Path,
+        commit: &str,
+        max_bytes: u64,
+    ) -> Result<(), DriverError> {
+        let limit = StorageLimit {
+            max_bytes,
+            max_inodes: DEFAULT_INODE_LIMIT,
+        };
+        super::write_baseline(baseline_root, root_name, repository, commit, limit)
     }
 
     fn source_repository() -> (tempfile::TempDir, git2::Oid) {
@@ -1188,8 +1249,13 @@ mod tests {
                 "fixture remote branch",
             )
             .expect("remote branch");
-        finish_materialization(&observed, "refs/remotes/origin/provider-default", commit)
-            .expect("exact checkout");
+        finish_materialization(
+            &observed,
+            "refs/remotes/origin/provider-default",
+            commit,
+            DEFAULT_LIMIT,
+        )
+        .expect("exact checkout");
 
         assert_eq!(observed.head().expect("HEAD").target(), Some(commit));
         assert!(observed.head_detached().expect("detached state"));
@@ -1360,11 +1426,27 @@ mod tests {
     }
 
     /// What `read` answers for the workspace as an observation names it, with `copy_bound`
-    /// bytes for the copy a store is built from.
+    /// bytes for the copy a store is built from and the inode limit of a workspace under no
+    /// project quota.
     fn target<T>(
         workspace: &std::path::Path,
         baselines: &std::path::Path,
         copy_bound: u64,
+        read: impl FnOnce(&GitWorkspace<'_>) -> T,
+    ) -> T {
+        let limit = StorageLimit {
+            max_bytes: copy_bound,
+            max_inodes: DEFAULT_INODE_LIMIT,
+        };
+        target_within(workspace, baselines, limit, read)
+    }
+
+    /// What `read` answers for the workspace as an observation names it, with `limit` for a
+    /// build of its store.
+    fn target_within<T>(
+        workspace: &std::path::Path,
+        baselines: &std::path::Path,
+        limit: StorageLimit,
         read: impl FnOnce(&GitWorkspace<'_>) -> T,
     ) -> T {
         read(&GitWorkspace {
@@ -1373,7 +1455,7 @@ mod tests {
             path: workspace,
             baseline_root: baselines,
             root_name: "ws_git",
-            copy_bound: &|| copy_bound,
+            build_limit: &|| limit,
         })
     }
 
@@ -2246,6 +2328,7 @@ mod tests {
     }
 
     mod adversary_cases;
+    pub(super) mod shape_cases;
     mod store_cases;
     pub(super) mod store_failure_cases;
     pub(super) mod watch;

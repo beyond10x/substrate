@@ -70,6 +70,7 @@ use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -1093,14 +1094,55 @@ fn workspace_destroy_roots() -> &'static Mutex<HashSet<WorkspaceDestroyKey>> {
     ROOTS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// The byte bound of the copy a baseline store is built from for the workspace at `workspace`:
-/// the limit of its project quota where it has one, else the limit of a Git create that
+/// The bounds of a build of the baseline store of the workspace at `workspace`: the bytes of
+/// the copy the store is built from, and the paths its baseline may name. Each is the limit of
+/// the workspace's project quota where it has one, else the limit of a Git create that
 /// requests none (design 21, § *The baseline store*).
 #[cfg(target_os = "linux")]
-fn copy_bound(quotas: Option<&quota::ProjectQuotas>, workspace: &Path) -> u64 {
-    quotas
-        .and_then(|quotas| quotas.byte_limit(workspace))
-        .unwrap_or(git_baselines::DEFAULT_BYTE_LIMIT)
+fn build_limit(
+    quotas: Option<&quota::ProjectQuotas>,
+    workspace: &Path,
+) -> substrate_wire::StorageLimit {
+    let default = git_baselines::DEFAULT_LIMIT;
+    substrate_wire::StorageLimit {
+        max_bytes: quotas
+            .and_then(|quotas| quotas.byte_limit(workspace))
+            .unwrap_or(default.max_bytes),
+        max_inodes: quotas
+            .and_then(|quotas| quotas.inode_limit(workspace))
+            .unwrap_or(default.max_inodes),
+    }
+}
+
+/// A Git workspace as an observation of the driver names it, kept across the places the
+/// observation runs in.
+#[cfg(target_os = "linux")]
+struct GitObserved {
+    workspace_id: String,
+    root_name: String,
+    path: PathBuf,
+    baseline_root: PathBuf,
+    quotas: Option<Arc<quota::ProjectQuotas>>,
+}
+
+#[cfg(target_os = "linux")]
+impl GitObserved {
+    /// Runs `run` on the workspace, in one of the places for file operations.
+    fn within<T>(
+        &self,
+        filesystem: &fs::GuardedFilesystem,
+        run: impl FnOnce(&git_baselines::GitWorkspace<'_>) -> Result<T, DriverError>,
+    ) -> Result<T, DriverError> {
+        let root = filesystem.root_descriptor()?;
+        run(&git_baselines::GitWorkspace {
+            id: &self.workspace_id,
+            root: &root,
+            path: &self.path,
+            baseline_root: &self.baseline_root,
+            root_name: &self.root_name,
+            build_limit: &|| build_limit(self.quotas.as_deref(), &self.path),
+        })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1444,40 +1486,75 @@ impl HostDriver {
         })?
     }
 
-    /// Runs a Git observation in one of the places for file operations. An observation that
-    /// finds its workspace's store has to be built says so and leaves its place. The turn to
-    /// build is awaited here, where no place is held, and the observation then runs again in
-    /// a place, with the turn (design 21, § *The baseline store*).
-    async fn git_observation<T, F>(&self, observe: F) -> Result<T, DriverError>
+    /// Runs a Git observation of the workspace `root_name` in one of the places for file
+    /// operations (design 21, § *The baseline store*).
+    ///
+    /// An observation builds no store. One that finds its workspace's store has to be built
+    /// says so and leaves its place. The turn to build is awaited here, where no place is
+    /// held, for at most `wait`. The build then runs in a place with the turn, which ends
+    /// there: when the store is in place or the build is refused, before anything is compared.
+    /// The observation then runs again.
+    ///
+    /// # Errors
+    ///
+    /// `workspace.git-baseline-missing` for an observation that waited `wait` for its turn,
+    /// and for one whose workspace has no store after its build; a later one tries again.
+    async fn git_observation<T, F>(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        wait: Duration,
+        observe: F,
+    ) -> Result<T, DriverError>
     where
         T: Send + 'static,
-        F: Fn(
-                &fs::GuardedFilesystem,
-                Option<&git_baselines::BuildTurn>,
-            ) -> Result<git_baselines::Observed<T>, DriverError>
+        F: Fn(&git_baselines::GitWorkspace<'_>) -> Result<git_baselines::Observed<T>, DriverError>
             + Send
             + Sync
             + 'static,
     {
+        if self.config.git_sources.is_empty() {
+            return Err(DriverError::refused(
+                "workspace.git-workspace-required",
+                "The workspace has no Git materialization baseline.",
+                "workspace.git",
+            ));
+        }
+        let observed = Arc::new(GitObserved {
+            workspace_id: workspace_id.to_owned(),
+            root_name: root_name.to_owned(),
+            path: self.workspace_path(root_name)?,
+            baseline_root: self.config.git_baseline_root(),
+            quotas: self.quotas.clone(),
+        });
         let observe = Arc::new(observe);
-        let first = Arc::clone(&observe);
-        if let git_baselines::Observed::Answer(answer) = self
-            .filesystem_io(move |filesystem| first(filesystem, None))
-            .await?
-        {
+        let run = || {
+            let (observed, observe) = (Arc::clone(&observed), Arc::clone(&observe));
+            self.filesystem_io(move |filesystem| {
+                observed.within(filesystem, |workspace| observe(workspace))
+            })
+        };
+        if let git_baselines::Observed::Answer(answer) = run().await? {
             return Ok(answer);
         }
-        let turn = git_baselines::BuildTurn::taken().await;
-        // The turn goes into the place with the observation and ends there, with the build.
-        match self
-            .filesystem_io(move |filesystem| observe(filesystem, Some(&turn)))
-            .await?
-        {
-            git_baselines::Observed::Answer(answer) => Ok(answer),
-            git_baselines::Observed::NeedsBuild => Err(DriverError::failed(
+        let unbuilt = || {
+            DriverError::failed(
                 "workspace.git-baseline-missing",
                 "The Git baseline store was not built.",
-            )),
+            )
+        };
+        let turn = git_baselines::BuildTurn::taken_within(wait)
+            .await
+            .ok_or_else(unbuilt)?;
+        let building = Arc::clone(&observed);
+        // The turn goes into the place with the build and ends there.
+        self.filesystem_io(move |filesystem| {
+            building.within(filesystem, |workspace| git::build_store(workspace, &turn))
+        })
+        .await?;
+        match run().await? {
+            git_baselines::Observed::Answer(answer) => Ok(answer),
+            git_baselines::Observed::NeedsBuild => Err(unbuilt()),
         }
     }
 }
@@ -1673,10 +1750,7 @@ impl Driver for HostDriver {
                 // Whether this create wrote the baseline: only then is it this create's to remove.
                 let mut baseline_written = false;
                 let result = (|| {
-                    let limit = requested_storage.unwrap_or(substrate_wire::StorageLimit {
-                        max_bytes: git_baselines::DEFAULT_BYTE_LIMIT,
-                        max_inodes: 200_000,
-                    });
+                    let limit = requested_storage.unwrap_or(git_baselines::DEFAULT_LIMIT);
                     if let Some(quotas) = staging.quotas.as_ref() {
                         quotas.apply(staging.path(), limit)?;
                     }
@@ -1694,7 +1768,7 @@ impl Driver for HostDriver {
                         &root_name,
                         staging.path(),
                         &git_source.commit,
-                        limit.max_bytes,
+                        limit,
                     )?;
                     baseline_written = true;
                     if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1879,35 +1953,13 @@ impl Driver for HostDriver {
         path: &str,
         max_bytes: u64,
     ) -> Result<GitBaselineFileResult, DriverError> {
-        if self.config.git_sources.is_empty() {
-            return Err(DriverError::refused(
-                "workspace.git-workspace-required",
-                "The workspace has no Git materialization baseline.",
-                "workspace.git",
-            ));
-        }
-        let workspace_id = workspace_id.to_owned();
-        let root_name = root_name.to_owned();
         let path = path.to_owned();
-        let workspace = self.workspace_path(&root_name)?;
-        let baseline_root = self.config.git_baseline_root();
-        let quotas = self.quotas.clone();
-        self.git_observation(move |filesystem, turn| {
-            let root = filesystem.root_descriptor()?;
-            git::baseline_file(
-                &git_baselines::GitWorkspace {
-                    id: &workspace_id,
-                    root: &root,
-                    path: &workspace,
-                    baseline_root: &baseline_root,
-                    root_name: &root_name,
-                    copy_bound: &|| copy_bound(quotas.as_deref(), &workspace),
-                },
-                &path,
-                max_bytes,
-                turn,
-            )
-        })
+        self.git_observation(
+            workspace_id,
+            root_name,
+            git_baselines::BUILD_TURN_WAIT,
+            move |workspace| git::baseline_file(workspace, &path, max_bytes),
+        )
         .await
     }
 
@@ -1917,34 +1969,13 @@ impl Driver for HostDriver {
         root_name: &str,
         query: &GitChangesQuery,
     ) -> Result<GitChangeSet, DriverError> {
-        if self.config.git_sources.is_empty() {
-            return Err(DriverError::refused(
-                "workspace.git-workspace-required",
-                "The workspace has no Git materialization baseline.",
-                "workspace.git",
-            ));
-        }
-        let workspace_id = workspace_id.to_owned();
-        let root_name = root_name.to_owned();
-        let workspace = self.workspace_path(&root_name)?;
-        let baseline_root = self.config.git_baseline_root();
-        let quotas = self.quotas.clone();
         let query = *query;
-        self.git_observation(move |filesystem, turn| {
-            let root = filesystem.root_descriptor()?;
-            git::changes(
-                &git_baselines::GitWorkspace {
-                    id: &workspace_id,
-                    root: &root,
-                    path: &workspace,
-                    baseline_root: &baseline_root,
-                    root_name: &root_name,
-                    copy_bound: &|| copy_bound(quotas.as_deref(), &workspace),
-                },
-                query,
-                turn,
-            )
-        })
+        self.git_observation(
+            workspace_id,
+            root_name,
+            git_baselines::BUILD_TURN_WAIT,
+            move |workspace| git::changes(workspace, query),
+        )
         .await
     }
 

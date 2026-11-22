@@ -16,6 +16,7 @@ use git2::{ObjectType, Oid};
 use nix::errno::Errno;
 use nix::fcntl::RenameFlags;
 use substrate_guarded::fs as guarded;
+use substrate_wire::StorageLimit;
 
 use super::{failed, object_store, read_baseline, storage_limit, worktree};
 use crate::DriverError;
@@ -24,17 +25,16 @@ use crate::git_baselines::{self as baselines, BuildTurn, GitWorkspace};
 const WRITE_FAILED: &str = "workspace.git-baseline-write-failed";
 const READ_FAILED: &str = "workspace.git-baseline-read-failed";
 
-/// How deep the directories of a baseline may nest (design 21, § *Nesting*): a directory of
-/// the baseline lies in at most this many directories, the root of the commit's tree counted
-/// as none. A store is written only for a baseline within it, so no reader of a store walks
-/// deeper.
+/// How deep the directories of a baseline may nest (design 21, § *The baseline store*): the
+/// path of a directory of the baseline has at most this many components.
 pub(super) const MAX_BASELINE_DEPTH: usize = 1024;
 
 /// Why a store was not written.
 pub(super) enum Unwritten {
     /// An object of the baseline is absent from the source, or is not what its id names.
     Object,
-    /// The store, or an object of the baseline, is over the byte bound.
+    /// The store, or an object of the baseline, is over the byte bound, or the baseline names
+    /// more paths than the inode limit.
     Limit,
     /// The directories of the baseline nest deeper than [`MAX_BASELINE_DEPTH`].
     Nesting,
@@ -65,36 +65,51 @@ enum Standing {
     Lacking,
 }
 
-/// The store of the workspace, which holds its baseline commit `commit`, opened for reading.
-///
-/// A workspace that predates the store has none, and gets it here, from a copy of the
-/// workspace's object store of at most `max_entries` entries. A store that does not hold
-/// `commit` is replaced the same way. Either is a build, and one build runs at a time in a
-/// daemon: with no `turn`, an observation that needs one makes nothing and answers `None`.
+/// The store of the workspace, opened for reading, when it holds the workspace's baseline
+/// commit `commit`. `None` for a workspace that has no store, and for one whose store does not
+/// hold `commit`: its store has to be built ([`built`]). Nothing is made here.
 ///
 /// # Errors
 ///
-/// `workspace.git-baseline-read-failed` for a store that cannot be opened or read: it is not
-/// absent, and nothing of it is removed. Otherwise the refusal that ended the build, which
-/// leaves what stood in the store's place before, and no copy.
+/// `workspace.git-baseline-read-failed` for a store that cannot be opened: it is not absent,
+/// and nothing of it is removed.
 pub(super) fn held(
     workspace: &GitWorkspace<'_>,
     commit: Oid,
-    max_entries: usize,
-    turn: Option<&BuildTurn>,
 ) -> Result<Option<git2::Repository>, DriverError> {
     let entries = baselines::entries(workspace.baseline_root, workspace.root_name)?;
-    // With the turn this is a second look: another observation may have built the store while
-    // this one waited.
-    if let Standing::Held(store) = open(&entries.store, commit)? {
-        return Ok(Some(store));
+    match open(&entries.store, commit)? {
+        Standing::Held(store) => Ok(Some(store)),
+        Standing::Absent | Standing::Lacking => Ok(None),
     }
-    if turn.is_none() {
-        return Ok(None);
+}
+
+/// Gives the workspace its store, which holds its baseline commit `commit`.
+///
+/// A workspace that predates the store has none, and gets it here, from a copy of the
+/// workspace's object store of at most `max_entries` entries. A store that does not hold
+/// `commit` is replaced the same way. Either is a build, one build runs at a time in a daemon,
+/// and whoever builds holds the turn.
+///
+/// # Errors
+///
+/// `workspace.git-baseline-read-failed` for a store that cannot be opened. Otherwise the
+/// refusal that ended the build, which leaves what stood in the store's place before, and no
+/// copy.
+pub(super) fn built(
+    workspace: &GitWorkspace<'_>,
+    commit: Oid,
+    max_entries: usize,
+    _turn: &BuildTurn,
+) -> Result<(), DriverError> {
+    let entries = baselines::entries(workspace.baseline_root, workspace.root_name)?;
+    // Another observation may have built the store while this one waited for its turn.
+    if let Standing::Held(_) = open(&entries.store, commit)? {
+        return Ok(());
     }
     build(workspace, &entries.store, commit, max_entries)?;
     match open(&entries.store, commit)? {
-        Standing::Held(store) => Ok(Some(store)),
+        Standing::Held(_) => Ok(()),
         Standing::Absent | Standing::Lacking => Err(failed("workspace.git-baseline-missing")),
     }
 }
@@ -157,28 +172,29 @@ fn build(
         .map_err(|_| failed("workspace.git-repository-failed"))?;
     let objects = worktree::open_directory(&pinned, ".git/objects")?
         .ok_or_else(|| failed("workspace.git-repository-failed"))?;
-    let bound = (workspace.copy_bound)();
+    let limit = (workspace.build_limit)();
     let copy = tempfile::Builder::new()
         .prefix(".copy-")
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in(workspace.baseline_root)
         .map_err(|_| failed(WRITE_FAILED))?;
-    let built = worktree::copy_store(&objects, copy.path(), max_entries, bound).and_then(|()| {
-        let written = write(
-            workspace.baseline_root,
-            store,
-            copy.path(),
-            commit,
-            bound,
-            Place::Taken,
-        );
-        written.map_err(|unwritten| match unwritten {
-            Unwritten::Object => failed("workspace.git-baseline-missing"),
-            Unwritten::Limit => storage_limit(),
-            Unwritten::Nesting => failed("workspace.git-path-unrepresentable"),
-            Unwritten::Exists | Unwritten::Write => failed(WRITE_FAILED),
-        })
-    });
+    let built =
+        worktree::copy_store(&objects, copy.path(), max_entries, limit.max_bytes).and_then(|()| {
+            let written = write(
+                workspace.baseline_root,
+                store,
+                copy.path(),
+                commit,
+                limit,
+                Place::Taken,
+            );
+            written.map_err(|unwritten| match unwritten {
+                Unwritten::Object => failed("workspace.git-baseline-missing"),
+                Unwritten::Limit => storage_limit(),
+                Unwritten::Nesting => failed("workspace.git-path-unrepresentable"),
+                Unwritten::Exists | Unwritten::Write => failed(WRITE_FAILED),
+            })
+        });
     let removed = copy.close();
     built?;
     removed.map_err(|_| failed(WRITE_FAILED))?;
@@ -194,8 +210,9 @@ fn build(
 
 /// Writes the store `store` of `commit` from the object store at `source`, a directory the
 /// driver owns, and puts it into `place`: one pack and its index, made in a staging directory
-/// inside `baseline_root`, synced, and renamed. Every object is read by its id and checked
-/// against it, and none whose header states more than `max_bytes` is read.
+/// inside `baseline_root`, synced, and renamed. The baseline is checked first
+/// ([`check_baseline`]) against `limit`. Every object is read by its id and checked against
+/// it, and none whose header states more than `limit.max_bytes` is read.
 ///
 /// # Errors
 ///
@@ -205,12 +222,12 @@ pub(super) fn write(
     store: &Path,
     source: &Path,
     commit: Oid,
-    max_bytes: u64,
+    limit: StorageLimit,
     place: Place,
 ) -> Result<(), Unwritten> {
     let repository =
         object_store(source.to_str().ok_or(Unwritten::Write)?).map_err(|_| Unwritten::Object)?;
-    check_baseline(&repository, commit, max_bytes)?;
+    check_baseline(&repository, commit, limit)?;
     let staging = tempfile::Builder::new()
         .prefix(".store-")
         .permissions(std::fs::Permissions::from_mode(0o700))
@@ -221,37 +238,74 @@ pub(super) fn write(
         .mode(0o700)
         .create(&pack)
         .map_err(|_| Unwritten::Write)?;
-    write_pack(&repository, commit, &pack, max_bytes)?;
-    seal(staging.path(), &pack, max_bytes)?;
+    write_pack(&repository, commit, &pack, limit.max_bytes)?;
+    seal(staging.path(), &pack, limit.max_bytes)?;
     install(baseline_root, staging, store, place)
 }
 
 /// A directory of the baseline the check is in.
 struct Directory {
     id: Oid,
-    /// Its directories the check has not entered yet.
+    /// Its directories the check has not entered yet, one for each name it holds one by.
     pending: Vec<Oid>,
-    /// How many directories nest beneath it, as far as the check has seen.
-    beneath: usize,
+    /// What is known of it so far: its own entries, and what the directories the check has
+    /// left hold.
+    shape: Shape,
 }
 
-/// Checks the baseline before any of its objects is read whole or packed. The header of every
-/// object is read first: the commit, every tree it reaches and every file and link object
-/// those trees name. A tree entry that records another repository's commit names no object of
-/// the baseline. And no directory lies deeper than [`MAX_BASELINE_DEPTH`]: the check keeps the
-/// directories it is in as a list, never longer than that bound, and reads each tree once.
-fn check_baseline(
+/// What a tree of the baseline holds, wherever the baseline names it.
+#[derive(Clone, Copy)]
+struct Shape {
+    /// How many directories nest beneath it.
+    beneath: usize,
+    /// How many paths it names: each of its entries, and each path of each directory it holds,
+    /// once for each name it holds that directory by.
+    paths: u64,
+}
+
+impl Shape {
+    /// Adds a directory this one holds by one name.
+    fn hold(&mut self, held: Shape) {
+        self.beneath = self.beneath.max(held.beneath + 1);
+        self.paths = self.paths.saturating_add(held.paths);
+    }
+}
+
+/// What a check that passed read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Checked {
+    /// The trees it read: each tree of the baseline once.
+    pub(super) trees: usize,
+    /// The paths the baseline names.
+    pub(super) paths: u64,
+}
+
+/// Checks the baseline of `commit` before anything walks it, and before any of its objects is
+/// read whole (design 21, § *The baseline store*).
+///
+/// - The header of every object is read first: the commit, every tree it reaches and every
+///   file and link object those trees name. A tree entry that records another repository's
+///   commit names no object of the baseline.
+/// - No directory lies deeper than [`MAX_BASELINE_DEPTH`].
+/// - The baseline names at most `limit.max_inodes` paths. Every entry of every tree counts
+///   once for each place the baseline names it, a directory that holds nothing included.
+///
+/// The check reads each tree once, however often the baseline names it: what it found in a
+/// tree it has left it keeps by the tree's id. It keeps the directories it is in as a list,
+/// never longer than the nesting bound. So its work follows the objects of the baseline, not
+/// the paths those objects name.
+pub(super) fn check_baseline(
     repository: &git2::Repository,
     commit: Oid,
-    max_bytes: u64,
-) -> Result<(), Unwritten> {
+    limit: StorageLimit,
+) -> Result<Checked, Unwritten> {
     let objects = repository.odb().map_err(|_| Unwritten::Object)?;
     let within = |id: Oid, kind: ObjectType| {
         let (size, found) = objects.read_header(id).map_err(|_| Unwritten::Object)?;
         if found != kind {
             return Err(Unwritten::Object);
         }
-        if u64::try_from(size).unwrap_or(u64::MAX) > max_bytes {
+        if u64::try_from(size).unwrap_or(u64::MAX) > limit.max_bytes {
             return Err(Unwritten::Limit);
         }
         Ok(())
@@ -262,9 +316,11 @@ fn check_baseline(
         .map_err(|_| Unwritten::Object)?
         .tree_id();
     let mut files = HashSet::new();
+    let mut trees = 0_usize;
     let mut enter = |id: Oid| {
         within(id, ObjectType::Tree)?;
         let tree = repository.find_tree(id).map_err(|_| Unwritten::Object)?;
+        trees += 1;
         let mut pending = Vec::new();
         for entry in &tree {
             match entry.kind() {
@@ -278,32 +334,38 @@ fn check_baseline(
         Ok(Directory {
             id,
             pending,
-            beneath: 0,
+            shape: Shape {
+                beneath: 0,
+                paths: u64::try_from(tree.len()).unwrap_or(u64::MAX),
+            },
         })
     };
-    // Every tree the check has left, with the directories that nest beneath it.
-    let mut left: HashMap<Oid, usize> = HashMap::new();
+    // Every tree the check has left, with what it holds.
+    let mut left: HashMap<Oid, Shape> = HashMap::new();
     let mut inside = vec![enter(root)?];
     loop {
-        // A directory of the innermost one lies in this many directories.
+        // The path of a directory of the innermost one has this many components.
         let depth = inside.len();
         let Some(innermost) = inside.last_mut() else {
-            return Ok(());
+            break;
         };
         let Some(next) = innermost.pending.pop() else {
-            let beneath = innermost.beneath;
-            left.insert(innermost.id, beneath);
+            let shape = innermost.shape;
+            if shape.paths > limit.max_inodes {
+                return Err(Unwritten::Limit);
+            }
+            left.insert(innermost.id, shape);
             inside.pop();
             if let Some(parent) = inside.last_mut() {
-                parent.beneath = parent.beneath.max(beneath + 1);
+                parent.shape.hold(shape);
             }
             continue;
         };
-        if let Some(&beneath) = left.get(&next) {
-            if depth + beneath > MAX_BASELINE_DEPTH {
+        if let Some(&shape) = left.get(&next) {
+            if depth + shape.beneath > MAX_BASELINE_DEPTH {
                 return Err(Unwritten::Nesting);
             }
-            innermost.beneath = innermost.beneath.max(beneath + 1);
+            innermost.shape.hold(shape);
         } else {
             if depth > MAX_BASELINE_DEPTH {
                 return Err(Unwritten::Nesting);
@@ -312,6 +374,9 @@ fn check_baseline(
             inside.push(entered);
         }
     }
+    // The root's tree was left last.
+    let paths = left.get(&root).ok_or(Unwritten::Object)?.paths;
+    Ok(Checked { trees, paths })
 }
 
 /// Writes the pack of `commit` and its index into the directory `pack`. The pack builder reads

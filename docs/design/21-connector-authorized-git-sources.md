@@ -94,7 +94,9 @@ baseline from this store and open nothing beneath the workspace's `.git/objects`
 **A workspace materialized before the store existed** has a commit-id file and no store. The first
 observation that finds no store builds it. One build runs at a time in a daemon; an observation
 that needs one waits for its turn, and while it waits it holds none of the places the driver
-keeps for file operations.
+keeps for file operations. The turn ends when the store is in place or the build is refused,
+before the observation compares anything. An observation that has waited 10 s for its turn is
+refused `workspace.git-baseline-missing`; a later one tries again.
 
 1. It copies the workspace's `.git/objects` into a staging directory inside
    `.substrate-git-baselines`. The copy is made beneath the admitted workspace's own directory,
@@ -116,14 +118,25 @@ stays as it was, and the observation is refused
 workspace during the copy can make an attempt fail. It cannot make the store hold an object that
 is not the baseline's, because every object is bound to the daemon-held commit id by its hash. A
 store that does not hold the commit the commit-id file names is treated as absent and replaced
-the same way. A store that cannot be opened or read for any other reason is not removed: the
+the same way; a store whose pack or index the Git library cannot read as one counts as not
+holding the commit. A store that cannot be opened for any other reason is not removed: the
 observation is refused `workspace.git-baseline-read-failed`.
 
-**Nesting.** A baseline whose directories nest deeper than 1,024 is refused
-`workspace.git-path-unrepresentable`: at create before the store is written, and by a build the
-same way. Every store therefore holds a baseline within that depth, and no reader of a store
-walks deeper. The count of a baseline's paths needs no bound of its own here: the checkout a
-create makes of it stayed within the workspace's inode limit.
+**The shape of a baseline is checked before anything walks it.** The check reads each tree of
+the baseline once, however often the baseline names it, and holds two bounds:
+
+- **Nesting.** A baseline whose directories nest deeper than 1,024 is refused
+  `workspace.git-path-unrepresentable`.
+- **Paths.** A baseline that names more paths than the inode limit is refused
+  `workspace.git-storage-limit`. Every entry of every tree counts once for each place the
+  baseline names it, a directory that holds nothing included. The inode limit is the one the
+  create applies (the requested storage limit, else 200,000); for a build it is the limit of
+  the workspace's project quota where it has one, else 200,000.
+
+A create runs the check on the fetched commit before it checks anything out, and a build runs it
+on the copy before it writes the store. Every store therefore holds a baseline within both
+bounds, and what a create, a build or an observation does with a baseline is bounded by them,
+not by the number of places a tree is named in.
 
 What a build costs and does not bound:
 

@@ -29,7 +29,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     with plain reads that do not wait, into a directory of its own, writes the store from the
     copy, and removes the copy whatever the outcome. One build runs at a time in a daemon; an
     observation that needs one waits for its turn, and while it waits it holds none of the
-    places the driver keeps for file operations.
+    places the driver keeps for file operations. The turn ends when the store is in place or
+    the build is refused, before the observation compares anything. An observation that has
+    waited 10 s for its turn is refused `workspace.git-baseline-missing`; a later one tries
+    again.
     A link, another entry that is neither a directory nor a regular file, an
     `info/alternates` file, directories nested deeper than eight or more than 262,144 entries
     end the attempt `workspace.git-repository-failed`. More bytes than the copy's bound, or a
@@ -38,9 +41,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     is absent or is not what its id names ends it `workspace.git-baseline-missing`. No store
     is kept then, and a later observation tries again. A store that does not hold the commit
     the commit-id file names is replaced the same way, and only by a finished store: an
-    attempt that ends leaves it in place. A store that cannot be opened or read for any other
-    reason is not removed, and the observation is refused
-    `workspace.git-baseline-read-failed`.
+    attempt that ends leaves it in place. A store whose pack or index cannot be read as one
+    counts as not holding the commit. A store that cannot be opened for any other reason is
+    not removed, and the observation is refused `workspace.git-baseline-read-failed`.
   - The driver refuses a root name outside the root-name set, `workspace.path-escape`, before
     it writes or removes a commit-id file or a store; a Git create with such a name is refused
     before dispatch.
@@ -69,6 +72,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `workspace.git-path-unrepresentable` before its store is written, and the workspace is
   proved absent; such a baseline was created before. The build of a store refuses it the same
   way.
+- A Git create whose baseline names more paths than its inode limit (the requested storage
+  limit, else 200,000) is refused `workspace.git-storage-limit` before anything is checked
+  out, and the workspace is proved absent. Every entry of every tree counts once for each
+  place the baseline names it, a directory that holds nothing included. The build of a store
+  refuses such a baseline the same way, against the inode limit of the workspace's project
+  quota where it has one, else 200,000.
 - A Git workspace's baseline objects are on disk a second time, compressed, outside its
   reported usage: a Git workspace under a project quota holds at most twice its byte limit.
 - Once a workspace's store exists, the changes observation answers whatever the workspace's

@@ -7,11 +7,10 @@ use std::path::{Path, PathBuf};
 use git2::{Oid, Repository, Signature};
 use tempfile::{TempDir, tempdir};
 
-use super::super::write_baseline;
 use super::store_cases::{leftovers, plant_store, store_objects};
 use super::{
     baseline_file, baseline_object, baseline_root, commit_paths, objects_of, observe,
-    source_repository, store_of, target,
+    source_repository, store_of, target, write_baseline,
 };
 use crate::git_baselines::DEFAULT_BYTE_LIMIT;
 use crate::{DriverError, DriverErrorClass};
@@ -44,7 +43,7 @@ fn holding(repository: &Repository, directory: Oid) -> Oid {
 
 /// A repository whose branch `provider-default` holds one commit: a file, and the directories
 /// `directories` writes, by name.
-fn repository_of(
+pub(super) fn repository_of(
     directories: impl FnOnce(&Repository) -> Vec<(&'static str, Oid)>,
 ) -> (TempDir, Oid) {
     let directory = tempdir().expect("repository directory");
@@ -98,14 +97,14 @@ pub(in crate::git) fn copy_tree(from: &Path, to: &Path) {
 
 /// The baseline root of a workspace materialized before the store existed, whose commit-id file
 /// names `commit`.
-fn commit_id_file_alone(commit: Oid) -> TempDir {
+pub(super) fn commit_id_file_alone(commit: Oid) -> TempDir {
     let baselines = tempdir().expect("baseline root");
     std::fs::write(baselines.path().join("ws_git"), format!("{commit}\n")).expect("commit-id file");
     baselines
 }
 
 /// Both observations of the workspace: the changes, then the baseline's `README.md`.
-fn both(workspace: &Path, baselines: &Path) -> [Result<(), DriverError>; 2] {
+pub(super) fn both(workspace: &Path, baselines: &Path) -> [Result<(), DriverError>; 2] {
     [
         observe(workspace, baselines, 1024).map(|_| ()),
         target(workspace, baselines, DEFAULT_BYTE_LIMIT, |held| {
@@ -115,7 +114,7 @@ fn both(workspace: &Path, baselines: &Path) -> [Result<(), DriverError>; 2] {
     ]
 }
 
-fn codes(outcomes: [Result<(), DriverError>; 2]) -> [&'static str; 2] {
+pub(super) fn codes(outcomes: [Result<(), DriverError>; 2]) -> [&'static str; 2] {
     outcomes.map(|outcome| outcome.map_or_else(|error| error.code, |()| "answered"))
 }
 
@@ -278,7 +277,7 @@ fn a_baseline_write_that_fails_once_its_commit_id_file_is_in_place_leaves_no_com
 
 /// A workspace whose commit-id file names its second commit, and whose store holds only its
 /// first: the store does not hold the named commit.
-fn store_of_another_commit() -> (TempDir, TempDir, Oid) {
+pub(super) fn store_of_another_commit() -> (TempDir, TempDir, Oid) {
     let (workspace, first) = source_repository();
     std::fs::write(workspace.path().join("later.txt"), b"later\n").expect("file");
     let commit = commit_paths(workspace.path(), first, &["later.txt"]);
@@ -415,6 +414,48 @@ fn a_store_that_cannot_be_read_is_refused_and_not_removed() {
         assert_eq!(listing(baselines.path()), before, "{}", entry.display());
         assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
     }
+}
+
+/// A store whose pack index the Git library cannot read as one counts as not holding the
+/// commit: a finished build replaces it and the observation answers, and a build that is
+/// refused leaves it in place as it was.
+#[test]
+fn a_store_whose_pack_index_cannot_be_read_as_one_is_replaced_only_by_a_finished_build() {
+    let (workspace, commit) = source_repository();
+    let baselines = baseline_root(workspace.path(), commit);
+    let index = std::fs::read_dir(store_of(baselines.path()).join("pack"))
+        .expect("pack directory")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "idx"))
+        .expect("the index of the pack");
+    let length = usize::try_from(index.metadata().expect("index").len()).expect("length");
+    std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o600)).expect("mode");
+    std::fs::write(&index, vec![b'x'; length]).expect("bytes that are no index");
+    std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o400)).expect("mode");
+    let before = listing(baselines.path());
+    let object = baseline_object(workspace.path(), commit);
+    let bytes = std::fs::read(&object).expect("object");
+
+    std::fs::remove_file(&object).expect("object removed");
+    assert_eq!(
+        codes(both(workspace.path(), baselines.path())),
+        ["workspace.git-baseline-missing"; 2]
+    );
+    assert_eq!(listing(baselines.path()), before);
+    assert_eq!(
+        std::fs::read(&index).expect("index"),
+        vec![b'x'; length],
+        "the refused build changed the store that was there"
+    );
+    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
+
+    std::fs::write(&object, bytes).expect("object restored");
+    assert_eq!(
+        codes(both(workspace.path(), baselines.path())),
+        ["answered"; 2]
+    );
+    assert!(store_objects(baselines.path()).contains(&commit));
+    assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
 }
 
 /// What stands in a store's place and is not a directory is not absent either: a file, and a

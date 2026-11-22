@@ -14,6 +14,9 @@
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
+
+use substrate_wire::StorageLimit;
 
 use crate::DriverError;
 
@@ -23,6 +26,20 @@ const STORES: &str = ".objects";
 /// The byte limit of a Git create that requests no storage limit, and the bound of the copy a
 /// store is built from for a workspace under no project quota.
 pub(crate) const DEFAULT_BYTE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+
+/// The inode limit of a Git create that requests no storage limit, and the number of paths the
+/// baseline of a workspace under no project quota may name when its store is built.
+pub(crate) const DEFAULT_INODE_LIMIT: u64 = 200_000;
+
+/// The limit of a Git create that requests none.
+pub(crate) const DEFAULT_LIMIT: StorageLimit = StorageLimit {
+    max_bytes: DEFAULT_BYTE_LIMIT,
+    max_inodes: DEFAULT_INODE_LIMIT,
+};
+
+/// How long an observation waits for its turn to build a store (design 21, § *The baseline
+/// store*).
+pub(crate) const BUILD_TURN_WAIT: Duration = Duration::from_secs(10);
 
 /// A Git workspace as an observation names it.
 #[cfg_attr(not(feature = "git"), allow(dead_code))] // Read only by the build that serves Git.
@@ -34,9 +51,10 @@ pub(crate) struct GitWorkspace<'a> {
     pub(crate) path: &'a Path,
     pub(crate) baseline_root: &'a Path,
     pub(crate) root_name: &'a str,
-    /// The byte bound of the copy a store is built from. It is asked only when a store is
-    /// built, so an observation of a workspace that has its store asks nothing.
-    pub(crate) copy_bound: &'a dyn Fn() -> u64,
+    /// The bounds of a build of the workspace's store: the bytes of the copy it is built from,
+    /// and the paths its baseline may name. They are asked only when a store is built, so an
+    /// observation of a workspace that has its store asks nothing.
+    pub(crate) build_limit: &'a dyn Fn() -> StorageLimit,
 }
 
 /// One build of a store runs at a time in a daemon: whoever holds this builds.
@@ -46,8 +64,18 @@ static BUILD_TURN: LazyLock<Arc<tokio::sync::Mutex<()>>> = LazyLock::new(Arc::de
 pub(crate) struct BuildTurn(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>);
 
 impl BuildTurn {
-    /// Waits for the turn. An observation waits here and nowhere else, so while it waits it
-    /// holds none of the places the driver keeps for file operations.
+    /// Waits for the turn, at most `wait`; `None` when the wait ended first. An observation
+    /// waits here and nowhere else, so while it waits it holds none of the places the driver
+    /// keeps for file operations.
+    pub(crate) async fn taken_within(wait: Duration) -> Option<Self> {
+        tokio::time::timeout(wait, Arc::clone(&BUILD_TURN).lock_owned())
+            .await
+            .ok()
+            .map(Self)
+    }
+
+    /// Waits for the turn however long that takes.
+    #[cfg(all(test, feature = "git"))]
     pub(crate) async fn taken() -> Self {
         Self(Arc::clone(&BUILD_TURN).lock_owned().await)
     }
@@ -63,8 +91,8 @@ impl BuildTurn {
 #[cfg_attr(not(feature = "git"), allow(dead_code))] // A build that serves no Git builds no store.
 pub(crate) enum Observed<T> {
     Answer(T),
-    /// The workspace's store has to be built, and the observation held no turn to build it:
-    /// it made nothing. It is run again with the turn.
+    /// The workspace's store has to be built. An observation builds none: it made nothing,
+    /// and is run again once the store is built.
     NeedsBuild,
 }
 

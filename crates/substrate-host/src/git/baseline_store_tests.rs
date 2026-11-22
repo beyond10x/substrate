@@ -15,9 +15,10 @@ use tempfile::tempdir;
 
 use super::{AUTHORITY, Mode, Server, repository};
 use crate::git::tests::objects_of;
+use crate::git::tests::shape_cases::doubled_repository;
 use crate::git::tests::store_failure_cases::{NESTING_BOUND, copy_tree, nested_repository};
 use crate::git::tests::watch::{Event, Kind, Watch};
-use crate::git_baselines::BuildTurn;
+use crate::git_baselines::{BUILD_TURN_WAIT, BuildTurn};
 use crate::{
     DispatchOutcome, Driver as _, DriverError, HostConfig, HostDriver, WorkspaceDestroyProgress,
 };
@@ -564,4 +565,120 @@ async fn a_file_operation_completes_while_observations_wait_for_their_turn_to_bu
         assert_eq!(built, commit.to_string(), "{name}");
         assert!(objects_of(&stores.join(name)).contains(&commit), "{name}");
     }
+}
+
+/// A create whose baseline names more paths than its inode limit is refused
+/// `workspace.git-storage-limit` before anything is checked out, and leaves no workspace, no
+/// store and no commit-id file. The baseline here names 2^41 paths in forty-two trees, against
+/// the 200,000 of a create that requests no limit; nothing of the create walks those paths.
+#[tokio::test]
+async fn a_create_whose_baseline_names_more_paths_than_its_inode_limit_is_refused() {
+    let (source, commit) = doubled_repository(40);
+    let server = Server::start(source.path(), Mode::V2);
+    let root = tempdir().expect("workspace root");
+    let driver = driver(root.path(), &server);
+
+    let outcome = driver
+        .create_workspace_authorized("ws_a", "ws_a", &input(&server, commit), Some(AUTHORITY))
+        .await;
+
+    let (dispatch, error) = refused(outcome);
+    assert_eq!(error.code, "workspace.git-storage-limit");
+    assert_eq!(dispatch, "contained absent");
+    assert!(!root.path().join("ws_a").exists(), "a workspace is left");
+    let baselines = baselines(root.path());
+    assert!(!baselines.join("ws_a").exists(), "a commit-id file is left");
+    assert_eq!(names(&baselines.join(".objects")), Vec::<String>::new());
+    assert!(
+        names(&baselines).iter().all(|name| name == ".objects"),
+        "{:?}",
+        names(&baselines)
+    );
+    assert!(staging_paths(root.path()).is_empty());
+}
+
+/// The turn to build ends when the store is in place, before the observation that built
+/// compares anything: the turn is free again while the observation of `ws_b`, whose store was
+/// just built, still compares a large file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_turn_to_build_ends_before_the_observation_that_built_compares() {
+    let (source, commit) = repository(0);
+    let server = Server::start(source.path(), Mode::V2);
+    let root = tempdir().expect("workspace root");
+    let predating = ["ws_b".to_owned()];
+    let driver = driver_with_predating(root.path(), &server, commit, &predating).await;
+    let store = baselines(root.path()).join(".objects/ws_b");
+    // The comparison of `ws_b` hashes this file whole.
+    std::fs::File::create(root.path().join("ws_b/README.md"))
+        .and_then(|file| file.set_len(256 * 1024 * 1024))
+        .expect("a large tracked file");
+
+    let first = observation(&driver, "ws_b");
+    // The turn comes here once the build of `ws_b` has ended it: no other build holds the
+    // turn while the store is put into place.
+    let turn = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let turn = BuildTurn::taken().await;
+            if store.exists() {
+                break turn;
+            }
+            drop(turn);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the store of `ws_b` is built and the turn is free again");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert!(
+        !first.is_finished(),
+        "the turn to build was held while the observation that built compared"
+    );
+    assert!(objects_of(&store).contains(&commit));
+    drop(turn);
+    let built = tokio::time::timeout(Duration::from_secs(30), first)
+        .await
+        .expect("the observation answers")
+        .expect("observation")
+        .expect("change set");
+    assert_eq!(built, commit.to_string());
+}
+
+/// An observation that has waited its bound for a turn to build is refused
+/// `workspace.git-baseline-missing` and made nothing; a later one tries again. The bound is
+/// 10 s, and this case passes a shorter one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_observation_that_has_waited_its_bound_for_a_turn_to_build_is_refused() {
+    assert_eq!(BUILD_TURN_WAIT, Duration::from_secs(10));
+    let (source, commit) = repository(0);
+    let server = Server::start(source.path(), Mode::V2);
+    let root = tempdir().expect("workspace root");
+    let predating = ["ws_b".to_owned()];
+    let driver = driver_with_predating(root.path(), &server, commit, &predating).await;
+    let baselines = baselines(root.path());
+    let turn = BuildTurn::taken().await;
+
+    let waited = tokio::time::timeout(
+        Duration::from_secs(5),
+        driver.git_observation("ws_b", "ws_b", Duration::from_millis(200), |workspace| {
+            crate::git::changes(workspace, QUERY)
+        }),
+    )
+    .await
+    .expect("the observation waited longer than its bound");
+
+    assert_eq!(
+        waited.expect_err("no turn within the bound").code,
+        "workspace.git-baseline-missing"
+    );
+    assert_eq!(names(&baselines.join(".objects")), ["ws_a"]);
+    assert_eq!(names(&baselines), [".objects", "ws_a", "ws_b"]);
+
+    drop(turn);
+    let later = driver
+        .read_workspace_git_changes_v2("ws_b", "ws_b", &QUERY)
+        .await
+        .expect("a later observation");
+    assert_eq!(later.commit, commit.to_string());
+    assert!(objects_of(&baselines.join(".objects/ws_b")).contains(&commit));
 }

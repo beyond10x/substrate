@@ -75,7 +75,7 @@ pub(super) fn write_baseline(
     _root_name: &str,
     _repository: &Path,
     _commit: &str,
-    _max_bytes: u64,
+    _limit: StorageLimit,
 ) -> Result<(), DriverError> {
     Err(source_unserved())
 }
@@ -87,11 +87,17 @@ pub(super) fn remove_baseline(baseline_root: &Path, root_name: &str) -> Result<(
     crate::git_baselines::remove(baseline_root, root_name)
 }
 
+pub(super) fn build_store(
+    _workspace: &GitWorkspace<'_>,
+    _turn: &BuildTurn,
+) -> Result<(), DriverError> {
+    Err(source_unserved())
+}
+
 pub(super) fn baseline_file(
     _workspace: &GitWorkspace<'_>,
     _path: &str,
     _max_bytes: u64,
-    _turn: Option<&BuildTurn>,
 ) -> Result<Observed<GitBaselineFileResult>, DriverError> {
     Err(source_unserved())
 }
@@ -99,7 +105,6 @@ pub(super) fn baseline_file(
 pub(super) fn changes(
     _workspace: &GitWorkspace<'_>,
     _query: GitChangesQuery,
-    _turn: Option<&BuildTurn>,
 ) -> Result<Observed<GitChangeSet>, DriverError> {
     Err(source_unserved())
 }

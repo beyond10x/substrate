@@ -14,17 +14,17 @@ use sha2::{Digest as _, Sha256};
 use substrate_wire::{GitBaselineFile, GitChange, GitChangesQuery, is_root_name};
 use tempfile::{TempDir, tempdir};
 
-use super::super::{read_baseline, remove_baseline, store, worktree, write_baseline};
+use super::super::{read_baseline, remove_baseline, store, worktree};
 use super::watch::{Event, Kind, Watch};
 use super::{
     baseline_file, baseline_object, baseline_root, change_every_kind_of_entry, changes,
     commit_paths, objects_of, observe, paths, remove_store, source_repository, store_of, target,
-    tracked_workspace,
+    tracked_workspace, write_baseline,
 };
 use crate::git_baselines::{BuildTurn, DEFAULT_BYTE_LIMIT};
 use crate::{DriverError, DriverErrorClass};
 
-const QUERY: GitChangesQuery = GitChangesQuery {
+pub(super) const QUERY: GitChangesQuery = GitChangesQuery {
     max_files: 100,
     max_file_bytes: 1024,
     max_total_bytes: 1024 * 1024,
@@ -741,7 +741,7 @@ fn no_store_is_built_from_an_object_store_with_more_entries_than_the_bound() {
             workspace.path(),
             baselines.path(),
             DEFAULT_BYTE_LIMIT,
-            |held| store::held(held, commit, max_entries, Some(&turn)).map(|_| ()),
+            |held| store::built(held, commit, max_entries, &turn),
         )
     };
 
