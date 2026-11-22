@@ -185,7 +185,12 @@ pub(crate) fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
     }
 }
 
-fn pipe_session(id: &str, exec_id: &str, workspace: &str, lease: &NewLease) -> PipeSession {
+pub(crate) fn pipe_session(
+    id: &str,
+    exec_id: &str,
+    workspace: &str,
+    lease: &NewLease,
+) -> PipeSession {
     PipeSession {
         capture: substrate_wire::CaptureMode::Recorded,
         id: id.to_owned(),
@@ -211,7 +216,7 @@ fn seed_exec(store: &Store, scope: &Scope, resource: &StoredExec) {
     upsert_exec(&store.connection.lock(), scope, resource).expect("seed exec membership");
 }
 
-fn lease_at(subject: &str, id: &str, ttl_ms: u64) -> (NewOperation, NewLease) {
+pub(crate) fn lease_at(subject: &str, id: &str, ttl_ms: u64) -> (NewOperation, NewLease) {
     let operation = operation_named(
         subject,
         &format!("lease-authority-{id}"),

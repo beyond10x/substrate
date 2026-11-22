@@ -23,3 +23,21 @@ different verified grant remains `delegated-context.grant-conflict` and the same
 
 Replay is an authorized read of a durable outcome rather than a bypass around the current trust
 envelope, while first-write attribution remains immutable.
+
+## Addendum — 2026-11-23: requests that arrive at the same time
+
+This addendum changes no decision above. It states the decision for the case the text does not
+name: two requests of one subject and one operation identity that are in flight together.
+
+The grant is compared in the transaction that finds the row, for every request that finds it. A
+request that loses the write of a row to a concurrent one is answered as a retry of that row:
+the stored outcome when its verified grant is the row's, `delegated-context.grant-conflict` when
+it verified another grant. A refusal decided from a request's own envelope or delegated context
+is never replaced by a row's stored outcome.
+
+The grant is compared before the request hash, so a request under another grant is answered
+`delegated-context.grant-conflict` also when its input differs.
+
+Unchanged and recorded here because the text above leaves it open: where the deployment does
+not require delegated context, a valid request without one replays a row that records a grant.
+A deployment that requires context refuses that request `delegated-context.absent` first.

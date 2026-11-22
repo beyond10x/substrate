@@ -486,6 +486,333 @@ async fn bound_refusal_losing_to_accepted_reservation_returns_outcome_unknown() 
     );
 }
 
+/// ADR 0017 where the row is found late: by the transaction that records a refusal, after the
+/// lookup at the head of the request found nothing. Each case installs the row between the two
+/// through `refusal_before_record`, once, with no second task and no clock.
+mod replay_compares_the_grant_where_the_row_is_found {
+    use std::sync::Arc;
+
+    use axum::Extension;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
+    use chrono::Utc;
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use serde_json::{Value, json};
+    use sha2::{Digest as _, Sha256};
+    use substrate_host::{HostConfig, HostDriver};
+    use substrate_store::{NewOperation, Reservation, Scope, Store};
+    use substrate_wire::{
+        DELEGATED_CONTEXT_AUDIENCE, DELEGATED_CONTEXT_TYPE, ErrorClass, ErrorDetail,
+        OperationOutcome,
+    };
+    use tower::ServiceExt as _;
+
+    use crate::app::operations::reservation_response;
+    use crate::app::{App, Identity, PrivateHostPaths, SystemAuthority};
+    use crate::delegation::{DelegatedContextPolicy, TrustedKey};
+
+    const DEPLOYMENT: &str = "dep_replay_grant";
+    const SUBJECT: &str = "local:1000";
+    const ISSUER: &str = "https://issuer.invalid";
+    const KID: &str = "app-test-key-1";
+    const GRANT_A: &str = "grant:a";
+    const GRANT_B: &str = "grant:b";
+
+    /// A signing key for these cases only: its seed is the SHA-256 of this sentence, so no key
+    /// material is committed and there is nothing to rotate.
+    fn signing_key() -> SigningKey {
+        let seed: [u8; 32] =
+            Sha256::digest(b"substrate app-test delegated-context signing seed").into();
+        SigningKey::from_bytes(&seed)
+    }
+
+    /// A context that verifies for this deployment and subject and names `grant`.
+    fn context(grant: &str) -> String {
+        let instant = Utc::now().timestamp();
+        let header = json!({ "alg": "EdDSA", "kid": KID, "typ": DELEGATED_CONTEXT_TYPE });
+        let claims = json!({
+            "act": { "sub": "svc:actor" },
+            "aud": DELEGATED_CONTEXT_AUDIENCE,
+            "bound_deployment": DEPLOYMENT,
+            "bound_subject": SUBJECT,
+            "exp": instant + 60,
+            "grant_ref": grant,
+            "grant_revision": "rev_1",
+            "iat": instant - 10,
+            "iss": ISSUER,
+            "jti": "jti_1",
+            "nbf": instant - 10,
+            "sub": "platform:principal-1",
+            "tenant": "tenant_app_test",
+        });
+        let signing_input = format!(
+            "{}.{}",
+            BASE64URL.encode(serde_json::to_vec(&header).expect("header")),
+            BASE64URL.encode(serde_json::to_vec(&claims).expect("claims"))
+        );
+        let signature = signing_key().sign(signing_input.as_bytes());
+        format!("{signing_input}.{}", BASE64URL.encode(signature.to_bytes()))
+    }
+
+    fn app(required: bool) -> (tempfile::TempDir, Arc<Store>, Arc<App>) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = Arc::new(Store::open(":memory:").expect("state store"));
+        let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+            .expect("host driver");
+        let policy = DelegatedContextPolicy::new(
+            vec![TrustedKey {
+                kid: KID.to_owned(),
+                issuer: ISSUER.to_owned(),
+                verifying_key: signing_key().verifying_key(),
+            }],
+            required,
+        )
+        .expect("one key is a policy");
+        let app = App::with_delegated_context(
+            Arc::clone(&store),
+            driver,
+            DEPLOYMENT,
+            Arc::new(SystemAuthority),
+            policy,
+            PrivateHostPaths::of_no_daemon_configuration(),
+        );
+        (directory, store, app)
+    }
+
+    fn first_outcome() -> ErrorDetail {
+        ErrorDetail {
+            class: ErrorClass::Conflict,
+            code: "first.outcome".to_owned(),
+            message: "The first request's stored outcome.".to_owned(),
+            retriable: false,
+            address: None,
+            operation: None,
+        }
+    }
+
+    /// Before this request's refusal is recorded, another request of the same subject, operation
+    /// id and input records its row under `grant` and stores a terminal outcome.
+    fn another_request_wins_first(app: &App, store: &Arc<Store>, grant: Option<&'static str>) {
+        let store = Arc::clone(store);
+        app.refusal_before_record
+            .lock()
+            .replace(Arc::new(move |new: &NewOperation| {
+                let first = NewOperation {
+                    grant_ref: grant.map(ToOwned::to_owned),
+                    platform_principal: grant.map(|_| "platform:principal-0".to_owned()),
+                    ..new.clone()
+                };
+                assert_eq!(
+                    store.reserve(&first).expect("first request"),
+                    Reservation::Accepted
+                );
+                store
+                    .complete_error(
+                        &first.scope,
+                        &first.operation,
+                        &Utc::now().to_rfc3339(),
+                        409,
+                        None,
+                        &first_outcome(),
+                    )
+                    .expect("first request's outcome");
+            }));
+    }
+
+    async fn create_workspace(app: Arc<App>, uri: &str, body: Value) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-request-id", "req_replay_grant")
+            .body(Body::from(serde_json::to_vec(&body).expect("request JSON")))
+            .expect("request");
+        let identity = Identity {
+            subject: SUBJECT.to_owned(),
+            actor: "replay-grant-test".to_owned(),
+            principal: None,
+        };
+        let response = crate::app::router(app)
+            .layer(Extension(identity))
+            .oneshot(request)
+            .await
+            .expect("router response");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 2_097_152)
+            .await
+            .expect("response bytes");
+        (
+            status,
+            serde_json::from_slice(&body).expect("response JSON"),
+        )
+    }
+
+    /// The first request's row as it wrote it: its grant and its outcome, whatever the second
+    /// request was answered.
+    fn assert_first_row_unchanged(store: &Store, operation: &str, grant: Option<&str>) {
+        let row = store
+            .operation(
+                &Scope {
+                    deployment: DEPLOYMENT.to_owned(),
+                    subject: SUBJECT.to_owned(),
+                },
+                operation,
+            )
+            .expect("row lookup")
+            .expect("the first request's row");
+        assert_eq!(row.grant_ref.as_deref(), grant);
+        let Some(OperationOutcome::Error { error }) = row.outcome else {
+            panic!("the first request's outcome is stored");
+        };
+        assert_eq!(error.code, "first.outcome");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refusal_recorded_after_a_row_under_another_grant_appeared_is_the_grant_conflict() {
+        let (_directory, store, app) = app(false);
+        another_request_wins_first(&app, &store, Some(GRANT_A));
+
+        let operation = "01JREPLAYGRANTLATEROW01";
+        // The input does not deserialize, so this request has a refusal to record; its context
+        // verifies and names another grant than the row it then finds.
+        let (status, response) = create_workspace(
+            Arc::clone(&app),
+            "/v1/workspaces",
+            json!({
+                "op": operation,
+                "input": { "source": "empty", "labels": {}, "unexpected": true },
+                "delegated_context": context(GRANT_B),
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            response["error"]["code"],
+            "delegated-context.grant-conflict"
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_first_row_unchanged(&store, operation, Some(GRANT_A));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refusal_for_a_missing_required_context_is_not_replaced_by_a_stored_outcome() {
+        let (_directory, store, app) = app(true);
+        another_request_wins_first(&app, &store, Some(GRANT_A));
+
+        let operation = "01JREPLAYGRANTLATEROW02";
+        let (status, response) = create_workspace(
+            Arc::clone(&app),
+            "/v1/workspaces",
+            json!({ "op": operation, "input": { "source": "empty", "labels": {} } }),
+        )
+        .await;
+
+        assert_eq!(response["error"]["code"], "delegated-context.absent");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_first_row_unchanged(&store, operation, Some(GRANT_A));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refusal_for_an_invalid_context_is_not_replaced_by_a_stored_outcome() {
+        let (_directory, store, app) = app(false);
+        another_request_wins_first(&app, &store, None);
+
+        let operation = "01JREPLAYGRANTLATEROW03";
+        let (status, response) = create_workspace(
+            Arc::clone(&app),
+            "/v1/workspaces",
+            json!({
+                "op": operation,
+                "input": { "source": "empty", "labels": {} },
+                "delegated_context": "not-a-context",
+            }),
+        )
+        .await;
+
+        assert_eq!(response["error"]["code"], "delegated-context.malformed");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_first_row_unchanged(&store, operation, None);
+    }
+
+    /// The lookup at the head of a request ranks a closed-envelope refusal above replay; the
+    /// recording transaction ranks it the same.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refusal_for_the_request_s_own_shape_is_not_replaced_by_a_stored_outcome() {
+        let (_directory, store, app) = app(false);
+        another_request_wins_first(&app, &store, None);
+
+        let operation = "01JREPLAYGRANTLATEROW04";
+        let (status, response) = create_workspace(
+            Arc::clone(&app),
+            "/v1/workspaces?unexpected=1",
+            json!({ "op": operation, "input": { "source": "empty", "labels": {} } }),
+        )
+        .await;
+
+        assert_eq!(response["error"]["code"], "request.schema-invalid");
+        assert_eq!(response["error"]["address"], "query");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_first_row_unchanged(&store, operation, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_row_found_at_the_head_of_a_request_under_another_grant_is_the_grant_conflict() {
+        let (_directory, _store, app) = app(false);
+        let operation = "01JREPLAYGRANTEARLYROW1";
+        let (status, response) = create_workspace(
+            Arc::clone(&app),
+            "/v1/workspaces",
+            json!({
+                "op": operation,
+                "input": { "source": "empty", "labels": {}, "unexpected": true },
+                "delegated_context": context(GRANT_A),
+            }),
+        )
+        .await;
+        assert_eq!(response["error"]["code"], "request.schema-invalid");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let (status, response) = create_workspace(
+            Arc::clone(&app),
+            "/v1/workspaces",
+            json!({
+                "op": operation,
+                "input": { "source": "empty", "labels": {}, "unexpected": true },
+                "delegated_context": context(GRANT_B),
+            }),
+        )
+        .await;
+        assert_eq!(
+            response["error"]["code"],
+            "delegated-context.grant-conflict"
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    /// Every route answers an existing row through `reservation_response`, so this one mapping is
+    /// what a grant mismatch found by any accepting transaction becomes.
+    #[test]
+    fn a_grant_mismatch_from_the_store_is_answered_as_the_grant_conflict_refusal() {
+        let response = reservation_response(
+            Ok(Reservation::GrantConflict),
+            "req_replay_grant",
+            "01JREPLAYGRANTMAPPING01",
+        )
+        .expect("a grant mismatch is an answer, never an admission");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let detail = response
+            .extensions()
+            .get::<ErrorDetail>()
+            .expect("error detail");
+        assert_eq!(detail.code, "delegated-context.grant-conflict");
+        assert_eq!(detail.class, ErrorClass::Conflict);
+        assert_eq!(detail.address.as_deref(), Some("grant_ref"));
+        assert_eq!(detail.operation.as_deref(), Some("01JREPLAYGRANTMAPPING01"));
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn maintenance_driver_deadline_is_hard_and_retriable() {
     let task = tokio::spawn(run_maintenance_driver(std::future::pending::<

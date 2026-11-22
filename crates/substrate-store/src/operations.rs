@@ -47,6 +47,9 @@ pub enum Reservation {
     /// value is returned by value on every mutation path (ADR 0011 added two members to the row).
     Pending(Box<OperationRecord>),
     Conflict,
+    /// The row exists and records a grant other than the one this request verified. The stored
+    /// outcome is not this request's to read (ADR 0017), and the row is left as it was written.
+    GrantConflict,
     Capacity(OperationCapacity),
 }
 
@@ -134,23 +137,19 @@ impl Store {
         Ok((Reservation::Replay(answer), Some(event)))
     }
 
+    /// What an existing row answers to a request with this input under `grant_ref`, the grant its
+    /// verified delegated context named, or `None` when no row exists. The grant is compared in
+    /// the read that finds the row (ADR 0017).
     pub fn inspect_reservation(
         &self,
         scope: &Scope,
         operation: &str,
         request_hash: &str,
+        grant_ref: Option<&str>,
     ) -> Result<Option<Reservation>, StoreError> {
         let connection = self.connection.lock();
-        let Some(existing) = load_operation(&connection, scope, operation)? else {
-            return Ok(None);
-        };
-        Ok(Some(if existing.record.request_hash != request_hash {
-            Reservation::Conflict
-        } else if let Some(answer) = existing.answer {
-            Reservation::Replay(answer)
-        } else {
-            Reservation::Pending(Box::new(existing.record))
-        }))
+        Ok(load_operation(&connection, scope, operation)?
+            .map(|existing| existing.answer_to(request_hash, grant_ref)))
     }
 
     pub fn record_refusal(
@@ -162,16 +161,11 @@ impl Store {
     ) -> Result<Reservation, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(existing) = load_operation(&transaction, &new.scope, &new.operation)? {
-            let result = if existing.record.request_hash != new.request_hash {
-                Reservation::Conflict
-            } else if let Some(answer) = existing.answer {
-                Reservation::Replay(answer)
-            } else {
-                Reservation::Pending(Box::new(existing.record))
-            };
+        // Another request's row decides, and is left as it was written: the refusal is recorded
+        // only where no row exists.
+        if let Some(reservation) = existing_reservation(&transaction, new)? {
             transaction.commit()?;
-            return Ok(result);
+            return Ok(reservation);
         }
         let (answer, event) = match insert_unbound_refusal(
             &transaction,
@@ -660,16 +654,8 @@ pub(crate) fn existing_reservation(
     connection: &Connection,
     new: &NewOperation,
 ) -> Result<Option<Reservation>, StoreError> {
-    let Some(existing) = load_operation(connection, &new.scope, &new.operation)? else {
-        return Ok(None);
-    };
-    Ok(Some(if existing.record.request_hash != new.request_hash {
-        Reservation::Conflict
-    } else if let Some(answer) = existing.answer {
-        Reservation::Replay(answer)
-    } else {
-        Reservation::Pending(Box::new(existing.record))
-    }))
+    Ok(load_operation(connection, &new.scope, &new.operation)?
+        .map(|existing| existing.answer_to(&new.request_hash, new.grant_ref.as_deref())))
 }
 
 pub(crate) fn insert_accepted_operation(
@@ -977,6 +963,38 @@ pub(crate) struct LoadedOperation {
     pub(crate) answer: Option<StoredAnswer>,
 }
 
+impl LoadedOperation {
+    /// What this row answers to a request of its deployment, subject and operation id.
+    ///
+    /// Every read that can hand a stored row to a request goes through here, in the transaction
+    /// that found the row, so the row's outcome and its pending record reach a request only
+    /// after the grant is compared (ADR 0017):
+    ///
+    /// - a row that records a grant and a request that verified a different one is
+    ///   [`Reservation::GrantConflict`], decided before the input is compared, so that request
+    ///   learns nothing else about the row;
+    /// - a row recorded without a grant replays to a request under any verified grant, and is
+    ///   not rewritten;
+    /// - a request that verified no grant is not a different grant. Whether a missing context is
+    ///   refused is the deployment's requirement, which the daemon enforces before it answers
+    ///   from a row.
+    fn answer_to(self, request_hash: &str, grant_ref: Option<&str>) -> Reservation {
+        let another_grant = match (self.record.grant_ref.as_deref(), grant_ref) {
+            (Some(recorded), Some(verified)) => recorded != verified,
+            (None, _) | (_, None) => false,
+        };
+        if another_grant {
+            Reservation::GrantConflict
+        } else if self.record.request_hash != request_hash {
+            Reservation::Conflict
+        } else if let Some(answer) = self.answer {
+            Reservation::Replay(answer)
+        } else {
+            Reservation::Pending(Box::new(self.record))
+        }
+    }
+}
+
 pub(crate) fn load_operation(
     connection: &Connection,
     scope: &Scope,
@@ -1063,3 +1081,6 @@ pub(crate) fn load_operation(
         answer,
     }))
 }
+
+#[cfg(test)]
+mod replay_grant_tests;

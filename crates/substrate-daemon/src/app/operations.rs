@@ -120,40 +120,29 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
         Ok(verified) => (verified, None),
         Err(refusal) => (None, Some(refusal)),
     };
-    let (invalid_query, invalid_envelope) = invalid_envelope(object, raw_query);
+    let own_refusal = request_refusal(object, raw_query, refusal, request_id, &operation);
     match app
         .store_io(|| {
-            app.store
-                .inspect_reservation(&scope, &operation, &request_hash)
+            app.store.inspect_reservation(
+                &scope,
+                &operation,
+                &request_hash,
+                attribution.as_ref().map(|value| value.grant_ref.as_str()),
+            )
         })
         .await
     {
         Ok(None) => {}
         Ok(Some(reservation)) => {
             // Replay is still a request in the current trust posture. An existing ledger row is
-            // immutable, so these refusals are returned without trying to replace its outcome.
-            if invalid_query {
-                return Err(schema_invalid(request_id, Some(&operation), "query"));
-            }
-            if invalid_envelope {
-                return Err(schema_invalid(request_id, Some(&operation), "input"));
-            }
-            if let Some(refusal) = refusal {
-                return Err(delegated_context_refusal(
-                    request_id,
-                    Some(&operation),
-                    refusal,
-                ));
-            }
-            if let Some(response) =
-                grant_conflict(app, &scope, &operation, request_id, attribution.as_ref()).await
-            {
-                return Err(response);
-            }
-            return Err(
+            // immutable, so the request's own refusal is returned without trying to replace its
+            // outcome. Otherwise the row answers, and the store compared its grant with this
+            // request's in the read that found it: a row under another grant arrives here as
+            // `GrantConflict` (ADR 0017).
+            return Err(own_refusal.unwrap_or_else(|| {
                 reservation_response(Ok(reservation), request_id, &operation)
-                    .unwrap_or_else(|| outcome_unknown(request_id, &operation)),
-            );
+                    .unwrap_or_else(|| outcome_unknown(request_id, &operation))
+            }));
         }
         Err(error) => return Err(store_failure(request_id, Some(&operation), &error)),
     }
@@ -166,23 +155,19 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
         &request_hash,
         attribution.as_ref(),
     );
-    if invalid_query {
-        let response = schema_invalid(request_id, Some(&operation), "query");
-        return Err(record_bound_refusal(app, request_id, &new, response).await);
-    }
-    // Still closed: `op`, `input`, and the one optional sibling. Anything else is the same
-    // strict-request refusal `0.6.0` gave, at the same address.
-    if invalid_envelope {
-        let response = schema_invalid(request_id, Some(&operation), "input");
-        return Err(record_bound_refusal(app, request_id, &new, response).await);
-    }
-    if let Some(refusal) = refusal {
-        let response = delegated_context_refusal(request_id, Some(&operation), refusal);
-        return Err(record_bound_refusal(app, request_id, &new, response).await);
+    // No row existed at the lookup. Another request may write one before a refusal is recorded,
+    // so each refusal keeps the rank the lookup gives it against a row: the request's own
+    // stands, and the one for an input that does not deserialize yields to the row.
+    if let Some(response) = own_refusal {
+        return Err(
+            record_bound_refusal(app, request_id, &new, response, AgainstARow::Stands).await,
+        );
     }
     let Ok(input) = serde_json::from_value(raw_input.clone()) else {
         let response = schema_invalid(request_id, Some(&operation), "input");
-        return Err(record_bound_refusal(app, request_id, &new, response).await);
+        return Err(
+            record_bound_refusal(app, request_id, &new, response, AgainstARow::Yields).await,
+        );
     };
     Ok(BoundMutation {
         op: operation,
@@ -192,14 +177,30 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
     })
 }
 
-fn invalid_envelope(
+/// The refusal a request earns from its own closed envelope and delegated context, if any, in
+/// the order they are checked: the query, the envelope's members, the context.
+///
+/// It is decided from the request alone, before the ledger is read, and it ranks above any row
+/// the ledger holds: the request is answered with it, never with a stored outcome (ADR 0017).
+fn request_refusal(
     object: &serde_json::Map<String, Value>,
     raw_query: Option<&str>,
-) -> (bool, bool) {
-    let invalid_member = object
+    context: Option<ContextRefusal>,
+    request_id: &str,
+    operation: &str,
+) -> Option<Response> {
+    if !query_is_empty(raw_query) {
+        return Some(schema_invalid(request_id, Some(operation), "query"));
+    }
+    // Still closed: `op`, `input`, and the one optional sibling. Anything else is the same
+    // strict-request refusal `0.6.0` gave, at the same address.
+    if object
         .keys()
-        .any(|member| !matches!(member.as_str(), "op" | "input" | "delegated_context"));
-    (!query_is_empty(raw_query), invalid_member)
+        .any(|member| !matches!(member.as_str(), "op" | "input" | "delegated_context"))
+    {
+        return Some(schema_invalid(request_id, Some(operation), "input"));
+    }
+    context.map(|refusal| delegated_context_refusal(request_id, Some(operation), refusal))
 }
 
 fn bound_new_operation(
@@ -250,27 +251,26 @@ fn presented_context(
 ///
 /// `delegated_context` is outside the canonical request hash, so replaying an `op` with a *fresh*
 /// context is the same operation and returns the original outcome. Replaying it under a *different*
-/// grant is not: first write wins on the recorded one (design 09 § 4). The extra ledger read costs
-/// nothing on the common path — it runs only when a reservation already exists *and* this request
-/// carried a verified grant.
-async fn grant_conflict(
-    app: &App,
-    scope: &Scope,
-    operation: &str,
-    request_id: &str,
-    attribution: Option<&VerifiedContext>,
-) -> Option<Response> {
-    let attribution = attribution?;
-    let existing = match app.store_io(|| app.store.operation(scope, operation)).await {
-        Ok(existing) => existing?,
-        Err(error) => return Some(store_failure(request_id, Some(operation), &error)),
-    };
-    existing
-        .grant_ref
-        .is_some_and(|recorded| recorded != attribution.grant_ref)
-        .then(|| {
-            delegated_context_refusal(request_id, Some(operation), ContextRefusal::GRANT_CONFLICT)
-        })
+/// grant is not: first write wins on the recorded one (design 09 § 4). The store decides it, as
+/// [`Reservation::GrantConflict`], in whichever transaction finds the row (ADR 0017).
+fn grant_conflict(request_id: &str, operation: &str) -> Response {
+    delegated_context_refusal(request_id, Some(operation), ContextRefusal::GRANT_CONFLICT)
+}
+
+/// How a refusal that is about to be recorded ranks against a row another request wrote first.
+///
+/// The lookup at the head of [`decode_mutation`] ranks the refusals it knows above an existing
+/// row and the rest below it. A row that appears after that lookup is found by the recording
+/// transaction, and the refusal keeps its rank there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgainstARow {
+    /// Decided from the request alone: its closed envelope and its delegated context. The
+    /// request is owed this refusal whatever the ledger holds, and never another request's
+    /// stored outcome in its place (ADR 0017).
+    Stands,
+    /// Decided for a request whose envelope and context passed. An existing row answers first,
+    /// after the store compared its grant with this request's.
+    Yields,
 }
 
 async fn record_bound_refusal(
@@ -278,6 +278,7 @@ async fn record_bound_refusal(
     request_id: &str,
     new: &NewOperation,
     response: Response,
+    against_a_row: AgainstARow,
 ) -> Response {
     let Some(detail) = response.extensions().get::<ErrorDetail>().cloned() else {
         return store_failure(
@@ -291,26 +292,35 @@ async fn record_bound_refusal(
     if let Some(hook) = app.refusal_before_record.lock().take() {
         hook(new);
     }
-    match app
+    let recorded = app
         .store_io(|| {
             app.store
                 .record_refusal(new, &app.authority.now().to_rfc3339(), status, &detail)
         })
-        .await
-    {
-        Ok(Reservation::Replay(answer)) => replay(request_id, &new.operation, answer),
-        Ok(Reservation::Conflict) => conflict(
+        .await;
+    match (recorded, against_a_row) {
+        // The refusal is not durable, so it is not answered as if it were.
+        (Ok(Reservation::Capacity(_)), _) => operation_ledger_capacity(request_id),
+        (Err(error), _) => store_failure(request_id, Some(&new.operation), &error),
+        // Recorded just now, or found beside a row another request wrote first, which the
+        // store left as it was written: the answer is this request's own refusal either way.
+        (Ok(_), AgainstARow::Stands) => response,
+        (Ok(Reservation::Replay(answer)), AgainstARow::Yields) => {
+            replay(request_id, &new.operation, answer)
+        }
+        (Ok(Reservation::GrantConflict), AgainstARow::Yields) => {
+            grant_conflict(request_id, &new.operation)
+        }
+        (Ok(Reservation::Conflict), AgainstARow::Yields) => conflict(
             request_id,
             &new.operation,
             "operation.request-conflict",
             "Operation id is already bound to different input.",
             "operation",
         ),
-        Ok(Reservation::Pending(_) | Reservation::Accepted) => {
+        (Ok(Reservation::Pending(_) | Reservation::Accepted), AgainstARow::Yields) => {
             outcome_unknown(request_id, &new.operation)
         }
-        Ok(Reservation::Capacity(_)) => operation_ledger_capacity(request_id),
-        Err(error) => store_failure(request_id, Some(&new.operation), &error),
     }
 }
 
@@ -1227,6 +1237,9 @@ pub(super) fn reservation_response(
             "Operation id is already bound to different input.",
             "operation",
         )),
+        // A row under another grant, found by the transaction that would have accepted: the store
+        // compared the grant before it answered from the row (ADR 0017).
+        Ok(Reservation::GrantConflict) => Some(grant_conflict(request_id, operation)),
         Ok(Reservation::Pending(_)) => Some(outcome_unknown(request_id, operation)),
         Ok(Reservation::Capacity(_)) => Some(operation_ledger_capacity(request_id)),
         // The accepting transaction found a workspace frozen, its own or a bound Git root whose
@@ -1317,7 +1330,9 @@ pub(super) async fn refuse_before_dispatch_response<T>(
         resource: None,
     };
     let _ = (method, address);
-    record_bound_refusal(app, request_id, &new, response).await
+    // The request passed its envelope and its context, so a row another request wrote first
+    // answers before this refusal does.
+    record_bound_refusal(app, request_id, &new, response, AgainstARow::Yields).await
 }
 
 pub(super) async fn finish_success<T: Serialize + Sync>(
