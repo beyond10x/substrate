@@ -7,7 +7,8 @@
 //! The Git library is only ever pointed at a directory the driver wrote: a store, the staging
 //! tree of a create, or the copy a store is built from. It is never pointed at a workspace.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
@@ -38,22 +39,22 @@ pub(super) const MAX_PATH_BYTES: u64 = 4096;
 /// The bytes the paths of a baseline may take together, for each path the inode limit admits.
 pub(super) const PATH_BYTES_PER_PATH: u64 = 256;
 
-/// The bytes the header of a tree may state, for each path the inode limit admits: the most
-/// one entry with a name of [`MAX_NAME_BYTES`] takes, which is a mode of six digits, a space,
-/// the name, a zero byte and an id of twenty bytes.
+/// The bytes a tree may state for each of its entries, and its header for each path the inode
+/// limit admits: the most one entry with a name of [`MAX_NAME_BYTES`] takes, which is a mode
+/// of six digits, a space, the name, a zero byte and an id of twenty bytes.
 pub(super) const TREE_BYTES_PER_PATH: u64 = 283;
 
 /// Why a store was not written.
 pub(super) enum Unwritten {
     /// An object of the baseline is absent from the source, or is not what its id names.
     Object,
-    /// The store, or an object of the baseline, is over the byte bound; or the baseline names
-    /// more paths than the inode limit, or its paths together or one of its trees take more
-    /// bytes than that limit admits.
+    /// The store, an object of the baseline, or its files together are over the byte bound;
+    /// or the baseline names more paths than the inode limit, or its paths together or one of
+    /// its trees take more bytes than that limit or the tree's own entries admit.
     Limit,
-    /// The baseline names a path no checkout can make: its directories nest deeper than
-    /// [`MAX_BASELINE_DEPTH`], a name is longer than [`MAX_NAME_BYTES`] or a path longer than
-    /// [`MAX_PATH_BYTES`].
+    /// The baseline names a path no checkout can make as one entry: its directories nest
+    /// deeper than [`MAX_BASELINE_DEPTH`], a name is longer than [`MAX_NAME_BYTES`] or holds a
+    /// `/`, or a path is longer than [`MAX_PATH_BYTES`].
     Path,
     /// The root name already has a store.
     Exists,
@@ -334,6 +335,9 @@ struct Shape {
     path_bytes: u64,
     /// The bytes of the longest of them.
     longest: u64,
+    /// The bytes its files and links state together: each object once for each name the tree
+    /// or a directory beneath it holds it by.
+    bytes: u64,
 }
 
 impl Shape {
@@ -341,6 +345,7 @@ impl Shape {
     /// that name, a separator and the path.
     fn hold(&mut self, name: u64, held: Shape) {
         self.beneath = self.beneath.max(held.beneath + 1);
+        self.bytes = self.bytes.saturating_add(held.bytes);
         self.paths = self.paths.saturating_add(held.paths);
         self.path_bytes = self
             .path_bytes
@@ -351,15 +356,17 @@ impl Shape {
         }
     }
 
-    /// Whether the paths of the tree are within the bounds of `limit`: none longer than
-    /// [`MAX_PATH_BYTES`], no more than the inode limit, and together no more than
-    /// [`PATH_BYTES_PER_PATH`] for each path that limit admits.
+    /// Whether the tree is within the bounds of `limit`: no path longer than
+    /// [`MAX_PATH_BYTES`], no more paths than the inode limit, the paths together no more than
+    /// [`PATH_BYTES_PER_PATH`] for each path that limit admits, and the files together no more
+    /// than the byte limit.
     fn within(&self, limit: StorageLimit) -> Result<(), Unwritten> {
         if self.longest > MAX_PATH_BYTES {
             return Err(Unwritten::Path);
         }
         if self.paths > limit.max_inodes
             || self.path_bytes > PATH_BYTES_PER_PATH.saturating_mul(limit.max_inodes)
+            || self.bytes > limit.max_bytes
         {
             return Err(Unwritten::Limit);
         }
@@ -367,19 +374,20 @@ impl Shape {
     }
 }
 
-/// Reads the header of the object `id` and nothing more of it: the object is of `kind`, and
-/// states no more than `limit.max_bytes`; a tree also no more than [`TREE_BYTES_PER_PATH`] for
-/// each path the inode limit admits.
+/// Reads the header of the object `id` and nothing more of it, and answers the bytes it
+/// states: the object is of `kind`, and states no more than `limit.max_bytes`; a tree also no
+/// more than [`TREE_BYTES_PER_PATH`] for each path the inode limit admits.
 fn stated_within(
     objects: &git2::Odb<'_>,
     id: Oid,
     kind: ObjectType,
     limit: StorageLimit,
-) -> Result<(), Unwritten> {
+) -> Result<u64, Unwritten> {
     let (size, found) = objects.read_header(id).map_err(|_| Unwritten::Object)?;
     if found != kind {
         return Err(Unwritten::Object);
     }
+    let size = u64::try_from(size).unwrap_or(u64::MAX);
     let bound = if kind == ObjectType::Tree {
         limit
             .max_bytes
@@ -387,10 +395,10 @@ fn stated_within(
     } else {
         limit.max_bytes
     };
-    if u64::try_from(size).unwrap_or(u64::MAX) > bound {
+    if size > bound {
         return Err(Unwritten::Limit);
     }
-    Ok(())
+    Ok(size)
 }
 
 /// What a check that passed read.
@@ -404,6 +412,141 @@ pub(super) struct Checked {
     pub(super) path_bytes: u64,
     /// The bytes of the longest of them.
     pub(super) longest: u64,
+    /// The bytes the files and links of the baseline state together, each once for each place
+    /// the baseline names it.
+    pub(super) bytes: u64,
+}
+
+/// What a check had read and kept when it ended, whether it passed or refused.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Kept {
+    /// The trees it read.
+    pub(super) trees: usize,
+    /// The entries those trees hold together, each tree once.
+    pub(super) entries: u64,
+    /// The directories it kept the id of and had not entered.
+    pub(super) waiting: usize,
+}
+
+/// The check of one baseline, while it runs.
+struct Check<'a> {
+    repository: &'a git2::Repository,
+    objects: git2::Odb<'a>,
+    limit: StorageLimit,
+    /// The bytes every file and link object the check has read the header of states.
+    files: HashMap<Oid, u64>,
+    /// Every tree the check has left, with what it holds.
+    left: HashMap<Oid, Shape>,
+    /// The directories the check is in, the root first.
+    inside: Vec<Directory>,
+    trees: usize,
+    entries: u64,
+}
+
+impl Check<'_> {
+    /// Reads the tree `id`, which a directory holds by a name of `name` bytes, and answers it
+    /// as a directory the check is in, with its own entries counted and its directories yet
+    /// to enter.
+    ///
+    /// The tree's header is read first ([`stated_within`]). Once the tree is read, its entries
+    /// are added to those of the trees read before, and the check ends when they are more than
+    /// the inode limit: before anything of this tree is kept and before another tree is read.
+    /// So the ids the check keeps of directories it has not entered are never more than the
+    /// inode limit.
+    fn enter(&mut self, id: Oid, name: u64) -> Result<Directory, Unwritten> {
+        let stated = stated_within(&self.objects, id, ObjectType::Tree, self.limit)?;
+        let tree = self
+            .repository
+            .find_tree(id)
+            .map_err(|_| Unwritten::Object)?;
+        let entries = u64::try_from(tree.len()).unwrap_or(u64::MAX);
+        self.trees += 1;
+        self.entries = self.entries.saturating_add(entries);
+        if self.entries > self.limit.max_inodes {
+            return Err(Unwritten::Limit);
+        }
+        let mut pending = Vec::new();
+        let mut shape = Shape {
+            beneath: 0,
+            paths: entries,
+            path_bytes: 0,
+            longest: 0,
+            bytes: 0,
+        };
+        for entry in &tree {
+            let name = entry.name_bytes();
+            if name.len() > MAX_NAME_BYTES || name.contains(&b'/') {
+                return Err(Unwritten::Path);
+            }
+            let bytes = u64::try_from(name.len()).unwrap_or(u64::MAX);
+            shape.path_bytes = shape.path_bytes.saturating_add(bytes);
+            shape.longest = shape.longest.max(bytes);
+            match entry.kind() {
+                Some(ObjectType::Tree) => pending.push((entry.id(), bytes)),
+                Some(ObjectType::Blob) => {
+                    let file = match self.files.entry(entry.id()) {
+                        Entry::Occupied(known) => *known.get(),
+                        Entry::Vacant(unknown) => *unknown.insert(stated_within(
+                            &self.objects,
+                            entry.id(),
+                            ObjectType::Blob,
+                            self.limit,
+                        )?),
+                    };
+                    shape.bytes = shape.bytes.saturating_add(file);
+                }
+                _ => {}
+            }
+        }
+        // No name is longer than the bound here, so an entry takes at most this many bytes.
+        if stated > TREE_BYTES_PER_PATH.saturating_mul(entries) {
+            return Err(Unwritten::Limit);
+        }
+        Ok(Directory {
+            id,
+            name,
+            pending,
+            shape,
+        })
+    }
+
+    /// Enters every tree the tree `root` reaches, each once, and answers what `root` holds.
+    fn walk(&mut self, root: Oid) -> Result<Shape, Unwritten> {
+        let entered = self.enter(root, 0)?;
+        self.inside.push(entered);
+        loop {
+            // The path of a directory of the innermost one has this many components.
+            let depth = self.inside.len();
+            let Some(innermost) = self.inside.last_mut() else {
+                break;
+            };
+            let Some((next, name)) = innermost.pending.pop() else {
+                let (id, shape, name) = (innermost.id, innermost.shape, innermost.name);
+                // What is over a bound relative to its tree is over it wherever the tree is.
+                shape.within(self.limit)?;
+                self.left.insert(id, shape);
+                self.inside.pop();
+                if let Some(parent) = self.inside.last_mut() {
+                    parent.shape.hold(name, shape);
+                }
+                continue;
+            };
+            if let Some(&shape) = self.left.get(&next) {
+                if depth + shape.beneath > MAX_BASELINE_DEPTH {
+                    return Err(Unwritten::Path);
+                }
+                innermost.shape.hold(name, shape);
+            } else {
+                if depth > MAX_BASELINE_DEPTH {
+                    return Err(Unwritten::Path);
+                }
+                let entered = self.enter(next, name)?;
+                self.inside.push(entered);
+            }
+        }
+        // The root's tree was left last.
+        self.left.get(&root).copied().ok_or(Unwritten::Object)
+    }
 }
 
 /// Checks the baseline of `commit` before anything walks it, and before any of its objects is
@@ -412,109 +555,76 @@ pub(super) struct Checked {
 /// - **Object sizes.** The header of every object is read before the object is: the commit,
 ///   every tree it reaches and every file and link object those trees name. None states more
 ///   than `limit.max_bytes`, and no tree more than [`TREE_BYTES_PER_PATH`] for each path the
-///   inode limit admits. A tree entry that records another repository's commit names no
+///   inode limit admits. A tree that is read states no more than [`TREE_BYTES_PER_PATH`] for
+///   each entry it holds. A tree entry that records another repository's commit names no
 ///   object of the baseline.
 /// - **Nesting.** No directory lies deeper than [`MAX_BASELINE_DEPTH`].
-/// - **Names and path lengths.** No name is longer than [`MAX_NAME_BYTES`] and no path longer
-///   than [`MAX_PATH_BYTES`], and the paths together take at most [`PATH_BYTES_PER_PATH`] for
-///   each path the inode limit admits.
+/// - **Names and path lengths.** No name is longer than [`MAX_NAME_BYTES`], none holds a `/`,
+///   and no path is longer than [`MAX_PATH_BYTES`]; the paths together take at most
+///   [`PATH_BYTES_PER_PATH`] for each path the inode limit admits.
 /// - **Paths.** The baseline names at most `limit.max_inodes` paths. Every entry of every tree
 ///   counts once for each place the baseline names it, a directory that holds nothing
-///   included.
+///   included. The trees the check has read never hold more entries together, each tree
+///   once, than the inode limit: it ends before it reads another.
+/// - **Bytes.** The files and links of the baseline state at most `limit.max_bytes` together,
+///   each once for each place the baseline names it.
 ///
 /// The check reads each tree once, however often the baseline names it: what it found in a
 /// tree it has left it keeps by the tree's id, relative to the tree. It keeps the directories
-/// it is in as a list, never longer than the nesting bound. So its work follows the objects of
-/// the baseline, not the paths those objects name.
+/// it is in as a list, never longer than the nesting bound, and of the directories it has yet
+/// to enter their ids, never more than the inode limit. So its work and what it keeps follow
+/// the objects of the baseline up to that limit, not the paths those objects name.
 pub(super) fn check_baseline(
     repository: &git2::Repository,
     commit: Oid,
     limit: StorageLimit,
 ) -> Result<Checked, Unwritten> {
-    let objects = repository.odb().map_err(|_| Unwritten::Object)?;
-    let within = |id: Oid, kind: ObjectType| stated_within(&objects, id, kind, limit);
-    within(commit, ObjectType::Commit)?;
-    let root = repository
-        .find_commit(commit)
-        .map_err(|_| Unwritten::Object)?
-        .tree_id();
-    let mut files = HashSet::new();
-    let mut trees = 0_usize;
-    let mut enter = |id: Oid, name: u64| {
-        within(id, ObjectType::Tree)?;
-        let tree = repository.find_tree(id).map_err(|_| Unwritten::Object)?;
-        trees += 1;
-        let mut pending = Vec::new();
-        let mut shape = Shape {
-            beneath: 0,
-            paths: u64::try_from(tree.len()).unwrap_or(u64::MAX),
-            path_bytes: 0,
-            longest: 0,
-        };
-        for entry in &tree {
-            let bytes = entry.name_bytes().len();
-            if bytes > MAX_NAME_BYTES {
-                return Err(Unwritten::Path);
-            }
-            let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-            shape.path_bytes = shape.path_bytes.saturating_add(bytes);
-            shape.longest = shape.longest.max(bytes);
-            match entry.kind() {
-                Some(ObjectType::Tree) => pending.push((entry.id(), bytes)),
-                Some(ObjectType::Blob) if files.insert(entry.id()) => {
-                    within(entry.id(), ObjectType::Blob)?;
-                }
-                _ => {}
-            }
-        }
-        Ok(Directory {
-            id,
-            name,
-            pending,
-            shape,
-        })
+    check_baseline_keeping(repository, commit, limit).0
+}
+
+/// [`check_baseline`], and beside its answer what the check had read and kept when it ended.
+pub(super) fn check_baseline_keeping(
+    repository: &git2::Repository,
+    commit: Oid,
+    limit: StorageLimit,
+) -> (Result<Checked, Unwritten>, Kept) {
+    let Ok(objects) = repository.odb() else {
+        return (Err(Unwritten::Object), Kept::default());
     };
-    // Every tree the check has left, with what it holds.
-    let mut left: HashMap<Oid, Shape> = HashMap::new();
-    let mut inside = vec![enter(root, 0)?];
-    loop {
-        // The path of a directory of the innermost one has this many components.
-        let depth = inside.len();
-        let Some(innermost) = inside.last_mut() else {
-            break;
-        };
-        let Some((next, name)) = innermost.pending.pop() else {
-            let (shape, name) = (innermost.shape, innermost.name);
-            // A path that is too long relative to its tree is too long wherever the tree is.
-            shape.within(limit)?;
-            left.insert(innermost.id, shape);
-            inside.pop();
-            if let Some(parent) = inside.last_mut() {
-                parent.shape.hold(name, shape);
-            }
-            continue;
-        };
-        if let Some(&shape) = left.get(&next) {
-            if depth + shape.beneath > MAX_BASELINE_DEPTH {
-                return Err(Unwritten::Path);
-            }
-            innermost.shape.hold(name, shape);
-        } else {
-            if depth > MAX_BASELINE_DEPTH {
-                return Err(Unwritten::Path);
-            }
-            let entered = enter(next, name)?;
-            inside.push(entered);
-        }
-    }
-    // The root's tree was left last.
-    let shape = left.get(&root).ok_or(Unwritten::Object)?;
-    Ok(Checked {
-        trees,
-        paths: shape.paths,
-        path_bytes: shape.path_bytes,
-        longest: shape.longest,
-    })
+    let mut check = Check {
+        repository,
+        objects,
+        limit,
+        files: HashMap::new(),
+        left: HashMap::new(),
+        inside: Vec::new(),
+        trees: 0,
+        entries: 0,
+    };
+    let checked = stated_within(&check.objects, commit, ObjectType::Commit, limit)
+        .and_then(|_| {
+            repository
+                .find_commit(commit)
+                .map_err(|_| Unwritten::Object)
+        })
+        .and_then(|commit| check.walk(commit.tree_id()))
+        .map(|shape| Checked {
+            trees: check.trees,
+            paths: shape.paths,
+            path_bytes: shape.path_bytes,
+            longest: shape.longest,
+            bytes: shape.bytes,
+        });
+    let kept = Kept {
+        trees: check.trees,
+        entries: check.entries,
+        waiting: check
+            .inside
+            .iter()
+            .map(|directory| directory.pending.len())
+            .sum(),
+    };
+    (checked, kept)
 }
 
 /// Writes the pack of `commit` and its index into the directory `pack`. The pack builder reads

@@ -39,6 +39,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   states more than 283 bytes for each such path, is refused `workspace.git-storage-limit`.
   Each is refused before anything is checked out, and the workspace is proved absent. The
   build of a store refuses such a baseline the same way.
+- A Git create whose baseline holds a name with a `/` in it is refused
+  `workspace.git-path-unrepresentable`. One that holds a tree which states more than 283
+  bytes for each entry it holds, or whose files and links together state more bytes than the
+  create's byte limit, each counted once for each place the baseline names it, is refused
+  `workspace.git-storage-limit`. Each is refused before anything is checked out, and the
+  workspace is proved absent. The build of a store refuses such a baseline the same way.
 - A Git workspace's baseline objects are on disk a second time, compressed, outside its
   reported usage: a Git workspace under a project quota holds at most twice its byte limit.
 - Once a workspace's store exists, the changes observation answers whatever the workspace's

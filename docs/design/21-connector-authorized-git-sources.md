@@ -130,19 +130,24 @@ the baseline once, however often the baseline names it, and holds these bounds:
 
 - **Nesting.** A baseline whose directories nest deeper than 1,024 is refused
   `workspace.git-path-unrepresentable`.
-- **Names and path lengths.** A name longer than 255 bytes, or a path longer than 4,096 bytes,
-  is refused `workspace.git-path-unrepresentable`: no checkout can make it. A baseline whose
-  paths together are longer than 256 bytes for each path the inode limit admits is refused
-  `workspace.git-storage-limit`.
+- **Names and path lengths.** A name longer than 255 bytes, a name that holds a `/`, or a path
+  longer than 4,096 bytes is refused `workspace.git-path-unrepresentable`: no checkout can make
+  it as one entry. A baseline whose paths together are longer than 256 bytes for each path the
+  inode limit admits is refused `workspace.git-storage-limit`.
 - **Object sizes.** The commit, a tree or a file object whose header states more than the byte
   limit is not read and is refused `workspace.git-storage-limit`. A tree is also not read when
-  its header states more than 283 bytes for each path the inode limit admits, the most one
-  entry with a 255-byte name takes.
+  its header states more than 283 bytes for each path the inode limit admits, and is refused
+  when it states more than 283 bytes for each entry it holds, the most one entry with a
+  255-byte name takes.
 - **Paths.** A baseline that names more paths than the inode limit is refused
   `workspace.git-storage-limit`. Every entry of every tree counts once for each place the
-  baseline names it, a directory that holds nothing included. The inode limit is the one the
-  create applies (the requested storage limit, else 200,000); for a build it is the limit of
-  the workspace's project quota where it has one, else 200,000.
+  baseline names it, a directory that holds nothing included. The check also refuses as soon as
+  the distinct trees it has read hold more entries than the inode limit, so it reads and keeps
+  no more of a baseline than that. The inode limit is the one the create applies (the
+  requested storage limit, else 200,000); for a build it is the limit of the workspace's
+  project quota where it has one, else 200,000.
+- **Bytes.** A baseline whose files together state more bytes than the byte limit is refused
+  `workspace.git-storage-limit`. A file counts once for each place the baseline names it.
 
 A create runs the check on the fetched commit before it checks anything out, and a build runs it
 on the copy before it writes the store. Every store therefore holds a baseline within these

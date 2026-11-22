@@ -291,22 +291,29 @@ fn finish_materialization(
         _ => return Err(missing()),
     }
     let commit = repository.find_commit(expected).map_err(|_| missing())?;
-    let checked =
-        store::check_baseline(repository, expected, limit).map_err(
-            |unwritten| match unwritten {
-                store::Unwritten::Limit => storage_limit(),
-                store::Unwritten::Path => failed("workspace.git-path-unrepresentable"),
-                store::Unwritten::Object | store::Unwritten::Exists | store::Unwritten::Write => {
-                    failed("workspace.git-checkout-failed")
-                }
-            },
-        )?;
+    let (checked, kept) = store::check_baseline_keeping(repository, expected, limit);
+    tracing::debug!(
+        stage = "git_baseline_check",
+        admitted = checked.is_ok(),
+        trees = kept.trees,
+        entries = kept.entries,
+        waiting = kept.waiting,
+        "Git baseline check ended"
+    );
+    let checked = checked.map_err(|unwritten| match unwritten {
+        store::Unwritten::Limit => storage_limit(),
+        store::Unwritten::Path => failed("workspace.git-path-unrepresentable"),
+        store::Unwritten::Object | store::Unwritten::Exists | store::Unwritten::Write => {
+            failed("workspace.git-checkout-failed")
+        }
+    })?;
     tracing::debug!(
         stage = "git_baseline_check",
         trees = checked.trees,
         paths = checked.paths,
         path_bytes = checked.path_bytes,
         longest_path = checked.longest,
+        bytes = checked.bytes,
         "Git materialization stage completed"
     );
     let mut checkout = git2::build::CheckoutBuilder::new();

@@ -585,15 +585,18 @@ async fn real_quota_byte_and_inode_limits_enforce_later_workspace_mutations() {
 }
 
 /// The files of the checkout of [`repository_with_large_checkout`], each of
-/// [`LARGE_CHECKOUT_FILE_BYTES`] bytes: 2 MiB together.
+/// [`LARGE_CHECKOUT_FILE_BYTES`] bytes: 1 MiB together.
 const LARGE_CHECKOUT_FILES: [&str; 4] =
     ["large-0.txt", "large-1.txt", "large-2.txt", "large-3.txt"];
-const LARGE_CHECKOUT_FILE_BYTES: u64 = 512 * 1024;
+const LARGE_CHECKOUT_FILE_BYTES: u64 = 256 * 1024;
 
-/// A repository whose newest commit checks out to 2 MiB in four files of 512 KiB. No object of
-/// it and no count of its paths is over a limit of 1 MiB and the inodes of [`LIMIT`]: only the
-/// bytes of the files together are, so a create under a 1 MiB quota meets the quota in its
-/// checkout.
+/// A repository whose newest commit checks out to exactly 1 MiB in four files of 256 KiB, and
+/// to nothing else. Under a limit of 1 MiB and the inodes of [`LIMIT`] the baseline is within
+/// every bound of the check before the checkout: no object, no count of its paths and not the
+/// bytes its files state together, which are the limit and not more. The quota of such a
+/// create is that same 1 MiB, and it also holds the workspace's directory and its `.git`,
+/// which the fetch has written by then. The files alone take every block of the quota, so the
+/// checkout meets the quota before it has written the last of them.
 fn repository_with_large_checkout() -> (TempDir, git2::Oid) {
     let (source, parent) = repository(0);
     let repository = git2::Repository::open(source.path()).expect("large checkout source");

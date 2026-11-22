@@ -6,14 +6,15 @@ use std::collections::BTreeSet;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 
-use git2::{Oid, Repository};
+use git2::{ObjectType, Oid, Repository};
 use tempfile::{TempDir, tempdir};
 
-use super::super::worktree;
+use super::super::{store, worktree};
 use super::store_cases::{leftovers, store_objects};
 use super::store_failure_cases::{both, codes, commit_id_file_alone};
 use super::watch::{Kind, Watch};
-use super::{baseline_root, observe, remove_store, source_repository, store_of};
+use super::{baseline_root, observe, remove_store, source_repository, store_of, target};
+use crate::git_baselines::{BuildTurns, DEFAULT_BYTE_LIMIT};
 
 /// Every entry beneath `directory`, by its path relative to it; a directory ends in `/`.
 fn entries(directory: &Path) -> BTreeSet<String> {
@@ -154,31 +155,45 @@ fn a_build_reads_the_pack_files_of_a_workspace_and_no_index_of_them() {
 }
 
 const CHILD: &str = "SUBSTRATE_TEST_BUILD_IN_A_PROCESS_OF_ITS_OWN";
-/// The processor time the builds of this file's small stores may take together, in seconds.
+/// The processor time the builds of [`a_build_refuses_an_object_its_copy_stores_against_itself`]
+/// may take together, in seconds.
 const PROCESSOR_SECONDS: u64 = 3;
 
-/// Writes one pack, and an index for it, into the object store at `objects`. The pack holds
-/// one object, stored against the object `base`, and its trailer is the hash of its bytes.
-/// The index names that object `id`.
-fn plant_pack_of_an_object_stored_against(objects: &Path, id: Oid, base: Oid) {
-    let delta = [1_u8, 1, 1, b'x'];
+/// The bytes of `data` as one zlib stream of one stored block.
+fn stored(data: &[u8]) -> Vec<u8> {
+    let length = u16::try_from(data.len()).expect("at most one stored block");
     let (mut low, mut high) = (1_u32, 0_u32);
-    for byte in delta {
-        low = (low + u32::from(byte)) % 65_521;
+    for byte in data {
+        low = (low + u32::from(*byte)) % 65_521;
         high = (high + low) % 65_521;
     }
+    let mut stream = vec![0x78, 0x01, 0x01];
+    stream.extend(length.to_le_bytes());
+    stream.extend((!length).to_le_bytes());
+    stream.extend(data);
+    stream.extend(((high << 16) | low).to_be_bytes());
+    stream
+}
+
+/// Ends `pack` with the hash of its bytes and answers that hash.
+fn trailer_of(pack: &mut Vec<u8>) -> gix::hash::ObjectId {
+    let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+    hasher.update(pack);
+    let trailer = hasher.try_finalize().expect("hash of the pack");
+    pack.extend(trailer.as_bytes());
+    trailer
+}
+
+/// Writes one pack into the object store at `objects`, and an index of it that names `id`.
+/// The pack holds one object, stored against the object `base`.
+fn plant_pack_of_an_object_stored_against(objects: &Path, id: Oid, base: Oid) {
     let mut pack = b"PACK".to_vec();
     pack.extend(2_u32.to_be_bytes());
     pack.extend(1_u32.to_be_bytes());
     pack.push(0x74);
     pack.extend(base.as_bytes());
-    pack.extend([0x78, 0x01, 0x01, 0x04, 0x00, 0xfb, 0xff]);
-    pack.extend(delta);
-    pack.extend(((high << 16) | low).to_be_bytes());
-    let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
-    hasher.update(&pack);
-    let trailer = hasher.try_finalize().expect("hash of the pack");
-    pack.extend(trailer.as_bytes());
+    pack.extend(stored(&[1, 1, 1, b'x']));
+    let trailer = trailer_of(&mut pack);
     let mut index = vec![0xff, b't', b'O', b'c'];
     index.extend(2_u32.to_be_bytes());
     for first in 0..=255_u8 {
@@ -196,13 +211,11 @@ fn plant_pack_of_an_object_stored_against(objects: &Path, id: Oid, base: Oid) {
     std::fs::write(directory.join(format!("{name}.idx")), index).expect("index");
 }
 
-/// A build ends, and a pack whose objects do not all resolve ends it
-/// `workspace.git-baseline-missing` for both observations, with no store and no copy left. The
-/// commit of each workspace here is in no loose object; its object store holds a pack of one
-/// object stored against another, and an index that names that object by the commit's id. In
-/// the first workspace the other object is the commit's id itself, in the second an id no
-/// object has. The builds run in a process of their own with a bound on its processor time,
-/// which no load on the machine changes.
+/// A pack whose objects do not all resolve ends the build `workspace.git-baseline-missing`
+/// for both observations, with no store and no copy left. Each workspace here holds its commit
+/// in no loose object, and a pack of one object that is stored against another: in the first
+/// against the commit's own id, in the second against an id no object has. The builds run in a
+/// process of their own, whose processor time is bounded.
 #[test]
 fn a_build_refuses_an_object_its_copy_stores_against_itself() {
     if std::env::var_os(CHILD).is_none() {
@@ -250,4 +263,150 @@ fn a_build_refuses_an_object_its_copy_stores_against_itself() {
         assert!(!store_of(baselines.path()).exists(), "a store is kept");
         assert_eq!(leftovers(baselines.path()), Vec::<String>::new());
     }
+}
+
+/// `value` in groups of seven bits, the lowest first, as a delta states a size.
+fn size_of_delta(mut value: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    loop {
+        let group = u8::try_from(value & 0x7f).expect("seven bits");
+        value >>= 7;
+        if value == 0 {
+            bytes.push(group);
+            return bytes;
+        }
+        bytes.push(group | 0x80);
+    }
+}
+
+/// The header of a pack entry of the type `kind` that states `size` bytes.
+fn entry_header(kind: u8, mut size: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut byte = (kind << 4) | u8::try_from(size & 0x0f).expect("four bits");
+    size >>= 4;
+    while size > 0 {
+        bytes.push(byte | 0x80);
+        byte = u8::try_from(size & 0x7f).expect("seven bits");
+        size >>= 7;
+    }
+    bytes.push(byte);
+    bytes
+}
+
+/// The bytes one object of [`plant_pack_that_holds_an_object`] resolves to.
+const RESOLVED_BYTES: usize = 128 * 65_535;
+
+/// Writes one pack file of 66 KiB, and no index, into the object store at `objects`. It holds
+/// a file object of 65,535 bytes and, `times` times, the same object stored against it, of
+/// [`RESOLVED_BYTES`] bytes, about 8 MiB.
+fn plant_pack_that_holds_an_object(objects: &Path, times: u32) {
+    let base = vec![b'a'; 65_535];
+    let id = Oid::hash_object(ObjectType::Blob, &base).expect("id of the base");
+    let mut delta = size_of_delta(base.len());
+    delta.extend(size_of_delta(RESOLVED_BYTES));
+    for _ in 0..RESOLVED_BYTES / base.len() {
+        // Copy 65,535 bytes of the base from its start.
+        delta.extend([0xb0, 0xff, 0xff]);
+    }
+    let mut pack = b"PACK".to_vec();
+    pack.extend(2_u32.to_be_bytes());
+    pack.extend((1 + times).to_be_bytes());
+    pack.extend(entry_header(3, base.len()));
+    pack.extend(stored(&base));
+    for _ in 0..times {
+        pack.extend(entry_header(7, delta.len()));
+        pack.extend(id.as_bytes());
+        pack.extend(stored(&delta));
+    }
+    let trailer = trailer_of(&mut pack);
+    let directory = objects.join("pack");
+    std::fs::create_dir_all(&directory).expect("pack directory");
+    std::fs::write(directory.join(format!("pack-{trailer}.pack")), pack).expect("pack");
+}
+
+/// The memory this process holds, resident and swapped, in KiB.
+fn held_kib() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").expect("process status");
+    ["VmRSS:", "VmSwap:"]
+        .iter()
+        .map(|field| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(field))
+                .and_then(|rest| {
+                    rest.trim()
+                        .trim_end_matches("kB")
+                        .trim()
+                        .parse::<u64>()
+                        .ok()
+                })
+                .expect("a count of KiB")
+        })
+        .sum()
+}
+
+/// A build that is refused leaves nothing: no store, no copy, and none of the memory its
+/// indexer took. The workspace's object store here holds the pack of
+/// [`plant_pack_that_holds_an_object`] with its object twice, and each build is refused
+/// `workspace.git-baseline-missing`. After one pair of observations, four more pairs, eight
+/// builds, leave the process holding less than 48 MiB more than before them. The same pack
+/// with that object once is indexed, and the store is built beside it.
+#[test]
+#[ignore = "waits for the decision on the build of a store for a workspace that predates it"]
+fn a_refused_build_keeps_none_of_the_memory_its_indexer_took() {
+    let (sound, commit) = source_repository();
+    plant_pack_that_holds_an_object(&sound.path().join(".git/objects"), 1);
+    assert_eq!(
+        codes(both(sound.path(), commit_id_file_alone(commit).path())),
+        ["answered"; 2],
+        "the pack that holds the object once"
+    );
+
+    let (workspace, commit) = source_repository();
+    let baselines = commit_id_file_alone(commit);
+    plant_pack_that_holds_an_object(&workspace.path().join(".git/objects"), 2);
+    let observed = || codes(both(workspace.path(), baselines.path()));
+
+    assert_eq!(observed(), ["workspace.git-baseline-missing"; 2]);
+    let before = held_kib();
+    for _ in 0..4 {
+        assert_eq!(observed(), ["workspace.git-baseline-missing"; 2]);
+    }
+    let kept = held_kib().saturating_sub(before);
+
+    assert!(
+        kept < 48 * 1024,
+        "eight refused builds of a pack of 66 KiB left the process holding {kept} KiB more"
+    );
+}
+
+/// An entry of the workspace's object store counts toward the entry bound whether or not a
+/// build copies it: with eight files a build does not copy in the pack directory, a bound of
+/// one entry fewer than the object store holds ends the attempt
+/// `workspace.git-repository-failed`, and a bound of exactly as many builds the store.
+#[test]
+fn an_entry_a_build_does_not_copy_counts_toward_its_entry_bound() {
+    let (workspace, commit) = source_repository();
+    let objects = workspace.path().join(".git/objects");
+    let pack = objects.join("pack");
+    std::fs::create_dir_all(&pack).expect("pack directory");
+    for number in 0..8 {
+        std::fs::write(pack.join(format!("other-{number}.idx")), b"another file\n")
+            .expect("a file a build does not copy");
+    }
+    let held = entries(&objects).len();
+    let build = |max_entries: usize| {
+        let baselines = commit_id_file_alone(commit);
+        let turn = BuildTurns::default().taken_blocking();
+        target(
+            workspace.path(),
+            baselines.path(),
+            DEFAULT_BYTE_LIMIT,
+            |workspace| store::built(workspace, commit, max_entries, &turn),
+        )
+        .map_or_else(|error| error.code, |()| "built")
+    };
+
+    assert_eq!(build(held - 1), "workspace.git-repository-failed");
+    assert_eq!(build(held), "built");
 }
