@@ -227,11 +227,14 @@ bash scripts/gate.sh
 ```
 
 In order: `cargo xtask check-ess`, `cargo xtask check-docs`, `cargo fetch --locked` (every
-target's dependencies, which the offline `cargo tree --target all` cases need),
-`cargo test --workspace --release --locked`, `cargo fmt --all --check`,
+target's dependencies, which the offline `cargo tree --target all` cases need), the test step
+(`cargo nextest run --workspace --release --locked --no-run`, the same command with
+`--test-threads 12 --retries 0` in place of `--no-run`,
+`xtask slowest-tests` and `cargo test --workspace --release --locked --doc`; *The test step's
+budget* below), `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --release --locked -- -D warnings`, the host driver without
 its default features (`cargo clippy -p b10x-substrate-host --no-default-features --all-targets`,
-then `cargo test -p b10x-substrate-host --no-default-features` over `host_features`,
+then `cargo nextest run -p b10x-substrate-host --no-default-features` over `host_features`,
 `ess_confinement_local` and `consumer_surface`, both `--release --locked`, § *Releases*), then
 `cargo xtask check-links`, `cargo xtask check-adrs`, `cargo xtask check-secrets`, `cargo xtask check-advisories`,
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
@@ -246,6 +249,99 @@ seconds. Repetition counts, soak loops and load generators are local evidence re
 planning store, never a test, a CI step or a script the gate calls. A story whose acceptance needs
 "N runs under load" proves it on a workstation and records the run; the case it adds to the suite
 runs once.
+
+**The test step's budget: the run ends within 120 s on the hosted runner, and no test runs longer
+than 60 s** (`story:gate-test-step-ends-within-two-minutes`). The step is four commands:
+
+1. `cargo nextest run --workspace --release --locked --no-run` builds every test binary and every
+   binary a test starts, `substrate-daemon` among them. The compile is not in the budget.
+2. `cargo nextest run --workspace --release --locked --test-threads 12 --retries 0` runs every
+   test in its own process. This is the 120 s, and the runner holds it: at 120 s it kills what
+   still runs, and the run fails.
+3. `target/release/xtask slowest-tests --junit target/nextest/default/junit.xml` prints the ten
+   slowest tests of that run, whether it passed or failed. It is the release `xtask` step 1 built:
+   `cargo xtask` there would compile a second one.
+4. `cargo test --workspace --release --locked --doc` runs the doctests, which cargo-nextest does
+   not run. Nothing kills a doctest at 60 s and nothing ends this command at 120 s. Both doctests
+   are compile-only today; one that runs code needs a bound before it is added.
+
+`scripts/gate.sh` prints `gate-time: test build: <n> s`, `gate-time: test run: <n> s` and
+`gate-time: doctests: <n> s`, so the run's time is read apart from the compile.
+[`.config/nextest.toml`](.config/nextest.toml) holds both bounds, so they apply to every
+`cargo nextest run` here, on a workstation and in CI:
+
+- `slow-timeout` with a 30 s period, `terminate-after = 2` and `grace-period = "0s"`: a test is
+  reported slow at 30 s and killed with `SIGKILL` at 60 s, and a killed test fails the run. The
+  grace period is zero because cargo-nextest otherwise sends `SIGTERM` and waits 10 s, so a test
+  that ignores the signal would run 70 s.
+- `global-timeout = "120s"`: tests still running at 120 s are killed the same way and the run
+  fails. The clock starts when the first test starts, after cargo's freshness check and the
+  listing of the tests; `gate-time: test run` is the whole command and includes both, a few
+  seconds. The compile is another command and outside the bound. A run over 120 s is a defect to
+  fix (*An expensive product is made once*, below), never a bound to raise.
+- `test-threads = 12`, more than a hosted runner's four CPUs on purpose: the suite's time is
+  mostly waiting, so tests overlap where CPUs do not (measured on four CPUs, the four largest
+  binaries: cancelled at 120 s with 4 threads, 48 s with 12, 103 s of CPU for 530 s of test time).
+
+**The gate names the thread count and the retries on its command line, because a variable of the
+caller wins over the configuration file.** cargo-nextest reads `NEXTEST_TEST_THREADS` and
+`NEXTEST_RETRIES` before `.config/nextest.toml`. `scripts/gate.sh` therefore reads `test-threads`
+from that file, its one home, and passes it as `--test-threads`, with `--retries 0`, on both of
+its test runs: a caller's thread count does not decide the 120 s, and a caller's retries do not
+turn a failed test into a passed one. A `cargo nextest run` typed by hand has neither option: in
+a job of the workstation's build pool it runs with the pool's `NEXTEST_TEST_THREADS`, a default
+for CPU-bound tests, unless the command names its own.
+
+**A local run of the test phase asks the pool for the CPUs it uses:**
+
+```console
+SLOT_TOKENS=3 bash scripts/gate.sh tests
+```
+
+Three, because twelve threads of mostly waiting tests used about 2.3 CPUs (the 103 s of CPU over
+530 s of test time above). The time a job waits in the pool's queue is before the run and outside
+the 120 s. `gate.yml` installs cargo-nextest from its release archive, pinned by
+`NEXTEST_VERSION` and `NEXTEST_SHA256`; moving one moves both.
+
+What the budget asks of a test:
+
+- **An expensive product is made once per run, never per test.** Every test is its own process,
+  so a `OnceLock` is filled once per *test*, not once per binary. A product that costs more than a
+  fraction of a second has one of two forms: a setup step before the tests, or a cache on disk
+  under `target/`, keyed by the digest of its sources, built under a file lock and not writable by
+  a confined run a test starts. Both products of this kind today are made by a setup step:
+  - the daemon a test starts, by step 1. `test-support/daemon_binary.rs` finds it:
+    `SUBSTRATE_TEST_DAEMON`, else the one beside the test executable, else the test fails and
+    names the step. An empty variable names none. A test never runs `cargo build`: a
+    package-scoped build resolves other features than step 1, recompiles what step 1 built and
+    replaces the daemon other tests are starting. A package-scoped run of the CLI's tests
+    (`cargo test -p b10x-substrate-cli`) therefore starts whatever daemon an earlier build left
+    beside it, which may be older than the source: build the workspace's tests first;
+  - the image the oci cases run, by `gate.yml`'s pull step. A case asks the runtime's store first
+    and pulls only an image the store does not hold, so the test step makes no registry request.
+- **A test binary with its own `main` (`harness = false`) answers what cargo-nextest asks of
+  libtest**: `--list --format terse`, and `--exact <name>` to run one case.
+  `crates/b10x-substrate-conformance/tests/local_endpoint.rs` is the one such binary.
+- **Tests that cannot run beside each other share a test group** in `.config/nextest.toml`, never
+  a global thread limit. A `static` lock in a test file orders only that one process. The groups:
+
+  | group | limit | tests | why |
+  |---|---|---|---|
+  | `oci-runtime` | 1 | `ess_confinement_oci`, `adversary_oci` | opening the `oci` adapter removes every container whose embedder is gone; `open_removes_a_container_whose_embedder_is_gone` makes such a container and requires its own open to count the removal, so no other open may run beside it |
+  | `systemd-user-manager` | 1 | `ess_confinement_systemd`, `security_review_systemd`, `adversary_systemd` | opening the `systemd` adapter kills and stops every leftover scope of a dead embedder under the one user manager; `a_dead_embedders_run_is_ended_and_its_scope_reclaimed_by_the_next_open` requires its own open to count the reclaim |
+
+- **A test build carries no debug info.** The release profile, which the gate builds in, has
+  none; `[profile.dev] debug = false` in `.cargo/config.toml` holds the dev profile to the same,
+  which `scripts/delegated-lane.sh` and `cargo xtask` build in. It is set there and not in
+  `Cargo.toml` because a cargo configuration file wins over the manifest, and a user's own may
+  name another value; the repository's is nearer and wins over that one. Read the effect from a
+  built binary (`readelf -S`: no `.debug_*` section), never from the manifest. A backtrace then
+  names functions without lines; a panic still names its file and line.
+- **Before a test is added it is timed.** A test over 5 s is named with its time in the change
+  that adds it.
+
+`scripts/delegated-lane.sh`, `scripts/pod-lane.sh` and the release lanes select their cases by
+name with `cargo test`; they are lanes, not this step, and are not under this budget.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
 
 **The gate's own checks are `cargo xtask` verbs**, in the `xtask/` workspace member — anything that
@@ -259,6 +355,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-docs` | a public page missing from `PAGES` or from `website/sidebars.ts`, or out of their order or grouping; a release-notes page that does not end with the newest released `CHANGELOG.md` section; a start-page link that does not resolve; a derived site table that disagrees with `spec/`; a reading load above `website/ux/baseline.json`; or a `website/ux/findings/` record that breaks its rules (§ *Public website*) | yes |
 | `check-toolchain [--root <dir>]` | a Rust version the three pinning files disagree on | yes |
 | `check-links` | a machine-local Markdown link, or a repository-relative target that is not there | yes |
+| `slowest-tests --junit <file> [--count <n>]` | prints the slowest tests of a cargo-nextest run from the JUnit report it wrote, ten unless `--count` says otherwise, each with its seconds, its test binary and `FAILED` when the run failed or killed it; refuses a missing report and one that is not what cargo-nextest writes | yes, as `target/release/xtask`, after the test run (*The test step's budget*) |
 | `check-mcp-boundary` | a publishable MCP crate, a Substrate implementation dependency, an unpinned/featured MCP stack, or a built-in unbounded/remote transport | yes |
 | `mcp-codex-smoke --server <path>` | manually asks an authenticated ephemeral Codex run to exercise the shipped stdio adapter | no |
 | `check-adrs` | an ADR whose identity, frontmatter, index row or supersession link does not agree | yes |
@@ -279,7 +376,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
-`cargo test --workspace --release --locked`, the gate's first step.
+the gate's test step (`cargo nextest run --workspace --release --locked`).
 
 **`cargo xtask render-bundle <version>` is how a successor bundle is cut.** The original renderer
 is frozen for `0.5.0`–`0.8.0`; `0.9.0` and later select the versioned multi-major renderer.
@@ -313,7 +410,7 @@ insertion order, which a sorted-key bundle preserves nowhere.
 reason.** `crates/substrate-daemon/tests/runtime_vectors.rs` spawns the *shipped* binary
 (`env!("CARGO_BIN_EXE_substrate-daemon")`) and drives it over its Unix socket with a
 hand-written HTTP/1.1 and WebSocket client, so it links no implementation and asserts only on
-the wire; `cargo test --workspace --release --locked` runs it. Its portable lane asserts three named
+the wire; the gate's test step runs it. Its portable lane asserts three named
 refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
 `exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501), the five lexical
 `exec.read-only-file*` refusals (422), `exec.read-only-files-unserved` (501),
@@ -451,7 +548,7 @@ on `ext4`, `overlay` or `tmpfs`; the preload cases and the stand-in helpers also
 compiler named `cc` that links statically. Without the
 delegated root the host cases print `ABSENT`; the helper's own cases start cargo's dynamically
 linked test build with no driver around it, need no delegated root and
-run under `cargo test --workspace` wherever the kernel has Landlock, absent otherwise. On a start
+run under the gate's test step wherever the kernel has Landlock, absent otherwise. On a start
 with a list the run's variables are operands of the helper (`--env <name> <value>`) and bubblewrap
 gets no `--setenv` (D28); a start without a list keeps its argv, which
 `a_start_without_a_list_builds_the_argv_it_built_before` in `crates/substrate-host/src/process.rs`

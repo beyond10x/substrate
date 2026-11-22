@@ -26,6 +26,10 @@ use tokio::task::JoinHandle;
 
 use super::{HANDSHAKE_KEY, Harness, SUBJECT, input, text};
 
+/// Descriptors a case is allowed beside its streams: the listener, the runtime's own, the store's
+/// files and the standard three.
+const HARNESS_DESCRIPTORS: u64 = 128;
+
 struct Served {
     address: SocketAddr,
     task: JoinHandle<()>,
@@ -58,6 +62,30 @@ async fn serve(app: &Arc<App>) -> Served {
         }
     });
     Served { address, task }
+}
+
+/// Raises this process's soft descriptor limit to `needed` when it is lower, and fails the case
+/// with the two limits when the hard limit does not allow it.
+///
+/// The router is served in this process, so a stream a case holds is two sockets here: the
+/// client's and the served connection's. A case that holds the subject's 512 streams therefore
+/// holds more than a soft limit of 1024, which a job of the workstation's build pool starts with:
+/// `accept` then fails, the loop that serves ends, and the client reads a reset connection.
+fn hold_descriptors(needed: u64) {
+    use nix::sys::resource::{Resource, getrlimit, setrlimit};
+
+    let (soft, hard) =
+        getrlimit(Resource::RLIMIT_NOFILE).expect("the descriptor limit is readable");
+    if soft >= needed {
+        return;
+    }
+    assert!(
+        hard >= needed,
+        "this case holds {needed} descriptors and the hard RLIMIT_NOFILE of this process is \
+         {hard} (soft {soft}): raise the hard limit to run it"
+    );
+    setrlimit(Resource::RLIMIT_NOFILE, needed, hard)
+        .expect("the soft descriptor limit is raised to what the case holds");
 }
 
 enum Opened {
@@ -215,6 +243,10 @@ async fn security_pass1_a_cursor_of_another_record_does_not_skip_this_records_li
 /// ended record, is beyond the stated bound and must be refused before the upgrade.
 #[tokio::test(flavor = "multi_thread")]
 async fn security_pass1_a_subject_holds_at_most_512_process_event_streams() {
+    // Both ends of the 512 streams and of the one refused, and what the harness itself holds.
+    let streams = u64::try_from(substrate_wire::MAX_PROCESS_EVENT_STREAMS_PER_SUBJECT)
+        .expect("the bound is a count");
+    hold_descriptors(2 * (streams + 1) + HARNESS_DESCRIPTORS);
     let (harness, _fake) = Harness::faked();
     let cwd = harness.workdir("sp1-subject-bound");
     let ended = harness

@@ -43,6 +43,7 @@ mod report;
 mod secrets;
 mod site_drift;
 mod site_ux;
+mod slowest_tests;
 mod toolchain;
 
 use std::path::PathBuf;
@@ -105,6 +106,9 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
+    /// Print the slowest tests of a cargo-nextest run from the `JUnit` report it wrote.
+    #[command(name = "slowest-tests")]
+    SlowestTests(slowest_tests::Args),
     /// Reject machine-local Markdown links and broken repository-relative targets.
     #[command(name = "check-links")]
     Links,
@@ -176,6 +180,7 @@ fn dispatch() -> Result<ExitCode> {
             };
             Ok(toolchain::check(&root).emit())
         }
+        Command::SlowestTests(args) => slowest_tests::run(&args),
         Command::Links => Ok(links::check(&repo::root()?)?.emit()),
         Command::McpBoundary => Ok(mcp::check(&repo::root()?)?.emit()),
         Command::McpCodexSmoke(args) => mcp_smoke::run(&args),

@@ -5,69 +5,18 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::sync::OnceLock;
 
 use b10x_substrate_sdk::ManagedDaemon;
 use serde_json::Value;
 
-/// The shipped daemon binary. `SUBSTRATE_TEST_DAEMON` names one; otherwise the one beside this
-/// test, which a workspace run builds; otherwise the workspace's own `substrate-daemon` target is
-/// built once, in this test's profile and target directory, so the lane never runs without one.
+/// The shipped daemon binary: the one `SUBSTRATE_TEST_DAEMON` names, else the one beside this
+/// test, which a workspace build leaves there. A test builds none.
+#[path = "../../../test-support/daemon_binary.rs"]
+mod daemon_binary;
 #[path = "../../../test-support/readiness.rs"]
 mod readiness;
 #[path = "../../../test-support/unix_socket.rs"]
 mod unix_socket;
-
-fn daemon_binary() -> PathBuf {
-    static BINARY: OnceLock<PathBuf> = OnceLock::new();
-    BINARY
-        .get_or_init(|| {
-            if let Some(path) = std::env::var_os("SUBSTRATE_TEST_DAEMON") {
-                return path.into();
-            }
-            let mut profile_dir = std::env::current_exe().expect("current test executable");
-            profile_dir.pop();
-            if profile_dir.file_name().is_some_and(|name| name == "deps") {
-                profile_dir.pop();
-            }
-            // `cargo test --workspace` has already built the daemon beside this test, as the SDK's
-            // own tests rely on; only a package-scoped run builds it here.
-            let sibling = profile_dir.join("substrate-daemon");
-            if sibling.is_file() {
-                return sibling;
-            }
-            let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let mut build = std::process::Command::new(cargo);
-            build
-                .arg("build")
-                .arg("--locked")
-                .arg("--manifest-path")
-                .arg(&manifest)
-                .args(["-p", "b10x-substrate-daemon", "--bin", "substrate-daemon"]);
-            if profile_dir
-                .file_name()
-                .is_some_and(|name| name == "release")
-            {
-                build.arg("--release");
-            }
-            let status = build
-                .status()
-                .expect("starting cargo to build substrate-daemon");
-            assert!(
-                status.success(),
-                "building substrate-daemon failed: {status}"
-            );
-            let binary = profile_dir.join("substrate-daemon");
-            assert!(
-                binary.is_file(),
-                "{} is absent after the build",
-                binary.display()
-            );
-            binary
-        })
-        .clone()
-}
 
 struct Fixture {
     _data: tempfile::TempDir,
@@ -81,7 +30,7 @@ async fn fixture() -> Fixture {
     let mut builder = ManagedDaemon::builder()
         .data_dir(&root)
         .deployment("cli_test")
-        .external_binary(daemon_binary())
+        .external_binary(daemon_binary::daemon_binary())
         .startup_timeout(readiness::DAEMON_READINESS);
     if let Some(cgroup) = std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT") {
         builder = builder.cgroup_root(cgroup);

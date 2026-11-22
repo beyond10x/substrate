@@ -169,10 +169,23 @@ fn open_lane(runtime: &Path) -> Arc<dyn ConfinementAdapter> {
 }
 
 /// story:oci-adapter, adversary 7: a run pulls nothing (`--pull never`), so the lane pulls its
-/// pinned images once before any run.
+/// pinned images once before any run. An image the runtime's store already holds is not pulled
+/// again: under cargo-nextest every case is its own process, and a pull per case would be a
+/// registry request per case (`story:gate-test-step-ends-within-two-minutes`).
 fn pull(runtime: &Path) {
     static PULLED: OnceLock<()> = OnceLock::new();
     PULLED.get_or_init(|| {
+        let held = std::process::Command::new(runtime)
+            .args(["image", "inspect", IMAGE])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("the runtime runs")
+            .success();
+        if held {
+            return;
+        }
         let status = std::process::Command::new(runtime)
             .args(["pull", IMAGE])
             .stdin(std::process::Stdio::null())

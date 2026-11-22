@@ -39,7 +39,10 @@ use substrate_wire::Signal;
 
 const REASON: &str = "the test bounds a host process on purpose";
 
-/// The cases that open `systemd` share one process scope; one at a time.
+/// The cases that open `systemd` share one process scope; one at a time. cargo-nextest starts
+/// every case as its own process, which this lock does not order: there the
+/// `systemd-user-manager` test group in `.config/nextest.toml` runs them one at a time, because
+/// an open reclaims every dead embedder's scope under the one user manager.
 static OPENING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn local_inner() -> InnerRequest {

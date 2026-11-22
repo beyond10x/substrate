@@ -2,16 +2,17 @@
 format: aep.planning-md/3
 id: story:gate-test-step-ends-within-two-minutes
 kind: story
-status: active
+status: implemented
 title: The gate's test step ends within two minutes and no test runs over 60 s
 summary: 'Hosted: 1126 s with compile, 354 s of tests, one test over 60 s; the runner enforces the budget'
 tags:
 - defect
 - gate
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T21:01:49Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-21T21:01:49Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-22T03:10:48Z", actor: "agent:host-operator", revision: 6, decided_on: {"recorded":{"test_result":1}}, executor: "agent:substrate"}
 ---
 # Story: the gate's test step ends within two minutes and no test runs over 60 s
 
