@@ -279,12 +279,33 @@ change moves `config_generation`. Before each Pod create, `start_exec` checks th
 re-reads the policy (one `GET`) and compares the binding with the admitted snapshot. A mismatch is
 `NotDispatched(exec.capability-stale)` (422), recorded as refused.
 
-The driver holds a start to the proof it was admitted with at the last moment before the Pod is
-created. After every wait the start can sit in, it computes the snapshot again and creates the Pod
-only when its digest, its node and the facts the start requires are those of the admission and the
-proof is still valid. Otherwise the start is `NotDispatched(exec.capability-stale)` (422), recorded
-as refused, and no Pod is created. Daemon admission takes the facts and the digest it hands the
-driver from one snapshot.
+The driver holds a start to what it was admitted for at the last moment before the request that
+creates the Pod is sent. After every wait the start can sit in, it computes the snapshot again
+and creates the Pod only when that snapshot is a valid proof, on the node the workspace's keeper
+runs on and under the binding and policy set of the admission, of every fact the start requires.
+A proof the driver renewed while the start waited serves it when it proves the same facts: the
+start is not held to the digest of the admission, whose validity instant moves with every probe.
+Otherwise the start is `NotDispatched(exec.capability-stale)` (422), recorded as refused, and no
+Pod is created. Daemon admission takes the facts and the digest it hands the driver from one
+snapshot, and still refuses a start that names any snapshot but the current one.
+
+A start carries only the digest of its admission. The driver therefore remembers, for each
+snapshot the daemon read, what it stated with it: the binding generation, the Lease epoch and
+the node the proof observed. It keeps the newest 2,048 (`MAX_STATED_SNAPSHOTS`): the digest
+moves at most once per probe interval of 60 s, and a run a start waits behind is bounded at
+24 h, which is 1,440 probes. A start that names a snapshot the driver does not remember, one
+never stated by this process included, is `exec.capability-stale`. The digest is looked up and
+never compared with the snapshot the driver would state now.
+
+The Lease epoch is part of the comparison: a Lease lost or taken again since the admission is
+`exec.capability-stale` although the same holder has it, because `config_generation` does not
+move on a retake by the same holder. A proof that held on the keeper's node at the admission
+and does not hold there now is `exec.capability-stale`. A keeper on a node no proof observed, at
+the admission or now, stays `exec.sandbox-unavailable` (501, § 6.4).
+
+A proof is valid for a span measured on the driver's monotonic clock from the probe that made
+it. The wall clock decides neither whether a proof is valid nor when the next probe runs; it
+only states `valid_until` in the published snapshot.
 
 ### 6.4 Admission
 

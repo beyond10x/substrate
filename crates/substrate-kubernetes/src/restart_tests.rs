@@ -63,7 +63,7 @@ async fn a_driver_taken_over_publishes_no_probe_node_until_its_own_probe() {
     let mut rig = rig().await;
     restart(&mut rig).await;
     let snapshot = rig.driver.machine();
-    assert_eq!(rig.driver.published_exec_node(), None);
+    assert_eq!(rig.driver.capability_snapshot().node, None);
     let mut start = input(&["/bin/true"]);
     start.sandbox.capability_snapshot = snapshot.snapshot;
     let DispatchOutcome::NotDispatched(refused) = rig.start("exec_taken_over", &start).await else {

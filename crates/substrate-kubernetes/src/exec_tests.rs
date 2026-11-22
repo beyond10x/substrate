@@ -2142,9 +2142,9 @@ mod d354_adv {
             rig.driver.machine();
         });
         assert_eq!(
-            rig.driver.published_exec_node().as_deref(),
+            rig.driver.capability_snapshot().node.as_deref(),
             Some(OTHER_NODE),
-            "the control: the later probe's node was published while the start ran"
+            "the control: the later probe's node is the proof's while the start ran"
         );
         match outcome {
             DispatchOutcome::NotDispatched(refused) => assert!(
@@ -2164,9 +2164,9 @@ mod d354_adv {
         assert_eq!(rig.pod_creates(), 0, "no Pod create was sent");
     }
 
-    /// Design amendment of 2026-11-01: the node comparison runs after the snapshot check. A start
-    /// naming a snapshot that is no longer published hears `exec.capability-stale` (422), not
-    /// `exec.sandbox-unavailable`, even when the published node is another one.
+    /// Design amendment of 2026-11-01 and § 6.3: a start admitted under a proof on its keeper's
+    /// node hears `exec.capability-stale` (422), not `exec.sandbox-unavailable`, once a later
+    /// probe's node is another one.
     #[tokio::test]
     async fn a_stale_snapshot_is_capability_stale_before_the_node_is_compared() {
         let rig = rig().await;
@@ -2181,7 +2181,7 @@ mod d354_adv {
         );
         let DispatchOutcome::NotDispatched(refused) = rig.start("exec_stale", &earlier).await
         else {
-            panic!("a start under an unpublished snapshot was dispatched");
+            panic!("a start whose proof moved to another node was dispatched");
         };
         assert_eq!(refused.code, CAPABILITY_STALE, "{}", refused.message);
         assert_eq!(refused.class, DriverErrorClass::Refused);
@@ -2189,121 +2189,70 @@ mod d354_adv {
     }
 }
 
-/// `story:concurrent-snapshots-never-publish-an-older-probe`: after two `machine()` calls
-/// interleave, a start is held to the newer probe's tuple.
-mod d364 {
-    use super::*;
-    use crate::interleave::older_published_last;
-
-    const OTHER_NODE: &str = "node-b";
-
-    /// Acceptance 2: the older call computes under a probe on `OTHER_NODE`, a newer probe proves
-    /// the keeper's node `NODE`, and the older call publishes last. A start naming the newer
-    /// snapshot is dispatched on `NODE`; one naming the older snapshot is
-    /// `exec.capability-stale` before any Pod.
-    #[tokio::test]
-    async fn a_start_after_the_interleave_compares_against_the_newer_probes_tuple() {
-        let rig = rig().await;
-        rig.driver.prove_on(OTHER_NODE);
-        let (older, newer) = older_published_last(&rig.driver, || {
-            rig.clock.set(Duration::from_secs(1));
-            rig.driver.prove_on(NODE);
-        });
-        assert_ne!(older.snapshot, newer.snapshot, "the control");
-
-        let mut current = input(&["/bin/true"]);
-        current
-            .sandbox
-            .capability_snapshot
-            .clone_from(&newer.snapshot);
-        match rig.start("exec_newer", &current).await {
-            DispatchOutcome::Observed(observation) => {
-                assert_eq!(observation.resource.state, ExecState::Running);
-            }
-            DispatchOutcome::NotDispatched(refused)
-            | DispatchOutcome::ContainedAbsent(refused)
-            | DispatchOutcome::OutcomeUnknown(refused) => panic!(
-                "story:concurrent-snapshots-never-publish-an-older-probe: a start under the \
-                 newer probe's snapshot was compared against the older tuple: {}: {}",
-                refused.code, refused.message
-            ),
-        }
-        let pod = rig
-            .pod(&names::exec_pod(DEPLOYMENT, "exec_newer"))
-            .expect("the Pod is stored");
-        assert_eq!(
-            pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
-                ["nodeSelectorTerms"][0]["matchExpressions"][0]["values"],
-            json!([NODE])
-        );
-
-        let mut stale = input(&["/bin/true"]);
-        stale
-            .sandbox
-            .capability_snapshot
-            .clone_from(&older.snapshot);
-        let DispatchOutcome::NotDispatched(refused) = rig.start("exec_older", &stale).await else {
-            panic!(
-                "story:concurrent-snapshots-never-publish-an-older-probe: a start under the \
-                 older snapshot was dispatched"
-            );
-        };
-        assert_eq!(
-            refused.code, CAPABILITY_STALE,
-            "story:concurrent-snapshots-never-publish-an-older-probe: the older snapshot is \
-             still admitted: {}: {}",
-            refused.code, refused.message
-        );
-        assert_eq!(rig.pod_creates(), 1, "only the newer start created a Pod");
-    }
-}
-
-/// Adversary cases for `story:concurrent-snapshots-never-publish-an-older-probe`.
-mod d364_adv {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::sync::mpsc;
-
-    use super::*;
-    use crate::interleave::older_published_last;
-
-    /// The seam both acceptance cases run through: when the newer probe a case plays fails (its
-    /// `expect` panics), the interleave ends with that failure. It must not leave the older call
-    /// waiting for a newer probe that never comes, which turns a red case into a hung suite.
-    #[tokio::test]
-    async fn a_newer_probe_that_fails_ends_the_interleave_instead_of_hanging_it() {
-        let rig = rig().await;
-        let driver: &'static NamespaceDriver = Box::leak(Box::new(rig.driver));
-        let (done, ended) = mpsc::channel();
-        std::thread::spawn(move || {
-            let outcome = catch_unwind(AssertUnwindSafe(|| {
-                older_published_last(driver, || panic!("the newer probe fails"))
-            }));
-            let _ = done.send(outcome.is_err());
-        });
-        assert_eq!(
-            ended.recv_timeout(Duration::from_secs(10)),
-            Ok(true),
-            "story:concurrent-snapshots-never-publish-an-older-probe: a failing newer probe left \
-             interleave::older_published_last waiting on the older call for 10 s instead of \
-             returning the failure"
-        );
-    }
-}
-
-/// `story:namespace-driver-start-holds-its-proof-until-pod-create` (design 34 § 6.3): an exec
-/// runs only under the proof it was admitted with. Immediately before the Pod create, after
-/// every wait the start can sit in, the driver computes the snapshot again; a digest, a node or
-/// a required fact other than the admission's, or a proof past its validity, is
+/// `story:namespace-driver-start-holds-its-proof-until-pod-create` (design 34 § 6.3): a start is
+/// held to what it was admitted for at the last moment before the request that creates the Pod
+/// is sent. After every wait the start can sit in, the driver computes the snapshot again and
+/// creates the Pod only when it is a valid proof, on the node the workspace's keeper runs on and
+/// under the binding, the policy set and the Lease of the admission, of every fact the start
+/// requires. A renewed proof of the same facts serves the start. Otherwise the start is
 /// `exec.capability-stale` (422) and no Pod is created.
 mod proof_held_until_pod_create {
     use std::future::Future;
     use std::pin::{Pin, pin};
     use std::task::Poll;
 
+    use chrono::DateTime;
+
     use super::*;
+    use crate::lease::HELD_FOR;
+    use crate::namespace::probe::Unproved;
 
     const OTHER_NODE: &str = "node-b";
     const POLICY_READ: &str = "GET /apis/networking.k8s.io/v1/namespaces/substrate/networkpolicies";
+    /// When a later probe runs, on the case's clock: its proof is valid until another instant
+    /// than the first one's, so its snapshot has another digest.
+    const LATER: Duration = Duration::from_secs(1);
+    /// How long another process's Lease must read unchanged before it is taken (§ 6.1 step 3).
+    const TAKEOVER: Duration = Duration::from_secs(30);
+
+    /// A clock whose two readings a case moves separately: a host's wall clock can be set while
+    /// its monotonic clock runs on.
+    struct TwoClocks {
+        base: Instant,
+        wall_base: DateTime<Utc>,
+        readings: Mutex<(Duration, Duration)>,
+    }
+
+    impl TwoClocks {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                base: Instant::now(),
+                wall_base: Utc::now(),
+                readings: Mutex::new((Duration::ZERO, Duration::ZERO)),
+            })
+        }
+
+        /// The monotonic clock reads `elapsed` after its start, the wall clock `wall` after its
+        /// own.
+        fn set(&self, elapsed: Duration, wall: Duration) {
+            *self.readings.lock().unwrap_or_else(PoisonError::into_inner) = (elapsed, wall);
+        }
+
+        fn readings(&self) -> (Duration, Duration) {
+            *self.readings.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
+    impl Clock for TwoClocks {
+        fn now(&self) -> Instant {
+            self.base + self.readings().0
+        }
+
+        fn wall(&self) -> DateTime<Utc> {
+            self.wall_base
+                + chrono::Duration::from_std(self.readings().1).expect("a case's offset is small")
+        }
+    }
 
     /// A start as the daemon admits it now: it names the snapshot the driver states.
     fn admitted(rig: &Rig) -> ExecStartInput {
@@ -2388,74 +2337,148 @@ mod proof_held_until_pod_create {
         refused
     }
 
+    /// The start was served: one Pod was created for it, pinned to the keeper's node.
+    fn assert_served(rig: &Rig, id: &str, outcome: DispatchOutcome<ExecObservation>) {
+        let observation = match outcome {
+            DispatchOutcome::Observed(observation) => observation,
+            DispatchOutcome::NotDispatched(error)
+            | DispatchOutcome::ContainedAbsent(error)
+            | DispatchOutcome::OutcomeUnknown(error) => panic!(
+                "story:namespace-driver-start-holds-its-proof-until-pod-create: the start was \
+                 not served: {}: {}",
+                error.code, error.message
+            ),
+        };
+        assert_eq!(observation.resource.state, ExecState::Running);
+        assert_eq!(rig.pod_creates(), 1);
+        let pod = rig
+            .pod(&names::exec_pod(DEPLOYMENT, id))
+            .expect("the Pod is stored");
+        assert_eq!(
+            pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+                ["nodeSelectorTerms"][0]["matchExpressions"][0]["values"],
+            json!([NODE])
+        );
+    }
+
     /// The control: nothing changed between the admission and the Pod create, and the start is
     /// served on the keeper's node.
     #[tokio::test]
     async fn a_start_under_an_unchanged_proof_is_served() {
         let rig = rig().await;
         let start = admitted(&rig);
-        let observation = rig.started("exec_unchanged", &start).await;
-        assert_eq!(observation.resource.state, ExecState::Running);
-        assert_eq!(rig.pod_creates(), 1);
-        assert!(
-            rig.pod(&names::exec_pod(DEPLOYMENT, "exec_unchanged"))
-                .is_some()
-        );
+        let id = "exec_unchanged";
+        let outcome = rig.start(id, &start).await;
+        assert_served(&rig, id, outcome);
     }
 
-    /// A newer proof on the same node lands while the start waits on its policy re-read, and it
-    /// lacks a fact every start requires (§ 6.4): the start is stale, whatever was published.
+    /// A proof the driver renewed since the admission serves the start when it proves the same
+    /// facts on the keeper's node: the start is not held to the digest of the admission, whose
+    /// validity instant moves with every probe.
+    #[tokio::test]
+    async fn a_proof_renewed_since_the_admission_serves_the_start_when_it_proves_the_same_facts() {
+        let rig = rig().await;
+        let start = admitted(&rig);
+        rig.clock.set(LATER);
+        rig.driver.prove_on(NODE);
+        assert_ne!(
+            rig.driver.machine().snapshot,
+            start.sandbox.capability_snapshot,
+            "the control: the renewed proof has another digest"
+        );
+        let id = "exec_renewed_before";
+        let outcome = rig.start(id, &start).await;
+        assert_served(&rig, id, outcome);
+    }
+
+    /// The same for a proof renewed while the start waits on its policy re-read.
+    #[tokio::test]
+    async fn a_proof_renewed_while_the_start_waited_serves_it_when_it_proves_the_same_facts() {
+        let rig = rig().await;
+        let start = admitted(&rig);
+        let id = "exec_renewed_meanwhile";
+        let outcome = changed_during_the_policy_reread(&rig, id, &start, || {
+            rig.clock.set(LATER);
+            rig.driver.prove_on(NODE);
+            let renewed = rig.driver.machine();
+            assert_eq!(
+                renewed.facts.confinement_no_egress,
+                Some(true),
+                "the control"
+            );
+            assert_ne!(
+                renewed.snapshot, start.sandbox.capability_snapshot,
+                "the control: the renewed proof has another digest"
+            );
+        })
+        .await;
+        assert_served(&rig, id, outcome);
+    }
+
+    /// The node is the keeper's, whichever node the proof of the admission observed: a start
+    /// admitted while the proof was on another node is served once a renewed proof holds on the
+    /// node its workspace's keeper runs on.
+    #[tokio::test]
+    async fn a_proof_renewed_on_the_keepers_node_serves_a_start_admitted_under_one_elsewhere() {
+        let rig = rig().await;
+        rig.driver.prove_on(OTHER_NODE);
+        let start = admitted(&rig);
+        rig.clock.set(LATER);
+        rig.driver.prove_on(NODE);
+        let id = "exec_renewed_here";
+        let outcome = rig.start(id, &start).await;
+        assert_served(&rig, id, outcome);
+    }
+
+    /// The driver remembers a bounded number of the snapshots it stated. A start naming one
+    /// stated before that many others is stale, as one the driver never stated is.
+    #[tokio::test]
+    async fn a_start_naming_a_snapshot_older_than_the_drivers_memory_is_stale() {
+        let rig = rig().await;
+        let start = admitted(&rig);
+        for later in 1..=crate::exec::MAX_STATED_SNAPSHOTS {
+            // One millisecond on: the proof is valid until another instant, so the snapshot
+            // stated with it has another digest. The Lease stays held throughout.
+            rig.clock.set(Duration::from_millis(
+                u64::try_from(later).expect("a small count"),
+            ));
+            rig.driver.prove_on(NODE);
+            assert_ne!(
+                rig.driver.machine().snapshot,
+                start.sandbox.capability_snapshot,
+                "the control"
+            );
+        }
+        assert!(rig.driver.lease_held(), "the control: the Lease is held");
+        let id = "exec_forgotten";
+        let outcome = rig.start(id, &start).await;
+        assert_stale_before_any_pod(&rig, id, outcome);
+    }
+
+    /// The start is held to the snapshot computed when it runs: a proof that lost a fact every
+    /// start requires (§ 6.4) after the admission refuses it.
+    #[tokio::test]
+    async fn a_proof_that_lost_a_required_fact_since_the_admission_is_stale() {
+        let rig = rig().await;
+        let start = admitted(&rig);
+        rig.driver.prove_on_without(NODE, Unproved::NoEgress);
+        let id = "exec_lost_before";
+        let outcome = rig.start(id, &start).await;
+        assert_stale_before_any_pod(&rig, id, outcome);
+    }
+
+    /// The same for a proof that lands while the start waits on its policy re-read, the last
+    /// wait before the Pod create.
     #[tokio::test]
     async fn a_proof_that_lost_a_required_fact_while_the_start_waited_is_stale() {
         let rig = rig().await;
         let start = admitted(&rig);
-        let id = "exec_waited";
+        let id = "exec_lost_meanwhile";
         let outcome = changed_during_the_policy_reread(&rig, id, &start, || {
-            rig.driver.prove_without_no_egress_on(NODE);
-            let newer = rig.driver.machine();
-            assert_eq!(newer.facts.confinement_no_egress, None, "the control");
-            assert_ne!(
-                newer.snapshot, start.sandbox.capability_snapshot,
-                "the control"
-            );
-        })
-        .await;
-        assert_stale_before_any_pod(&rig, id, outcome);
-    }
-
-    /// The comparison is with the snapshot computed when the start runs: a proof that changed
-    /// after the admission is seen although nothing read the machine route in between.
-    #[tokio::test]
-    async fn a_proof_that_changed_since_the_admission_is_stale_without_a_machine_read() {
-        let rig = rig().await;
-        let start = admitted(&rig);
-        rig.driver.prove_without_no_egress_on(NODE);
-        let id = "exec_unread";
-        let reads = policy_reads(&rig);
-        let outcome = rig.start(id, &start).await;
-        assert_stale_before_any_pod(&rig, id, outcome);
-        assert_eq!(
-            policy_reads(&rig),
-            reads,
-            "a start naming a snapshot the driver does not state is refused before the policy \
-             re-read"
-        );
-    }
-
-    /// The digest is the admission's or the start is stale: a later probe that lands while the
-    /// start waits is another proof, although it is on the same node and proves the same facts.
-    #[tokio::test]
-    async fn a_later_proof_of_the_same_facts_while_the_start_waited_is_stale() {
-        let rig = rig().await;
-        let start = admitted(&rig);
-        let id = "exec_proved_again";
-        let outcome = changed_during_the_policy_reread(&rig, id, &start, || {
-            rig.clock.set(Duration::from_secs(1));
-            rig.driver.prove_on(NODE);
-            let later = rig.driver.machine();
-            assert_eq!(later.facts.confinement_no_egress, Some(true), "the control");
-            assert_ne!(
-                later.snapshot, start.sandbox.capability_snapshot,
+            rig.driver.prove_on_without(NODE, Unproved::NoEgress);
+            assert_eq!(
+                rig.driver.machine().facts.confinement_no_egress,
+                None,
                 "the control"
             );
         })
@@ -2489,8 +2512,175 @@ mod proof_held_until_pod_create {
         assert_stale_before_any_pod(&rig, id, outcome);
     }
 
-    /// The proof's node is the admission's too: a probe that lands on another node while the
-    /// start waits leaves it stale even when the facts and their validity read the same.
+    /// The rig with a driver that reads `TwoClocks`: it took the namespace over from the rig's
+    /// own driver at [`TAKEOVER`] on both clocks and proved every fact on `NODE` then.
+    async fn rig_on_two_clocks() -> (Rig, Arc<TwoClocks>) {
+        let mut rig = rig().await;
+        let clock = TwoClocks::new();
+        let driver = NamespaceDriver::parse_with_clock(
+            &kubeconfig_with(&rig.fake, Some(extension())),
+            DEPLOYMENT,
+            Arc::clone(&rig.ledger) as Arc<dyn BackendLedger>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        )
+        .expect("the configuration loads");
+        let held = driver
+            .open()
+            .await
+            .expect_err("the rig's own driver holds the Lease");
+        assert_eq!(held.code, crate::LEASE_HELD, "{}", held.message);
+        clock.set(TAKEOVER, TAKEOVER);
+        driver.open().await.expect("the Lease is taken over");
+        driver.prove_on(NODE);
+        drop(std::mem::replace(&mut rig.driver, driver));
+        (rig, clock)
+    }
+
+    /// § 6.3: the wall clock does not decide when the next probe runs. It is due one probe
+    /// interval after the last one on the monotonic clock, wherever the wall clock was set.
+    #[tokio::test]
+    async fn the_next_probe_is_due_on_the_monotonic_clock_whatever_the_wall_clock_reads() {
+        let (rig, clock) = rig_on_two_clocks().await;
+        let interval = Duration::from_secs(rig.driver.config().probe_interval_seconds);
+        assert!(!rig.driver.probe_due(), "the control: a probe just ran");
+
+        clock.set(TAKEOVER, TAKEOVER + interval + interval);
+        assert!(rig.driver.lease_held(), "the control: the Lease is held");
+        assert!(
+            !rig.driver.probe_due(),
+            "the wall clock set two intervals ahead makes no probe due"
+        );
+
+        clock.set(TAKEOVER + interval, TAKEOVER);
+        rig.driver.renew().await;
+        assert!(rig.driver.lease_held(), "the control: the Lease is held");
+        assert!(
+            rig.driver.probe_due(),
+            "one interval on the monotonic clock makes the next probe due"
+        );
+    }
+
+    /// § 6.3: a proof is valid for a span measured on the driver's monotonic clock from the probe
+    /// that made it. The wall clock does not decide it: set back to the probe's time, it leaves
+    /// a proof older than its span as invalid as before, as it leaves the Lease (§ 6.1 step 3).
+    #[tokio::test]
+    async fn a_proof_older_than_its_validity_window_is_stale_whatever_the_wall_clock_reads() {
+        let (rig, clock) = rig_on_two_clocks().await;
+        let proved = rig.driver.machine();
+        let window = (proved.valid_until.expect("a proved snapshot is bounded") - proved.probed_at)
+            .to_std()
+            .expect("the proof is valid after the probe");
+        let mut start = input(&["/bin/true"]);
+        start
+            .sandbox
+            .capability_snapshot
+            .clone_from(&proved.snapshot);
+
+        // The window passes on both clocks, and one second more. The Lease is renewed, so only
+        // the proof's age is in question.
+        let later = TAKEOVER + window + Duration::from_secs(1);
+        clock.set(later, later);
+        rig.driver.renew().await;
+        assert!(rig.driver.lease_held(), "the control: the Lease is held");
+        assert_eq!(
+            rig.driver.machine().facts.confinement_no_egress,
+            None,
+            "the control: past its window the proof states nothing"
+        );
+
+        // The wall clock reads the probe's time again. The monotonic clock does not: the probe
+        // ran one window and a second ago, and no probe ran since.
+        clock.set(later, TAKEOVER);
+        assert!(rig.driver.lease_held(), "the control: the Lease is held");
+        let id = "exec_window_passed";
+        let outcome = rig.start(id, &start).await;
+        assert_stale_before_any_pod(&rig, id, outcome);
+    }
+
+    /// § 6.2: a failed probe, or a Lease taken again, leaves no proof. A start admitted under
+    /// the proof that is gone is stale.
+    #[tokio::test]
+    async fn a_proof_that_is_gone_since_the_admission_is_stale() {
+        let rig = rig().await;
+        let start = admitted(&rig);
+        rig.driver.forget_probe();
+        let id = "exec_proof_gone";
+        let outcome = rig.start(id, &start).await;
+        assert_stale_before_any_pod(&rig, id, outcome);
+    }
+
+    /// § 6.3: the Lease is held or the start is stale.
+    #[tokio::test]
+    async fn a_lease_not_renewed_since_the_admission_is_stale() {
+        let rig = rig().await;
+        let start = admitted(&rig);
+        rig.clock.set(HELD_FOR);
+        assert!(!rig.driver.lease_held(), "the control");
+        let id = "exec_lease_lapsed";
+        let outcome = rig.start(id, &start).await;
+        assert_stale_before_any_pod(&rig, id, outcome);
+    }
+
+    /// The Lease is the admission's: one taken again while the start waited leaves the start
+    /// stale, although the probe under the new Lease proved every fact on the keeper's node.
+    #[tokio::test]
+    async fn a_lease_taken_again_while_the_start_waited_is_stale_though_its_probe_proved_the_same()
+    {
+        let rig = rig().await;
+        let start = admitted(&rig);
+        let id = "exec_lease_retaken";
+        let outcome = changed_during_the_policy_reread(&rig, id, &start, || {
+            rig.driver.forget_probe();
+            rig.driver.prove_on(NODE);
+            assert_eq!(
+                rig.driver.machine().facts.confinement_no_egress,
+                Some(true),
+                "the control: the new Lease's probe proved the fact"
+            );
+        })
+        .await;
+        assert_stale_before_any_pod(&rig, id, outcome);
+    }
+
+    /// The binding is the admission's: a driver opened again over another policy set binds
+    /// another `config_generation`, and a start admitted under the first one is stale although
+    /// the probe under the new binding proved the same facts on the keeper's node.
+    #[tokio::test]
+    async fn a_binding_that_moved_since_the_admission_is_stale_though_the_facts_are_unchanged() {
+        let rig = rig().await;
+        let admission = rig.driver.machine();
+        let mut start = input(&["/bin/true"]);
+        start
+            .sandbox
+            .capability_snapshot
+            .clone_from(&admission.snapshot);
+        rig.fake
+            .seed(
+                "networkpolicies",
+                json!({"metadata": {"name": "deny-ingress"}, "spec": {"podSelector": {}, "policyTypes": ["Ingress"]}}),
+            )
+            .expect("a second policy that allows nothing is stored");
+        rig.driver
+            .open()
+            .await
+            .expect("a re-open binds the changed policy set");
+        rig.driver.prove_on(NODE);
+        let current = rig.driver.machine();
+        assert_ne!(
+            current.config_generation, admission.config_generation,
+            "the control: the binding moved"
+        );
+        assert_eq!(
+            current.facts, admission.facts,
+            "the control: the facts are unchanged"
+        );
+        let id = "exec_binding_moved";
+        let outcome = rig.start(id, &start).await;
+        assert_stale_before_any_pod(&rig, id, outcome);
+    }
+
+    /// The proof holds on the node it observed (§ 6.4): one renewed on another node than the
+    /// keeper's while the start waited leaves the start stale.
     #[tokio::test]
     async fn a_proof_that_moved_to_another_node_while_the_start_waited_is_stale() {
         let rig = rig().await;
@@ -2508,26 +2698,53 @@ mod proof_held_until_pod_create {
         assert_stale_before_any_pod(&rig, id, outcome);
     }
 
-    /// The driver's own backstop behind the daemon's admission (§ 6.4): a start naming a current
-    /// snapshot that does not prove the neutral set creates no Pod.
-    #[tokio::test]
-    async fn a_start_under_a_snapshot_without_the_admission_facts_creates_no_pod() {
+    /// The driver's own check behind the daemon's admission (§ 6.4): a start naming a current
+    /// snapshot that does not prove `unproved`, a part of the neutral set, creates no Pod, and
+    /// the refusal names `fact`.
+    async fn refused_under_a_proof_without(unproved: Unproved, id: &str, fact: &str) {
         let rig = rig().await;
-        rig.driver.prove_without_no_egress_on(NODE);
+        rig.driver.prove_on_without(NODE, unproved);
         let start = admitted(&rig);
-        let id = "exec_unproved";
         let outcome = rig.start(id, &start).await;
         let refused = assert_stale_before_any_pod(&rig, id, outcome);
         assert!(
-            refused
-                .message
-                .contains(substrate_wire::CONFINEMENT_NO_EGRESS_FACT),
+            refused.message.contains(fact),
             "the refusal names the fact: {}",
             refused.message
         );
     }
 
-    /// The same backstop for `sandbox.requires` (design 30 § 4.4): a family the current snapshot
+    #[tokio::test]
+    async fn a_start_under_a_snapshot_without_no_egress_creates_no_pod() {
+        refused_under_a_proof_without(
+            Unproved::NoEgress,
+            "exec_no_egress_unproved",
+            substrate_wire::CONFINEMENT_NO_EGRESS_FACT,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_start_under_a_snapshot_without_whole_tree_kill_creates_no_pod() {
+        refused_under_a_proof_without(
+            Unproved::WholeTreeKill,
+            "exec_whole_tree_kill_unproved",
+            substrate_wire::CONFINEMENT_WHOLE_TREE_KILL_FACT,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_start_under_a_snapshot_without_the_families_creates_no_pod() {
+        refused_under_a_proof_without(
+            Unproved::Families,
+            "exec_families_unproved",
+            substrate_wire::ConfinementFamily::ProcessRun.fact(),
+        )
+        .await;
+    }
+
+    /// The same check for `sandbox.requires` (design 30 § 4.4): a family the current snapshot
     /// does not serve creates no Pod.
     #[tokio::test]
     async fn a_start_requiring_a_family_the_snapshot_does_not_serve_creates_no_pod() {
@@ -2537,12 +2754,34 @@ mod proof_held_until_pod_create {
             families: Some(vec![substrate_wire::ConfinementFamily::NetworkIngress]),
             facts: None,
         });
-        let id = "exec_requires";
+        let id = "exec_requires_family";
         let outcome = rig.start(id, &start).await;
         let refused = assert_stale_before_any_pod(&rig, id, outcome);
         assert!(
             refused.message.contains("network-ingress"),
             "the refusal names the family: {}",
+            refused.message
+        );
+    }
+
+    /// And a property the start's `sandbox.requires` names and the current snapshot does not
+    /// prove creates none.
+    #[tokio::test]
+    async fn a_start_requiring_a_property_the_snapshot_does_not_prove_creates_no_pod() {
+        let rig = rig().await;
+        let mut start = admitted(&rig);
+        start.sandbox.requires = Some(substrate_wire::ConfinementRequires {
+            families: None,
+            facts: Some(vec![
+                substrate_wire::ConfinementProperty::IpcSignalsContained,
+            ]),
+        });
+        let id = "exec_requires_property";
+        let outcome = rig.start(id, &start).await;
+        let refused = assert_stale_before_any_pod(&rig, id, outcome);
+        assert!(
+            refused.message.contains("ipc-signals-contained"),
+            "the refusal names the property: {}",
             refused.message
         );
     }

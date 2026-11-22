@@ -57,9 +57,9 @@ enum Facts {
     Neutral { missing: Option<NeutralFact> },
     /// Neither set.
     Neither,
-    /// A driver whose snapshot moves between two reads: the first, third and every other odd
-    /// read states the neutral set under [`EARLIER`], and every even read states neither set
-    /// under [`SNAPSHOT`]. No single snapshot both carries `SNAPSHOT` and admits a start.
+    /// A driver that states one of two snapshots, in turn: the neutral set under [`EARLIER`],
+    /// then neither set under [`SNAPSHOT`], and so on. No one snapshot both carries `SNAPSHOT`
+    /// and admits a start.
     Moving,
 }
 

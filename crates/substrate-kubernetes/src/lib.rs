@@ -92,21 +92,13 @@ impl std::error::Error for StartupRefusal {}
 impl substrate_host::Driver for NamespaceDriver {
     // --- the snapshot (U10) and the exec routes (U9) -------------------------------------
 
-    /// Computes and publishes under the publication lock, so calls publish in the order they
-    /// computed and an older tuple never lands over a newer one. Lock order: the publication
-    /// lock, then the binding, Lease and probe locks the snapshot takes; nothing takes the
-    /// publication lock while holding another.
+    /// Computes the snapshot and remembers what it was stated with (§ 6.3): the daemon admits
+    /// starts under the digest it reads here, and a start is later held to the binding, the
+    /// Lease and the node of that admission. Calls record in any order.
     fn machine(&self) -> substrate_wire::CapabilitySnapshot {
-        let mut published = self
-            .execs()
-            .published
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (snapshot, node) = self.capability_snapshot();
-        #[cfg(test)]
-        interleave::before_publication(self);
-        *published = Some((snapshot.snapshot.clone(), snapshot.config_generation, node));
-        snapshot
+        let computed = self.capability_snapshot();
+        self.note_stated(&computed);
+        computed.snapshot
     }
 
     async fn shutdown(&self) -> Result<(), substrate_host::DriverError> {
@@ -331,85 +323,5 @@ fn adopt_unserved() -> substrate_host::DriverError {
         message: refusal.message.to_owned(),
         address: refusal.address.map(str::to_owned),
         retriable: false,
-    }
-}
-
-/// Two `machine()` calls ordered as a race orders them
-/// (`story:concurrent-snapshots-never-publish-an-older-probe`): the older computes its snapshot,
-/// a newer probe lands, and the newer call runs before the older one publishes.
-#[cfg(test)]
-pub(crate) mod interleave {
-    use std::cell::RefCell;
-    use std::sync::TryLockError;
-    use std::sync::mpsc::{self, TryRecvError};
-
-    use substrate_host::Driver as _;
-    use substrate_wire::CapabilitySnapshot;
-
-    use crate::NamespaceDriver;
-
-    type Hook = Box<dyn FnOnce(&NamespaceDriver)>;
-
-    thread_local! {
-        /// What this thread's next `machine()` call runs between its snapshot and its publication.
-        static BEFORE_PUBLICATION: RefCell<Option<Hook>> = const { RefCell::new(None) };
-    }
-
-    pub(super) fn before_publication(driver: &NamespaceDriver) {
-        if let Some(hook) = BEFORE_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
-            hook(driver);
-        }
-    }
-
-    /// Runs an older and a newer `machine()` call on two threads: the older computes its
-    /// snapshot, `newer_probe` runs, then the newer call runs. The older call publishes only
-    /// once the newer one has published, or at once when the publication lock is already held,
-    /// since the newer one cannot publish before it then. Returns what each call returned,
-    /// older first.
-    pub(crate) fn older_published_last(
-        driver: &NamespaceDriver,
-        newer_probe: impl FnOnce(),
-    ) -> (CapabilitySnapshot, CapabilitySnapshot) {
-        let (computed, older_computed) = mpsc::channel();
-        let (probed, newer_probed) = mpsc::channel();
-        let (published, newer_published) = mpsc::channel::<()>();
-        // `move`: the scope closure owns every sender the older thread waits on, so a panic in
-        // `newer_probe` or before the newer call drops them, the older thread's waits end, and
-        // the scope joins it and passes the panic on.
-        std::thread::scope(move |scope| {
-            let older = scope.spawn(move || {
-                BEFORE_PUBLICATION.with(|hook| {
-                    *hook.borrow_mut() = Some(Box::new(move |driver: &NamespaceDriver| {
-                        let _ = computed.send(());
-                        let _ = newer_probed.recv();
-                        while matches!(newer_published.try_recv(), Err(TryRecvError::Empty))
-                            && !matches!(
-                                driver.execs().published.try_lock(),
-                                Err(TryLockError::WouldBlock)
-                            )
-                        {
-                            std::thread::yield_now();
-                        }
-                    }));
-                });
-                driver.machine()
-            });
-            older_computed
-                .recv()
-                .expect("the older call computed its snapshot");
-            newer_probe();
-            probed
-                .send(())
-                .expect("the older call waits for the newer probe");
-            let newer = scope.spawn(move || {
-                let snapshot = driver.machine();
-                let _ = published.send(());
-                snapshot
-            });
-            (
-                older.join().expect("the older call returns"),
-                newer.join().expect("the newer call returns"),
-            )
-        })
     }
 }
