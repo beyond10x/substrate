@@ -7,6 +7,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The ESS pin is 0.97.4, from 0.86.0 (the six `ess-inputs.yaml` under `spec/`, and `ESS_VERSION`
+  and `ESS_SHA256` in `gate.yml`). The host-process suite is regenerated: its 92 scenarios keep
+  their ids and twelve change. Eleven create their second instance with the inputs' declared
+  examples, `RenewLease/not-live` also sends an ended adopted record, and synthesis records 26
+  refusals where it recorded 27. The other suites and the CLI contract keep their bytes, and the
+  generated types change only in their header. Measured on a workstation under ESS 0.97.4:
+  synthesis of the confinement suite took 28 s (0.86.0: 92 s) and `cargo xtask check-ess` as a
+  whole 54 s.
+
+- A Git create whose root name already has a commit-id file or a store is refused
+  `workspace.git-target-exists` before any request to the source. A create whose store would
+  be larger than the create's byte limit (the requested storage limit, else 2 GiB), or whose
+  baseline holds an object whose header states more, is refused `workspace.git-storage-limit`,
+  and the workspace is proved absent.
+- A Git create whose baseline nests directories deeper than 1,024 is refused
+  `workspace.git-path-unrepresentable` before its store is written, and the workspace is
+  proved absent; such a baseline was created before. The build of a store refuses it the same
+  way.
+- A Git create whose baseline names more paths than its inode limit (the requested storage
+  limit, else 200,000) is refused `workspace.git-storage-limit` before anything is checked
+  out, and the workspace is proved absent. Every entry of every tree counts once for each
+  place the baseline names it, a directory that holds nothing included. The build of a store
+  refuses such a baseline the same way, against the inode limit of the workspace's project
+  quota where it has one, else 200,000.
+- A Git create whose baseline holds a name longer than 255 bytes or a path longer than 4,096
+  bytes is refused `workspace.git-path-unrepresentable`. One whose paths together are longer
+  than 256 bytes for each path its inode limit admits, or which holds a tree whose header
+  states more than 283 bytes for each such path, is refused `workspace.git-storage-limit`.
+  Each is refused before anything is checked out, and the workspace is proved absent. The
+  build of a store refuses such a baseline the same way.
+- A Git workspace's baseline objects are on disk a second time, compressed, outside its
+  reported usage: a Git workspace under a project quota holds at most twice its byte limit.
+- Once a workspace's store exists, the changes observation answers whatever the workspace's
+  `.git/objects` holds. Where the reader of 0.24.0 refused `workspace.git-repository-failed`
+  for an object store with a link, an entry that is not a regular file, an `info/alternates`
+  file, more than eight nested directories or more than 262,144 entries, the observation now
+  answers from the store; those refusals remain for the build of a store.
+
 ### Security
 
 - **Both Git observations read the baseline from a store the driver keeps, and open nothing
@@ -63,37 +103,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   - Not bounded by this change: while a store is built, the Git library reads each object of
     the copy to the size its header states, and an object the baseline's objects are stored
     against is read without the size check (`story:git-read-limits-bound-the-work`).
-
-### Changed
-
-- A Git create whose root name already has a commit-id file or a store is refused
-  `workspace.git-target-exists` before any request to the source. A create whose store would
-  be larger than the create's byte limit (the requested storage limit, else 2 GiB), or whose
-  baseline holds an object whose header states more, is refused `workspace.git-storage-limit`,
-  and the workspace is proved absent.
-- A Git create whose baseline nests directories deeper than 1,024 is refused
-  `workspace.git-path-unrepresentable` before its store is written, and the workspace is
-  proved absent; such a baseline was created before. The build of a store refuses it the same
-  way.
-- A Git create whose baseline names more paths than its inode limit (the requested storage
-  limit, else 200,000) is refused `workspace.git-storage-limit` before anything is checked
-  out, and the workspace is proved absent. Every entry of every tree counts once for each
-  place the baseline names it, a directory that holds nothing included. The build of a store
-  refuses such a baseline the same way, against the inode limit of the workspace's project
-  quota where it has one, else 200,000.
-- A Git create whose baseline holds a name longer than 255 bytes or a path longer than 4,096
-  bytes is refused `workspace.git-path-unrepresentable`. One whose paths together are longer
-  than 256 bytes for each path its inode limit admits, or which holds a tree whose header
-  states more than 283 bytes for each such path, is refused `workspace.git-storage-limit`.
-  Each is refused before anything is checked out, and the workspace is proved absent. The
-  build of a store refuses such a baseline the same way.
-- A Git workspace's baseline objects are on disk a second time, compressed, outside its
-  reported usage: a Git workspace under a project quota holds at most twice its byte limit.
-- Once a workspace's store exists, the changes observation answers whatever the workspace's
-  `.git/objects` holds. Where the reader of 0.24.0 refused `workspace.git-repository-failed`
-  for an object store with a link, an entry that is not a regular file, an `info/alternates`
-  file, more than eight nested directories or more than 262,144 entries, the observation now
-  answers from the store; those refusals remain for the build of a store.
 
 ## [0.24.0] — 2026-11-22
 
