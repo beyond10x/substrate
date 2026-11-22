@@ -375,7 +375,9 @@ fn the_two_gate_phases_partition_every_gate_step() {
 
 /// `Full gate` is the status context `main`'s ruleset requires, and `release.yml` reads this
 /// workflow's run conclusion. The phases run as two jobs side by side; `Full gate` waits for both,
-/// runs whatever they concluded, and succeeds only when both succeeded.
+/// runs whatever they concluded, and succeeds only when both succeeded. The one other green, a
+/// planning-only pull request whose phases were skipped, is held by executing the step in
+/// `planning_only_classification.rs`.
 #[test]
 fn the_full_gate_context_is_green_only_when_both_gate_phases_are() {
     assert_eq!(GATE_WORKFLOW.matches("name: Full gate\n").count(), 1);
@@ -386,7 +388,7 @@ fn the_full_gate_context_is_green_only_when_both_gate_phases_are() {
     assert!(tests.contains("        run: bash scripts/gate.sh tests\n"));
     assert!(checks.contains("        run: bash scripts/gate.sh static\n"));
     assert!(full.contains("    name: Full gate\n"));
-    assert!(full.contains("    needs: [gate-tests, gate-static]\n"));
+    assert!(full.contains("    needs: [classify, gate-tests, gate-static]\n"));
     assert!(full.contains("    if: always()\n"));
     assert!(full.contains("TESTS: ${{ needs.gate-tests.result }}"));
     assert!(full.contains("STATIC: ${{ needs.gate-static.result }}"));
@@ -2103,6 +2105,10 @@ fn every_third_party_action_is_pinned_to_a_commit() {
             .split_whitespace()
             .next()
             .expect("action reference before comment");
+        if reference.starts_with("./") {
+            // A workflow of this repository, run at the caller's own commit: nothing to pin.
+            continue;
+        }
         let (_, revision) = reference
             .rsplit_once('@')
             .unwrap_or_else(|| panic!("action is unpinned: {line}"));

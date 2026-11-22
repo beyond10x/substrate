@@ -1,0 +1,152 @@
+# Classifies the change a run is about, for `gate.yml` and `macos.yml` (AGENTS.md § "The gate").
+#
+# The answer is `planning-only` for a pull request whose changed paths are all in
+# `.github/planning-only-paths`, and `code` for everything else: a push, a dispatch, a pull
+# request that changes one path outside the list or none at all, and every reading this job
+# cannot finish. A caller skips its build and test jobs only for the exact answer
+# `planning-only`, so a job that fails here or answers nothing runs them.
+#
+# The changed paths are those between the merge base of the pull request's base and head and its
+# head, read without rename detection: a renamed file is a deleted path and an added one, and
+# both are classified. The list is read from the base commit, never from the pull request, so a
+# pull request cannot add its own paths to it.
+name: Classify the change
+
+on:
+  workflow_call:
+    outputs:
+      change:
+        description: "`planning-only` or `code`"
+        value: ${{ jobs.classify.outputs.change }}
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      change: ${{ steps.classify.outputs.change }}
+
+    steps:
+      # The merge base is found in history, so all of it is fetched. Only a pull request is ever
+      # classified; a push or a dispatch needs no checkout to be answered `code`.
+      - name: Check out the whole history
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify the changed paths
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          export LC_ALL=C
+          list=.github/planning-only-paths
+
+          # Every way out of this step is an answer, and every answer but the last is `code`.
+          answer() {
+            echo "reason: $2"
+            echo "change: $1"
+            echo "change=$1" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          echo "event: $(printf '%q' "$EVENT_NAME")"
+          if [ "$EVENT_NAME" != pull_request ]; then
+            answer code "only a pull request is classified; every other event runs the full gate"
+          fi
+
+          commit='^[0-9a-f]{40}([0-9a-f]{24})?$'
+          echo "base: $(printf '%q' "$BASE_SHA")"
+          echo "head: $(printf '%q' "$HEAD_SHA")"
+          if ! [[ "$BASE_SHA" =~ $commit && "$HEAD_SHA" =~ $commit ]]; then
+            answer code "the base or the head is not a full commit id"
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2> /dev/null)" != false ]; then
+            answer code "this checkout is not the whole history"
+          fi
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2> /dev/null ||
+            ! git cat-file -e "$HEAD_SHA^{commit}" 2> /dev/null; then
+            answer code "this checkout does not hold the base and the head as commits"
+          fi
+          if ! merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA" 2> /dev/null) ||
+            ! [[ "$merge_base" =~ $commit ]]; then
+            answer code "the base and the head have no merge base"
+          fi
+          echo "merge base: $merge_base"
+
+          if ! text=$(git cat-file blob "$BASE_SHA:$list" 2> /dev/null); then
+            answer code "the base commit holds no $list"
+          fi
+          includes=()
+          excludes=()
+          while IFS= read -r line; do
+            case "$line" in
+              '' | '#'*) continue ;;
+              'include '*) pattern=${line#include } ;;
+              'exclude '*) pattern=${line#exclude } ;;
+              *) answer code "$list of the base has a line that is neither include nor exclude" ;;
+            esac
+            if ! [[ "$pattern" =~ ^[A-Za-z0-9._/*-]+$ ]]; then
+              answer code "$list of the base has a pattern outside A-Z a-z 0-9 . _ / - *"
+            fi
+            case "$line" in
+              include*) includes+=("$pattern") ;;
+              *) excludes+=("$pattern") ;;
+            esac
+          done <<< "$text"
+          if [ "${#includes[@]}" -eq 0 ]; then
+            answer code "$list of the base includes no path"
+          fi
+
+          # listed <path>: the path matches an include pattern and no exclude pattern. A pattern
+          # is matched against the whole path, and its `*` also matches `/`.
+          listed() {
+            local pattern
+            for pattern in ${excludes[@]+"${excludes[@]}"}; do
+              if [[ "$1" == $pattern ]]; then return 1; fi
+            done
+            for pattern in "${includes[@]}"; do
+              if [[ "$1" == $pattern ]]; then return 0; fi
+            done
+            return 1
+          }
+
+          paths=$(mktemp "${RUNNER_TEMP:?}/changed-paths.XXXXXX")
+          if ! git -c core.quotePath=false diff --no-ext-diff --no-textconv --no-relative \
+            --ignore-submodules=none --no-renames --name-only -z \
+            "$merge_base" "$HEAD_SHA" -- > "$paths"; then
+            answer code "the changed paths could not be read"
+          fi
+
+          echo "changed paths:"
+          count=0
+          outside=0
+          while IFS= read -r -d '' path; do
+            count=$((count + 1))
+            if listed "$path"; then
+              printf '  planning-only  %q\n' "$path"
+            else
+              printf '  code           %q\n' "$path"
+              outside=$((outside + 1))
+            fi
+          done < "$paths"
+          rm -f "$paths"
+
+          if [ "$count" -eq 0 ]; then
+            answer code "the pull request changes no path"
+          fi
+          if [ "$outside" -ne 0 ]; then
+            answer code "changed paths outside $list: $outside of $count"
+          fi
+          answer planning-only "all $count changed paths are in $list"

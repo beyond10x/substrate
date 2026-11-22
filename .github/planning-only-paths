@@ -1,0 +1,32 @@
+# The planning-only path list (AGENTS.md § "The gate").
+#
+# A pull request whose changed paths are all listed here passes `Full gate` without a build or a
+# test. `.github/workflows/classify-change.yml` reads this file from the pull request's base
+# commit, so a pull request that changes it is classified by the list it found, under which this
+# file is code.
+#
+# A path is listed when it matches an `include` pattern and no `exclude` pattern. A pattern is
+# matched against the whole path from the repository root, `*` matches any run of characters,
+# `/` included, and a pattern holds only letters, digits and `. _ / - *`. A line that is neither
+# a comment, an `include` nor an `exclude` makes every pull request `code`.
+#
+# The list names the trees that hold planning and prose. Every other path is code, Markdown
+# included: `website/` is the built site, `CHANGELOG.md` is compared with the site's release
+# page, `contracts/` and `xtask/bundle-source/` are released bundle bytes and their sources,
+# `README.md`, `AGENTS.md` and the crate READMEs are read by tests or compiled as doctests, and
+# `spec/`, `deploy/` and `vendor/` are sources.
+include .engineering/*
+include adr/*.md
+include architecture/*.md
+include docs/*.md
+include ROADMAP.md
+include SECURITY.md
+include STATUS.md
+include glossary.md
+
+# Documents in those trees that a test reads by name. A change to one can fail that test, so it
+# is code. `xtask/tests/planning_only_classification.rs` fails when Rust source names a listed
+# Markdown file that has no line here.
+exclude adr/0047-a-kubernetes-namespace-driver-serves-workspaces-on-pvcs-and-execs-as-pods.md
+exclude docs/design/04-security-and-isolation.md
+exclude docs/design/08-phase-3-closure-invariants.md
