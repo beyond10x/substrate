@@ -9,6 +9,7 @@
 //! earlier build with `git` wrote is still removed with its workspace. Invariant 3: a missing
 //! mechanism is a named refusal, never a degraded Git workspace.
 
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -107,6 +108,7 @@ pub(super) fn baseline_file(
 
 pub(super) fn changes(
     _workspace_id: &str,
+    _root: &OwnedFd,
     _workspace: &Path,
     _baseline_root: &Path,
     _root_name: &str,

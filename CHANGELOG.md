@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+
+- The Git change-set observation reads only the admitted workspace: every byte it returns comes
+  from a file beneath the workspace's root or from the baseline the daemon holds, the workspace's
+  own repository metadata decides neither which directory is read nor how an entry is read, and
+  the per-file byte bound holds for every file the reader opens.
+
 ## [0.23.0] — 2026-11-21
 
 ### Added

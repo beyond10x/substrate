@@ -50,6 +50,10 @@ Substrate publishes a bounded baseline-file read and a path-sorted bounded Git c
 observation computed against the exact materialized commit kept in host-private metadata. Tree and
 current-file reads remain lazy and paged. The observation
 does not disclose `.git`, Connector authority, remote credentials, or remote URL userinfo.
+Every byte the change-set observation returns comes from a file beneath the admitted workspace's
+root or from the baseline the daemon holds: the workspace's own repository metadata decides
+neither which directory is read nor how an entry is read, and the per-file byte bound holds for
+every file the reader opens.
 
 ## Refusals
 
