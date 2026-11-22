@@ -81,14 +81,18 @@ baseline from this store and open nothing beneath the workspace's `.git/objects`
   written once and never grows. A Git workspace under a project quota therefore holds at most
   twice its byte limit on disk; in the three measurements above the store adds 10 % to 30 % to
   the files.
-- **Removal.** Destroying or forgetting a workspace removes its commit-id file and its store,
-  whether or not a Git source is configured, and in the build without the `git` feature too. At
-  start, whenever `.substrate-git-baselines` exists, the driver removes every entry in it that is
-  neither the commit-id file nor the store of a workspace directory that exists; a staging
-  directory left by an interrupted write is such an entry.
+- **Removal.** Wherever the driver removes a workspace's commit-id file, it removes the store
+  with it, in the build without the `git` feature too; a failed create removes both even when
+  its staging directory could not be removed. At start the driver removes every entry of
+  `.substrate-git-baselines` that is neither the commit-id file nor the store of a workspace
+  directory that exists; a staging directory left by an interrupted write is such an entry.
+  Design 23 holds unchanged: a driver with no Git source configured neither reads nor removes
+  anything in `.substrate-git-baselines`, at start or at destroy. A Git workspace destroyed by
+  such a driver therefore leaves its commit-id file and its store, up to the byte bound above,
+  until a start with a Git source configured removes them.
 
 **A workspace materialized before the store existed** has a commit-id file and no store. The first
-observation that finds no store builds it. One build runs at a time in a driver; an observation
+observation that finds no store builds it. One build runs at a time in a daemon; an observation
 that needs one waits for its turn.
 
 1. It copies the workspace's `.git/objects` into a staging directory inside
@@ -101,7 +105,8 @@ that needs one waits for its turn.
    it has one, else 2 GiB.
 2. It opens the copy, not the workspace, and writes the store from it as a materialization does:
    each object by its id, checked. An object of the baseline whose header states a size over the
-   copy's bound is not read.
+   copy's bound is not read and ends the attempt `workspace.git-storage-limit`; a create checks
+   the same against its byte limit.
 3. It removes the copy, whatever the outcome.
 
 When an object is absent or fails its check, no store is kept and the observation is refused
@@ -114,7 +119,7 @@ the same way.
 What a build costs and does not bound:
 
 - While it runs, the workspace, the copy and the store exist together; the copy and the store
-  are outside every quota. One build at a time holds that to one copy per driver.
+  are outside every quota. One build at a time holds that to one copy per daemon.
 - The Git library reads each object of the copy to the size its header states, and an object
   the baseline's objects are stored against is read without the check of step 2. The reader this
   section replaces read the workspace's object store the same way in every observation; a build

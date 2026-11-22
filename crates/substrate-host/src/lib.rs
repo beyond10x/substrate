@@ -29,6 +29,9 @@ mod git;
 #[cfg(all(target_os = "linux", not(feature = "git")))]
 #[path = "git_unserved.rs"]
 mod git;
+// Where the baseline of a Git workspace is kept and how it goes, with and without `git`.
+#[cfg(target_os = "linux")]
+mod git_baselines;
 pub mod host_process;
 mod observation;
 // Which bytes of a bounded output stream a run keeps (design 29). Published through `confinement`,
@@ -1090,6 +1093,16 @@ fn workspace_destroy_roots() -> &'static Mutex<HashSet<WorkspaceDestroyKey>> {
     ROOTS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// The byte bound of the copy a baseline store is built from for the workspace at `workspace`:
+/// the limit of its project quota where it has one, else the limit of a Git create that
+/// requests none (design 21, § *The baseline store*).
+#[cfg(target_os = "linux")]
+fn copy_bound(quotas: Option<&quota::ProjectQuotas>, workspace: &Path) -> u64 {
+    quotas
+        .and_then(|quotas| quotas.byte_limit(workspace))
+        .unwrap_or(git_baselines::DEFAULT_BYTE_LIMIT)
+}
+
 #[cfg(target_os = "linux")]
 /// An uninstalled Git tree owns its quota until cleanup proves physical absence and zero usage.
 /// A blocking materialization worker retains this guard after its async caller is cancelled.
@@ -1539,6 +1552,10 @@ impl Driver for HostDriver {
         let substrate_wire::WorkspaceSource::Git(source) = &input.source else {
             return self.create_workspace(id, root_name, input).await;
         };
+        // The root name becomes a directory and the name of both baseline entries.
+        if let Err(error) = fs::validate_root_name(root_name) {
+            return DispatchOutcome::NotDispatched(error);
+        }
         // A build without the `git` feature serves no source, whatever the configuration binds.
         let Some(binding) = self
             .config
@@ -1592,7 +1609,11 @@ impl Driver for HostDriver {
         let interrupt = cancellation.flag();
         let result = self
             .filesystem_io(move |_| {
-                if install_target.exists() {
+                // Before anything is fetched or written: a root name that has a directory, a
+                // commit-id file or a store is another workspace's.
+                if install_target.exists()
+                    || git_baselines::present(&git_baseline_root, &root_name)?
+                {
                     return Err(DriverError::refused(
                         "workspace.git-target-exists",
                         "The workspace target already exists.",
@@ -1612,9 +1633,11 @@ impl Driver for HostDriver {
                     directory: Some(temporary),
                     quotas,
                 };
+                // Whether this create wrote the baseline: only then is it this create's to remove.
+                let mut baseline_written = false;
                 let result = (|| {
                     let limit = requested_storage.unwrap_or(substrate_wire::StorageLimit {
-                        max_bytes: 2 * 1024 * 1024 * 1024,
+                        max_bytes: git_baselines::DEFAULT_BYTE_LIMIT,
                         max_inodes: 200_000,
                     });
                     if let Some(quotas) = staging.quotas.as_ref() {
@@ -1629,7 +1652,14 @@ impl Driver for HostDriver {
                         limit,
                         &interrupt,
                     )?;
-                    git::write_baseline(&git_baseline_root, &root_name, &git_source.commit)?;
+                    git::write_baseline(
+                        &git_baseline_root,
+                        &root_name,
+                        staging.path(),
+                        &git_source.commit,
+                        limit.max_bytes,
+                    )?;
+                    baseline_written = true;
                     if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
                         return Err(DriverError::failed(
                             "workspace.git-fetch-cancelled",
@@ -1671,8 +1701,12 @@ impl Driver for HostDriver {
                     })
                 })();
                 if result.is_err() && staging.directory.is_some() {
-                    staging.cleanup()?;
-                    git::remove_baseline(&git_baseline_root, &root_name)?;
+                    // The baseline goes whether or not the staging tree could be removed.
+                    let staged = staging.cleanup();
+                    if baseline_written {
+                        git::remove_baseline(&git_baseline_root, &root_name)?;
+                    }
+                    staged?;
                 }
                 result
             })
@@ -1820,12 +1854,18 @@ impl Driver for HostDriver {
         let path = path.to_owned();
         let workspace = self.workspace_path(&root_name)?;
         let baseline_root = self.config.git_baseline_root();
-        self.filesystem_io(move |_| {
+        let quotas = self.quotas.clone();
+        self.filesystem_io(move |filesystem| {
+            let root = filesystem.root_descriptor()?;
             git::baseline_file(
-                &workspace_id,
-                &workspace,
-                &baseline_root,
-                &root_name,
+                &git_baselines::GitWorkspace {
+                    id: &workspace_id,
+                    root: &root,
+                    path: &workspace,
+                    baseline_root: &baseline_root,
+                    root_name: &root_name,
+                    copy_bound: &|| copy_bound(quotas.as_deref(), &workspace),
+                },
                 &path,
                 max_bytes,
             )
@@ -1850,14 +1890,19 @@ impl Driver for HostDriver {
         let root_name = root_name.to_owned();
         let workspace = self.workspace_path(&root_name)?;
         let baseline_root = self.config.git_baseline_root();
+        let quotas = self.quotas.clone();
         let query = *query;
         self.filesystem_io(move |filesystem| {
+            let root = filesystem.root_descriptor()?;
             git::changes(
-                &workspace_id,
-                &filesystem.root_descriptor()?,
-                &workspace,
-                &baseline_root,
-                &root_name,
+                &git_baselines::GitWorkspace {
+                    id: &workspace_id,
+                    root: &root,
+                    path: &workspace,
+                    baseline_root: &baseline_root,
+                    root_name: &root_name,
+                    copy_bound: &|| copy_bound(quotas.as_deref(), &workspace),
+                },
                 query,
             )
         })

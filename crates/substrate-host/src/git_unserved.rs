@@ -4,12 +4,13 @@
 //! Every entry point the driver calls in `git.rs` is here with the same signature. The probe
 //! proves no Git mechanism, so no `workspace.git` fact is published, and the driver refuses every
 //! Git source `workspace.git-source-unserved` before dispatch ([`SERVED`]). What it reaches after
-//! that refusal answers the same refusal; what tidies Git state does nothing, because this
-//! build writes no Git workspace and no materialization baseline, except that a baseline an
-//! earlier build with `git` wrote is still removed with its workspace. Invariant 3: a missing
-//! mechanism is a named refusal, never a degraded Git workspace.
+//! that refusal answers the same refusal. This build writes no Git workspace, no commit-id file
+//! and no baseline store, and removes no staging tree beside the workspaces. What an earlier
+//! build with `git` wrote in the baseline root still goes as in that build (`git_baselines.rs`),
+//! wherever the driver asks for it: with its workspace, and at the start of a driver with a Git
+//! source configured when it belongs to no workspace directory that exists.
+//! Invariant 3: a missing mechanism is a named refusal, never a degraded Git workspace.
 
-use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -19,6 +20,7 @@ use substrate_wire::{
 };
 use zeroize::Zeroizing;
 
+use crate::git_baselines::GitWorkspace;
 use crate::{DriverError, GitSourceBinding};
 
 /// Whether this build serves a Git source at all; `git.rs` holds `true`.
@@ -62,44 +64,31 @@ pub(super) fn mechanism_is_provable(_workspace_root: &Path) -> bool {
     false
 }
 
-#[allow(clippy::unnecessary_wraps)] // The signature is `git.rs`'s, which can fail.
-pub(super) fn reconcile(_workspace_root: &Path, _baseline_root: &Path) -> Result<(), DriverError> {
-    Ok(())
+/// The start rule of the baseline root, as `git.rs` applies it. The staging trees of Git
+/// creates beside the workspaces are left: this build makes none.
+pub(super) fn reconcile(workspace_root: &Path, baseline_root: &Path) -> Result<(), DriverError> {
+    crate::git_baselines::reconcile(workspace_root, baseline_root)
 }
 
 pub(super) fn write_baseline(
     _baseline_root: &Path,
     _root_name: &str,
+    _repository: &Path,
     _commit: &str,
+    _max_bytes: u64,
 ) -> Result<(), DriverError> {
     Err(source_unserved())
 }
 
-/// Removes a baseline a build with `git` wrote, as `git.rs` does: forgetting or destroying a
-/// workspace removes its baseline whichever build does it, so a later build with `git` never reads
-/// a same-named workspace as materialized from Git.
+/// Removes the commit-id file and the store a build with `git` wrote, as `git.rs` does:
+/// forgetting or destroying a workspace removes both whichever build does it, so a later build
+/// with `git` never reads a same-named workspace as materialized from Git.
 pub(super) fn remove_baseline(baseline_root: &Path, root_name: &str) -> Result<(), DriverError> {
-    match std::fs::remove_file(baseline_root.join(root_name)) {
-        Ok(()) => std::fs::File::open(baseline_root)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| removal_failed()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(removal_failed()),
-    }
-}
-
-fn removal_failed() -> DriverError {
-    DriverError::failed(
-        "workspace.git-baseline-remove-failed",
-        "Git workspace materialization failed.",
-    )
+    crate::git_baselines::remove(baseline_root, root_name)
 }
 
 pub(super) fn baseline_file(
-    _workspace_id: &str,
-    _workspace: &Path,
-    _baseline_root: &Path,
-    _root_name: &str,
+    _workspace: &GitWorkspace<'_>,
     _path: &str,
     _max_bytes: u64,
 ) -> Result<GitBaselineFileResult, DriverError> {
@@ -107,11 +96,7 @@ pub(super) fn baseline_file(
 }
 
 pub(super) fn changes(
-    _workspace_id: &str,
-    _root: &OwnedFd,
-    _workspace: &Path,
-    _baseline_root: &Path,
-    _root_name: &str,
+    _workspace: &GitWorkspace<'_>,
     _query: GitChangesQuery,
 ) -> Result<GitChangeSet, DriverError> {
     Err(source_unserved())

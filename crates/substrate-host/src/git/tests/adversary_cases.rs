@@ -9,9 +9,10 @@ use substrate_wire::{GitChangeStatus, GitChangesQuery, MAX_IO_BYTES};
 
 use super::super::{COMPARISON_BUDGET, changes, changes_within};
 use super::{
-    baseline_object, baseline_root, commit_paths, observe, paths, source_repository,
-    workspaces_root,
+    baseline_object, baseline_root, commit_paths, observe, paths, remove_store, source_repository,
+    store_of, target,
 };
+use crate::git_baselines::DEFAULT_BYTE_LIMIT;
 
 /// An instant long before any index of a test is written.
 fn earlier() -> SystemTime {
@@ -46,7 +47,7 @@ fn stage_readme(workspace: &Path) {
 #[test]
 fn a_tracked_file_whose_bytes_differ_from_the_baseline_is_reported_whatever_time_it_carries() {
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     let file = workspace.path().join("README.md");
     set_modified(&file, earlier());
     stage_readme(workspace.path());
@@ -65,7 +66,7 @@ fn a_tracked_file_whose_bytes_differ_from_the_baseline_is_reported_whatever_time
 #[test]
 fn a_tracked_file_as_old_as_the_index_is_read_and_compared() {
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     let file = workspace.path().join("README.md");
     set_modified(&file, earlier());
     stage_readme(workspace.path());
@@ -82,7 +83,7 @@ fn a_tracked_file_as_old_as_the_index_is_read_and_compared() {
 fn a_changed_tracked_file_is_reported_whatever_flags_its_index_entry_carries() {
     const ASSUMED_UNCHANGED: u16 = 0x8000;
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     {
         let repository = Repository::open(workspace.path()).expect("repository");
         let mut index = repository.index().expect("index");
@@ -119,7 +120,7 @@ fn an_untouched_tracked_file_over_the_per_file_bound_is_not_reported() {
         "wide line\n".repeat(512).as_bytes(),
     );
     let commit = commit_paths(workspace.path(), first, &["big.txt"]);
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
 
     let observed = observe(workspace.path(), baselines.path(), 1024).expect("change set");
     assert!(paths(&observed).is_empty(), "{observed:#?}");
@@ -129,7 +130,7 @@ fn an_untouched_tracked_file_over_the_per_file_bound_is_not_reported() {
 #[test]
 fn a_path_the_index_records_only_in_conflict_stages_is_reported_as_conflicted() {
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     {
         let repository = Repository::open(workspace.path()).expect("repository");
         let mut index = repository.index().expect("index");
@@ -158,7 +159,7 @@ fn a_path_the_index_records_only_in_conflict_stages_is_reported_as_conflicted() 
 #[test]
 fn ignore_rules_decide_as_git_decides() {
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     let root = workspace.path();
     write(
         root,
@@ -225,7 +226,7 @@ fn ignore_rules_decide_as_git_decides() {
 #[test]
 fn an_ignore_file_with_a_byte_order_mark_gives_every_rule_it_holds() {
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     let root = workspace.path();
     write(root, ".gitignore", b"\xef\xbb\xbffirst.tmp\nsecond.tmp\n");
     for path in ["first.tmp", "second.tmp", "third.tmp"] {
@@ -244,7 +245,7 @@ fn an_ignore_file_with_a_byte_order_mark_gives_every_rule_it_holds() {
 #[test]
 fn directories_that_hold_no_file_do_not_fail_the_observation() {
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     let root = workspace.path();
     std::fs::create_dir_all(root.join(["d"; 70].join("/"))).expect("nested directories");
     write(root, "own.txt", b"own\n");
@@ -258,24 +259,22 @@ fn directories_that_hold_no_file_do_not_fail_the_observation() {
 #[test]
 fn the_file_and_total_byte_bounds_cut_the_answer_and_mark_it_truncated() {
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     let root = workspace.path();
     for path in ["c.txt", "a.txt", "b.txt"] {
         write(root, path, "line\n".repeat(100).as_bytes());
     }
 
-    let observed = changes(
-        "ws_git",
-        &workspaces_root(root),
-        root,
-        baselines.path(),
-        "ws_git",
-        GitChangesQuery {
-            max_files: 2,
-            max_file_bytes: 1024,
-            max_total_bytes: 1000,
-        },
-    )
+    let observed = target(root, baselines.path(), DEFAULT_BYTE_LIMIT, |held| {
+        changes(
+            held,
+            GitChangesQuery {
+                max_files: 2,
+                max_file_bytes: 1024,
+                max_total_bytes: 1000,
+            },
+        )
+    })
     .expect("change set");
     assert_eq!(paths(&observed), ["a.txt", "b.txt"], "{observed:#?}");
     assert!(observed.truncated, "{observed:#?}");
@@ -298,7 +297,7 @@ fn the_file_and_total_byte_bounds_cut_the_answer_and_mark_it_truncated() {
 fn the_observation_answers_when_worktree_entries_are_not_regular_files() {
     use std::os::unix::fs::OpenOptionsExt as _;
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     let root = workspace.path().to_owned();
     let entries = [
         root.join("README.md"),
@@ -344,36 +343,39 @@ fn the_observation_answers_when_worktree_entries_are_not_regular_files() {
 }
 
 /// A size the reader reports for a baseline entry is the size of an object that was read whole
-/// and checked against its id, also when the object store holds only directories and regular
-/// files.
+/// and checked against its id: the object in the driver's store, whatever regular file the
+/// workspace's object store holds in its place. No store is built from an object that is not
+/// what its id names.
 #[test]
-fn a_baseline_size_comes_only_from_a_checked_object_of_a_plain_store() {
+fn a_baseline_size_comes_only_from_a_checked_object_of_the_store_the_driver_holds() {
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     let object = baseline_object(workspace.path(), commit);
     std::fs::remove_file(&object).expect("object removed");
     std::fs::write(&object, [0xb7, 0x55, 0x00, 0x00]).expect("other bytes in the object's place");
     std::fs::remove_file(workspace.path().join("README.md")).expect("tracked file removed");
 
-    match observe(workspace.path(), baselines.path(), 16) {
-        Ok(observed) => {
-            let sizes: Vec<u64> = observed
-                .items
-                .iter()
-                .filter_map(|item| item.baseline.as_ref())
-                .map(|side| side.size)
-                .collect();
-            assert_eq!(sizes, [22], "{observed:#?}");
-        }
-        Err(error) => assert_eq!(error.code, "workspace.git-baseline-read-failed"),
-    }
+    let observed = observe(workspace.path(), baselines.path(), 16).expect("change set");
+    let sizes: Vec<u64> = observed
+        .items
+        .iter()
+        .filter_map(|item| item.baseline.as_ref())
+        .map(|side| side.size)
+        .collect();
+    assert_eq!(sizes, [22], "{observed:#?}");
+
+    remove_store(baselines.path());
+    let error = observe(workspace.path(), baselines.path(), 16)
+        .expect_err("an object that is not what its id names");
+    assert_eq!(error.code, "workspace.git-baseline-missing");
+    assert!(!store_of(baselines.path()).exists());
 }
 
 /// A rule that the bound on an ignore file cuts does not apply in part.
 #[test]
 fn a_rule_the_ignore_bound_cuts_does_not_apply() {
     let (workspace, commit) = source_repository();
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     let root = workspace.path();
     // The bound falls directly after the first five bytes of the last line.
     let before_rule = usize::try_from(MAX_IO_BYTES).expect("bound fits usize") - 5;
@@ -404,22 +406,20 @@ fn a_baseline_object_the_budget_does_not_cover_ends_the_answer_and_marks_it() {
     let root = workspace.path();
     write(root, "a.txt", "line\n".repeat(20).as_bytes());
     let commit = commit_paths(root, first, &["a.txt"]);
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     write(root, "a.txt", "LINE\n".repeat(20).as_bytes());
     let within = |budget: u64| {
-        changes_within(
-            "ws_git",
-            &workspaces_root(root),
-            root,
-            baselines.path(),
-            "ws_git",
-            GitChangesQuery {
-                max_files: 100,
-                max_file_bytes: 1024,
-                max_total_bytes: 1024 * 1024,
-            },
-            budget,
-        )
+        target(root, baselines.path(), DEFAULT_BYTE_LIMIT, |held| {
+            changes_within(
+                held,
+                GitChangesQuery {
+                    max_files: 100,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 1024 * 1024,
+                },
+                budget,
+            )
+        })
         .expect("change set")
     };
 
@@ -440,7 +440,7 @@ fn a_tracked_file_too_large_to_compare_does_not_hide_the_paths_after_it() {
     let root = workspace.path();
     write(root, "b.txt", b"tracked\n");
     let commit = commit_paths(root, first, &["b.txt"]);
-    let baselines = baseline_root(commit);
+    let baselines = baseline_root(workspace.path(), commit);
     std::fs::File::options()
         .write(true)
         .open(root.join("README.md"))

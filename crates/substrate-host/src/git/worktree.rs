@@ -1,4 +1,5 @@
-//! The worktree side of the Git changes observation, and the check of the object store.
+//! The worktree side of the Git changes observation, and the copy of a workspace's object store
+//! that a baseline store is built from.
 //!
 //! Every entry is observed and read beneath the pinned workspace directory with the guarded file
 //! system: `openat2` beneath that directory, no link followed, no open that waits. Nothing the
@@ -7,10 +8,11 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
+use std::path::Path;
 
 use git2::{ObjectType, Oid};
 use gix::bstr::{BStr, ByteSlice as _};
@@ -19,7 +21,7 @@ use gix::glob::{Pattern, wildmatch};
 use substrate_guarded::fs as guarded;
 use substrate_wire::MAX_IO_BYTES;
 
-use super::failed;
+use super::{failed, storage_limit};
 use crate::{DriverError, DriverErrorClass};
 
 pub(super) const FILE: u32 = 0o100_644;
@@ -28,8 +30,8 @@ pub(super) const LINK: u32 = 0o120_000;
 
 /// Directories nested deeper than this beneath the workspace root are not entered.
 const MAX_WALK_DEPTH: usize = 100;
-/// An object store with more entries than this is not handed to the Git library.
-const MAX_STORE_ENTRIES: usize = 262_144;
+/// An object store with more entries than this is not copied.
+pub(super) const MAX_STORE_ENTRIES: usize = 262_144;
 /// Directories nested deeper than this beneath the object store are refused.
 const MAX_STORE_DEPTH: usize = 8;
 
@@ -307,47 +309,114 @@ impl Walk<'_> {
     }
 }
 
-/// Whether the object store at `objects` holds only what the Git library may open by path:
-/// directories and regular files, no `info/alternates`, within the entry and depth bounds.
-pub(super) fn store_is_plain(objects: &OwnedFd) -> Result<bool, DriverError> {
-    let mut entries_left = MAX_STORE_ENTRIES;
-    plain(objects, "", 0, &mut entries_left)
+/// Copies the object store at `objects`, a directory beneath the pinned workspace, into the
+/// directory `target`, which the driver owns. The Git library is then pointed at the copy and
+/// never at the workspace.
+///
+/// Every entry is opened beneath `objects` without following a link. A file is opened for
+/// reading only once it is known to be a regular file, without waiting, and is copied with
+/// plain reads.
+///
+/// # Errors
+///
+/// `workspace.git-repository-failed` for an entry that is neither a directory nor a regular
+/// file, a link among them, for an `info/alternates` file, for directories nested deeper than
+/// [`MAX_STORE_DEPTH`] and for more than `max_entries` entries. `workspace.git-storage-limit`
+/// for more than `max_bytes` bytes.
+pub(super) fn copy_store(
+    objects: &OwnedFd,
+    target: &Path,
+    max_entries: usize,
+    max_bytes: u64,
+) -> Result<(), DriverError> {
+    let mut copy = StoreCopy {
+        entries_left: max_entries,
+        bytes_left: max_bytes,
+        buffer: vec![0; 64 * 1024],
+    };
+    copy.directory(objects, target, "", 0)
 }
 
-fn plain(
-    directory: &OwnedFd,
-    prefix: &str,
-    level: usize,
-    entries_left: &mut usize,
-) -> Result<bool, DriverError> {
-    // The entry bound is applied while the directory is listed: no listing is held whole.
-    let listing = std::fs::read_dir(descriptor_path(directory))
-        .map_err(|_| failed("workspace.git-diff-failed"))?;
-    for entry in listing {
-        let Some(left) = entries_left.checked_sub(1) else {
-            return Ok(false);
-        };
-        *entries_left = left;
-        let (name, kind) = entry
-            .and_then(|entry| Ok((entry.file_name(), entry.file_type()?)))
-            .map_err(|_| failed("workspace.git-diff-failed"))?;
-        if kind.is_dir() {
-            let Some(name) = name.to_str() else {
-                return Ok(false);
-            };
-            let Some(child) = open_directory(directory, name)? else {
-                return Ok(false);
-            };
-            if level == MAX_STORE_DEPTH
-                || !plain(&child, &format!("{prefix}{name}/"), level + 1, entries_left)?
-            {
-                return Ok(false);
+/// What is left of the bounds of one copy, and the bytes of the read in hand.
+struct StoreCopy {
+    entries_left: usize,
+    bytes_left: u64,
+    buffer: Vec<u8>,
+}
+
+impl StoreCopy {
+    /// Copies `directory`, which lies `level` directories beneath the object store at the path
+    /// `prefix`, into `target`.
+    fn directory(
+        &mut self,
+        directory: &OwnedFd,
+        target: &Path,
+        prefix: &str,
+        level: usize,
+    ) -> Result<(), DriverError> {
+        // The entry bound is applied while the directory is listed: no listing is held whole.
+        let listing = std::fs::read_dir(descriptor_path(directory)).map_err(|_| not_plain())?;
+        for entry in listing {
+            self.entries_left = self.entries_left.checked_sub(1).ok_or_else(not_plain)?;
+            let (name, kind) = entry
+                .and_then(|entry| Ok((entry.file_name(), entry.file_type()?)))
+                .map_err(|_| not_plain())?;
+            let name = name.to_str().ok_or_else(not_plain)?;
+            let copied = target.join(name);
+            if kind.is_dir() {
+                if level == MAX_STORE_DEPTH {
+                    return Err(not_plain());
+                }
+                let child = open_directory(directory, name)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(not_plain)?;
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&copied)
+                    .map_err(|_| failed("workspace.git-baseline-write-failed"))?;
+                self.directory(&child, &copied, &format!("{prefix}{name}/"), level + 1)?;
+            } else if kind.is_file() && !(prefix == "info/" && name == "alternates") {
+                self.file(directory, name, &copied)?;
+            } else {
+                return Err(not_plain());
             }
-        } else if !kind.is_file() || (prefix == "info/" && name == "alternates") {
-            return Ok(false);
+        }
+        Ok(())
+    }
+
+    /// Copies the regular file `name` of `directory` to `copied`, with plain reads.
+    fn file(&mut self, directory: &OwnedFd, name: &str, copied: &Path) -> Result<(), DriverError> {
+        let (mut file, _) = regular(directory, name)
+            .ok()
+            .flatten()
+            .ok_or_else(not_plain)?;
+        let mut copy = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(copied)
+            .map_err(|_| failed("workspace.git-baseline-write-failed"))?;
+        loop {
+            let read = match file.read(&mut self.buffer) {
+                Ok(0) => return Ok(()),
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(not_plain()),
+            };
+            self.bytes_left = u64::try_from(read)
+                .ok()
+                .and_then(|read| self.bytes_left.checked_sub(read))
+                .ok_or_else(storage_limit)?;
+            copy.write_all(&self.buffer[..read])
+                .map_err(|_| failed("workspace.git-baseline-write-failed"))?;
         }
     }
-    Ok(true)
+}
+
+/// The refusal of an object store no store is built from.
+fn not_plain() -> DriverError {
+    failed("workspace.git-repository-failed")
 }
 
 /// The names in `directory` and what kind of entry each is, in byte order.
