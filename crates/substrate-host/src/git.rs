@@ -426,9 +426,10 @@ pub(super) fn changes(
     )
 }
 
-/// [`changes`] with `budget` bytes to hash. Paths are compared and listed in byte order; when
-/// the budget is spent, every path from the first one not compared on is left out and the
-/// answer is marked truncated.
+/// [`changes`] with `budget` bytes to hash. Paths are compared and listed in byte order. A
+/// tracked file larger than what is left of the budget is reported as modified without being
+/// read; a baseline object larger than what is left ends the answer. Either marks the answer
+/// truncated.
 fn changes_within(
     workspace_id: &str,
     root: &OwnedFd,
@@ -447,12 +448,11 @@ fn changes_within(
         .ok_or_else(|| failed("workspace.git-repository-failed"))?;
     let store = object_store(&objects).map_err(|_| failed("workspace.git-repository-failed"))?;
     let (baseline, links) = baseline_entries(&store, oid)?;
-    let labels = Labels::read(&workspace)?;
-    // A file or link of the baseline or the index is compared below. A path recorded as another
-    // repository's commit is neither listed nor entered.
+    let labels = Labels::read(&workspace, &links)?;
+    // A file or link of the baseline or the index is compared below. A path the baseline
+    // records as another repository's commit is neither listed nor entered.
     let claimed = |path: &str, is_directory: bool| {
         links.contains(path)
-            || labels.links.contains(path)
             || (!is_directory
                 && (baseline.contains_key(path)
                     || labels.staged.contains(path)
@@ -497,6 +497,7 @@ fn changes_within(
         memory: &memory,
         bound: query.max_file_bytes,
         budget,
+        uncompared: false,
         patch_bytes_left: query.max_total_bytes,
     };
     let item_limit = usize::try_from(query.max_files).expect("public list bound fits usize");
@@ -505,7 +506,10 @@ fn changes_within(
         workspace: workspace_id.to_owned(),
         commit,
         returned_bytes: query.max_total_bytes - reader.patch_bytes_left,
-        truncated: cut || untracked.truncated || items.iter().any(|item| item.patch.truncated),
+        truncated: cut
+            || reader.uncompared
+            || untracked.truncated
+            || items.iter().any(|item| item.patch.truncated),
         items,
         observed_at: Utc::now(),
     })
@@ -530,22 +534,21 @@ impl Entry {
     }
 }
 
-/// How the workspace's index labels paths. It never says whether a path changed, which
-/// directory is read or how an entry is read.
+/// How the workspace's index labels paths. It never says whether a path changed or is listed,
+/// which directory is read or how an entry is read.
 #[derive(Default)]
 struct Labels {
-    /// Paths the index records as files or links: absent from the baseline, such a path is
-    /// added, not untracked.
+    /// Paths the index records: absent from the baseline, such a path is added, not untracked.
     staged: BTreeSet<String>,
     /// Paths the index records in conflict stages.
     conflicted: BTreeSet<String>,
-    /// Paths recorded as another repository's commit: neither compared nor entered.
-    links: BTreeSet<String>,
 }
 
 impl Labels {
     /// Reads `.git/index` beneath the pinned workspace; a workspace without one labels nothing.
-    fn read(workspace: &OwnedFd) -> Result<Self, DriverError> {
+    /// `links` are the paths the baseline records as another repository's commit: an index
+    /// entry of that kind labels nothing there, and labels like any other entry elsewhere.
+    fn read(workspace: &OwnedFd, links: &BTreeSet<String>) -> Result<Self, DriverError> {
         let mut labels = Self::default();
         let Some(file) = worktree::open(workspace, ".git/index")? else {
             return Ok(labels);
@@ -560,9 +563,7 @@ impl Labels {
                 .map_err(|_| failed("workspace.git-path-unrepresentable"))?;
             if entry.flags & 0x3000 != 0 {
                 labels.conflicted.insert(path);
-            } else if entry.mode == SUBMODULE {
-                labels.links.insert(path);
-            } else {
+            } else if entry.mode != SUBMODULE || !links.contains(&path) {
                 labels.staged.insert(path);
             }
         }
@@ -627,6 +628,9 @@ struct Change {
     current: Option<worktree::Observed>,
     /// The object id of the current content, when comparing the path hashed it.
     hashed: Option<Oid>,
+    /// The current content is larger than what was left to hash: it was not read and is not
+    /// read for a patch.
+    uncompared: bool,
 }
 
 /// One side of a change. `bytes` is `None` for a side larger than the per-file bound, whose
@@ -639,8 +643,9 @@ struct Side {
 /// Compares and reads the two sides of a path: the baseline's objects in `store`, and the files
 /// beneath the pinned `workspace`. `scratch` is a repository in memory, backed by `memory`,
 /// that holds the bytes of one change while its patch is rendered. `bound` is the per-file
-/// bound on text, `budget` what is left to hash in this observation, and `patch_bytes_left`
-/// what is left of the bound on all patches together.
+/// bound on text, `budget` what is left to hash in this observation, `uncompared` whether a
+/// path was too large for it, and `patch_bytes_left` what is left of the bound on all patches
+/// together.
 struct Reader<'a> {
     workspace: &'a OwnedFd,
     store: &'a git2::Repository,
@@ -648,14 +653,15 @@ struct Reader<'a> {
     memory: &'a git2::Mempack<'a>,
     bound: u64,
     budget: u64,
+    uncompared: bool,
     patch_bytes_left: u64,
 }
 
 impl Reader<'_> {
     /// The items of the answer for `candidates`, which are in byte order and of which an
     /// untracked one carries what the walk observed, and whether the answer ends before the
-    /// last of them: at a path that was not compared, at one past `item_limit`, or at one
-    /// whose baseline object the budget no longer covers.
+    /// last of them: at a change past `item_limit`, or at one whose baseline object the budget
+    /// no longer covers.
     fn answer(
         &mut self,
         candidates: Vec<(&str, Option<worktree::Observed>)>,
@@ -666,19 +672,23 @@ impl Reader<'_> {
         let mut items = Vec::new();
         for (path, observed) in candidates {
             let change = if let Some(observed) = observed {
-                Some(Change {
+                Change {
                     status: Some(GitChangeStatus::Untracked),
                     baseline: None,
                     current: Some(observed),
                     hashed: None,
-                })
+                    uncompared: false,
+                }
             } else {
                 self.compare(path, baseline.get(path).copied(), labels)?
             };
-            let item = match change {
-                Some(change) if change.status.is_none() => continue,
-                Some(change) if items.len() < item_limit => self.item(path, &change)?,
-                _ => None,
+            if change.status.is_none() {
+                continue;
+            }
+            let item = if items.len() < item_limit {
+                self.item(path, &change)?
+            } else {
+                None
             };
             let Some(item) = item else {
                 return Ok((items, true));
@@ -689,19 +699,21 @@ impl Reader<'_> {
     }
 
     /// Compares the path of the baseline or the index with what is beneath the workspace root.
-    /// `None` is a path that was not compared because the budget is spent.
     ///
     /// A file or link of the baseline is unchanged only when the hash of its content is the
-    /// baseline's object id and its mode agrees. The index decides a label only: added for a
-    /// path the baseline does not hold, conflicted for a path it records in conflict stages.
+    /// baseline's object id and its mode agrees. One larger than what is left of the budget is
+    /// not read: it is reported as modified and the reader records that it was not compared.
+    /// The index decides a label only: added for a path the baseline does not hold, conflicted
+    /// for a path it records in conflict stages.
     fn compare(
         &mut self,
         path: &str,
         before: Option<Entry>,
         labels: &Labels,
-    ) -> Result<Option<Change>, DriverError> {
+    ) -> Result<Change, DriverError> {
         let current = worktree::observe(self.workspace, path)?;
         let mut hashed = None;
+        let mut uncompared = false;
         let status = if labels.conflicted.contains(path) {
             (before.is_some() || current.is_some()).then_some(GitChangeStatus::Conflicted)
         } else {
@@ -722,7 +734,11 @@ impl Reader<'_> {
                 }
                 (Some(before), Some(current)) => {
                     match worktree::blob_id(self.workspace, path, current, &mut self.budget)? {
-                        worktree::Hashed::OverBudget => return Ok(None),
+                        worktree::Hashed::OverBudget => {
+                            uncompared = true;
+                            self.uncompared = true;
+                            Some(GitChangeStatus::Modified)
+                        }
                         worktree::Hashed::Id(id) if id == before.id => None,
                         worktree::Hashed::Id(id) => {
                             hashed = Some(id);
@@ -733,17 +749,19 @@ impl Reader<'_> {
                 }
             }
         };
-        Ok(Some(Change {
+        Ok(Change {
             status,
             baseline: before,
             current,
             hashed,
-        }))
+            uncompared,
+        })
     }
 
     /// The change as the wire names it, with Git's patch while the patches rendered so far fit
-    /// the bound on all of them. A side over the per-file bound has no text. `None` is a change
-    /// whose baseline object the budget no longer covers.
+    /// the bound on all of them. A side over the per-file bound, and a current side that was
+    /// not compared, has no text. `None` is a change whose baseline object the budget no longer
+    /// covers.
     fn item(&mut self, path: &str, change: &Change) -> Result<Option<GitChange>, DriverError> {
         let Some(status) = change.status else {
             return Ok(None);
@@ -759,7 +777,7 @@ impl Reader<'_> {
         };
         let current = change
             .current
-            .map(|observed| self.current_side(path, observed, change.hashed))
+            .map(|observed| self.current_side(path, observed, change))
             .transpose()?;
         let mut diff = UnifiedDiff {
             text: String::new(),
@@ -829,17 +847,23 @@ impl Reader<'_> {
         }))
     }
 
+    /// The current side of a path. Its bytes are read when they are within the per-file bound
+    /// and the comparison did not find them too large to hash.
     fn current_side(
         &self,
         path: &str,
         observed: worktree::Observed,
-        hashed: Option<Oid>,
+        change: &Change,
     ) -> Result<Side, DriverError> {
-        let bytes = worktree::read(self.workspace, path, observed, self.bound)?;
+        let bytes = if change.uncompared {
+            None
+        } else {
+            worktree::read(self.workspace, path, observed, self.bound)?
+        };
         let oid = bytes
             .as_deref()
             .and_then(|bytes| Oid::hash_object(ObjectType::Blob, bytes).ok())
-            .or(hashed)
+            .or(change.hashed)
             .map(|id| id.to_string());
         let size = bytes.as_ref().map_or(observed.size, |bytes| {
             u64::try_from(bytes.len()).expect("file length fits u64")
@@ -1472,6 +1496,47 @@ mod tests {
                 .collect();
             assert_eq!(sizes, [22], "{observed:#?}");
         }
+    }
+
+    /// The index labels a path and removes none from the answer: a new file beneath the root
+    /// is listed whatever the index records at its path or at a directory above it.
+    #[test]
+    fn a_new_file_is_listed_whatever_the_index_records_at_its_path_or_above_it() {
+        let (workspace, commit) = source_repository();
+        let baselines = baseline_root(commit);
+        std::fs::create_dir(workspace.path().join("new")).expect("directory");
+        std::fs::write(workspace.path().join("new/file.txt"), b"new\n").expect("new file");
+        std::fs::write(workspace.path().join("other.txt"), b"other\n").expect("new file");
+        {
+            let repository = Repository::open(workspace.path()).expect("repository");
+            let mut index = repository.index().expect("index");
+            for path in ["new", "other.txt"] {
+                index
+                    .add(&git2::IndexEntry {
+                        ctime: git2::IndexTime::new(0, 0),
+                        mtime: git2::IndexTime::new(0, 0),
+                        dev: 0,
+                        ino: 0,
+                        mode: 0o160_000,
+                        uid: 0,
+                        gid: 0,
+                        file_size: 0,
+                        id: commit,
+                        flags: 0,
+                        flags_extended: 0,
+                        path: path.as_bytes().to_vec(),
+                    })
+                    .expect("index entry");
+            }
+            index.write().expect("write index");
+        }
+
+        let observed = observe(workspace.path(), baselines.path(), 1024).expect("change set");
+        assert_eq!(
+            paths(&observed),
+            ["new/file.txt", "other.txt"],
+            "{observed:#?}"
+        );
     }
 
     /// The baseline's objects are read only from the store beneath the workspace root.

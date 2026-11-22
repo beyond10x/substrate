@@ -320,11 +320,17 @@ fn plain(
     level: usize,
     entries_left: &mut usize,
 ) -> Result<bool, DriverError> {
-    for (name, kind) in entries(directory)? {
+    // The entry bound is applied while the directory is listed: no listing is held whole.
+    let listing = std::fs::read_dir(descriptor_path(directory))
+        .map_err(|_| failed("workspace.git-diff-failed"))?;
+    for entry in listing {
         let Some(left) = entries_left.checked_sub(1) else {
             return Ok(false);
         };
         *entries_left = left;
+        let (name, kind) = entry
+            .and_then(|entry| Ok((entry.file_name(), entry.file_type()?)))
+            .map_err(|_| failed("workspace.git-diff-failed"))?;
         if kind.is_dir() {
             let Some(name) = name.to_str() else {
                 return Ok(false);

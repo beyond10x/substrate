@@ -5,10 +5,13 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use git2::Repository;
-use substrate_wire::{GitChangeStatus, GitChangesQuery};
+use substrate_wire::{GitChangeStatus, GitChangesQuery, MAX_IO_BYTES};
 
-use super::super::changes;
-use super::{baseline_root, commit_paths, observe, paths, source_repository, workspaces_root};
+use super::super::{COMPARISON_BUDGET, changes, changes_within};
+use super::{
+    baseline_object, baseline_root, commit_paths, observe, paths, source_repository,
+    workspaces_root,
+};
 
 /// An instant long before any index of a test is written.
 fn earlier() -> SystemTime {
@@ -338,4 +341,124 @@ fn the_observation_answers_when_worktree_entries_are_not_regular_files() {
         outcome.expect("the observation waited on an entry that is not a regular file"),
         Ok(vec![("README.md".to_owned(), GitChangeStatus::Deleted)])
     );
+}
+
+/// A size the reader reports for a baseline entry is the size of an object that was read whole
+/// and checked against its id, also when the object store holds only directories and regular
+/// files.
+#[test]
+fn a_baseline_size_comes_only_from_a_checked_object_of_a_plain_store() {
+    let (workspace, commit) = source_repository();
+    let baselines = baseline_root(commit);
+    let object = baseline_object(workspace.path(), commit);
+    std::fs::remove_file(&object).expect("object removed");
+    std::fs::write(&object, [0xb7, 0x55, 0x00, 0x00]).expect("other bytes in the object's place");
+    std::fs::remove_file(workspace.path().join("README.md")).expect("tracked file removed");
+
+    match observe(workspace.path(), baselines.path(), 16) {
+        Ok(observed) => {
+            let sizes: Vec<u64> = observed
+                .items
+                .iter()
+                .filter_map(|item| item.baseline.as_ref())
+                .map(|side| side.size)
+                .collect();
+            assert_eq!(sizes, [22], "{observed:#?}");
+        }
+        Err(error) => assert_eq!(error.code, "workspace.git-baseline-read-failed"),
+    }
+}
+
+/// A rule that the bound on an ignore file cuts does not apply in part.
+#[test]
+fn a_rule_the_ignore_bound_cuts_does_not_apply() {
+    let (workspace, commit) = source_repository();
+    let baselines = baseline_root(commit);
+    let root = workspace.path();
+    // The bound falls directly after the first five bytes of the last line.
+    let before_rule = usize::try_from(MAX_IO_BYTES).expect("bound fits usize") - 5;
+    let mut rules = "# filler line\n".repeat(before_rule / 14);
+    match before_rule % 14 {
+        0 => {}
+        1 => rules.push('\n'),
+        rest => {
+            rules.push('#');
+            rules.push_str(&"x".repeat(rest - 2));
+            rules.push('\n');
+        }
+    }
+    assert_eq!(rules.len(), before_rule);
+    rules.push_str("*.tmp-not-this\n");
+    write(root, ".gitignore", rules.as_bytes());
+    write(root, "x.tmp", b"x\n");
+
+    let observed = observe(root, baselines.path(), 1024).expect("change set");
+    assert_eq!(paths(&observed), [".gitignore", "x.tmp"], "{observed:#?}");
+}
+
+/// The answer ends at a changed path whose baseline object the hashing budget no longer covers,
+/// and says so.
+#[test]
+fn a_baseline_object_the_budget_does_not_cover_ends_the_answer_and_marks_it() {
+    let (workspace, first) = source_repository();
+    let root = workspace.path();
+    write(root, "a.txt", "line\n".repeat(20).as_bytes());
+    let commit = commit_paths(root, first, &["a.txt"]);
+    let baselines = baseline_root(commit);
+    write(root, "a.txt", "LINE\n".repeat(20).as_bytes());
+    let within = |budget: u64| {
+        changes_within(
+            "ws_git",
+            &workspaces_root(root),
+            root,
+            baselines.path(),
+            "ws_git",
+            GitChangesQuery {
+                max_files: 100,
+                max_file_bytes: 1024,
+                max_total_bytes: 1024 * 1024,
+            },
+            budget,
+        )
+        .expect("change set")
+    };
+
+    // `README.md` and `a.txt` are hashed; the baseline object of `a.txt` is 100 bytes.
+    let covered = within(22 + 100 + 100);
+    assert_eq!(paths(&covered), ["a.txt"], "{covered:#?}");
+    assert!(!covered.truncated);
+    let cut = within(22 + 100 + 99);
+    assert!(paths(&cut).is_empty(), "{cut:#?}");
+    assert!(cut.truncated);
+}
+
+/// One tracked file that is too large to compare is reported as changed, the answer is marked,
+/// and the paths after it are still compared.
+#[test]
+fn a_tracked_file_too_large_to_compare_does_not_hide_the_paths_after_it() {
+    let (workspace, first) = source_repository();
+    let root = workspace.path();
+    write(root, "b.txt", b"tracked\n");
+    let commit = commit_paths(root, first, &["b.txt"]);
+    let baselines = baseline_root(commit);
+    std::fs::File::options()
+        .write(true)
+        .open(root.join("README.md"))
+        .expect("tracked file")
+        .set_len(COMPARISON_BUDGET + 1)
+        .expect("a length beyond what one observation compares");
+    write(root, "b.txt", b"changed\n");
+
+    let observed = observe(root, baselines.path(), 1024).expect("change set");
+    assert!(observed.truncated, "{observed:#?}");
+    assert_eq!(paths(&observed), ["README.md", "b.txt"], "{observed:#?}");
+    let (large, after) = (&observed.items[0], &observed.items[1]);
+    assert_eq!(large.status, GitChangeStatus::Modified);
+    assert!(
+        large.patch.binary && large.patch.text.is_empty(),
+        "{large:#?}"
+    );
+    assert_eq!(large.current.as_ref().expect("current side").oid, None);
+    assert_eq!(after.status, GitChangeStatus::Modified);
+    assert!(after.patch.text.contains("+changed\n"), "{after:#?}");
 }
