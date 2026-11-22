@@ -93,7 +93,8 @@ baseline from this store and open nothing beneath the workspace's `.git/objects`
 
 **A workspace materialized before the store existed** has a commit-id file and no store. The first
 observation that finds no store builds it. One build runs at a time in a daemon; an observation
-that needs one waits for its turn.
+that needs one waits for its turn, and while it waits it holds none of the places the driver
+keeps for file operations.
 
 1. It copies the workspace's `.git/objects` into a staging directory inside
    `.substrate-git-baselines`. The copy is made beneath the admitted workspace's own directory,
@@ -109,12 +110,20 @@ that needs one waits for its turn.
    the same against its byte limit.
 3. It removes the copy, whatever the outcome.
 
-When an object is absent or fails its check, no store is kept and the observation is refused
+When an object is absent or fails its check, no new store is kept, a store that was there
+stays as it was, and the observation is refused
 `workspace.git-baseline-missing`. A later observation tries again. A program that runs in the
 workspace during the copy can make an attempt fail. It cannot make the store hold an object that
 is not the baseline's, because every object is bound to the daemon-held commit id by its hash. A
 store that does not hold the commit the commit-id file names is treated as absent and replaced
-the same way.
+the same way. A store that cannot be opened or read for any other reason is not removed: the
+observation is refused `workspace.git-baseline-read-failed`.
+
+**Nesting.** A baseline whose directories nest deeper than 1,024 is refused
+`workspace.git-path-unrepresentable`: at create before the store is written, and by a build the
+same way. Every store therefore holds a baseline within that depth, and no reader of a store
+walks deeper. The count of a baseline's paths needs no bound of its own here: the checkout a
+create makes of it stayed within the workspace's inode limit.
 
 What a build costs and does not bound:
 

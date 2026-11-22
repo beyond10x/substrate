@@ -13,6 +13,7 @@
 
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 
 use crate::DriverError;
 
@@ -36,6 +37,35 @@ pub(crate) struct GitWorkspace<'a> {
     /// The byte bound of the copy a store is built from. It is asked only when a store is
     /// built, so an observation of a workspace that has its store asks nothing.
     pub(crate) copy_bound: &'a dyn Fn() -> u64,
+}
+
+/// One build of a store runs at a time in a daemon: whoever holds this builds.
+static BUILD_TURN: LazyLock<Arc<tokio::sync::Mutex<()>>> = LazyLock::new(Arc::default);
+
+/// The turn to build a store. It ends when this is dropped.
+pub(crate) struct BuildTurn(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>);
+
+impl BuildTurn {
+    /// Waits for the turn. An observation waits here and nowhere else, so while it waits it
+    /// holds none of the places the driver keeps for file operations.
+    pub(crate) async fn taken() -> Self {
+        Self(Arc::clone(&BUILD_TURN).lock_owned().await)
+    }
+
+    /// Waits for the turn on a thread that runs no task of the driver.
+    #[cfg(all(test, feature = "git"))]
+    pub(crate) fn taken_blocking() -> Self {
+        Self(Arc::clone(&BUILD_TURN).blocking_lock_owned())
+    }
+}
+
+/// What a Git observation gave.
+#[cfg_attr(not(feature = "git"), allow(dead_code))] // A build that serves no Git builds no store.
+pub(crate) enum Observed<T> {
+    Answer(T),
+    /// The workspace's store has to be built, and the observation held no turn to build it:
+    /// it made nothing. It is run again with the turn.
+    NeedsBuild,
 }
 
 /// The two entries the driver keeps for one root name.

@@ -5,16 +5,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use substrate_wire::{
     GitBaselineFile, GitChange, GitChangesQuery, GitSourceEnvelope, Workspace,
-    WorkspaceCreateInput, WorkspaceSource,
+    WorkspaceCreateInput, WorkspaceSource, WorkspaceTreeQuery,
 };
 use tempfile::tempdir;
 
 use super::{AUTHORITY, Mode, Server, repository};
 use crate::git::tests::objects_of;
+use crate::git::tests::store_failure_cases::{NESTING_BOUND, copy_tree, nested_repository};
 use crate::git::tests::watch::{Event, Kind, Watch};
+use crate::git_baselines::BuildTurn;
 use crate::{
     DispatchOutcome, Driver as _, DriverError, HostConfig, HostDriver, WorkspaceDestroyProgress,
 };
@@ -357,4 +360,208 @@ async fn a_create_refuses_a_root_name_outside_the_root_name_set_before_dispatch(
     }
     assert!(server.requests.lock().expect("requests").is_empty());
     assert_eq!((names(root.path()), names(&baselines(root.path()))), before);
+}
+
+/// The workspace a create was served with.
+fn served(outcome: DispatchOutcome<Workspace>) -> Workspace {
+    match outcome {
+        DispatchOutcome::Observed(workspace) => workspace,
+        DispatchOutcome::NotDispatched(error)
+        | DispatchOutcome::ContainedAbsent(error)
+        | DispatchOutcome::OutcomeUnknown(error) => {
+            panic!("the create was refused {}", error.code)
+        }
+    }
+}
+
+/// Design 21, § *Nesting*: a create whose baseline nests directories exactly as deep as the
+/// bound is served. Its store is written, and both observations answer from it.
+#[tokio::test]
+async fn a_create_whose_baseline_nests_directories_as_deep_as_the_bound_is_served() {
+    let (source, commit) = nested_repository(NESTING_BOUND);
+    let server = Server::start(source.path(), Mode::V2);
+    let root = tempdir().expect("workspace root");
+    let driver = driver(root.path(), &server);
+
+    served(
+        driver
+            .create_workspace_authorized("ws_a", "ws_a", &input(&server, commit), Some(AUTHORITY))
+            .await,
+    );
+
+    let baselines = baselines(root.path());
+    // The commit, its tree, the file and one tree for each nested directory.
+    assert_eq!(
+        objects_of(&baselines.join(".objects/ws_a")).len(),
+        NESTING_BOUND + 3
+    );
+    assert_eq!(
+        std::fs::read_to_string(baselines.join("ws_a")).expect("commit-id file"),
+        format!("{commit}\n")
+    );
+    let (changes, file) = observe(&driver).await;
+    assert_eq!(changes, Vec::new());
+    assert_eq!(
+        file.expect("baseline file")
+            .content
+            .decode()
+            .expect("content"),
+        b"bounded git workspace\n"
+    );
+}
+
+/// Design 21, § *Nesting*: a create whose baseline nests directories deeper than the bound is
+/// refused `workspace.git-path-unrepresentable`, and leaves no store, no commit-id file and no
+/// workspace.
+#[tokio::test]
+async fn a_create_whose_baseline_nests_directories_deeper_than_the_bound_is_refused() {
+    let (source, commit) = nested_repository(NESTING_BOUND + 1);
+    let server = Server::start(source.path(), Mode::V2);
+    let root = tempdir().expect("workspace root");
+    let driver = driver(root.path(), &server);
+
+    let outcome = driver
+        .create_workspace_authorized("ws_a", "ws_a", &input(&server, commit), Some(AUTHORITY))
+        .await;
+
+    let (dispatch, error) = refused(outcome);
+    assert_eq!(error.code, "workspace.git-path-unrepresentable");
+    assert_eq!(dispatch, "contained absent");
+    assert!(!root.path().join("ws_a").exists(), "a workspace is left");
+    let baselines = baselines(root.path());
+    assert!(!baselines.join("ws_a").exists(), "a commit-id file is left");
+    assert_eq!(names(&baselines.join(".objects")), Vec::<String>::new());
+    assert!(
+        names(&baselines).iter().all(|name| name == ".objects"),
+        "{:?}",
+        names(&baselines)
+    );
+    assert!(staging_paths(root.path()).is_empty());
+}
+
+/// A driver with the Git workspace `ws_a`, created from the server, and beside it one Git
+/// workspace for each name in `predating`, each a copy of `ws_a` with its commit-id file and no
+/// store: a workspace materialized before the store existed.
+async fn driver_with_predating(
+    root: &Path,
+    server: &Server,
+    commit: git2::Oid,
+    predating: &[String],
+) -> Arc<HostDriver> {
+    let driver = driver(root, server);
+    served(
+        driver
+            .create_workspace_authorized("ws_a", "ws_a", &input(server, commit), Some(AUTHORITY))
+            .await,
+    );
+    let baselines = baselines(root);
+    for name in predating {
+        copy_tree(&root.join("ws_a"), &root.join(name));
+        std::fs::copy(baselines.join("ws_a"), baselines.join(name)).expect("commit-id file");
+    }
+    driver
+}
+
+/// The changes observation of the workspace `name`, started now; it answers the commit.
+fn observation(
+    driver: &Arc<HostDriver>,
+    name: &str,
+) -> tokio::task::JoinHandle<Result<String, DriverError>> {
+    let (driver, name) = (Arc::clone(driver), name.to_owned());
+    tokio::spawn(async move {
+        driver
+            .read_workspace_git_changes_v2(&name, &name, &QUERY)
+            .await
+            .map(|set| set.commit)
+    })
+}
+
+/// One build runs at a time in a daemon: an observation that needs one waits for its turn and
+/// makes nothing before it. An observation of a workspace that has its store does not wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_observation_that_needs_a_build_waits_for_its_turn() {
+    let (source, commit) = repository(0);
+    let server = Server::start(source.path(), Mode::V2);
+    let root = tempdir().expect("workspace root");
+    let predating = ["ws_b".to_owned()];
+    let driver = driver_with_predating(root.path(), &server, commit, &predating).await;
+    let stores = baselines(root.path()).join(".objects");
+    let turn = BuildTurn::taken().await;
+
+    let waiting = observation(&driver, "ws_b");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !waiting.is_finished(),
+        "a build ran while another held the turn"
+    );
+    assert_eq!(names(&stores), ["ws_a"]);
+    assert_eq!(names(&baselines(root.path())), [".objects", "ws_a", "ws_b"]);
+    tokio::time::timeout(Duration::from_secs(10), observe(&driver))
+        .await
+        .expect("an observation of a workspace with a store waited for a build");
+
+    drop(turn);
+    let built = tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .expect("the observation answers after its turn")
+        .expect("observation")
+        .expect("change set");
+    assert_eq!(built, commit.to_string());
+    assert!(objects_of(&stores.join("ws_b")).contains(&commit));
+}
+
+/// An observation that waits for its turn to build holds none of the places the driver keeps
+/// for file operations: with as many observations waiting as the driver has places, a file
+/// operation completes. Each observation then builds and answers in its turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_operation_completes_while_observations_wait_for_their_turn_to_build() {
+    let (source, commit) = repository(0);
+    let server = Server::start(source.path(), Mode::V2);
+    let root = tempdir().expect("workspace root");
+    let places = HostDriver::open(HostConfig::minimum(tempdir().expect("root").path()))
+        .expect("host driver")
+        .blocking_slots
+        .available_permits();
+    let predating: Vec<String> = (0..places).map(|n| format!("ws_w{n:02}")).collect();
+    let driver = driver_with_predating(root.path(), &server, commit, &predating).await;
+    let stores = baselines(root.path()).join(".objects");
+    let turn = BuildTurn::taken().await;
+
+    let waiting: Vec<_> = predating
+        .iter()
+        .map(|name| observation(&driver, name))
+        .collect();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        waiting.iter().all(|observation| !observation.is_finished()),
+        "a build ran while another held the turn"
+    );
+    assert_eq!(names(&stores), ["ws_a"]);
+    let listed = tokio::time::timeout(
+        Duration::from_secs(2),
+        driver.list_workspace_tree_v2(
+            "ws_a",
+            "ws_a",
+            &WorkspaceTreeQuery {
+                limit_items: 10,
+                include_hidden: false,
+            },
+        ),
+    )
+    .await;
+    assert!(
+        listed.is_ok_and(|listing| listing.is_ok()),
+        "a file operation did not complete while {places} observations waited for their turn"
+    );
+
+    drop(turn);
+    for (name, observation) in predating.iter().zip(waiting) {
+        let built = tokio::time::timeout(Duration::from_secs(30), observation)
+            .await
+            .expect("the observation answers after its turn")
+            .expect("observation")
+            .expect("change set");
+        assert_eq!(built, commit.to_string(), "{name}");
+        assert!(objects_of(&stores.join(name)).contains(&commit), "{name}");
+    }
 }

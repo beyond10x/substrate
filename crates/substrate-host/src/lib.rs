@@ -1443,6 +1443,43 @@ impl HostDriver {
             )
         })?
     }
+
+    /// Runs a Git observation in one of the places for file operations. An observation that
+    /// finds its workspace's store has to be built says so and leaves its place. The turn to
+    /// build is awaited here, where no place is held, and the observation then runs again in
+    /// a place, with the turn (design 21, § *The baseline store*).
+    async fn git_observation<T, F>(&self, observe: F) -> Result<T, DriverError>
+    where
+        T: Send + 'static,
+        F: Fn(
+                &fs::GuardedFilesystem,
+                Option<&git_baselines::BuildTurn>,
+            ) -> Result<git_baselines::Observed<T>, DriverError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let observe = Arc::new(observe);
+        let first = Arc::clone(&observe);
+        if let git_baselines::Observed::Answer(answer) = self
+            .filesystem_io(move |filesystem| first(filesystem, None))
+            .await?
+        {
+            return Ok(answer);
+        }
+        let turn = git_baselines::BuildTurn::taken().await;
+        // The turn goes into the place with the observation and ends there, with the build.
+        match self
+            .filesystem_io(move |filesystem| observe(filesystem, Some(&turn)))
+            .await?
+        {
+            git_baselines::Observed::Answer(answer) => Ok(answer),
+            git_baselines::Observed::NeedsBuild => Err(DriverError::failed(
+                "workspace.git-baseline-missing",
+                "The Git baseline store was not built.",
+            )),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1855,7 +1892,7 @@ impl Driver for HostDriver {
         let workspace = self.workspace_path(&root_name)?;
         let baseline_root = self.config.git_baseline_root();
         let quotas = self.quotas.clone();
-        self.filesystem_io(move |filesystem| {
+        self.git_observation(move |filesystem, turn| {
             let root = filesystem.root_descriptor()?;
             git::baseline_file(
                 &git_baselines::GitWorkspace {
@@ -1868,6 +1905,7 @@ impl Driver for HostDriver {
                 },
                 &path,
                 max_bytes,
+                turn,
             )
         })
         .await
@@ -1892,7 +1930,7 @@ impl Driver for HostDriver {
         let baseline_root = self.config.git_baseline_root();
         let quotas = self.quotas.clone();
         let query = *query;
-        self.filesystem_io(move |filesystem| {
+        self.git_observation(move |filesystem, turn| {
             let root = filesystem.root_descriptor()?;
             git::changes(
                 &git_baselines::GitWorkspace {
@@ -1904,6 +1942,7 @@ impl Driver for HostDriver {
                     copy_bound: &|| copy_bound(quotas.as_deref(), &workspace),
                 },
                 query,
+                turn,
             )
         })
         .await

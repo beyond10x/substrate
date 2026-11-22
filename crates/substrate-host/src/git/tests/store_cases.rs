@@ -14,15 +14,14 @@ use sha2::{Digest as _, Sha256};
 use substrate_wire::{GitBaselineFile, GitChange, GitChangesQuery, is_root_name};
 use tempfile::{TempDir, tempdir};
 
-use super::super::{
-    baseline_file, changes, read_baseline, remove_baseline, store, worktree, write_baseline,
-};
+use super::super::{read_baseline, remove_baseline, store, worktree, write_baseline};
 use super::watch::{Event, Kind, Watch};
 use super::{
-    baseline_object, baseline_root, change_every_kind_of_entry, commit_paths, objects_of, observe,
-    paths, remove_store, source_repository, store_of, target, tracked_workspace,
+    baseline_file, baseline_object, baseline_root, change_every_kind_of_entry, changes,
+    commit_paths, objects_of, observe, paths, remove_store, source_repository, store_of, target,
+    tracked_workspace,
 };
-use crate::git_baselines::DEFAULT_BYTE_LIMIT;
+use crate::git_baselines::{BuildTurn, DEFAULT_BYTE_LIMIT};
 use crate::{DriverError, DriverErrorClass};
 
 const QUERY: GitChangesQuery = GitChangesQuery {
@@ -87,7 +86,7 @@ fn names(directory: &Path) -> Vec<String> {
 }
 
 /// What the baseline root holds beside the commit-id file and the store of `ws_git`.
-fn leftovers(baselines: &Path) -> Vec<String> {
+pub(super) fn leftovers(baselines: &Path) -> Vec<String> {
     names(baselines)
         .into_iter()
         .filter(|name| name != "ws_git" && name != ".objects")
@@ -114,7 +113,7 @@ fn mode(path: &Path) -> u32 {
 }
 
 /// The ids of every object the store of `ws_git` holds.
-fn store_objects(baselines: &Path) -> BTreeSet<Oid> {
+pub(super) fn store_objects(baselines: &Path) -> BTreeSet<Oid> {
     objects_of(&store_of(baselines))
 }
 
@@ -156,7 +155,7 @@ fn commit_tree(repository: &Repository, parent: Oid, tree: Oid) -> Oid {
 
 /// A pack of the objects of `commit`, written with the Git library alone, as the store of
 /// `ws_git`.
-fn plant_store(baselines: &Path, workspace: &Path, commit: Oid) {
+pub(super) fn plant_store(baselines: &Path, workspace: &Path, commit: Oid) {
     let pack = store_of(baselines).join("pack");
     std::fs::create_dir_all(&pack).expect("store");
     let repository = Repository::open(workspace).expect("repository");
@@ -736,12 +735,13 @@ fn a_store_is_built_from_an_object_store_with_directories_nested_eight_deep() {
 fn no_store_is_built_from_an_object_store_with_more_entries_than_the_bound() {
     let (workspace, baselines, commit) = predating();
     let (entries, _) = entries_and_bytes(&workspace.path().join(".git/objects"));
+    let turn = BuildTurn::taken_blocking();
     let held = |max_entries: usize| {
         target(
             workspace.path(),
             baselines.path(),
             DEFAULT_BYTE_LIMIT,
-            |held| store::held(held, commit, max_entries).map(|_| ()),
+            |held| store::held(held, commit, max_entries, Some(&turn)).map(|_| ()),
         )
     };
 
@@ -837,47 +837,6 @@ fn a_baseline_object_stated_larger_than_the_bound_is_not_read() {
 
     answer_within(workspace.path(), baselines.path(), 2 * 1024 * 1024)
         .expect("the object within the bound");
-    assert!(store_objects(baselines.path()).contains(&commit));
-}
-
-/// One build runs at a time: an observation that needs one waits for its turn and makes
-/// nothing before it. An observation of a workspace that has its store does not wait.
-#[test]
-fn an_observation_that_needs_a_build_waits_for_its_turn() {
-    let (workspace, baselines, commit) = predating();
-    let (held_workspace, held_baselines) = tracked_workspace();
-    let turn = store::BUILD_TURN.lock();
-    let (answer, answered) = std::sync::mpsc::channel();
-    let (root, baseline) = (workspace.path().to_owned(), baselines.path().to_owned());
-    std::thread::spawn(move || {
-        let _ = answer.send(observe(&root, &baseline, 1024).map(|set| set.commit));
-    });
-
-    assert!(
-        answered.recv_timeout(Duration::from_millis(300)).is_err(),
-        "a build ran while another held the turn"
-    );
-    assert_no_store_and_no_copy(baselines.path());
-    let (other, other_answered) = std::sync::mpsc::channel();
-    let (root, baseline) = (
-        held_workspace.path().to_owned(),
-        held_baselines.path().to_owned(),
-    );
-    std::thread::spawn(move || {
-        let _ = other.send(observe(&root, &baseline, 1024).is_ok());
-    });
-    assert_eq!(
-        other_answered.recv_timeout(Duration::from_secs(10)),
-        Ok(true),
-        "an observation of a workspace with a store waited for a build"
-    );
-
-    drop(turn);
-    let built = answered
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the observation answers after its turn")
-        .expect("change set");
-    assert_eq!(built, commit.to_string());
     assert!(store_objects(baselines.path()).contains(&commit));
 }
 

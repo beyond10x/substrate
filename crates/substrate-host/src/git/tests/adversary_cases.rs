@@ -7,10 +7,10 @@ use std::time::{Duration, SystemTime};
 use git2::Repository;
 use substrate_wire::{GitChangeStatus, GitChangesQuery, MAX_IO_BYTES};
 
-use super::super::{COMPARISON_BUDGET, changes, changes_within};
+use super::super::COMPARISON_BUDGET;
 use super::{
-    baseline_object, baseline_root, commit_paths, observe, paths, remove_store, source_repository,
-    store_of, target,
+    baseline_object, baseline_root, changes, changes_within, commit_paths, observe, paths,
+    remove_store, source_repository, store_of, target,
 };
 use crate::git_baselines::DEFAULT_BYTE_LIMIT;
 

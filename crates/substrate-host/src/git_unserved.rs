@@ -20,7 +20,7 @@ use substrate_wire::{
 };
 use zeroize::Zeroizing;
 
-use crate::git_baselines::GitWorkspace;
+use crate::git_baselines::{BuildTurn, GitWorkspace, Observed};
 use crate::{DriverError, GitSourceBinding};
 
 /// Whether this build serves a Git source at all; `git.rs` holds `true`.
@@ -91,14 +91,16 @@ pub(super) fn baseline_file(
     _workspace: &GitWorkspace<'_>,
     _path: &str,
     _max_bytes: u64,
-) -> Result<GitBaselineFileResult, DriverError> {
+    _turn: Option<&BuildTurn>,
+) -> Result<Observed<GitBaselineFileResult>, DriverError> {
     Err(source_unserved())
 }
 
 pub(super) fn changes(
     _workspace: &GitWorkspace<'_>,
     _query: GitChangesQuery,
-) -> Result<GitChangeSet, DriverError> {
+    _turn: Option<&BuildTurn>,
+) -> Result<Observed<GitChangeSet>, DriverError> {
     Err(source_unserved())
 }
 
