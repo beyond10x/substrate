@@ -113,6 +113,13 @@ pub(super) fn materialize(
         .map_err(|_| failed("workspace.git-remote-failed"))?;
     let destination = format!("refs/remotes/origin/{}", source.reference);
     let refspec = format!("+{branch_ref}:{destination}");
+    // What the fetch may allocate for one object while it indexes the pack: an entry, or what
+    // an entry is stored behind, that states more bytes is refused before the bytes are
+    // allocated. The Git library reads a configured integer as a signed one.
+    let alloc_limit = format!(
+        "gitoxide.objects.allocLimit={}",
+        limit.max_bytes.min(i64::MAX.unsigned_abs())
+    );
     let fetch_repository = gix::open::Options::isolated()
         .strict_config(true)
         .config_overrides([
@@ -121,6 +128,7 @@ pub(super) fn materialize(
             "gitoxide.tracePacket=false",
             "user.name=Substrate",
             "user.email=substrate@example.invalid",
+            alloc_limit.as_str(),
         ])
         .open(target)
         .map_err(|_| failed("workspace.git-init-failed"))?
@@ -171,7 +179,15 @@ pub(super) fn materialize(
                 .expect("validated positive depth"),
         ))
         .receive(gix::progress::Discard, interrupt)
-        .map_err(|_| control.error())?;
+        .map_err(|error| match control.error() {
+            stage
+                if stage.code == "workspace.git-fetch-failed"
+                    && over_the_allocation_limit(&error) =>
+            {
+                storage_limit()
+            }
+            stage => stage,
+        })?;
     if outcome.handshake.server_protocol_version != gix::protocol::transport::Protocol::V2 {
         return Err(refused("workspace.git-protocol-refused"));
     }
@@ -200,6 +216,27 @@ pub(super) fn materialize(
         "Git materialization stage completed"
     );
     Ok(usage)
+}
+
+/// Whether the fetch ended while it indexed the pack because one object would take more
+/// bytes than the fetch may allocate for it (`gitoxide.objects.allocLimit`, the byte limit of
+/// the create): an entry, or what an entry is stored behind, states more. A fetch that could
+/// not get the memory for an object within that limit ends the same way and is named the same.
+fn over_the_allocation_limit(error: &gix::remote::fetch::Error) -> bool {
+    use gix::odb::pack;
+    let gix::remote::fetch::Error::Fetch(gix::protocol::fetch::Error::ConsumePack(consumed)) =
+        error
+    else {
+        return false;
+    };
+    matches!(
+        consumed.downcast_ref::<pack::bundle::write::Error>(),
+        Some(pack::bundle::write::Error::IndexWrite(
+            pack::index::write::Error::TreeTraversal(
+                pack::cache::delta::traverse::Error::OutOfMemory
+            )
+        ))
+    )
 }
 
 #[allow(clippy::result_large_err, clippy::unnecessary_wraps)] // The callback's result type belongs to the pinned gix API.
@@ -260,8 +297,11 @@ pub(super) fn reconcile(workspace_root: &Path, baseline_root: &Path) -> Result<(
 /// # Errors
 ///
 /// `workspace.git-storage-limit` and `workspace.git-path-unrepresentable` for a baseline
-/// outside the bounds of [`store::check_baseline`], each before anything is checked out. The
-/// commit's header is compared with `limit.max_bytes` before the commit is read.
+/// outside the bounds of [`store::check_baseline_keeping`], each before anything is checked
+/// out. The check reads how the fetched pack stores its objects behind each other before the
+/// Git library reads any header, and compares the commit's header with `limit.max_bytes`
+/// before the commit is read. `workspace.git-commit-missing` for a commit that is absent, is
+/// no commit or is not what its id names.
 fn finish_materialization(
     repository: &git2::Repository,
     destination: &str,
@@ -279,18 +319,6 @@ fn finish_materialization(
         ));
     }
     let missing = || failed("workspace.git-commit-missing");
-    let stated = repository
-        .odb()
-        .and_then(|objects| objects.read_header(expected));
-    match stated {
-        Ok((size, ObjectType::Commit)) => {
-            if u64::try_from(size).unwrap_or(u64::MAX) > limit.max_bytes {
-                return Err(storage_limit());
-            }
-        }
-        _ => return Err(missing()),
-    }
-    let commit = repository.find_commit(expected).map_err(|_| missing())?;
     let (checked, kept) = store::check_baseline_keeping(repository, expected, limit);
     tracing::debug!(
         stage = "git_baseline_check",
@@ -300,15 +328,15 @@ fn finish_materialization(
         waiting = kept.waiting,
         "Git baseline check ended"
     );
-    let checked = checked.map_err(|unwritten| match unwritten {
-        store::Unwritten::Limit => storage_limit(),
-        store::Unwritten::Path => failed("workspace.git-path-unrepresentable"),
-        store::Unwritten::Object | store::Unwritten::Exists | store::Unwritten::Write => {
-            failed("workspace.git-checkout-failed")
-        }
+    let checked = checked.map_err(|unadmitted| match unadmitted {
+        store::Unadmitted::Commit => missing(),
+        store::Unadmitted::Limit => storage_limit(),
+        store::Unadmitted::Path => failed("workspace.git-path-unrepresentable"),
+        store::Unadmitted::Object => failed("workspace.git-checkout-failed"),
     })?;
     tracing::debug!(
         stage = "git_baseline_check",
+        chain_steps = checked.chain_steps,
         trees = checked.trees,
         paths = checked.paths,
         path_bytes = checked.path_bytes,
@@ -316,6 +344,7 @@ fn finish_materialization(
         bytes = checked.bytes,
         "Git materialization stage completed"
     );
+    let commit = repository.find_commit(expected).map_err(|_| missing())?;
     let mut checkout = git2::build::CheckoutBuilder::new();
     checkout.force().disable_filters(true);
     repository
@@ -334,10 +363,12 @@ fn finish_materialization(
 /// `workspace.path-escape` for a root name outside the root-name set, and
 /// `workspace.git-target-exists` for one that already has a commit-id file or a store, each
 /// before either is written. `workspace.git-storage-limit` for a store over `limit.max_bytes`
-/// and for a baseline that names more paths than `limit.max_inodes`,
-/// `workspace.git-path-unrepresentable` for a baseline whose directories nest deeper than
-/// [`store::MAX_BASELINE_DEPTH`], and `workspace.git-baseline-write-failed` for every other
-/// failure. A failure leaves neither entry of this create.
+/// and for a baseline over a bound [`store::Unadmitted::Limit`] names: of object sizes, of
+/// paths and their bytes, of the bytes of its files, and of the entries a pack stores its
+/// objects behind. `workspace.git-path-unrepresentable` for a baseline with a path
+/// [`store::Unadmitted::Path`] names: nested too deep, or with a name or a path no checkout
+/// can make. `workspace.git-baseline-write-failed` for every other failure. A failure leaves
+/// neither entry of this create.
 pub(super) fn write_baseline(
     baseline_root: &Path,
     root_name: &str,
@@ -2245,10 +2276,9 @@ mod tests {
         for name in ["ws_live", "ws_gone", ".tmpleft"] {
             std::fs::write(baseline_root.join(name), name).expect("commit-id file");
         }
-        for staging in [".store-left/pack", ".copy-left/ab"] {
-            std::fs::create_dir_all(baseline_root.join(staging)).expect("staging directory");
-            std::fs::write(baseline_root.join(staging).join("file"), b"left").expect("file");
-        }
+        let staging = baseline_root.join(".store-left/pack");
+        std::fs::create_dir_all(&staging).expect("staging directory");
+        std::fs::write(staging.join("file"), b"left").expect("file");
         std::os::unix::fs::symlink(elsewhere.path(), stores.join("ws_link")).expect("link");
         std::os::unix::fs::symlink(elsewhere.path(), baseline_root.join("ws_alias")).expect("link");
         std::fs::create_dir(workspace_root.path().join("ws_live")).expect("live workspace");
@@ -2269,6 +2299,9 @@ mod tests {
     }
 
     mod adversary_cases;
+    mod chain_cases;
+    mod guard_cases;
+    mod review5_cases;
     pub(super) mod shape_cases;
     mod store_cases;
     pub(super) mod store_failure_cases;

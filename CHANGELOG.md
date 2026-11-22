@@ -25,7 +25,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   and the workspace is proved absent.
 - A Git create whose baseline nests directories deeper than 1,024 is refused
   `workspace.git-path-unrepresentable` before its store is written, and the workspace is
-  proved absent; such a baseline was created before.
+  proved absent.
 - A Git create whose baseline names more paths than its inode limit (the requested storage
   limit, else 200,000) is refused `workspace.git-storage-limit` before anything is checked
   out, and the workspace is proved absent. Every entry of every tree counts once for each
@@ -76,6 +76,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     `workspace.git-baseline-read-failed`. No observation writes, removes or replaces a store,
     and the driver never reads a file a workspace wrote as a Git object, a pack or the index
     of a pack.
+  - A Git create whose fetched pack stores an object behind more than 4,095 entries, or the
+    objects of its baseline behind more than 64 entries together for each path its inode limit
+    admits, is refused `workspace.git-storage-limit` before the header of any object is read
+    and before anything is checked out.
+  - The fetch of a Git create allocates for one object no more than the create's byte limit:
+    an object that states more ends the fetch `workspace.git-storage-limit`.
   - The driver refuses a root name outside the root-name set, `workspace.path-escape`, before
     it writes or removes a commit-id file or a store; a Git create with such a name is refused
     before dispatch.

@@ -63,10 +63,7 @@ pub(super) fn open(directory: &OwnedFd, path: &str) -> Result<Option<std::fs::Fi
 }
 
 /// The directory at `path` beneath `directory`; `None` when it is absent or not a directory.
-pub(super) fn open_directory(
-    directory: &OwnedFd,
-    path: &str,
-) -> Result<Option<OwnedFd>, DriverError> {
+fn open_directory(directory: &OwnedFd, path: &str) -> Result<Option<OwnedFd>, DriverError> {
     let Some(entry) = open(directory, path)? else {
         return Ok(None);
     };

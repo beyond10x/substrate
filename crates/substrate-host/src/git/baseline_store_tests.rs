@@ -15,7 +15,9 @@ use tempfile::tempdir;
 use super::{AUTHORITY, Mode, Server, repository};
 use crate::git::tests::objects_of;
 use crate::git::tests::shape_cases::doubled_repository;
-use crate::git::tests::store_failure_cases::{NESTING_BOUND, copy_tree, nested_repository};
+use crate::git::tests::store_failure_cases::{
+    NESTING_BOUND, nested_repository, repository_holding,
+};
 use crate::git::tests::watch::{Event, Kind, Watch};
 use crate::{
     DispatchOutcome, Driver as _, DriverError, HostConfig, HostDriver, WorkspaceDestroyProgress,
@@ -438,29 +440,6 @@ async fn a_create_whose_baseline_nests_directories_deeper_than_the_bound_is_refu
     assert!(staging_paths(root.path()).is_empty());
 }
 
-/// A driver with the Git workspace `ws_a`, created from the server, and beside it one Git
-/// workspace for each name in `predating`, each a copy of `ws_a` with its commit-id file and no
-/// store: a workspace materialized before the store existed.
-async fn driver_with_predating(
-    root: &Path,
-    server: &Server,
-    commit: git2::Oid,
-    predating: &[String],
-) -> Arc<HostDriver> {
-    let driver = driver(root, server);
-    served(
-        driver
-            .create_workspace_authorized("ws_a", "ws_a", &input(server, commit), Some(AUTHORITY))
-            .await,
-    );
-    let baselines = baselines(root);
-    for name in predating {
-        copy_tree(&root.join("ws_a"), &root.join(name));
-        std::fs::copy(baselines.join("ws_a"), baselines.join(name)).expect("commit-id file");
-    }
-    driver
-}
-
 /// A create whose baseline names more paths than its inode limit is refused
 /// `workspace.git-storage-limit` before anything is checked out, and leaves no workspace, no
 /// store and no commit-id file. The baseline here names 2^41 paths with forty-two trees,
@@ -491,63 +470,114 @@ async fn a_create_whose_baseline_names_more_paths_than_its_inode_limit_is_refuse
     assert!(staging_paths(root.path()).is_empty());
 }
 
-/// A Git workspace with a commit-id file and no store has no Git observation: both are refused
-/// `workspace.git-baseline-missing`, and nothing is made for it. An observation takes one of
-/// the places the driver keeps for file operations and waits for no other observation: with
-/// every place but one held, sixteen observations of eight such workspaces all end in that
-/// refusal, and both observations of `ws_a`, which has its store, answer.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_observation_takes_one_place_and_waits_for_no_other_observation() {
+/// A Git workspace with a commit-id file and no store has no Git observation through the
+/// driver: both are refused `workspace.git-baseline-missing`, and nothing is made for it. The
+/// workspace here was created with its store, which is then removed.
+#[tokio::test]
+async fn a_git_workspace_without_a_store_has_no_git_observation_and_nothing_is_made_for_it() {
     let (source, commit) = repository(0);
     let server = Server::start(source.path(), Mode::V2);
     let root = tempdir().expect("workspace root");
-    let predating: Vec<String> = (0..8).map(|n| format!("ws_w{n:02}")).collect();
-    let driver = driver_with_predating(root.path(), &server, commit, &predating).await;
-    let baselines = baselines(root.path());
-    let entries = names(&baselines);
-    assert_eq!(entries.len(), 10, "{entries:?}");
-    let places = driver.blocking_slots.available_permits();
-    let held = Arc::clone(&driver.blocking_slots)
-        .acquire_many_owned(u32::try_from(places - 1).expect("places"))
-        .await
-        .expect("every place but one");
-
-    let mut observations = Vec::new();
-    for name in &predating {
-        let (changes, name_of_changes) = (Arc::clone(&driver), name.clone());
-        observations.push(tokio::spawn(async move {
-            changes
-                .read_workspace_git_changes_v2(&name_of_changes, &name_of_changes, &QUERY)
-                .await
-                .map_or_else(|error| error.code, |_| "answered")
-        }));
-        let (file, name_of_file) = (Arc::clone(&driver), name.clone());
-        observations.push(tokio::spawn(async move {
-            file.read_workspace_git_baseline_file_v2(
-                &name_of_file,
-                &name_of_file,
-                "README.md",
-                1024,
-            )
-            .await
-            .map_or_else(|error| error.code, |_| "answered")
-        }));
-    }
-    for observation in observations {
-        assert_eq!(
-            observation.await.expect("observation"),
-            "workspace.git-baseline-missing"
-        );
-    }
-    let (changes, file) = observe(&driver).await;
-    drop(held);
-
-    assert_eq!(changes, Vec::new());
-    assert!(
-        file.is_some(),
-        "the baseline file of the workspace with a store"
+    let driver = driver(root.path(), &server);
+    served(
+        driver
+            .create_workspace_authorized("ws_a", "ws_a", &input(&server, commit), Some(AUTHORITY))
+            .await,
     );
-    assert_eq!(names(&baselines.join(".objects")), ["ws_a"]);
-    assert_eq!(names(&baselines), entries);
+    let baselines = baselines(root.path());
+    std::fs::remove_dir_all(baselines.join(".objects/ws_a")).expect("store removed");
+
+    let changes = driver
+        .read_workspace_git_changes_v2("ws_a", "ws_a", &QUERY)
+        .await
+        .map_or_else(|error| error.code, |_| "answered");
+    let file = driver
+        .read_workspace_git_baseline_file_v2("ws_a", "ws_a", "README.md", 1024)
+        .await
+        .map_or_else(|error| error.code, |_| "answered");
+
+    assert_eq!([changes, file], ["workspace.git-baseline-missing"; 2]);
+    assert_eq!(names(&baselines.join(".objects")), Vec::<String>::new());
+    assert_eq!(names(&baselines), [".objects", "ws_a"]);
     assert!(staging_paths(root.path()).is_empty());
+}
+
+/// The file `zeros.bin` of `length` zero bytes, alone in a commit on `provider-default`.
+fn repository_of_zeros(length: usize) -> (tempfile::TempDir, git2::Oid) {
+    repository_holding(|repository| {
+        let file = repository.blob(&vec![0; length]).expect("file");
+        let mut root = repository.treebuilder(None).expect("tree builder");
+        root.insert("zeros.bin", file, 0o100_644).expect("file");
+        root.write().expect("root tree")
+    })
+}
+
+/// The packs and pack indexes in the object store of the staging tree at `target`.
+fn fetched_packs(target: &Path) -> Vec<String> {
+    names(&target.join(".git/objects/pack"))
+        .into_iter()
+        .filter(|name| {
+            Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension == "pack" || extension == "idx")
+        })
+        .collect()
+}
+
+/// The fetch allocates for one object no more than the byte limit of the create
+/// (`gitoxide.objects.allocLimit`): an entry of the pack that states more is refused
+/// `workspace.git-storage-limit` while the fetch indexes the pack, before the bytes it states
+/// are allocated. The file here is 2 MiB of zeros, which the pack holds in about 2 KiB, so the
+/// transfer is within every limit. Under a byte limit of 1 MiB the fetch ends without a pack
+/// in the staging tree and without the branch, so nothing read the object afterwards; under
+/// one of 4 MiB the same source is fetched and checked out.
+#[test]
+fn an_object_that_states_more_than_the_byte_limit_ends_the_fetch_before_it_is_allocated() {
+    const FILE: usize = 2 * 1024 * 1024;
+    let (source, commit) = repository_of_zeros(FILE);
+    let server = Server::start(source.path(), Mode::V2);
+    let fetch = |max_bytes: u64| {
+        let target = tempdir().expect("target");
+        let outcome = crate::git::materialize(
+            target.path(),
+            &server.locator,
+            &server.binding,
+            &server.source(commit),
+            &zeroize::Zeroizing::new(AUTHORITY.to_owned()),
+            substrate_wire::StorageLimit {
+                max_bytes,
+                max_inodes: 2000,
+            },
+            &Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        (outcome, target)
+    };
+
+    let (outcome, target) = fetch(1024 * 1024);
+    let error = outcome.expect_err("an object over the byte limit");
+    assert_eq!(error.code, "workspace.git-storage-limit");
+    assert_eq!(error.class, crate::DriverErrorClass::Exhausted);
+    assert_eq!(
+        fetched_packs(target.path()),
+        Vec::<String>::new(),
+        "the fetch finished its pack"
+    );
+    assert!(
+        git2::Repository::open(target.path())
+            .expect("staging repository")
+            .refname_to_id("refs/remotes/origin/provider-default")
+            .is_err(),
+        "the fetch wrote the branch"
+    );
+    assert!(!target.path().join("zeros.bin").exists());
+
+    let (outcome, target) = fetch(4 * 1024 * 1024);
+    outcome.expect("an object within the byte limit");
+    assert_eq!(fetched_packs(target.path()).len(), 2);
+    assert_eq!(
+        std::fs::metadata(target.path().join("zeros.bin"))
+            .expect("checked-out file")
+            .len(),
+        u64::try_from(FILE).expect("file length")
+    );
 }

@@ -107,17 +107,32 @@ replaces a store.
 **The shape of a baseline is checked before anything walks it.** The check reads each tree of
 the baseline once, however often the baseline names it, and holds these bounds:
 
+- **Stored chains.** A pack may store an object as its difference from another entry, and that
+  entry as its difference from a third. The Git library walks such a chain each time it reads
+  the object's header. Before it reads any header, the create therefore reads how many entries
+  each entry of the fetched pack is stored behind: one step for each entry, from the entry's
+  own header and the pack's index, with ten bytes kept for each. A pack with an entry stored
+  behind more than 4,095 entries, the deepest chain `git pack-objects --depth` writes, is
+  refused `workspace.git-storage-limit`. So is a baseline whose commit, trees and file objects
+  are stored behind more than 64 entries together for each path the inode limit admits; a pack
+  of Git's default depth, 50, is within that with one object for each such path. A pack with
+  an entry stored behind what is no entry of it, or behind itself, is not one a fetch writes:
+  the create ends `workspace.git-checkout-failed`.
 - **Nesting.** A baseline whose directories nest deeper than 1,024 is refused
   `workspace.git-path-unrepresentable`.
 - **Names and path lengths.** A name longer than 255 bytes, a name that holds a `/`, or a path
   longer than 4,096 bytes is refused `workspace.git-path-unrepresentable`: no checkout can make
   it as one entry. A baseline whose paths together are longer than 256 bytes for each path the
   inode limit admits is refused `workspace.git-storage-limit`.
-- **Object sizes.** The commit, a tree or a file object whose header states more than the byte
-  limit is not read and is refused `workspace.git-storage-limit`. A tree is also not read when
-  its header states more than 283 bytes for each path the inode limit admits, and is refused
-  when it states more than 283 bytes for each entry it holds, the most one entry with a
-  255-byte name takes.
+- **Object sizes.** While the fetch indexes the pack it received, it allocates for one object
+  no more than the byte limit: an object that states more, whether the pack stores it as it is
+  or behind another entry, ends the fetch `workspace.git-storage-limit` before those bytes are
+  allocated. The fetch inflates each entry once as it arrives, to find where it ends, and keeps
+  none of those bytes. The check then reads the header of the commit, of each tree and of each
+  file object before the object: one that states more than the byte limit is not read and is
+  refused `workspace.git-storage-limit`. A tree is also not read when its header states more
+  than 283 bytes for each path the inode limit admits, and is refused when it states more than
+  283 bytes for each entry it holds, the most one entry with a 255-byte name takes.
 - **Paths.** A baseline that names more paths than the inode limit is refused
   `workspace.git-storage-limit`. Every entry of every tree counts once for each place the
   baseline names it, a directory that holds nothing included. The check also refuses as soon as
@@ -127,9 +142,13 @@ the baseline once, however often the baseline names it, and holds these bounds:
 - **Bytes.** A baseline whose files together state more bytes than the byte limit is refused
   `workspace.git-storage-limit`. A file counts once for each place the baseline names it.
 
-A create runs the check on the fetched commit before it checks anything out. Every store
-therefore holds a baseline within these bounds, and what a create or an observation does with a
-baseline is bounded by them, not by the number of places a tree is named in.
+A create runs the check on the fetched commit before it checks anything out, and again before
+it writes the store. Every store therefore holds a baseline within these bounds. A create asks
+for the header of each object of the baseline three times: in each check, and when it writes
+the store. What the Git library walks for those headers is bounded by the inode limit, and the
+reading of the chains by the entries of the fetched pack: neither by the number of places a
+tree is named in, nor by how deep the pack stores an object. Reading an object whole applies
+each entry it is stored behind: at most 4,095 of them, none of more bytes than the byte limit.
 
 Decided: comparing the worktree by kept stat facts instead of hashing each tracked file (ADR
 0051's manifest) is not part of this step. The observation hashes as before.

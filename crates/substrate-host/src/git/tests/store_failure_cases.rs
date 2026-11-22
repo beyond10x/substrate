@@ -42,7 +42,7 @@ fn holding(repository: &Repository, directory: Oid) -> Oid {
 }
 
 /// A repository whose branch `provider-default` holds one commit, of the tree `root` writes.
-pub(super) fn repository_holding(root: impl FnOnce(&Repository) -> Oid) -> (TempDir, Oid) {
+pub(in crate::git) fn repository_holding(root: impl FnOnce(&Repository) -> Oid) -> (TempDir, Oid) {
     let directory = tempdir().expect("repository directory");
     let repository = Repository::init(directory.path()).expect("repository");
     let root = root(&repository);
@@ -88,7 +88,7 @@ pub(in crate::git) fn nested_repository(levels: usize) -> (TempDir, Oid) {
 }
 
 /// Copies the directory `from` and everything in it to `to`, which does not exist yet.
-pub(in crate::git) fn copy_tree(from: &Path, to: &Path) {
+fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir(to).expect("directory");
     for entry in std::fs::read_dir(from).expect("directory") {
         let entry = entry.expect("entry");

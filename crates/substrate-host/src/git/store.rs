@@ -8,7 +8,6 @@
 //! staging tree of a create. It is never pointed at a workspace.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
@@ -21,6 +20,10 @@ use substrate_wire::StorageLimit;
 use super::{failed, object_store};
 use crate::DriverError;
 use crate::git_baselines as baselines;
+
+pub(super) mod chains;
+
+use chains::Chains;
 
 const WRITE_FAILED: &str = "workspace.git-baseline-write-failed";
 const READ_FAILED: &str = "workspace.git-baseline-read-failed";
@@ -43,22 +46,57 @@ pub(super) const PATH_BYTES_PER_PATH: u64 = 256;
 /// of six digits, a space, the name, a zero byte and an id of twenty bytes.
 pub(super) const TREE_BYTES_PER_PATH: u64 = 283;
 
-/// Why a store was not written.
-pub(super) enum Unwritten {
-    /// An object of the baseline is absent from the source, or is not what its id names.
+/// The entries the objects of a baseline may be stored behind together, for each path the
+/// inode limit admits: each commit, tree and file object the check reads the header of counts
+/// once, with the entries its pack stores it behind ([`chains`]). A pack of the depth Git
+/// writes by default, 50, is within it with one object for every path the limit admits.
+pub(super) const CHAIN_STEPS_PER_PATH: u64 = 64;
+
+/// Why a baseline was not admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Unadmitted {
+    /// The commit is absent from the object store, is no commit, or is not what its id names.
+    Commit,
+    /// A tree or a file object of the baseline is absent or is not what the baseline names
+    /// it as; or a pack of the object store is not one a fetch wrote ([`Chains::read`]).
     Object,
-    /// The store, an object of the baseline, or its files together are over the byte bound;
-    /// or the baseline names more paths than the inode limit, or its paths together or one of
-    /// its trees take more bytes than that limit or the tree's own entries admit.
+    /// An object of the baseline or its files together are over the byte bound; or the
+    /// baseline names more paths than the inode limit, or its paths together or one of its
+    /// trees take more bytes than that limit or the tree's own entries admit; or a pack
+    /// stores an object behind more than [`chains::MAX_CHAIN`] entries, or the objects of the
+    /// baseline together behind more than [`CHAIN_STEPS_PER_PATH`] for each path the inode
+    /// limit admits.
     Limit,
     /// The baseline names a path no checkout can make as one entry: its directories nest
     /// deeper than [`MAX_BASELINE_DEPTH`], a name is longer than [`MAX_NAME_BYTES`] or holds a
     /// `/`, or a path is longer than [`MAX_PATH_BYTES`].
     Path,
+}
+
+/// Why a store was not written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Unwritten {
+    /// An object of the baseline is absent from the source, or is not what its id names.
+    Object,
+    /// The baseline is over a bound of [`Unadmitted::Limit`], or the store is over the byte
+    /// bound.
+    Limit,
+    /// The baseline names a path of [`Unadmitted::Path`].
+    Path,
     /// The root name already has a store.
     Exists,
     /// The store could not be written, synced or put into place.
     Write,
+}
+
+impl From<Unadmitted> for Unwritten {
+    fn from(unadmitted: Unadmitted) -> Self {
+        match unadmitted {
+            Unadmitted::Commit | Unadmitted::Object => Self::Object,
+            Unadmitted::Limit => Self::Limit,
+            Unadmitted::Path => Self::Path,
+        }
+    }
 }
 
 /// The store of the workspace `root_name`, opened for reading: it holds the workspace's
@@ -119,8 +157,9 @@ fn readable(store: &Path) -> Result<(), DriverError> {
 
 /// Writes the store `store` of `commit` from the object store at `source`, a directory the
 /// driver owns: one pack and its index, made in a staging directory inside `baseline_root`,
-/// synced, and renamed into place. The baseline is checked first ([`check_baseline`]) against
-/// `limit`. Every object is read by its id and checked against it, and none whose header
+/// synced, and renamed into place. The baseline is checked first ([`check_baseline_keeping`])
+/// against `limit`, so the pack builder reads the headers of the same objects, within the same
+/// bounds. Every object is read by its id and checked against it, and none whose header
 /// states more than `limit.max_bytes` is read.
 ///
 /// # Errors
@@ -135,7 +174,7 @@ pub(super) fn write(
 ) -> Result<(), Unwritten> {
     let repository =
         object_store(source.to_str().ok_or(Unwritten::Write)?).map_err(|_| Unwritten::Object)?;
-    check_baseline(&repository, commit, limit)?;
+    check_in(&repository, source, commit, limit).0?;
     let staging = tempfile::Builder::new()
         .prefix(".store-")
         .permissions(std::fs::Permissions::from_mode(0o700))
@@ -202,50 +241,26 @@ impl Shape {
     /// [`MAX_PATH_BYTES`], no more paths than the inode limit, the paths together no more than
     /// [`PATH_BYTES_PER_PATH`] for each path that limit admits, and the files together no more
     /// than the byte limit.
-    fn within(&self, limit: StorageLimit) -> Result<(), Unwritten> {
+    fn within(&self, limit: StorageLimit) -> Result<(), Unadmitted> {
         if self.longest > MAX_PATH_BYTES {
-            return Err(Unwritten::Path);
+            return Err(Unadmitted::Path);
         }
         if self.paths > limit.max_inodes
             || self.path_bytes > PATH_BYTES_PER_PATH.saturating_mul(limit.max_inodes)
             || self.bytes > limit.max_bytes
         {
-            return Err(Unwritten::Limit);
+            return Err(Unadmitted::Limit);
         }
         Ok(())
     }
 }
 
-/// Reads the header of the object `id` and nothing more of it, and answers the bytes it
-/// states: the object is of `kind`, and states no more than `limit.max_bytes`; a tree also no
-/// more than [`TREE_BYTES_PER_PATH`] for each path the inode limit admits.
-fn stated_within(
-    objects: &git2::Odb<'_>,
-    id: Oid,
-    kind: ObjectType,
-    limit: StorageLimit,
-) -> Result<u64, Unwritten> {
-    let (size, found) = objects.read_header(id).map_err(|_| Unwritten::Object)?;
-    if found != kind {
-        return Err(Unwritten::Object);
-    }
-    let size = u64::try_from(size).unwrap_or(u64::MAX);
-    let bound = if kind == ObjectType::Tree {
-        limit
-            .max_bytes
-            .min(TREE_BYTES_PER_PATH.saturating_mul(limit.max_inodes))
-    } else {
-        limit.max_bytes
-    };
-    if size > bound {
-        return Err(Unwritten::Limit);
-    }
-    Ok(size)
-}
-
 /// What a check that passed read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Checked {
+    /// The entries its objects are stored behind together: what the Git library walks to read
+    /// the header of each of them once.
+    pub(super) chain_steps: u64,
     /// The trees it read: each tree of the baseline once.
     pub(super) trees: usize,
     /// The paths the baseline names.
@@ -274,7 +289,11 @@ pub(super) struct Kept {
 struct Check<'a> {
     repository: &'a git2::Repository,
     objects: git2::Odb<'a>,
+    /// How the packs of the object store store their objects behind each other.
+    chains: &'a Chains,
     limit: StorageLimit,
+    /// The entries the objects the check has read the header of are stored behind together.
+    chain_steps: u64,
     /// The bytes every file and link object the check has read the header of states.
     files: HashMap<Oid, u64>,
     /// Every tree the check has left, with what it holds.
@@ -286,26 +305,61 @@ struct Check<'a> {
 }
 
 impl Check<'_> {
+    /// Reads the header of the object `id` and nothing more of it, and answers the bytes it
+    /// states: the object is of `kind`, and states no more than `limit.max_bytes`; a tree also
+    /// no more than [`TREE_BYTES_PER_PATH`] for each path the inode limit admits.
+    ///
+    /// The entries the object is stored behind are counted first, and the check ends when
+    /// the objects it has read the header of are stored behind more than
+    /// [`CHAIN_STEPS_PER_PATH`] for each path the inode limit admits: before the Git library
+    /// walks this object's chain. The check reads the header of each object once, so what the
+    /// Git library walks for all of them is within that bound.
+    fn stated(&mut self, id: Oid, kind: ObjectType) -> Result<u64, Unadmitted> {
+        self.chain_steps = self.chain_steps.saturating_add(self.chains.behind(id));
+        if self.chain_steps > CHAIN_STEPS_PER_PATH.saturating_mul(self.limit.max_inodes) {
+            return Err(Unadmitted::Limit);
+        }
+        let (size, found) = self
+            .objects
+            .read_header(id)
+            .map_err(|_| Unadmitted::Object)?;
+        if found != kind {
+            return Err(Unadmitted::Object);
+        }
+        let size = u64::try_from(size).unwrap_or(u64::MAX);
+        let bound = if kind == ObjectType::Tree {
+            self.limit
+                .max_bytes
+                .min(TREE_BYTES_PER_PATH.saturating_mul(self.limit.max_inodes))
+        } else {
+            self.limit.max_bytes
+        };
+        if size > bound {
+            return Err(Unadmitted::Limit);
+        }
+        Ok(size)
+    }
+
     /// Reads the tree `id`, which a directory holds by a name of `name` bytes, and answers it
     /// as a directory the check is in, with its own entries counted and its directories yet
     /// to enter.
     ///
-    /// The tree's header is read first ([`stated_within`]). Once the tree is read, its entries
+    /// The tree's header is read first ([`Check::stated`]). Once the tree is read, its entries
     /// are added to those of the trees read before, and the check ends when they are more than
     /// the inode limit: before anything of this tree is kept and before another tree is read.
     /// So the ids the check keeps of directories it has not entered are never more than the
     /// inode limit.
-    fn enter(&mut self, id: Oid, name: u64) -> Result<Directory, Unwritten> {
-        let stated = stated_within(&self.objects, id, ObjectType::Tree, self.limit)?;
+    fn enter(&mut self, id: Oid, name: u64) -> Result<Directory, Unadmitted> {
+        let stated = self.stated(id, ObjectType::Tree)?;
         let tree = self
             .repository
             .find_tree(id)
-            .map_err(|_| Unwritten::Object)?;
+            .map_err(|_| Unadmitted::Object)?;
         let entries = u64::try_from(tree.len()).unwrap_or(u64::MAX);
         self.trees += 1;
         self.entries = self.entries.saturating_add(entries);
         if self.entries > self.limit.max_inodes {
-            return Err(Unwritten::Limit);
+            return Err(Unadmitted::Limit);
         }
         let mut pending = Vec::new();
         let mut shape = Shape {
@@ -318,7 +372,7 @@ impl Check<'_> {
         for entry in &tree {
             let name = entry.name_bytes();
             if name.len() > MAX_NAME_BYTES || name.contains(&b'/') {
-                return Err(Unwritten::Path);
+                return Err(Unadmitted::Path);
             }
             let bytes = u64::try_from(name.len()).unwrap_or(u64::MAX);
             shape.path_bytes = shape.path_bytes.saturating_add(bytes);
@@ -326,14 +380,12 @@ impl Check<'_> {
             match entry.kind() {
                 Some(ObjectType::Tree) => pending.push((entry.id(), bytes)),
                 Some(ObjectType::Blob) => {
-                    let file = match self.files.entry(entry.id()) {
-                        Entry::Occupied(known) => *known.get(),
-                        Entry::Vacant(unknown) => *unknown.insert(stated_within(
-                            &self.objects,
-                            entry.id(),
-                            ObjectType::Blob,
-                            self.limit,
-                        )?),
+                    let file = if let Some(known) = self.files.get(&entry.id()) {
+                        *known
+                    } else {
+                        let stated = self.stated(entry.id(), ObjectType::Blob)?;
+                        self.files.insert(entry.id(), stated);
+                        stated
                     };
                     shape.bytes = shape.bytes.saturating_add(file);
                 }
@@ -342,7 +394,7 @@ impl Check<'_> {
         }
         // No name is longer than the bound here, so an entry takes at most this many bytes.
         if stated > TREE_BYTES_PER_PATH.saturating_mul(entries) {
-            return Err(Unwritten::Limit);
+            return Err(Unadmitted::Limit);
         }
         Ok(Directory {
             id,
@@ -353,7 +405,7 @@ impl Check<'_> {
     }
 
     /// Enters every tree the tree `root` reaches, each once, and answers what `root` holds.
-    fn walk(&mut self, root: Oid) -> Result<Shape, Unwritten> {
+    fn walk(&mut self, root: Oid) -> Result<Shape, Unadmitted> {
         let entered = self.enter(root, 0)?;
         self.inside.push(entered);
         loop {
@@ -375,25 +427,33 @@ impl Check<'_> {
             };
             if let Some(&shape) = self.left.get(&next) {
                 if depth + shape.beneath > MAX_BASELINE_DEPTH {
-                    return Err(Unwritten::Path);
+                    return Err(Unadmitted::Path);
                 }
                 innermost.shape.hold(name, shape);
             } else {
                 if depth > MAX_BASELINE_DEPTH {
-                    return Err(Unwritten::Path);
+                    return Err(Unadmitted::Path);
                 }
                 let entered = self.enter(next, name)?;
                 self.inside.push(entered);
             }
         }
         // The root's tree was left last.
-        self.left.get(&root).copied().ok_or(Unwritten::Object)
+        self.left.get(&root).copied().ok_or(Unadmitted::Object)
     }
 }
 
-/// Checks the baseline of `commit` before anything walks it, and before any of its objects is
-/// read whole (design 21, § *The baseline store*).
+/// Checks the baseline of `commit` in the repository `repository`, a staging tree the driver
+/// wrote, before anything walks it and before any of its objects is read whole (design 21,
+/// § *The baseline store*). Beside its answer it gives what the check had read and kept when
+/// it ended.
 ///
+/// - **Stored chains.** Before the Git library reads any header, every pack of the object
+///   store is read for how many entries each of its entries is stored behind
+///   ([`Chains::read`]). None is stored behind more than [`chains::MAX_CHAIN`]. The commit,
+///   the trees and the file and link objects the check reads the header of are stored behind
+///   at most [`CHAIN_STEPS_PER_PATH`] entries together for each path the inode limit admits:
+///   the check ends before it reads the header that would take it over.
 /// - **Object sizes.** The header of every object is read before the object is: the commit,
 ///   every tree it reaches and every file and link object those trees name. None states more
 ///   than `limit.max_bytes`, and no tree more than [`TREE_BYTES_PER_PATH`] for each path the
@@ -412,45 +472,76 @@ impl Check<'_> {
 ///   each once for each place the baseline names it.
 ///
 /// The check reads each tree once, however often the baseline names it: what it found in a
-/// tree it has left it keeps by the tree's id, relative to the tree. It keeps the directories
-/// it is in as a list, never longer than the nesting bound, and of the directories it has yet
-/// to enter their ids, never more than the inode limit. So its work and what it keeps follow
-/// the objects of the baseline up to that limit, not the paths those objects name.
-pub(super) fn check_baseline(
-    repository: &git2::Repository,
-    commit: Oid,
-    limit: StorageLimit,
-) -> Result<Checked, Unwritten> {
-    check_baseline_keeping(repository, commit, limit).0
-}
-
-/// [`check_baseline`], and beside its answer what the check had read and kept when it ended.
+/// tree it has left it keeps by the tree's id, relative to the tree. It reads the header of
+/// each file and link object once, and keeps the bytes it states by the object's id. It keeps
+/// the directories it is in as a list, never longer than the nesting bound, and of the
+/// directories it has yet to enter their ids, never more than the inode limit. So its work
+/// and what it keeps follow the objects of the baseline up to that limit and the entries of
+/// the fetched pack: not the paths those objects name, and not how the pack stores them.
 pub(super) fn check_baseline_keeping(
     repository: &git2::Repository,
     commit: Oid,
     limit: StorageLimit,
-) -> (Result<Checked, Unwritten>, Kept) {
+) -> (Result<Checked, Unadmitted>, Kept) {
+    check_in(
+        repository,
+        &repository.path().join("objects"),
+        commit,
+        limit,
+    )
+}
+
+/// The answer of [`check_baseline_keeping`] alone.
+#[cfg(test)]
+pub(super) fn check_baseline(
+    repository: &git2::Repository,
+    commit: Oid,
+    limit: StorageLimit,
+) -> Result<Checked, Unadmitted> {
+    check_baseline_keeping(repository, commit, limit).0
+}
+
+/// [`check_baseline_keeping`] for a repository that reads its objects from the directory
+/// `objects`.
+fn check_in(
+    repository: &git2::Repository,
+    objects: &Path,
+    commit: Oid,
+    limit: StorageLimit,
+) -> (Result<Checked, Unadmitted>, Kept) {
+    let chains = match Chains::read(objects) {
+        Ok(chains) => chains,
+        Err(unadmitted) => return (Err(unadmitted), Kept::default()),
+    };
     let Ok(objects) = repository.odb() else {
-        return (Err(Unwritten::Object), Kept::default());
+        return (Err(Unadmitted::Object), Kept::default());
     };
     let mut check = Check {
         repository,
         objects,
+        chains: &chains,
         limit,
+        chain_steps: 0,
         files: HashMap::new(),
         left: HashMap::new(),
         inside: Vec::new(),
         trees: 0,
         entries: 0,
     };
-    let checked = stated_within(&check.objects, commit, ObjectType::Commit, limit)
+    let checked = check
+        .stated(commit, ObjectType::Commit)
+        .map_err(|unadmitted| match unadmitted {
+            Unadmitted::Object => Unadmitted::Commit,
+            other => other,
+        })
         .and_then(|_| {
             repository
                 .find_commit(commit)
-                .map_err(|_| Unwritten::Object)
+                .map_err(|_| Unadmitted::Commit)
         })
         .and_then(|commit| check.walk(commit.tree_id()))
         .map(|shape| Checked {
+            chain_steps: check.chain_steps,
             trees: check.trees,
             paths: shape.paths,
             path_bytes: shape.path_bytes,
