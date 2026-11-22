@@ -81,6 +81,7 @@ fn run(stage: &str, entry: Entry<'_>, script: &str) -> Result<Seen, String> {
         loader: substrate_exec_gate::elf_interpreter(&std::fs::read(&env).expect("env")),
         allow: vec![entry],
         writable: vec![writable],
+        deny: Vec::new(),
     };
     let output: Output = Command::new(unshare)
         .args(["--user", "--map-root-user", "--mount", "--"])

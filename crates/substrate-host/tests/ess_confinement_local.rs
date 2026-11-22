@@ -3,9 +3,9 @@
 //! Executes every authored `-on-portable` scenario of `spec/confinement-suite.json` against the
 //! real `local` adapter, `systemd` with no user manager, `oci` without a runtime program and
 //! the S0 stubs of `macos` and `pod`, through `confinement::open`. The count is pinned per
-//! host: 18 declared, all executed off macOS; on macOS `absent-macos-off-macos-on-portable` is
+//! host: 22 declared, all executed off macOS; on macOS `absent-macos-off-macos-on-portable` is
 //! named as not executable there, because the adapter it asserts absent is present, and the
-//! other 17 run. Every other `absent-*` scenario opens its adapter with the scenario's own
+//! other 21 run. Every other `absent-*` scenario opens its adapter with the scenario's own
 //! unreachable setup, so it executes on every host. Beside the
 //! suite: `linux` without a delegated cgroup refuses `limits` by name, each stub refuses to open,
 //! `render` under `linux` produces the bubblewrap argv, and a `local` run reports itself declared
@@ -70,7 +70,7 @@ fn open_portable(
 
 /// The authored `-on-portable` scenarios `spec/confinement-suite.json` holds. Pinned, so a
 /// scenario lost or renamed out of the lane fails here instead of shrinking what runs.
-const PORTABLE_DECLARED: usize = 20;
+const PORTABLE_DECLARED: usize = 22;
 
 /// The portable scenarios this host cannot execute, by name: an `absent-<adapter>-*` scenario on
 /// the platform where that adapter is present.
@@ -82,9 +82,9 @@ const NOT_EXECUTABLE_HERE: &[&str] = &[];
 
 /// What this host executes of the portable lane.
 #[cfg(target_os = "macos")]
-const PORTABLE_EXECUTED: usize = 19;
+const PORTABLE_EXECUTED: usize = 21;
 #[cfg(not(target_os = "macos"))]
-const PORTABLE_EXECUTED: usize = 20;
+const PORTABLE_EXECUTED: usize = 22;
 
 #[test]
 fn ess_confinement_portable_lane_executes_every_authored_portable_scenario() {

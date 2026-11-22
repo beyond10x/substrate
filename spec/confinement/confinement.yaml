@@ -42,6 +42,8 @@ types:
   #   differs by adapter and the difference is stated, not removed (design 35 D1): on `linux` it
   #   runs every program of the view and only a non-empty list holds the run to its program and
   #   the list; on `macos` it runs only the program.
+  # - exec_denied_paths: execve of these paths fails, even beneath an exec subpath (design 35
+  #   section 8). A profile sets it only beside a non-empty `exec_subpaths`.
   # - private_tmpdir: a per-run TMPDIR, invisible to another run and gone after wait.
   # - host_network: the run uses the host's network directly.
   # - image_digest_pinned: the image runs by digest only.
@@ -61,6 +63,7 @@ types:
       - ipc_signals_contained
       - sealed_paths
       - exec_subpaths
+      - exec_denied_paths
       - private_tmpdir
       - host_network
       - image_digest_pinned
@@ -182,6 +185,10 @@ errors:
     summary: "`confinement.reserved-field-unserved`, 501. An ingress route or a rate bound was set; both are reserved (ADR 0109 F1 B)."
     fields:
       - {name: field, type: substrate.confinement.ReservedField}
+  - name: substrate.confinement.ExecDeniedPathsWithoutSubpaths
+    summary: "`confinement.exec-denied-paths-without-subpaths`, 422. The profile sets `exec_denied_paths` beside an empty `exec_subpaths`: a run that can execute every file of its view can copy a denied program and run the copy, so a deny-list alone is refused on every adapter (design 35 D13)."
+    fields:
+      - {name: adapter, type: substrate.confinement.AdapterName}
 
 commands:
   # `confinement::open` (S0 contract). The adapter probes at open; the input states the families
@@ -199,7 +206,9 @@ commands:
   #   stdin_pipe and output_live (design 32: the host driver's pipe channel, with a live sender
   #   for output_live, each proved with the floor), exec_subpaths (design 35: the Landlock
   #   execute right, applied inside the sandbox by the helper `HostConfig.exec_gate` names, and
-  #   proved by the driver's probe; the delegated lane opens its adapter with that helper). The S0
+  #   proved by the driver's probe; the delegated lane opens its adapter with that helper),
+  #   exec_denied_paths (design 35 section 8: the helper grants per entry where a directory
+  #   holds a denied path; proved by a second probe run, and only where exec_subpaths was). The S0
   #   story: paths_are_host_paths, sealed_paths and host_network are not proved.
   #   UNMAPPED: private_tmpdir. The bwrap argv mounts a fresh `/tmp`
   #   (`crates/substrate-host/src/process.rs`), but no story declares the fact for `linux`;
@@ -207,7 +216,8 @@ commands:
   # - macos, final state after `story:macos-seatbelt-policy-runs-cargo-test`: process_run,
   #   process_watch, output_read, wait, workspace, filesystem_view, audit; paths_are_host_paths,
   #   ipc_signals_contained (the profile's `signal (target same-sandbox)` rule,
-  #   `crates/substrate-host/src/seatbelt.rs`), sealed_paths, exec_subpaths, private_tmpdir,
+  #   `crates/substrate-host/src/seatbelt.rs`), sealed_paths, exec_subpaths, exec_denied_paths
+  #   (design 35 D12: Seatbelt deny rules after every allow), private_tmpdir,
   #   stdin_pipe (design 32: the run inherits descriptor 0; declared once the macos lane proves a
   #   confined `cat` reads it), output_live (design 32: the shared drain's live queue; declared
   #   once the macos lane proves a confined run's output arrives while it runs). No limits,
@@ -324,6 +334,14 @@ commands:
       # UNMAPPED: the shape of an ingress route and of a rate bound. Any value is refused here.
       - {name: ingress_routes, type: "Optional<Json>"}
       - {name: rate_bounds, type: "Optional<Json>"}
+      # The two executable lists of the profile (design 35), each stated only where the profile
+      # sets it: the model reads a list that is defined as a list with an entry, and no scenario
+      # states an empty one. A list that is set also requires its fact, which `required_facts`
+      # states beside it; the inputs are named apart from the facts, which a payload writes as
+      # literal text. The model runs no program; what an entry admits or denies is each
+      # adapter lane's case.
+      - {name: exec_subpath_entries, type: "Optional<List<String>>"}
+      - {name: exec_denied_path_entries, type: "Optional<List<String>>"}
     outcomes:
       - name: ingress-routes-reserved
         when: {ingress_routes: {defined: true}}
@@ -335,6 +353,13 @@ commands:
         error: substrate.confinement.ReservedFieldUnserved
         payload:
           substrate.confinement.ReservedFieldUnserved: {field: rate-bounds}
+      # Design 35 D13: a deny-list beside no allow-list, on every adapter and before any fact is
+      # read, so `local`, which proves neither list fact, answers with this refusal too.
+      - name: exec-denied-paths-without-subpaths
+        when: {all: ["defined(exec_denied_path_entries)", "not defined(exec_subpath_entries)"]}
+        error: substrate.confinement.ExecDeniedPathsWithoutSubpaths
+        payload:
+          substrate.confinement.ExecDeniedPathsWithoutSubpaths: {adapter: input.adapter}
       # No row: the adapter did not open on this host.
       - name: adapter-not-open
         when_related: {via: input.adapter, exists: false}
@@ -570,6 +595,14 @@ commands:
         error: substrate.confinement.FactUnserved
         payload:
           substrate.confinement.FactUnserved: {adapter: input.adapter, fact: exec_subpaths}
+      - name: fact-unserved-exec-denied-paths
+        when: {exists: {in: required_facts, as: needed, that: needed == exec_denied_paths}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == exec_denied_paths}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: exec_denied_paths}
       - name: fact-unserved-private-tmpdir
         when: {exists: {in: required_facts, as: needed, that: needed == private_tmpdir}}
         when_related:

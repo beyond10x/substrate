@@ -1,0 +1,46 @@
+# Design 35 D12: `macos` denies the paths with Seatbelt deny rules after every allow, and
+# proves `exec_denied_paths` where its build probe held.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: macos-lists-admits-exec-denied-paths-on-macos
+summary: "lane macos: macos admits a profile with both executable lists, requiring exec_subpaths and exec_denied_paths."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-11-21T10:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: macos
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, audit]
+      facts: [paths_are_host_paths, ipc_signals_contained, sealed_paths, exec_subpaths, exec_denied_paths, private_tmpdir, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T10:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: macos
+      required_families: [process_run, filesystem_view]
+      required_facts: [exec_subpaths, exec_denied_paths]
+      exec_subpath_entries: [/usr/bin]
+      exec_denied_path_entries: [/usr/bin/id]
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: macos
+          families: [process_run, filesystem_view]
+          facts: [exec_subpaths, exec_denied_paths]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: macos
+      facts: [exec_subpaths, exec_denied_paths]
+      declared_insecure: false

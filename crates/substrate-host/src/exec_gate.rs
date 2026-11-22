@@ -2,9 +2,11 @@
 //!
 //! `HostConfig.exec_gate` names `substrate-exec-gate`, the helper that holds a run to its
 //! executable allow-list. This module decides whether that file can be the authority (D21), reads
-//! it once and seals its bytes in memory (D20), and turns one start's list into the helper's
+//! it once and seals its bytes in memory (D20), and turns one start's lists into the helper's
 //! arguments, refusing an entry the view cannot carry before anything is dispatched (D2, D3,
-//! D24).
+//! D24). The deny-list (§ 8) goes the same way: each entry is located as an allow entry is,
+//! except that it need not exist, and a start whose program lies in a denied path, or is the
+//! same file as a denied one, is refused before dispatch (D23).
 //!
 //! What the open answers, in the order it asks (D27):
 //!
@@ -69,7 +71,7 @@ use substrate_exec_gate::{Class, Linkage, Lists, Located, PROTOCOL};
 use crate::confinement::{Fact, FactWithheld};
 use crate::read_only_files::PinnedFile;
 use crate::read_only_roots::PinnedRoot;
-use crate::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
+use crate::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE, PROGRAM_UNLISTED};
 use crate::writable_roots::PinnedWritableRoot;
 use crate::{DriverError, HostConfig};
 
@@ -105,6 +107,8 @@ const WORKSPACE_ROOT: &str = "config.workspace_root";
 const WRITABLE_ROOTS: &str = "config.writable_roots";
 /// The address of a refused allow-list entry.
 const ENTRY: &str = "exec_subpaths";
+/// The address of a refused deny-list entry.
+const DENIED: &str = "exec_denied_paths";
 /// The address of a refused program.
 const PROGRAM: &str = "argv";
 /// The address of a refused mount a run can write.
@@ -114,7 +118,7 @@ const WORKSPACE: &str = "workspace";
 
 /// The facts the helper proves, in the `Fact` order: what an open that cannot use it withholds
 /// (D27). A fact the helper comes to prove is added here, and to nothing else of the open.
-const GATED_FACTS: [Fact; 1] = [Fact::ExecSubpaths];
+const GATED_FACTS: [Fact; 2] = [Fact::ExecSubpaths, Fact::ExecDeniedPaths];
 
 /// The base system directories of every view, bound from the host's own at the same paths.
 const BASE_MOUNTS: [&str; 4] = ["/usr", "/bin", "/lib", "/lib64"];
@@ -189,6 +193,12 @@ pub(crate) fn start_unplaced(address: &str, why: &Unestablished) -> DriverError 
         ),
         address,
     )
+}
+
+/// [`start_unplaced`] for an entry of the deny-list, or its nearest existing ancestor: address
+/// `exec_denied_paths`.
+pub(crate) fn denied_unplaced(why: &Unestablished) -> DriverError {
+    start_unplaced(DENIED, why)
 }
 
 /// A place the open needs and could not establish, as data (D26): whose configuration field
@@ -807,6 +817,15 @@ pub(crate) fn check_literal(entry: &str) -> Result<(), DriverError> {
     literal(entry, ENTRY)
 }
 
+/// [`check_literal`] for an entry of the deny-list.
+///
+/// # Errors
+///
+/// `exec.sandbox-path-unrepresentable`, address `exec_denied_paths`.
+pub(crate) fn check_denied_literal(entry: &str) -> Result<(), DriverError> {
+    literal(entry, DENIED)
+}
+
 fn literal(text: &str, address: &str) -> Result<(), DriverError> {
     let checked = if text.starts_with('/') {
         crate::seatbelt::absolute_literal(text)
@@ -1017,6 +1036,10 @@ fn why_unopened(error: &io::Error) -> String {
 enum Unfollowed {
     /// The path itself is at fault: what follows the entry's text in the refusal.
     Refused(String),
+    /// A name of the path does not exist in the mount it was looked up in. A fault of an
+    /// entry of the allow-list and of the program; what an entry of the deny-list may be
+    /// (design 35 § 8.2).
+    Absent(String),
     /// A symbolic link the walk read, or a directory it passed through, has no place (D26,
     /// D30).
     Unplaced(Unestablished),
@@ -1029,11 +1052,24 @@ impl From<String> for Unfollowed {
 }
 
 impl Unfollowed {
+    fn other(why: String) -> Self {
+        Self::Refused(why)
+    }
+
+    /// A name that did not open: absent where the kernel says it does not exist.
+    fn unopened(why: String, error: &io::Error) -> Self {
+        if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) {
+            Self::Absent(why)
+        } else {
+            Self::Refused(why)
+        }
+    }
+
     /// The refusal of the start: `exec.sandbox-path-unrepresentable` for a path at fault, and
     /// [`PLACE_UNSERVED`] with the cause for a link or a directory that has no place.
     fn refusal(self, text: &str, address: &str) -> DriverError {
         match self {
-            Self::Refused(why) => unrepresentable(text, why, address),
+            Self::Refused(why) | Self::Absent(why) => unrepresentable(text, why, address),
             Self::Unplaced(why) => start_unplaced(address, &why),
         }
     }
@@ -1087,8 +1123,31 @@ fn judge_passed(
     }
 }
 
+/// The device and inode of the file `descriptor` is, or `None` for a directory: what another
+/// name of the same file has too.
+fn file_identity(descriptor: &OwnedFd) -> Option<(libc::dev_t, libc::ino_t)> {
+    // SAFETY: `fstat` fills the zeroed struct for a live descriptor.
+    let mut status: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: as above; `status` is a valid out pointer.
+    if unsafe { libc::fstat(descriptor.as_raw_fd(), &raw mut status) } != 0 {
+        return None;
+    }
+    (status.st_mode & libc::S_IFMT != libc::S_IFDIR).then_some((status.st_dev, status.st_ino))
+}
+
+/// Where a path of the view is on the host: its place, the mount the kernel reported for what
+/// was opened, and for a file its device and inode.
+struct Sighted {
+    place: Place,
+    /// The ID of the mount the place was read from: the mount a walk of the path is on.
+    mount: Option<u64>,
+    file: Option<(libc::dev_t, libc::ino_t)>,
+}
+
 /// Where a followed path ends in the view.
 struct Reached {
+    /// The device and inode of the host object, where it is a file the driver opened.
+    file: Option<(libc::dev_t, libc::ino_t)>,
     /// The view path with every symbolic link resolved.
     view: String,
     /// The mount it lies in.
@@ -1397,6 +1456,7 @@ impl<'a> Mounts<'a> {
             let Some(directory) = mount.descriptor() else {
                 current.extend(pending);
                 return Ok(Reached {
+                    file: None,
                     view: join(&current),
                     mount: index,
                     object: None,
@@ -1420,10 +1480,16 @@ impl<'a> Mounts<'a> {
                     "names {here}, beneath a mount that is a single file"
                 )));
             }
-            let opened = open_beneath(directory, &rel.join("/"), libc::O_NOFOLLOW)
-                .map_err(|error| format!("names {here}, which {}", why_unopened(&error)))?;
-            let target = link_target(&opened)
-                .map_err(|error| format!("names {here}, which cannot be read ({error})"))?;
+            let opened =
+                open_beneath(directory, &rel.join("/"), libc::O_NOFOLLOW).map_err(|error| {
+                    Unfollowed::unopened(
+                        format!("names {here}, which {}", why_unopened(&error)),
+                        &error,
+                    )
+                })?;
+            let target = link_target(&opened).map_err(|error| {
+                Unfollowed::other(format!("names {here}, which cannot be read ({error})"))
+            })?;
             if let Some(target) = target {
                 links += 1;
                 if links > MAX_LINKS {
@@ -1472,25 +1538,32 @@ impl<'a> Mounts<'a> {
             )));
         };
         let mount = &self.list[index];
-        let object = match mount.descriptor() {
-            None => None,
+        let (object, file) = match mount.descriptor() {
+            None => (None, None),
             Some(directory) => {
                 let object = if rel.is_empty() {
                     None
                 } else {
                     Some(open_beneath(directory, &rel.join("/"), 0).map_err(|error| {
-                        format!(
-                            "resolves to {}, which {}",
-                            join(current),
-                            why_unopened(&error)
+                        Unfollowed::unopened(
+                            format!(
+                                "resolves to {}, which {}",
+                                join(current),
+                                why_unopened(&error)
+                            ),
+                            &error,
                         )
                     })?)
                 };
                 let descriptor = object.as_ref().unwrap_or(directory);
-                Some(Opened::of_descriptor(descriptor.as_raw_fd(), asked))
+                (
+                    Some(Opened::of_descriptor(descriptor.as_raw_fd(), asked)),
+                    file_identity(descriptor),
+                )
             }
         };
         Ok(Reached {
+            file,
             view: join(current),
             mount: index,
             object,
@@ -1503,10 +1576,21 @@ impl<'a> Mounts<'a> {
     /// Asked of the view's mounts as the driver built them, and of the place of what the path
     /// names on the host (D25), so a host mount beneath a read-only root is seen too.
     fn check_followed(&self, text: &str, path: &str, address: &str) -> Result<(), DriverError> {
-        let refuse = |why: String| unrepresentable(text, why, address);
         let reached = self
             .follow(path, text)
             .map_err(|why| why.refusal(text, address))?;
+        self.check_reached(text, reached, address).map(drop)
+    }
+
+    /// The checks of [`Self::check_followed`] on a path that was followed to its end, and where
+    /// what it names is on the host.
+    fn check_reached(
+        &self,
+        text: &str,
+        reached: Reached,
+        address: &str,
+    ) -> Result<Sighted, DriverError> {
+        let refuse = |why: String| unrepresentable(text, why, address);
         if let Some(crossed) = reached.crossed {
             return Err(refuse(format!(
                 "resolves through a symbolic link in the writable mount {}",
@@ -1520,7 +1604,7 @@ impl<'a> Mounts<'a> {
                 reached.view, mount.path
             )));
         }
-        let Some(object) = reached.object else {
+        let Some(object) = &reached.object else {
             return Err(refuse(format!(
                 "resolves to {}, in {}, where no executable path can be named",
                 reached.view, mount.path
@@ -1529,7 +1613,7 @@ impl<'a> Mounts<'a> {
         let place = self
             .tree
             .table()
-            .place_of(&object)
+            .place_of(object)
             .map_err(|why| start_unplaced(address, &why))?;
         if let Some(location) = shown_location(&place, &self.locations) {
             return Err(refuse(format!(
@@ -1539,13 +1623,23 @@ impl<'a> Mounts<'a> {
         }
         // The end is where no run can write; the way to it is judged last, so a path that
         // ends where a run can write keeps the answer it had.
-        reached
-            .through
-            .map_or(Ok(()), |why| Err(why.refusal(text, address)))
+        if let Some(why) = reached.through {
+            return Err(why.refusal(text, address));
+        }
+        Ok(Sighted {
+            place,
+            mount: object.mount_id,
+            file: reached.file,
+        })
     }
 
-    /// One path of a list, located in the view and held to the rules of design 35 § 5.
-    fn located(&self, text: &str, address: &str) -> Result<Located, DriverError> {
+    /// The eligible mount `text` lies in, the view path of `text`, and its names beneath the
+    /// mount; the refusal of a path that lies in none.
+    fn eligible(
+        &self,
+        text: &str,
+        address: &str,
+    ) -> Result<(&Mount<'a>, String, Vec<String>), DriverError> {
         literal(text, address)?;
         // A relative entry lies beneath the workspace mount.
         let path = if text.starts_with('/') {
@@ -1575,12 +1669,135 @@ impl<'a> Mounts<'a> {
                 )
             });
         };
-        let refuse = |why: String| unrepresentable(text, why, address);
         if mount.file && !rel.is_empty() {
-            return Err(refuse(
-                "lies beneath a mount that is a single file".to_owned(),
+            return Err(unrepresentable(
+                text,
+                "lies beneath a mount that is a single file",
+                address,
             ));
         }
+        Ok((mount, path, rel))
+    }
+
+    /// One entry of the deny-list, located in the view (design 35 § 8), and where it is on the
+    /// host. An entry need not exist at the start: it is then kept as a name, its nearest
+    /// existing ancestor is held to the rules of an entry, and the place of that ancestor must
+    /// be one this host can establish (D26). Such an entry is sighted where its name is, the
+    /// ancestor's place and the names after it, and is no file: the ancestor is not what it
+    /// denies, and the directory that is to hold it is expanded like any other.
+    fn denied(&self, text: &str) -> Result<(Located, Sighted), DriverError> {
+        let (mount, path, rel) = self.eligible(text, DENIED)?;
+        let refuse = |why: String| unrepresentable(text, why, DENIED);
+        let unplaced = |why: Unestablished| denied_unplaced(&why);
+        // What was opened, and the names of the entry after it: none for an entry that exists.
+        let named = |opened: Sighted, absent: &[String]| Sighted {
+            place: absent
+                .iter()
+                .fold(opened.place, |place, name| place.entry(name)),
+            mount: opened.mount,
+            file: opened.file.filter(|_| absent.is_empty()),
+        };
+        // What was opened beneath the mount's directory, placed.
+        let placed = |descriptor: &OwnedFd| {
+            let opened = Opened::of_descriptor(descriptor.as_raw_fd(), text);
+            let place = self.tree.table().place_of(&opened).map_err(unplaced)?;
+            Ok::<_, DriverError>(Sighted {
+                place,
+                mount: opened.mount_id,
+                file: file_identity(descriptor),
+            })
+        };
+        let sighted = match mount.class {
+            Class::Beneath => {
+                let directory = mount.descriptor().expect("an eligible mount is walked");
+                let mut existing = rel.clone();
+                loop {
+                    if existing.is_empty() {
+                        break named(placed(directory)?, &rel);
+                    }
+                    match open_beneath(directory, &existing.join("/"), 0) {
+                        Ok(object) => break named(placed(&object)?, &rel[existing.len()..]),
+                        Err(error)
+                            if matches!(
+                                error.raw_os_error(),
+                                Some(libc::ENOENT | libc::ENOTDIR)
+                            ) =>
+                        {
+                            existing.pop();
+                        }
+                        Err(error) => return Err(refuse(why_unopened(&error))),
+                    }
+                }
+            }
+            Class::Follow => {
+                let all = names(&path);
+                let mut existing = all.clone();
+                loop {
+                    match self.follow(&join(&existing), text) {
+                        Ok(reached) => {
+                            let sighted = self.check_reached(text, reached, DENIED)?;
+                            break named(sighted, &all[existing.len()..]);
+                        }
+                        Err(Unfollowed::Absent(_)) if existing.len() > mount.names.len() => {
+                            existing.pop();
+                        }
+                        Err(unfollowed) => return Err(unfollowed.refusal(text, DENIED)),
+                    }
+                }
+            }
+        };
+        let rel = if rel.is_empty() {
+            ".".to_owned()
+        } else {
+            rel.join("/")
+        };
+        let located = Located::new(mount.class, &mount.path, &rel)
+            .map_err(|why| refuse(format!("is not a path of the gate: {why}")))?;
+        check_openable(&located).map_err(refuse)?;
+        Ok((located, sighted))
+    }
+
+    /// Where the program or an entry of the allow-list is on the host, after
+    /// [`Self::located`] accepted it: what the deny check compares (D23, D30).
+    fn sighted(&self, text: &str, address: &str) -> Result<Sighted, DriverError> {
+        let (mount, path, rel) = self.eligible(text, address)?;
+        let refuse = |why: String| unrepresentable(text, why, address);
+        match mount.class {
+            Class::Follow => {
+                let reached = self
+                    .follow(&path, text)
+                    .map_err(|unfollowed| unfollowed.refusal(text, address))?;
+                self.check_reached(text, reached, address)
+            }
+            Class::Beneath => {
+                let directory = mount.descriptor().expect("an eligible mount is walked");
+                let object = if rel.is_empty() {
+                    None
+                } else {
+                    Some(
+                        open_beneath(directory, &rel.join("/"), 0)
+                            .map_err(|error| refuse(why_unopened(&error)))?,
+                    )
+                };
+                let descriptor = object.as_ref().unwrap_or(directory);
+                let opened = Opened::of_descriptor(descriptor.as_raw_fd(), text);
+                Ok(Sighted {
+                    place: self
+                        .tree
+                        .table()
+                        .place_of(&opened)
+                        .map_err(|why| start_unplaced(address, &why))?,
+                    mount: opened.mount_id,
+                    file: file_identity(descriptor),
+                })
+            }
+        }
+    }
+
+    /// One path of a list, located in the view and held to the rules of design 35 § 5.
+    fn located(&self, text: &str, address: &str) -> Result<Located, DriverError> {
+        let (mount, path, rel) = self.eligible(text, address)?;
+        let refuse = |why: String| unrepresentable(text, why, address);
         match mount.class {
             Class::Beneath => {
                 let directory = mount.descriptor().expect("an eligible mount is walked");
@@ -1650,8 +1867,143 @@ fn check_openable(located: &Located) -> Result<(), String> {
     check_length(&located.path())
 }
 
-/// One start's allow-list as the helper takes it: the program, the host's loader, every entry
-/// and the mounts the run can write, each located in `view` (D24).
+/// **What a deny-list asks of the driver's own table before dispatch** (D10, D11, D23, D30),
+/// with where the program, each deny entry that exists and each entry of the allow-list is on
+/// the host.
+///
+/// - **A denied program is refused**: its place lies in a place a deny entry reaches, which
+///   is the entry's own place or the root of a host mount beneath a denied directory, or it
+///   is the same file, by device and inode, as a denied file. A program that is a link to a
+///   denied program is that case. The helper is the second line: it writes no rule for such
+///   a program.
+/// - **What a denied directory reaches must be established**: a mount beneath it that is
+///   covered, whose root was removed, that cannot be asked or that is of a file-system type
+///   outside the list refuses the start. The helper would end the run for it after dispatch.
+/// - **So must what a listed directory reaches**, because the helper asks it of every listed
+///   directory of a start with a deny-list, to see whether a denied place lies in a mount
+///   beneath it. A mount of a type outside the list is compared with nothing there. A listed
+///   entry that is a file, or lies in a denied place, is asked nothing.
+/// - **A mount of a type outside the list refuses where the helper would meet it as an
+///   entry** (D11 step 3): the directory that holds its mount point lies in what the listed
+///   directory reaches, and what that directory reaches overlaps a denied reach, so the
+///   helper expands it. An entry that is a mount point has the place its own row gives it,
+///   and such a row gives none: dispatched, the start would end with the helper's status
+///   and nothing run. Anywhere else beneath a listed directory such a mount refuses nothing:
+///   its directory gets one rule and the helper never asks for its place. Nor does one that
+///   is hidden: covered at its mount point, or with a mount point that is gone beneath a
+///   mount laid over a directory above.
+/// - **So must what the root of a mount reaches that the helper would step as a directory**
+///   (D11 step 3; security review S9-1). An entry that is a mount point has the place its
+///   own row gives it, the root of the mount, and the helper asks what that reaches as it
+///   does of the listed directory. By place that holds the mounts attached in the same file
+///   system under another mount of it, which are not beneath the listed directory: a
+///   covered one there would end the run with the helper's status. The walk is the
+///   helper's, on the tree ([`MountTree::listed_entries`]): from the listed directory into
+///   each mount of a listed type whose mount point is an entry of a directory the helper
+///   expands, one that lies in no denied place and reaches one. A root in a denied place
+///   gets no rule and a mount that shows a file one rule or none; neither is asked.
+///
+/// `denied` holds every deny entry, the ones that do not exist too, each where its name is:
+/// the helper expands the directory that is to hold an absent entry as it does any other.
+///
+/// # Errors
+///
+/// [`PROGRAM_UNLISTED`] (address `argv`) for a denied program, and [`PLACE_UNSERVED`] with
+/// D30's cause where a reach cannot be established: address `exec_denied_paths` for a denied
+/// directory, `exec_subpaths` for a listed one, for a mount of a type outside the list among
+/// the entries of a directory the start expands, and for the root of a mount of a listed
+/// type among them.
+fn judge_denied(
+    tree: &MountTree,
+    asked: &str,
+    program: &Sighted,
+    denied: &[(&str, Sighted)],
+    listed: &[Sighted],
+) -> Result<(), DriverError> {
+    let mut reaches = Vec::with_capacity(denied.len());
+    for (entry, denied) in denied {
+        let reach = tree
+            .reaches(&denied.place, Unlisted::Refused)
+            .map_err(|why| denied_unplaced(&why))?;
+        if reach.holds(&program.place) || (program.file.is_some() && program.file == denied.file) {
+            return Err(DriverError::refused(
+                PROGRAM_UNLISTED,
+                format!(
+                    "{asked:?} is denied by the deny-list entry {entry:?}: it lies in it, or is \
+                     another name of the same file"
+                ),
+                PROGRAM,
+            ));
+        }
+        reaches.push(reach);
+    }
+    let asked_of = |place: &Place| {
+        tree.reaches(place, Unlisted::Skipped)
+            .map_err(|why| start_unplaced(ENTRY, &why))
+    };
+    // D11 step 1, no rule and nothing asked: the place lies in a denied place.
+    let denied_place = |place: &Place| reaches.iter().any(|reach| reach.holds(place));
+    // D11 step 3: the directory reaches a denied place, so the helper walks its entries.
+    let expanded = |reach: &Reach| reaches.iter().any(|denied| reach.overlaps(denied));
+    for entry in listed {
+        if entry.file.is_some() || denied_place(&entry.place) {
+            continue;
+        }
+        let reach = asked_of(&entry.place)?;
+        for odd in tree.unlisted_entries(&entry.place) {
+            // The helper walks only what the listed directory reaches, and expands only a
+            // directory that reaches a denied place.
+            if !reach.holds(&odd.holder) {
+                continue;
+            }
+            if expanded(&asked_of(&odd.holder)?) {
+                return Err(start_unplaced(ENTRY, &odd.unplaced()));
+            }
+        }
+        // The helper's walk across the mounts of a listed type, mount by mount: the listed
+        // directory first, then the root of each mount it steps as a directory.
+        let mut walk: Vec<(u64, Place)> = entry
+            .mount
+            .map(|mount| (mount, entry.place.clone()))
+            .into_iter()
+            .collect();
+        while let Some((mount, directory)) = walk.pop() {
+            for met in tree.listed_entries(mount, &directory) {
+                // Met only where the helper expands the directory that holds the mount
+                // point: one that lies in no denied place and reaches one.
+                if denied_place(&met.holder) || !expanded(&asked_of(&met.holder)?) {
+                    continue;
+                }
+                // Stepped with the place its row gives it. In a denied place it gets no
+                // rule, and a file one rule or none: nothing is asked of either.
+                if denied_place(&met.root) || shows_a_file(&met.mount_point) {
+                    continue;
+                }
+                // The question the helper would end the run with: what the root reaches,
+                // by place, the mounts attached in that file system elsewhere among them.
+                asked_of(&met.root)?;
+                walk.push((met.mount, met.root));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the mount at `mount_point` shows a file: the helper gives such an entry one rule
+/// or none, and asks the table nothing about it. A mount point that cannot be asked is taken
+/// for a directory, whose root is asked.
+fn shows_a_file(mount_point: &str) -> bool {
+    std::fs::symlink_metadata(mount_point).is_ok_and(|shown| !shown.is_dir())
+}
+
+/// One start's lists as the helper takes them: the program, the host's loader, every entry of
+/// the allow-list and of the deny-list, and the mounts the run can write, each located in `view`
+/// (D24).
+///
+/// **A denied program is refused here** (D10, D23): `exec.sandbox-program-unlisted` when the
+/// program lies in a denied path, by place (D25) through what the deny entry reaches on the
+/// driver's own mount table (D30), or is the same file, by device and inode, as a denied
+/// file ([`judge_denied`]).
 ///
 /// # Errors
 ///
@@ -1660,10 +2012,14 @@ fn check_openable(located: &Located) -> Result<(), String> {
 /// (address `argv`), and for an entry that is not normal, does not exist at the start, has a
 /// symbolic link in a mount classed `beneath`, or resolves into a mount the run can write;
 /// `exec.sandbox-exec-subpath-undeclared` for an absolute entry outside the eligible locations;
-/// and [`PLACE_UNSERVED`] where a place cannot be established.
+/// [`PROGRAM_UNLISTED`] for a denied program; and [`PLACE_UNSERVED`] where a place cannot be
+/// established, of the program, of an entry of either list or of a deny entry's nearest
+/// existing ancestor, or, on a start with a deny-list, what a denied or a listed directory
+/// reaches.
 pub(crate) fn plan(
     gate: &ExecGate,
     entries: &[String],
+    denied: &[String],
     program: &str,
     view: &View<'_>,
     config: &HostConfig,
@@ -1676,11 +2032,27 @@ pub(crate) fn plan(
         ));
     }
     let mounts = Mounts::of(view, config)?;
-    let program = mounts.located(program, PROGRAM)?;
+    let asked = program;
+    let program = mounts.located(asked, PROGRAM)?;
     let allow = entries
         .iter()
         .map(|entry| mounts.located(entry, ENTRY))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut deny = Vec::with_capacity(denied.len());
+    let mut sighted = Vec::new();
+    for entry in denied {
+        let (located, on_host) = mounts.denied(entry)?;
+        deny.push(located);
+        sighted.push((entry.as_str(), on_host));
+    }
+    if !denied.is_empty() {
+        let program = mounts.sighted(asked, PROGRAM)?;
+        let listed = entries
+            .iter()
+            .map(|entry| mounts.sighted(entry, ENTRY))
+            .collect::<Result<Vec<_>, _>>()?;
+        judge_denied(&mounts.tree, asked, &program, &sighted, &listed)?;
+    }
     // The helper opens the loader as a `follow` path and refuses one in a writable mount; the
     // same answer here, before dispatch, instead of exit status 125 after it.
     if let Some(loader) = gate.loader() {
@@ -1695,6 +2067,7 @@ pub(crate) fn plan(
         program,
         loader: gate.loader().map(str::to_owned),
         allow,
+        deny,
         writable,
     })
 }

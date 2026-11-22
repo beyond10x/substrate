@@ -125,6 +125,7 @@ fn run_entry(
         loader: substrate_exec_gate::elf_interpreter(&std::fs::read(&env).expect("env")),
         allow: vec![Located::new(class, &at(within), entry).expect("a path of the gate")],
         writable: writable.iter().map(|rel| at(rel)).collect(),
+        deny: Vec::new(),
     };
     let stage = stage
         .replace("{mount}", &mount)

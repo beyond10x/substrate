@@ -1261,7 +1261,8 @@ impl HostDriver {
             Some(Arc::new(filesystem.root_descriptor()?)),
             exec_gate,
             exec_lists.subpaths,
-        )?;
+        )?
+        .proving_exec_denied_paths(exec_lists.denied_paths);
         let workspace_destroy_namespace = filesystem.root_identity()?;
         Ok(Arc::new(Self {
             config,

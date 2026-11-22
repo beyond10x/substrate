@@ -25,7 +25,7 @@ pub const FAMILY_ORDER: [ContractFamily; 10] = [
 
 /// The facts in the model's `Fact` order. A refusal names the first fact in this order that a
 /// profile requires and the adapter did not prove.
-pub const FACT_ORDER: [Fact; 13] = [
+pub const FACT_ORDER: [Fact; 14] = [
     Fact::DeclaredInsecure,
     Fact::PathsAreHostPaths,
     Fact::WholeTreeKill,
@@ -34,6 +34,7 @@ pub const FACT_ORDER: [Fact; 13] = [
     Fact::IpcSignalsContained,
     Fact::SealedPaths,
     Fact::ExecSubpaths,
+    Fact::ExecDeniedPaths,
     Fact::PrivateTmpdir,
     Fact::HostNetwork,
     Fact::ImageDigestPinned,
@@ -180,6 +181,23 @@ mod tests {
         for fact in &FACT_ORDER {
             assert_eq!(FACT_ORDER.iter().filter(|other| *other == fact).count(), 1);
         }
+    }
+
+    /// Design 35 D10: the deny-list's fact stands directly after the allow-list's, so an adapter
+    /// that proves neither refuses a profile with both lists naming `exec_subpaths`.
+    #[test]
+    fn the_deny_list_fact_stands_directly_after_the_allow_list_fact() {
+        let position = |fact: &Fact| {
+            FACT_ORDER
+                .iter()
+                .position(|other| other == fact)
+                .expect("in the order")
+        };
+        assert_eq!(
+            position(&Fact::ExecDeniedPaths),
+            position(&Fact::ExecSubpaths) + 1
+        );
+        assert_eq!(FACT_ORDER.len(), 14);
     }
 
     #[test]

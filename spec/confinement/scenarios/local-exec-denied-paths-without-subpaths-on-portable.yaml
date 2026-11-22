@@ -1,0 +1,34 @@
+# Design 35 D13: a deny-list beside no allow-list is refused on every adapter before any fact
+# is read. `local` proves neither list fact and still answers with this refusal.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: local-exec-denied-paths-without-subpaths-on-portable
+summary: "lane portable: a local profile with a deny-list and no allow-list is refused confinement.exec-denied-paths-without-subpaths."
+
+timeline:
+  - at: 2026-11-21T10:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, audit]
+      facts: [declared_insecure, paths_are_host_paths, local_permitted, host_network, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T10:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      required_families: [process_run]
+      required_facts: []
+      local_reason: the operator runs this task on the developer's own machine
+      exec_denied_path_entries: [/usr/bin/id]
+    outcome: exec-denied-paths-without-subpaths
+    error:
+      name: substrate.confinement.ExecDeniedPathsWithoutSubpaths
+      fields: {adapter: local}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}
