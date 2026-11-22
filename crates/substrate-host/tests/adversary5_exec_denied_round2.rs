@@ -126,6 +126,11 @@ fn owned(list: &[&str]) -> Vec<String> {
 
 /// What a forked child of the Python part ends with: 0 when the program ran, 100 when the
 /// kernel answered `EACCES`, 101 for another error, 102 when the call returned.
+///
+/// `unnamed_linked` passes a directory descriptor with an absolute source path. The kernel
+/// ignores the descriptor; Python before 3.14 calls `linkat` with `AT_SYMLINK_FOLLOW` only when
+/// one is given, and otherwise `link`, which links the `/proc` symlink itself and fails `EXDEV`,
+/// so the unnamed file was never linked there and the row read 101.
 const PYTHON: &str = r#"
 import os, sys
 
@@ -158,7 +163,8 @@ def unnamed_by_descriptor():
 
 def unnamed_linked():
     writer = unnamed()
-    os.link("/proc/self/fd/%d" % writer, "bin/from-unnamed", follow_symlinks=True)
+    here = os.open(".", os.O_RDONLY)
+    os.link("/proc/self/fd/%d" % writer, "bin/from-unnamed", src_dir_fd=here, follow_symlinks=True)
     os.close(writer)
     os.execv("bin/from-unnamed", ["tool"])
 
