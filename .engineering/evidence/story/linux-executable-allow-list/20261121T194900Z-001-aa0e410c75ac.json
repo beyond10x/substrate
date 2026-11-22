@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-21T19:49:00Z",
+  "actor": "human:timo",
+  "artifact": "story:linux-executable-allow-list",
+  "kind": "story",
+  "revision": 20,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "pull request 244, commits d36436a0f ec87d1554 13ce453ed",
+    "reference": "https://github.com/beyond10x/substrate/pull/244",
+    "review": "review-result:mount-fix-security",
+    "outcome": "fixed"
+  }
+}

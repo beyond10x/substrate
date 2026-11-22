@@ -14,7 +14,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  classify:
+    # `planning-only` for a pull request whose changed paths are all in
+    # `.github/planning-only-paths`, `code` for everything else, a push to `main` and a dispatch
+    # included (AGENTS.md § "The gate"). The jobs that wait for it skip only for `planning-only`.
+    name: Classify the change
+    uses: ./.github/workflows/classify-change.yml
+
   host:
+    needs: [classify]
+    if: ${{ !cancelled() && needs.classify.outputs.change != 'planning-only' }}
     name: Host crate on macOS
     runs-on: macos-15
     timeout-minutes: 30
