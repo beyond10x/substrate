@@ -279,6 +279,13 @@ change moves `config_generation`. Before each Pod create, `start_exec` checks th
 re-reads the policy (one `GET`) and compares the binding with the admitted snapshot. A mismatch is
 `NotDispatched(exec.capability-stale)` (422), recorded as refused.
 
+The driver holds a start to the proof it was admitted with at the last moment before the Pod is
+created. After every wait the start can sit in, it computes the snapshot again and creates the Pod
+only when its digest, its node and the facts the start requires are those of the admission and the
+proof is still valid. Otherwise the start is `NotDispatched(exec.capability-stale)` (422), recorded
+as refused, and no Pod is created. Daemon admission takes the facts and the digest it hands the
+driver from one snapshot.
+
 ### 6.4 Admission
 
 N6 A widens the last check in `operations.rs`. An exec is admitted on the four Linux facts **or** on

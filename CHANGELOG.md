@@ -18,6 +18,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   synthesis of the confinement suite took 28 s (0.86.0: 92 s) and `cargo xtask check-ess` as a
   whole 54 s.
 
+### Security
+
+- An exec on the Kubernetes namespace driver runs only under the confinement proof it was
+  admitted with (design 34 § 6.3). Immediately before the driver creates the Pod, after every
+  wait the start can sit in, it computes its capability snapshot again and creates the Pod only
+  when the digest, the probe's node and the facts the start requires are those of the admission
+  and the proof is before its `valid_until`. Otherwise the start is `exec.capability-stale`
+  (422) before dispatch, recorded as refused, and no Pod is created. Daemon admission of an exec
+  start takes the facts and the digest from one capability snapshot. No wire schema, capability
+  fact or refusal code changes.
+
 ## [0.24.0] — 2026-11-22
 
 ### Added

@@ -258,6 +258,16 @@ impl NamespaceDriver {
     /// Records what a probe that proved every fact on `node` records, at the clock's now, under
     /// the current binding and Lease: for exec cases whose fake plays no probe.
     pub(crate) fn prove_on(&self, node: &str) {
+        self.record_proof(node, true);
+    }
+
+    /// As [`NamespaceDriver::prove_on`], but for a probe whose run did not prove
+    /// `confinement.no-egress`: every other fact is proved on `node`.
+    pub(crate) fn prove_without_no_egress_on(&self, node: &str) {
+        self.record_proof(node, false);
+    }
+
+    fn record_proof(&self, node: &str, no_egress: bool) {
         let generation = self
             .binding()
             .expect("the driver is open")
@@ -280,7 +290,7 @@ impl NamespaceDriver {
                 families: true,
                 observed: ObservedProofs {
                     whole_tree_kill: true,
-                    no_egress: true,
+                    no_egress,
                 },
             },
             node: Some(node.to_owned()),

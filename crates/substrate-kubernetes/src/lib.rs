@@ -64,7 +64,7 @@ pub const POD_SECURITY_UNENFORCED: &str = "kubernetes.pod-security-unenforced";
 pub const EXECUTOR_HANDSHAKE_FAILED: &str = "kubernetes.executor-handshake-failed";
 /// The cluster API answered nothing a step can read (§ 8's failure code).
 pub const API_FAILED: &str = "kubernetes.api-failed";
-/// A start whose binding moved, or whose Lease is lost (§ 6.3, § 8).
+/// A start whose binding or proof moved, or whose Lease is lost (§ 6.3, § 8).
 pub const CAPABILITY_STALE: &str = "exec.capability-stale";
 
 /// Why the driver did not open: a reason code above and a message naming the fault, never a

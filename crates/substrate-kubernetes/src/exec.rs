@@ -28,14 +28,15 @@ use substrate_kubernetes_client::{
     WatchEvent, container_state,
 };
 use substrate_wire::{
-    AppliedConfinement, AppliedFilesystem, AppliedNetwork, Base64Content, Base64Encoding, Exec,
-    ExecExit, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState,
-    LeaseObservation, NetworkMode, OutputSlice, OutputStream, SandboxProfile, Signal,
-    WorkspaceAccess, WritableRoot,
+    AppliedConfinement, AppliedFilesystem, AppliedNetwork, Base64Content, Base64Encoding,
+    CapabilityFacts, ConfinementFamily, ConfinementProperty, ConfinementRequest, Exec, ExecExit,
+    ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState, LeaseObservation,
+    NetworkMode, OutputSlice, OutputStream, SandboxProfile, Signal, WorkspaceAccess, WritableRoot,
 };
 
 use crate::logs::{self, EXECUTOR_PROTOCOL, RunEnd};
 use crate::names::{self, DEPLOYMENT_LABEL, MANAGED_BY, MANAGED_BY_LABEL};
+use crate::namespace::stale;
 use crate::namespace::workspace::is_quota_refusal;
 use crate::ownership::{Foreign, Ownership, ownership};
 use crate::pod::{self, ExecPod, KILL_GRACE_SECONDS, RunBounds, TERM_GRACE_SECONDS};
@@ -65,9 +66,10 @@ const DELETION_CONFIRM: Duration = Duration::from_mins(1);
 /// The exec state one driver keeps.
 #[derive(Debug, Default)]
 pub(crate) struct Execs {
-    /// The snapshot the daemon admits starts under, the binding generation it was taken at, and
-    /// the node its probe observed (design 34 § 6.4): the node is bound to the snapshot here,
-    /// beside it, and is neither in its digest nor on the wire.
+    /// The snapshot `machine()` last stated, the binding generation it was taken at, and the
+    /// node its probe observed (design 34 § 6.4): the node is bound to the snapshot here, beside
+    /// it, and is neither in its digest nor on the wire. No start is compared with this copy: a
+    /// start is held to the snapshot computed when it runs (§ 6.3).
     pub(crate) published: Mutex<Option<(String, u64, Option<String>)>>,
     tracked: Mutex<BTreeMap<String, Tracked>>,
     /// Pods of ended execs whose rows a garbage round settles once they read absent.
@@ -130,18 +132,16 @@ enum Holder {
     Absent,
 }
 
-impl NamespaceDriver {
-    /// Publishes the snapshot starts are admitted under, the binding generation it was taken at,
-    /// and the node its probe observed; a start naming any other snapshot is
-    /// `exec.capability-stale`, and one whose workspace keeper is on any other node, or under a
-    /// snapshot with no observed node, is `exec.sandbox-unavailable` (§ 6.4).
-    pub fn publish_exec_snapshot(&self, snapshot: &str, generation: u64, node: Option<&str>) {
-        *lock(&self.execs().published) =
-            Some((snapshot.to_owned(), generation, node.map(str::to_owned)));
-    }
+/// The proof a start names, as the driver computed it before the binding re-read: the binding
+/// generation of the snapshot that carries the start's digest, and the node its probe observed.
+struct Admission {
+    generation: u64,
+    node: Option<String>,
+}
 
-    /// The node the latest published probe observed, if any: what a start's keeper node is
-    /// compared with, read when the comparison runs.
+impl NamespaceDriver {
+    /// The node `machine()` last stated beside its snapshot, if any.
+    #[cfg(test)]
     pub(crate) fn published_exec_node(&self) -> Option<String> {
         lock(&self.execs().published)
             .as_ref()
@@ -154,7 +154,8 @@ impl NamespaceDriver {
     }
 
     /// § 5 exec start: every request-level refusal first, then the Lease and the binding re-read
-    /// (§ 6.3), then the keeper's node against the probe's (§ 6.4), then one Pod create whose uid
+    /// (§ 6.3), then the proof the start was admitted with against the snapshot computed now
+    /// (§ 6.3) and the keeper's node against the probe's (§ 6.4), then one Pod create whose uid
     /// is bound to the exec's `pod` row.
     pub async fn exec_start(
         &self,
@@ -227,7 +228,9 @@ impl NamespaceDriver {
     }
 
     /// The checks a start makes before it touches the cluster's mutable state, then the binding
-    /// re-read: the row, the rendered Pod, the output bound and the wall bound.
+    /// re-read and, after it, the proof the start was admitted with: the row, the rendered Pod,
+    /// the output bound and the wall bound. Nothing after [`NamespaceDriver::held_to_its_proof`]
+    /// waits, here or in the caller, before the Pod create is sent.
     async fn prepare_start(
         &self,
         id: &str,
@@ -258,11 +261,11 @@ impl NamespaceDriver {
                 DriverError::failed(API_FAILED, "the exec's pod row is not reserved unbound")
             })?;
         let (claim_uid, node) = self.placement(&input.workspace, root_name).await?;
-        let generation = self.admitted_generation(&input.sandbox.capability_snapshot)?;
-        self.check_binding(generation).await?;
-        // Read after the await, not with the snapshot: a later probe published while the policy
-        // re-read was in flight is the latest probe, and the start is held to its node.
-        observed_on(&node, self.published_exec_node().as_deref())?;
+        let admission = self.admission(&input.sandbox)?;
+        self.check_binding(admission.generation).await?;
+        // After the last wait, not with the admission: a proof that changed, moved or lapsed
+        // while the keeper or the policies were read is the proof the Pod would run under.
+        self.held_to_its_proof(&admission, &node, &input.sandbox)?;
         let spec = RunSpec {
             argv: input.argv.clone(),
             env,
@@ -293,16 +296,56 @@ impl NamespaceDriver {
         Ok((row, rendered, bounds.output_bytes, bounds.deadline_seconds))
     }
 
-    /// The generation the start's snapshot was published at, or `exec.capability-stale`.
-    fn admitted_generation(&self, snapshot: &str) -> Result<u64, DriverError> {
-        match &*lock(&self.execs().published) {
-            Some((published, generation, _)) if published == snapshot => Ok(*generation),
-            _ => Err(DriverError::refused(
-                crate::CAPABILITY_STALE,
-                "The admitted capability snapshot is stale: the start names a snapshot this \
-                 driver does not publish.",
-                "capability_snapshot",
-            )),
+    /// The proof the start names (§ 6.3): the snapshot computed now carries the digest the daemon
+    /// admitted the start under, or the start is `exec.capability-stale`. The comparison is with
+    /// what the driver would state now, never with a copy an earlier read of the snapshot left.
+    fn admission(&self, sandbox: &ConfinementRequest) -> Result<Admission, DriverError> {
+        let (current, node) = self.capability_snapshot();
+        if current.snapshot != sandbox.capability_snapshot {
+            return Err(stale(
+                "the start names a snapshot this driver does not state",
+            ));
+        }
+        Ok(Admission {
+            generation: current.config_generation,
+            node,
+        })
+    }
+
+    /// The last check before the Pod create (§ 6.3), after every wait of the start: the snapshot
+    /// computed now has the admission's digest and node, its node is the keeper's (§ 6.4), and
+    /// it states every fact the start requires. A proof past its `valid_until` states none of
+    /// its facts ([`NamespaceDriver::capability_snapshot`]), so it has neither the digest nor
+    /// the facts.
+    ///
+    /// # Errors
+    ///
+    /// `exec.capability-stale` (refused, address `capability_snapshot`) for another digest,
+    /// another probe node or a required fact the snapshot does not state;
+    /// `exec.sandbox-unavailable` (unserved) for a keeper on a node the proof did not observe.
+    fn held_to_its_proof(
+        &self,
+        admission: &Admission,
+        keeper_node: &str,
+        sandbox: &ConfinementRequest,
+    ) -> Result<(), DriverError> {
+        let (current, node) = self.capability_snapshot();
+        if current.snapshot != sandbox.capability_snapshot {
+            return Err(stale(
+                "the driver's proof changed or lapsed after the start was admitted",
+            ));
+        }
+        if node != admission.node {
+            return Err(stale(
+                "the driver's proof was observed on another node after the start was admitted",
+            ));
+        }
+        observed_on(keeper_node, node.as_deref())?;
+        match unproved(&current.facts, sandbox) {
+            Some(fact) => Err(stale(&format!(
+                "the snapshot does not state {fact}, which the start requires"
+            ))),
+            None => Ok(()),
         }
     }
 
@@ -1407,6 +1450,51 @@ fn observed_on(keeper: &str, probed: Option<&str>) -> Result<(), DriverError> {
         ),
         substrate_wire::CONFINEMENT_NO_EGRESS_FACT,
     ))
+}
+
+/// The first fact an exec start requires of the snapshot it runs under that `facts` does not
+/// state: a member of the neutral set an exec is admitted on (§ 6.4), then a family or a
+/// property the start's `sandbox.requires` names (design 30 § 4.4). `None` when `facts` states
+/// all of them. The daemon checks both at admission, against the snapshot it reads then; this is
+/// the driver's own check of the snapshot it computes before the Pod create (§ 6.3).
+fn unproved(facts: &CapabilityFacts, sandbox: &ConfinementRequest) -> Option<&'static str> {
+    let admitted_on = [
+        ConfinementFamily::ProcessRun,
+        ConfinementFamily::Wait,
+        ConfinementFamily::OutputRead,
+        ConfinementFamily::Limits,
+    ]
+    .into_iter()
+    .find(|family| !facts.serves_family(*family))
+    .map(ConfinementFamily::fact)
+    .or_else(|| {
+        (!facts.proves(ConfinementProperty::WholeTreeKill))
+            .then_some(ConfinementProperty::WholeTreeKill.fact())
+    })
+    .or_else(|| {
+        (facts.confinement_no_egress != Some(true))
+            .then_some(substrate_wire::CONFINEMENT_NO_EGRESS_FACT)
+    });
+    if admitted_on.is_some() {
+        return admitted_on;
+    }
+    let requires = sandbox.requires.as_ref()?;
+    let family = requires
+        .families
+        .iter()
+        .flatten()
+        .copied()
+        .find(|family| !facts.serves_family(*family))
+        .map(ConfinementFamily::fact);
+    family.or_else(|| {
+        requires
+            .facts
+            .iter()
+            .flatten()
+            .copied()
+            .find(|property| !facts.proves(*property))
+            .map(ConfinementProperty::fact)
+    })
 }
 
 fn unserved(input: &ExecStartInput) -> Option<DriverError> {
