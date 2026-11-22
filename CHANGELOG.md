@@ -67,6 +67,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `exec_denied_paths` and `substrate_exec_gate::Lists` gains `deny`, so a literal of each that
   names every field gains one.
 
+### Security
+
+- **A confined run could change what the disk holds of a file without moving any of its stat
+  facts**
+  ([ADR 0050](adr/0050-the-floor-refuses-the-ioctl-requests-that-exchange-file-blocks.md)). A
+  program in a run with a writable mount on `ext4` could call `ioctl(EXT4_IOC_MOVE_EXT)`, the
+  request `e4defrag` uses, on two files it may write. It needs no capability. Observed in a run on
+  the `linux` adapter: the call returned 0, one file read as zeros from disk, and device, inode,
+  size, modification time and change time of both files stayed as they were. Until the page
+  cache dropped the file, every reader still got the old content, so a digest, a review or a
+  commit made after the run could describe bytes the disk no longer held. Nothing that decides
+  by stat facts, as Git's index does, sees such a change.
+  - **Affected:** every earlier release with confined execution, `0.23.0` included: the host
+    driver's execs and sessions, and the `linux` confinement adapter since `0.12.0`, alone or
+    inside `systemd`.
+  - **Now refused:** the seccomp program of every confined run and session (exec, pipe session
+    and pty session) answers `EXT4_IOC_MOVE_EXT` (`0xC028660F`), `XFS_IOC_SWAPEXT`
+    (`0xC0C0586D`) and `F2FS_IOC_SEC_TRIM_FILE` (`0x4018F514`) with `EACCES` before the kernel
+    looks at the descriptor, on every file system and whatever the profile asks. It is part of
+    the floor: no fact, no profile member and no wire change. Two of the three were read from
+    the kernel source (v6.18) and not run, because no XFS and no f2fs file system was at hand:
+    `XFS_IOC_SWAPEXT`, which exchanges the whole content of two files and sets no time, and
+    `F2FS_IOC_SEC_TRIM_FILE`, which erases the blocks a file keeps mapped and sets no time and
+    no size. The cases hold only the filter's answer for those two. Run, each with
+    `EXT4_IOC_MOVE_EXT` called on two files of an `ext4` workspace and refused: an exec, a pipe
+    session and a pty session of the host driver, and an exec on the `linux` adapter. A program
+    that defragments a file or erases its blocks in place inside a run now gets `EACCES`.
+  - **Not covered:** the `oci` and `pod` adapters and the namespace driver's exec pods, whose
+    runtimes' default seccomp profiles pass all three requests
+    (`story:oci-and-pod-refuse-the-ioctls-that-exchange-file-blocks`, a draft); `local` and
+    `systemd` around `local`, which install no filter and promise no confinement; host processes,
+    which are unconfined by contract; and a request of the same kind that ADR 0050's survey did
+    not find.
+
 ## [0.23.0] — 2026-11-21
 
 ### Added

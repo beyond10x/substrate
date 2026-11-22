@@ -321,6 +321,58 @@ require_executed security3_exec_gate \
   'security3 exec gate binfmt: executed' \
   'security3 exec gate unstartable image: executed, the byte test'
 
+# ADR 0050: one confined run calls `EXT4_IOC_MOVE_EXT` on two files of its writable workspace and
+# must be answered `EACCES`, with both files unchanged when read cold on the host. The case builds
+# its program with the host's `cc -static` and stages its workspace under cargo's target
+# directory, which has to be on ext4: on any other file system the request does not exist and
+# the case would show nothing.
+#
+# The case's `executed` line is required, with one absence taken instead: the case's own line
+# that the staging file system is not ext4, which a workstation's target directory may not be.
+# It is named below as absent, never as passed. Every other absence (no delegated root, no
+# bubblewrap, no `cc` that links a static program) fails the lane. On a hosted runner
+# (`GITHUB_ACTIONS` is `true`) that absence is not taken either: the lane there records a
+# release, so the `executed` line is required. Not `require_staged`: on a host that grants a
+# user namespace no mount, its `?<name>|<reason>` form takes any `ABSENT (` line of the case,
+# and a hosted runner is such a host.
+require_executed_unless() {
+  local binary="$1" name="$2" reason="$3"
+  local log
+  log="$(cargo test -p b10x-substrate-host --locked --test "${binary}" \
+    -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${log}" >&2; exit 1; }
+  printf '%s\n' "${log}"
+  local absent
+  absent="$(grep -c 'ABSENT' <<<"${log}" || true)"
+  if grep -qF "${name}: executed" <<<"${log}"; then
+    if [[ "${absent}" != 0 ]]; then
+      echo "delegated-lane: ${binary} reported a case absent" >&2
+      exit 1
+    fi
+    echo "delegated-lane: ${binary} executed its delegated cases"
+    return
+  fi
+  if [[ "${GITHUB_ACTIONS:-}" != "true" && "${absent}" == 1 ]] \
+    && grep -qF "${name}: ABSENT (${reason}" <<<"${log}"; then
+    echo "delegated-lane: ${reason}; absent, not passed: ${binary}: ${name}"
+    return
+  fi
+  echo "delegated-lane: ${binary} did not print '${name}: executed'" >&2
+  exit 1
+}
+require_executed_unless floor_refuses_block_exchange \
+  'floor block exchange' 'the staging file system is not ext4'
+# The adversary's cases of ADR 0050: the filter's answer for the f2fs request, and the ext4
+# request refused at every entry of an exec, a pipe session and a pty session. Required on the
+# hosted runner, which stages on ext4. Elsewhere they may be absent for the reason the case above
+# names; the host-crate run further up has run them, and an absence there is not read as run.
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  require_executed adversary_floor_block_exchange \
+    'adversary floor block exchange: f2fs survey: executed' \
+    'adversary floor block exchange: exec: executed' \
+    'adversary floor block exchange: pipe session: executed' \
+    'adversary floor block exchange: pty session: executed'
+fi
+
 # The helper's own cases start cargo's test build of `substrate-exec-gate`, which is dynamically
 # linked, with no sandbox and no driver around it: what they hold is the helper's own argument
 # grammar, ruleset and environment rule, which do not depend on how it is linked. They need no
