@@ -15,141 +15,192 @@ What 0.16.1 first publishes is listed under 0.16.0 in the full changelog and sum
 
 <!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->
 
-## 0.23.0 (2026-11-21)
+## 0.24.0 (2026-11-22)
 
-### Added in 0.23.0
+### Added in 0.24.0
 
-- The `linux` confinement adapter, and `systemd` around it, can hold a run to an executable
-  allow-list (design 35). A profile with a non-empty `exec_subpaths` executes only its literal
-  program, the host's ELF loader and what the entries name; any other `execve` fails inside the
-  run with `EACCES`. The wire, the bundle and the daemon are unchanged: no wire start carries a
-  list, and the daemon does not publish `confinement.exec-subpaths`.
-  - The fact `exec_subpaths` is proved only where the embedder names the new helper
-    `substrate-exec-gate` (package `b10x-substrate-exec-gate`) in the new
-    `HostConfig.exec_gate`, and the open-time probe held a run to a list with it. It needs
-    Landlock ABI 2 (Linux 5.19). Cargo does not build a dependency's binary: build the helper
-    from the revision you pin, and install a copy, because cargo's own output has a second hard
-    link and is refused.
-  - **The helper must be statically linked**, for example
-    `cargo build --release -p b10x-substrate-exec-gate --target x86_64-unknown-linux-musl`. A
-    helper whose program headers hold `PT_INTERP`, which cargo's default build has, and a file
-    that is not an ELF image of the driver's own machine with a readable program header table,
-    are refused `config.exec-gate-invalid` at the open: a loader would
-    run before the helper and read files a profile can mount, `/etc/ld.so.preload` among them.
-    So is an image the kernel does not start (a type other than `ET_EXEC` and `ET_DYN`, a
-    program header size that is not its class's, no program header or more than one 4 KiB
-    page of them), which bubblewrap would hand to a shell.
-    A start with a list and a controlling terminal is refused `session.pty-unserved`, and one
-    with a declared mount at or beneath `/.substrate-exec-gate`, where the helper is bound, by
-    the code its kind has for a mount the driver owns.
-  - An entry admits a file by where the file itself lies: a symbolic link in a listed
-    directory that points outside it is not admitted. On Ubuntu 26.04 `ln`, `env`, `cat`, `ls`
-    and `mkdir` in `/usr/bin` are such links, into `/usr/lib/cargo/bin/coreutils`.
-  - On a start with a list the run's variables reach the run's program and no program before
-    it: the driver gives them to the helper as `--env <name> <value>` operands and gives
-    bubblewrap no `--setenv`, and the helper refuses to run when a variable other than `PWD`
-    is in its own environment. No variable is refused by name. An object that `LD_PRELOAD`
-    names is still loaded into every allowed dynamic program; an `execve` it makes of an
-    unlisted path fails.
-  - **An empty list differs by adapter.** On `linux` it runs every program of the run's view, as
-    before; on `macos` it runs only the program.
-  - An entry is a path of the run's view, not a host path: relative beneath `/workspace`,
-    absolute beneath `/usr`, `/bin`, `/lib`, `/lib64`, `/workspace` or the mount of a declared
-    root or file. It must exist at the start. The program is an absolute path when the list is
-    not empty.
-  - Limits: an allowed interpreter runs any script it can read, the loader run as a program
-    loads any file, and a listed directory does not reach through a second mount of a part of
-    it, so a profile lists `/usr/bin` and not `/usr`.
-  - New refusals: `config.exec-gate-invalid` (422) and `config.exec-gate-unserved` (501) at the
-    open, and `exec.sandbox-place-unserved` (501) at the start of a profile with a list.
-    `exec.sandbox-path-unrepresentable` and `exec.sandbox-exec-subpath-undeclared` are new on
-    `linux`; the first also answers a program, a loader, an entry or a writable mount whose
-    path in the run's view is longer than 4095 bytes.
-  - Write `workspace_root` and every `writable_roots` path without `..` and `.`: with
-    `exec_gate` set, such a path that does not exist yet is refused at the open,
-    `config.exec-gate-unserved` with the cause `path-unopenable`.
-  - Whether one path lies in another is decided from the mount table, on `ext4`, `overlay` and
-    `tmpfs`. With `exec_gate` set and a path of the open on another file-system type, the
-    adapter opens without the fact; `AdapterFacts::withheld` and the `confinement.fact-unserved`
-    refusal name the cause, the path and the type.
-  - When a base directory (`/usr`, `/bin`, `/lib`, `/lib64`) shows a workspace, the `linux`
-    adapter opens without the fact `exec_subpaths` and its proof names no cause; every start
-    with a list is still refused `confinement.fact-unserved` before dispatch. Naming the cause
-    is planned as `story:linux-adapter-names-why-the-list-fact-is-absent`.
+- `ConfinementProfile` carries an executable deny-list, `exec_denied_paths`, beside
+  `exec_subpaths` (design 35 § 8). `linux`, `systemd` around it and `macos` enforce it and prove
+  the new fact `exec_denied_paths`, which stands directly after `exec_subpaths`; `local`, `oci`,
+  `pod` and `systemd` around `local` refuse the profile `confinement.fact-unserved`. The wire,
+  the bundle and the daemon are unchanged, and the fact has no wire property.
+  - An entry has the form of an `exec_subpaths` entry, and a denied path wins: over a listed
+    directory that holds it, over the loader and over the program. A start whose program is
+    denied is `exec.sandbox-program-unlisted` (422) before dispatch. On `linux` an entry may be
+    absent at the start.
+  - On `linux` a denied program is found by where its file lies. It is denied under a symbolic
+    link, under a second mount of its directory (`/bin/id` for `/usr/bin/id`) and under a hard
+    link in the same directory. `substrate-exec-gate` takes the new option `--deny`.
+  - A deny entry holds across the mounts of the view: what is mounted beneath a denied
+    directory is denied with it, and a program denied in a file system mounted beneath a
+    listed directory is denied there. Where such a mount cannot be compared, a start with a
+    deny-list is `exec.sandbox-place-unserved` (501) before dispatch: `mount-covered` or
+    `mount-root-deleted` beneath a denied or a listed directory, and `file-system-unlisted`
+    beneath a denied one, or for a mount of such a type that is an entry of a directory the
+    start expands. The helper expands only the directories on the way to a deny entry, so the
+    same mount one directory further from the entry refuses nothing. An allow-list alone is
+    unchanged.
+  - New refusals at admission, on every adapter and before any fact is read:
+    `confinement.exec-denied-paths-without-subpaths` (422) for a deny-list beside an empty
+    `exec_subpaths`, and `confinement.exec-denied-paths-exceeded` (422) for more than
+    `MAX_EXEC_DENIED_PATHS` (64) entries.
+  - Limits: a deny entry fails `execve` of a path, so the loader given a denied program runs
+    it and `sh` given a denied script runs it. A run that can write a listed directory copies
+    a denied program there and runs the copy. A hard link that existed before the start in
+    another listed directory runs.
+    **In a listed directory a run can write, a deny entry holds for the files that exist at
+    the start, under the names they have then.** A listed directory that holds a denied path
+    is expanded into one rule per entry, and a directory inside it that holds no denied path
+    gets one rule: what the run creates in it executes, and the rule moves with a rename. So
+    a file the run creates or moves can run under any name, the denied name included
+    (`copied after a rename 0`, `linked 0`, `renamed 0`). A new file in the expanded directory
+    itself has no rule (`copied 126`), and a program rebuilt there loses the right. Nothing
+    runs that the run could not already run by copying it into a listed directory it can
+    write. A deny-list is exact only where the run cannot write.
+    A start with a deny-list reads every directory it expands, and ends with status 125 where
+    one cannot be read. Its standard error is then one line that names the directory in the
+    run's view, `substrate-exec-gate: cannot read the directory "<path>": <cause>`, which a
+    consumer may match.
+    **Never list a lower directory of an overlay that is also in the view**: a program denied
+    in the overlay runs from the layer.
+  - On `macos` the entries are Seatbelt deny rules after every allow. They were read and run
+    only in the hosted macOS check; how Seatbelt matches a deny entry in another letter case
+    on a case-insensitive volume is not verified.
 
-### Changed in 0.23.0
+### Changed in 0.24.0
 
-- `confinement::linux::proof` takes a second argument, `&ExecListProof`.
-  `ConfinementError::FactUnserved` gains the field `withheld`, and `AdapterFacts` the public
-  field `withheld`, serialized only when it is not empty; both hold the new
-  `confinement::FactWithheld`. An embedder that builds the variant, or names both of its fields
-  in a pattern, changes one line.
+- **Breaking (`substrate-host` public API, design 35):** `FACT_ORDER` changes type from
+  `[Fact; 13]` to `[Fact; 14]`; code that names the array type or relies on its length breaks.
+  `ConfinementError` gains the variants `ExecDeniedPathsWithoutSubpaths` and
+  `ExecDeniedPathsExceeded`, so an exhaustive match gains two arms. `ConfinementProfile` gains
+  `exec_denied_paths`, `ExecListProof` gains `denied_paths`, `seatbelt::BuildProof` gains
+  `exec_denied_paths` and `substrate_exec_gate::Lists` gains `deny`, so a literal of each that
+  names every field gains one.
 
-### Fixed in 0.23.0
+- The Git change-set observation compares the worktree with the tree of the baseline commit the
+  daemon holds (design 21, *What the change-set observation reads*). Its answer differs from the
+  earlier reader's in these cases:
+  - A tracked path is unchanged only when the hash of its content equals the baseline's object
+    id. Every tracked file is hashed in each observation, and an index entry flagged
+    assume-unchanged or skip-worktree does not hide a changed file.
+  - The index labels a path `added` or `conflicted` and decides nothing else, neither whether a
+    path changed nor whether it is listed: a change that is staged while the worktree holds the
+    baseline's bytes is not listed, and a path the index no longer records is compared like any
+    other tracked path. An index entry that records another repository's commit is honoured
+    only at a path where the baseline's tree records one; elsewhere the path and everything
+    beneath it are compared and listed.
+  - The workspace's attributes and filters are not applied: a path marked `-diff` gets a textual
+    patch, and no line-ending conversion precedes the comparison.
+  - `core.fileMode` is not applied: a changed executable bit is always reported.
+  - The daemon user's own ignore file and a `core.excludesFile` are not applied.
+  - Rules beyond the first 1 MiB of an ignore file do not apply.
+  - An untracked directory that holds a `.git` entry of its own is neither entered nor listed;
+    the earlier reader failed the observation.
+  - A side over `max_file_bytes` has `binary` set and no patch text.
+  - `current.oid` is present whenever the worktree side was hashed, a tracked file over
+    `max_file_bytes` included.
+  - A tracked path that is not UTF-8 fails the observation whether or not it changed.
+  - One observation hashes at most 1 GiB of tracked files and baseline objects to compare, in
+    the byte order of their paths, and beside that the worktree side of each listed item within
+    `max_file_bytes` (at most `max_files` × `max_file_bytes` more). What could not be compared
+    is reported as changed, never as unchanged, and the answer is marked: a tracked file larger
+    than what is left of the 1 GiB is reported `modified` with `binary` set, no text and no
+    `current.oid`, the answer is marked `truncated`, and the comparison goes on with the next
+    path. A baseline object larger than what is left ends the answer there, marked `truncated`.
+  - Directories nested deeper than 100 are not entered and the answer is marked `truncated`.
+  - An object store that holds `info/alternates`, a link, an entry that is neither a directory
+    nor a regular file, directories nested deeper than eight or more than 262,144 entries is
+    refused `workspace.git-repository-failed`.
 
-- The executable allow-list's checks of what a run can write follow the mounts (design 35
-  D30). The defect is on `main` since pull request 241 (2026-11-21), with the allow-list
-  itself, and **no release contains it**. The `linux` adapter asked whether something lies in
-  a location a run can write by that location's own place alone, so a file system mounted
-  beneath `workspace_root`, a declared writable root or a workspace counted as outside it,
-  although a run that is given the location writes what is mounted there. Four checks had the
-  gap:
-  - a read-only root declared on such a mount, or one that holds a mount on which a declared
-    writable root lies, was classed as safe to follow. A symbolic link a run had left there,
-    listed by a later profile, admitted what it named: all of `/usr/bin` for a link to it;
-  - the helper `substrate-exec-gate` installed on such a mount passed the open;
-  - an entry that resolved onto such a mount was not refused by the driver, nor by the helper
-    for a mount beneath a writable mount of the run's view.
+### Security in 0.24.0
 
-  Each now asks the places the location reaches: its own, and the root of every mount that
-  is mounted beneath it, read from the parent IDs of the mount table. Where that cannot be
-  established for a location a run can write, the answer is the one a place has, with the
-  mount point in its text, `cannot establish where <mount point> is attached: <cause>`:
-  `exec.sandbox-place-unserved` (501) at a start with a list, `config.exec-gate-unserved`
-  (501) at the open, and status 125 from the helper. A tenth cause, `mount-covered`, names a
-  mount beneath such a location that a later mount hides or that lies under a stack; it
-  refuses the open. The host directory of a read-only root, and `/usr`, `/bin`, `/lib` and
-  `/lib64`, are never refused for a mount beneath them while they show nothing a run can
-  write: such a mount is counted by what the mount table says it shows, which can only make
-  the directory count as one a run can write. A directory that does count as one is asked
-  like every other location a run can write, and a mount beneath it that cannot be compared
-  refuses the start `exec.sandbox-place-unserved` (501) with the cause and the field the
-  mount was declared in, before anything is dispatched.
-  A start without a list reads no mount table, as before.
-  The cases that stage a mount ran on a workstation only: a GitHub-hosted runner grants a user
-  namespace no mount, and its confinement lane lists them as absent, not passed; the cases on
-  synthetic mount tables and the cases without a mount ran there.
-- **A symbolic link on a file system of a type other than `ext4`, `overlay` and `tmpfs` is
-  no longer followed.** Also on `main` since pull request 241, and in no release. A mount of
-  such a type is compared with nothing, so a link a run had left on one, mounted beneath a
-  workspace and again beneath a read-only root, was followed out of that root: a profile
-  that listed the link ran what it named. Every symbolic link that a listed path, the
-  program or the loader resolves through is now placed like the path's end, by the driver
-  before dispatch and by the helper in the run's view. A link that has no place refuses the
-  start `exec.sandbox-place-unserved` (501) with the cause, `file-system-unlisted` and the
-  type for such a mount, and the helper exits 125; a link in a place a run can write is
-  refused as before, and now by the helper as well, which checked only where a path ends.
-  The same file system of such a type mounted beneath a workspace and beneath a read-only
-  root also makes that root count as one a run can write.
-- **A listed path that passes through a directory a run can write is refused**, also where
-  it ends outside every such directory: a link in a read-only root to `/workspace/../usr/bin`
-  is such a path. Also on `main` since pull request 241, and in no release. A run that
-  shares the directory could rename what it holds while the helper resolved the path, and
-  move the path's end to a directory nothing had judged. The driver refuses the start
-  `exec.sandbox-path-unrepresentable` (422) and the helper exits 125; a directory on the way
-  that has no place refuses like a link that has none. The helper no longer asks the kernel
-  for `..`: it keeps the directories of its walk open and steps back to the one before, as
-  the driver resolves the same text.
-- **Every entry and the program are placed where they end, whatever the mount they lie
-  in.** One in a workspace or another mount a run can write was opened and not placed, so an
-  entry that ended on a file system of a type other than `ext4`, `overlay` and `tmpfs`
-  mounted there was admitted. It is refused `exec.sandbox-place-unserved` (501) now, and by
-  the helper with status 125.
-- `substrate_exec_gate::place`: `Unestablished` gains the public field `asked` (the new
-  `Asked`) and `Cause` the variant `MountCovered`. New and public, for the host driver:
-  `MountTree` (`table`, `reaches`, `reaches_as_written`), `Reach` (`holds`, `overlaps`),
-  `Unlisted` and `MountTable::into_tree`. `Reach::places` and
-  `MountTable::into_tree_as_written` are public for test code and hidden from the
-  documentation. `Relation`, `Place::relation`, `Place::lies_in`, `MountTable::lies_in` and
-  the free function `place`, which pull request 241 made public and no release contains,
-  have no user outside the module and are private to the crate again.
+- **A confined run could change what the disk holds of a file without moving any of its stat
+  facts**
+  ([ADR 0050](https://github.com/beyond10x/substrate/blob/main/adr/0050-the-floor-refuses-the-ioctl-requests-that-exchange-file-blocks.md)). A
+  program in a run with a writable mount on `ext4` could call `ioctl(EXT4_IOC_MOVE_EXT)`, the
+  request `e4defrag` uses, on two files it may write. It needs no capability. Observed in a run on
+  the `linux` adapter: the call returned 0, one file read as zeros from disk, and device, inode,
+  size, modification time and change time of both files stayed as they were. Until the page
+  cache dropped the file, every reader still got the old content, so a digest, a review or a
+  commit made after the run could describe bytes the disk no longer held. Nothing that decides
+  by stat facts, as Git's index does, sees such a change.
+  - **Affected:** every earlier release with confined execution, `0.23.0` included: the host
+    driver's execs and sessions, and the `linux` confinement adapter since `0.12.0`, alone or
+    inside `systemd`.
+  - **Now refused:** the seccomp program of every confined run and session (exec, pipe session
+    and pty session) answers `EXT4_IOC_MOVE_EXT` (`0xC028660F`), `XFS_IOC_SWAPEXT`
+    (`0xC0C0586D`) and `F2FS_IOC_SEC_TRIM_FILE` (`0x4018F514`) with `EACCES` before the kernel
+    looks at the descriptor, on every file system and whatever the profile asks. It is part of
+    the floor: no fact, no profile member and no wire change. Two of the three were read from
+    the kernel source (v6.18) and not run, because no XFS and no f2fs file system was at hand:
+    `XFS_IOC_SWAPEXT`, which exchanges the whole content of two files and sets no time, and
+    `F2FS_IOC_SEC_TRIM_FILE`, which erases the blocks a file keeps mapped and sets no time and
+    no size. The cases hold only the filter's answer for those two. Run, each with
+    `EXT4_IOC_MOVE_EXT` called on two files of an `ext4` workspace and refused: an exec, a pipe
+    session and a pty session of the host driver, and an exec on the `linux` adapter. A program
+    that defragments a file or erases its blocks in place inside a run now gets `EACCES`.
+  - **Not covered:** the `oci` and `pod` adapters and the namespace driver's exec pods, whose
+    runtimes' default seccomp profiles pass all three requests
+    (`story:oci-and-pod-refuse-the-ioctls-that-exchange-file-blocks`, a draft); `local` and
+    `systemd` around `local`, which install no filter and promise no confinement; host processes,
+    which are unconfined by contract; and a request of the same kind that ADR 0050's survey did
+    not find.
+
+- **A start could bind the daemon's own private paths into a run as a read-only source**
+  (ADR 0010 and ADR 0033, amendments of 2026-11-22). A read-only root and a read-only file name a
+  host path in the request, and the daemon checked the path's form, its mount point and the
+  fact, not what the path was. A caller allowed to start an exec could therefore name the
+  daemon's state directory, the workspace root with every other workspace beneath it, or its
+  key material, and read it inside the run. A writable root has been refused for such a path
+  since ADR 0038. Read from the source; no run of it was made before the change.
+  - **Affected:** every earlier release in which the daemon publishes `exec.read-only-roots` or
+    `exec.read-only-files`, `0.23.0` included, where a caller holds less than the daemon's own
+    view of the file system: a hosted deployment. On the local socket the caller is the daemon's
+    own user.
+  - **Now refused:** before dispatch, when a read-only root's host path equals, lies under or
+    contains a path the daemon keeps private, or a read-only file's host path equals or lies
+    under one: the state directory (the parent of `--state`), the workspace root, the TLS
+    private key, the static-bearer file, every secret-slot source, the namespace driver's
+    kubeconfig, the API socket and the delegated cgroup root. The answers are the published
+    `exec.read-only-root-absent` and `exec.read-only-file-absent` (422), each with a message
+    that names no path; no bundle changes.
+  - **Not covered:** which other host paths a caller may name. ADR 0010 makes the source
+    caller-selected, so a path outside that set which the daemon's user can read is still
+    admitted (`story:read-only-mount-sources-are-declared-by-the-operator`, a draft that needs
+    an ADR). A consumer that opens the host driver in process is not reached by the daemon's
+    admission. A second name for a private object made on the host, by hard link or bind mount,
+    is not compared.
+
+- **The Git change-set observation could return content from outside the admitted workspace**
+  (design 21, *What the change-set observation reads*). The observation opened the workspace's
+  repository with the Git library, which took from the workspace's own repository metadata
+  which directory to compare and how to read an entry. A program in a confined run can write
+  that metadata, so a later observation of the workspace could return, as a patch, content of
+  files the daemon's user can read outside it, another workspace's among them, and content
+  over the per-file bound. Shown by cases that were red on the earlier reader.
+  - **Affected:** every earlier release that serves the Git change-set observation, `0.23.0`
+    included, for a Git workspace a confined run or a Git writable root can write.
+  - **Now:** every byte and every size an answer returns comes from a file beneath the
+    workspace's root or from an object checked against the baseline commit the daemon holds.
+    The workspace's own repository metadata decides neither which directory is read, nor how an
+    entry is read, nor whether a path changed, and its index removes no path from the answer.
+    `max_file_bytes` bounds the text of each worktree file, link and baseline object a patch is
+    rendered from, an ignore file is read to 1 MiB, and one observation hashes at most 1 GiB to
+    compare and at most `max_files` × `max_file_bytes` for the items it lists. The entries
+    under *Changed* list where an answer differs from before.
+  - **Not covered:** the check of the workspace's object store holds while no program runs in
+    the workspace. While one runs, an observation gives no guarantee of an answer, and still
+    returns no byte and no size that was not checked
+    (`story:daemon-holds-the-baseline-objects-of-a-git-workspace`, a draft). The Git library
+    reads the index, the baseline's commit and tree objects and the stored file of each object
+    whole, each to its apparent size, which a storage limit that counts blocks does not bound
+    (`story:git-read-limits-bound-the-work`, a draft). The baseline-file observation is
+    unchanged; it returns only the object the daemon-held commit names.
+
+- `url` moves from 2.5.8 to 2.5.9 in `Cargo.lock`, and `form_urlencoded` from 1.2.2 to 1.2.3
+  with it, for [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592.html): in
+  2.5.8 `Url::origin()` on a deeply nested `blob:` URL overflows the stack, which ends the
+  process. The host driver's Git transport calls `Url::origin()` on the URL of each transport
+  request (`crates/substrate-host/src/git/network.rs`), in a build with the `git` feature.
+  Whether a Git server can make that URL a nested one was not established. Affected: every
+  earlier release with a Git source, `0.23.0` included.

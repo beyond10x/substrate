@@ -2,16 +2,17 @@
 format: aep.planning-md/3
 id: story:git-changes-reader-reads-only-the-admitted-workspace
 kind: story
-status: active
+status: implemented
 title: The Git changes reader reads only the admitted workspace
 summary: Every byte of a change-set answer comes from the admitted workspace or its daemon-held baseline
 tags:
 - defect
 - security
-revision: 3
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-22T02:16:41Z", actor: "human:timo", revision: 2, executor: "agent:substrate"}
 - {from: "proposed", to: "active", at: "2026-11-22T02:16:42Z", actor: "human:timo", revision: 3, executor: "agent:substrate"}
+- {from: "active", to: "implemented", at: "2026-11-22T09:49:17Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":4}}, executor: "agent:substrate"}
 ---
 # Story: the Git changes reader reads only the admitted workspace
 
@@ -50,3 +51,25 @@ finding 2 (high priority). The operator ordered its findings handled on 2026-11-
 states the rule that must hold; the review's detail stays with the operator until the fix is
 on `main`. Checked against the source at `1af046902` by reading; nothing was run. Release
 0.23.0 has the same source. Stakeholder: the operator.
+
+## As built
+
+Merged as `6b7aa0a9fd8b14e58f8e616c16a50d1151474150` (pull request 255), 2026-11-22, in three
+rounds. First in a release: 0.24.0.
+
+- What was wrong: the observation opened the workspace's repository with the Git library, which
+  took from the workspace's own repository metadata which directory to compare and how to read an
+  entry. A later observation could return content of files outside the workspace. Shown by cases
+  that were red on the earlier reader.
+- The first round's reader still took "unchanged" from the workspace's index and sizes from
+  unchecked object headers; both reviews found it. Since round 2 the tracked set and every id
+  come from the tree of the daemon-held baseline commit, and a path is unchanged only when the
+  hash of its content equals that id. The index labels `added` and `conflicted`.
+- Cost: every observation hashes every tracked file, 1 GiB at most to compare.
+- Stated limit: the check of the workspace's object store holds while no program runs in the
+  workspace. `story:daemon-holds-the-baseline-objects-of-a-git-workspace` closes it and is next
+  after the release.
+- Left: a changed file is read twice; a baseline object is held in memory whole for its size;
+  the index and each stored object are read whole (`story:git-read-limits-bound-the-work`).
+- Round 3 was not reviewed again. The hosted confinement lane ran the Git-root case; no mutant
+  was run in any round.

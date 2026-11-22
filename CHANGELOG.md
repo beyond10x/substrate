@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-11-22
+
 ### Added
 
 - `ConfinementProfile` carries an executable deny-list, `exec_denied_paths`, beside
@@ -136,24 +138,64 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     which are unconfined by contract; and a request of the same kind that ADR 0050's survey did
     not find.
 
-- The daemon refuses a start before dispatch when a read-only root's host path equals, lies under
-  or contains a path it keeps private, or a read-only file's host path equals or lies under one:
-  the state directory (the parent of `--state`), the workspace root, the TLS private key, the
-  static-bearer file, every secret-slot source, the namespace driver's kubeconfig, the API socket
-  and the delegated cgroup root. The answers are the published `exec.read-only-root-absent` and
-  `exec.read-only-file-absent` (422), each with a message that names no path; no bundle changes
-  (ADR 0010 and ADR 0033, amendments of 2026-11-22).
+- **A start could bind the daemon's own private paths into a run as a read-only source**
+  (ADR 0010 and ADR 0033, amendments of 2026-11-22). A read-only root and a read-only file name a
+  host path in the request, and the daemon checked the path's form, its mount point and the
+  fact, not what the path was. A caller allowed to start an exec could therefore name the
+  daemon's state directory, the workspace root with every other workspace beneath it, or its
+  key material, and read it inside the run. A writable root has been refused for such a path
+  since ADR 0038. Read from the source; no run of it was made before the change.
+  - **Affected:** every earlier release in which the daemon publishes `exec.read-only-roots` or
+    `exec.read-only-files`, `0.23.0` included, where a caller holds less than the daemon's own
+    view of the file system: a hosted deployment. On the local socket the caller is the daemon's
+    own user.
+  - **Now refused:** before dispatch, when a read-only root's host path equals, lies under or
+    contains a path the daemon keeps private, or a read-only file's host path equals or lies
+    under one: the state directory (the parent of `--state`), the workspace root, the TLS
+    private key, the static-bearer file, every secret-slot source, the namespace driver's
+    kubeconfig, the API socket and the delegated cgroup root. The answers are the published
+    `exec.read-only-root-absent` and `exec.read-only-file-absent` (422), each with a message
+    that names no path; no bundle changes.
+  - **Not covered:** which other host paths a caller may name. ADR 0010 makes the source
+    caller-selected, so a path outside that set which the daemon's user can read is still
+    admitted (`story:read-only-mount-sources-are-declared-by-the-operator`, a draft that needs
+    an ADR). A consumer that opens the host driver in process is not reached by the daemon's
+    admission. A second name for a private object made on the host, by hard link or bind mount,
+    is not compared.
 
-- The Git change-set observation reads only the admitted workspace. Every byte and every size
-  it returns comes from a file beneath the workspace's root or from an object checked against
-  the baseline commit the daemon holds. The workspace's own repository metadata decides neither
-  which directory is read, nor how an entry is read, nor whether a path changed, and its index
-  removes no path from the answer. `max_file_bytes` bounds the text of each worktree file, link
-  and baseline object a patch is rendered from, an ignore file is read to 1 MiB, and one
-  observation hashes at most 1 GiB to compare and at most `max_files` × `max_file_bytes` for
-  the items it lists. The Git library reads the index, the baseline's commit and tree objects
-  and the stored file of each object whole, each to its apparent size, which a storage limit
-  that counts blocks does not bound.
+- **The Git change-set observation could return content from outside the admitted workspace**
+  (design 21, *What the change-set observation reads*). The observation opened the workspace's
+  repository with the Git library, which took from the workspace's own repository metadata
+  which directory to compare and how to read an entry. A program in a confined run can write
+  that metadata, so a later observation of the workspace could return, as a patch, content of
+  files the daemon's user can read outside it, another workspace's among them, and content
+  over the per-file bound. Shown by cases that were red on the earlier reader.
+  - **Affected:** every earlier release that serves the Git change-set observation, `0.23.0`
+    included, for a Git workspace a confined run or a Git writable root can write.
+  - **Now:** every byte and every size an answer returns comes from a file beneath the
+    workspace's root or from an object checked against the baseline commit the daemon holds.
+    The workspace's own repository metadata decides neither which directory is read, nor how an
+    entry is read, nor whether a path changed, and its index removes no path from the answer.
+    `max_file_bytes` bounds the text of each worktree file, link and baseline object a patch is
+    rendered from, an ignore file is read to 1 MiB, and one observation hashes at most 1 GiB to
+    compare and at most `max_files` × `max_file_bytes` for the items it lists. The entries
+    under *Changed* list where an answer differs from before.
+  - **Not covered:** the check of the workspace's object store holds while no program runs in
+    the workspace. While one runs, an observation gives no guarantee of an answer, and still
+    returns no byte and no size that was not checked
+    (`story:daemon-holds-the-baseline-objects-of-a-git-workspace`, a draft). The Git library
+    reads the index, the baseline's commit and tree objects and the stored file of each object
+    whole, each to its apparent size, which a storage limit that counts blocks does not bound
+    (`story:git-read-limits-bound-the-work`, a draft). The baseline-file observation is
+    unchanged; it returns only the object the daemon-held commit names.
+
+- `url` moves from 2.5.8 to 2.5.9 in `Cargo.lock`, and `form_urlencoded` from 1.2.2 to 1.2.3
+  with it, for [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592.html): in
+  2.5.8 `Url::origin()` on a deeply nested `blob:` URL overflows the stack, which ends the
+  process. The host driver's Git transport calls `Url::origin()` on the URL of each transport
+  request (`crates/substrate-host/src/git/network.rs`), in a build with the `git` feature.
+  Whether a Git server can make that URL a nested one was not established. Affected: every
+  earlier release with a Git source, `0.23.0` included.
 
 ## [0.23.0] — 2026-11-21
 

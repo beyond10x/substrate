@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-cli"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "b10x-substrate-host",
  "b10x-substrate-sdk",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-conformance"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "b10x-substrate-sdk",
  "b10x-substrate-wire",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-daemon"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-exec-gate"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-executor"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "b10x-substrate-guarded",
  "b10x-substrate-wire",
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-guarded"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "b10x-substrate-wire",
  "base64 0.23.1",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-host"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "async-trait",
  "b10x-substrate-cli",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-kubernetes"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "async-trait",
  "b10x-substrate-executor",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-kubernetes-client"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-mcp"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "b10x-substrate-sdk",
  "base64 0.23.1",
@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-sdk"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "b10x-substrate-daemon",
  "b10x-substrate-wire",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-store"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "b10x-substrate-wire",
  "chrono",
@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-wire"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1164,9 +1164,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -3603,7 +3603,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-contract-check"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "jsonschema",
  "serde_json",
@@ -4060,9 +4060,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -4395,7 +4395,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "b10x-substrate-kubernetes-client",
