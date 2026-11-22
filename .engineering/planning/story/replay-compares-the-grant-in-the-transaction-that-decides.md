@@ -8,7 +8,7 @@ summary: ADR 0017's grant comparison holds for concurrent retries
 tags:
 - defect
 - security
-revision: 1
+revision: 2
 ---
 # Story: a stored outcome is returned only after the grant is compared in the transaction that decides the replay
 
@@ -43,3 +43,13 @@ finding 4. The operator ordered its findings handled on 2026-11-22. By
 states the rule that must hold; the review's detail stays with the operator until the fix is
 on `main`. Checked against the source at `1af046902` by reading; nothing was run. Release
 0.23.0 has the same source. Stakeholder: the operator.
+
+## Delivery
+
+## Delivery
+
+Branch `story/replay-grant`, pull request 265. The comparison is one function in the store,
+used by twelve entry points; the daemon maps the store's answer to the existing refusal. ADR
+0017 carries an addendum for requests in flight together. Reviewed once
+(`review-result:replay-grant-security-1`): no rule unheld in code, text narrowed to mutation
+requests, eleven cases of the reviewer kept.
