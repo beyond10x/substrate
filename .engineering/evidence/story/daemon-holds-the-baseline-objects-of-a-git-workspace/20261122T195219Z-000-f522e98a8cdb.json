@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-22T19:52:19Z",
+  "actor": "agent:substrate",
+  "artifact": "story:daemon-holds-the-baseline-objects-of-a-git-workspace",
+  "kind": "story",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo nextest run -p b10x-substrate-host --release --locked --lib --test git_startup_ownership --test host_features: 636 passed, exit 0; no-default-features lane 53 passed; runtime_vectors 12 passed",
+    "reference": "https://github.com/beyond10x/substrate/pull/261"
+  }
+}

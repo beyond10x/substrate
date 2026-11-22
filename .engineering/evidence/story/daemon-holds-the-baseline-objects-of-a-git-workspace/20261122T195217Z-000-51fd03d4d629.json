@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-22T19:52:17Z",
+  "actor": "agent:substrate",
+  "artifact": "story:daemon-holds-the-baseline-objects-of-a-git-workspace",
+  "kind": "story",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:baseline-store-security-1",
+    "review": "review-result:baseline-store-security-1",
+    "outcome": "fixed"
+  }
+}
