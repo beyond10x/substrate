@@ -97,6 +97,7 @@ impl Run<'_> {
                 .iter()
                 .map(|rel| format!("{root_text}/{rel}"))
                 .collect(),
+            deny: Vec::new(),
         };
         let output = Command::new(unshare)
             .args(["--user", "--map-root-user", "--mount", "--"])

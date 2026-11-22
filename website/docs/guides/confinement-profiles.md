@@ -42,7 +42,8 @@ refuses.
   `network_ingress`, `limits`, `audit`. `serves(&family)` asks for one.
 - `facts`: what the adapter proved, in this order: `declared_insecure`, `paths_are_host_paths`,
   `whole_tree_kill`, `local_permitted`, `ipc_socket_allowlist`, `ipc_signals_contained`,
-  `sealed_paths`, `exec_subpaths`, `private_tmpdir`, `host_network`, `image_digest_pinned`.
+  `sealed_paths`, `exec_subpaths`, `exec_denied_paths`, `private_tmpdir`, `host_network`,
+  `image_digest_pinned`.
   `proves(&fact)` asks for one.
 
 Two facts change how you write the profile and the command:
@@ -71,6 +72,7 @@ Each profile field needs the family or the fact beside it.
 | `writable_roots`, `read_only_roots`, `read_only_files` | `filesystem_view` |
 | `sealed_paths` | the fact `sealed_paths` |
 | `exec_subpaths` | the fact `exec_subpaths` |
+| `exec_denied_paths` | the fact `exec_denied_paths`, and an `exec_subpaths` that is not empty |
 | `private_tmpdir` | the fact `private_tmpdir` |
 | `network: Egress` | `network_egress` |
 | `network: Isolated` | `network_egress`, on an adapter that proves `host_network` |
@@ -146,7 +148,7 @@ let chosen = offered
 not show: `linux` refuses a `workdir` its host has not proved with `exec.workdir-unserved`, and a
 writable root the operator did not declare with `exec.writable-roots-host-unserved`. When an
 adapter does not cover a profile, admitting it there is refused in the order of the refusals table
-below. Past its first five rows, that is `confinement.family-unserved` naming the first family of
+below. Past its first seven rows, that is `confinement.family-unserved` naming the first family of
 `needed` the adapter does not serve, or, when it serves them all,
 `confinement.fact-unserved` naming the first fact of `required_facts()` it did not prove. Either
 can be read from the facts before the call.
@@ -243,6 +245,78 @@ guard is that nothing on a file system other than `ext4`, `overlay` and `tmpfs` 
 Where the fact is withheld, a profile with a list is `confinement.fact-unserved` (501) and its
 text repeats the cause. A profile without a list asks for no place and runs as before.
 
+## Executable deny-lists
+
+`exec_denied_paths` names what a run never executes, even beneath an `exec_subpaths` entry.
+`linux`, `systemd` around it and `macos` prove the fact `exec_denied_paths`. Every other adapter
+refuses the profile `confinement.fact-unserved` (501).
+
+- An entry has the form of an `exec_subpaths` entry: a file or a directory, relative beneath
+  the workspace or absolute in the same locations. A profile holds at most 64. An entry may
+  be absent when the run starts.
+- A denied path wins over a listed directory that holds it, over an entry that names it and
+  over the program. A start whose program is denied is `exec.sandbox-program-unlisted` (422).
+- A deny-list needs an allow-list. Without `exec_subpaths` the profile is
+  `confinement.exec-denied-paths-without-subpaths` (422) on every adapter.
+- What fails is `execve` of the path. The loader given a denied program runs it, and `sh` given
+  a denied script runs it.
+- A run that can write a listed directory copies a denied program there and runs the copy. List
+  no directory the run can write beside a deny-list.
+
+On `linux` a denied program is found by where its file lies, not by the text of a path, and
+across mounts. Where a mount beneath a denied directory, or beneath a listed directory of a
+profile with a deny-list, cannot be compared, the start is `exec.sandbox-place-unserved` (501):
+`mount-covered`, `mount-root-deleted`, and `file-system-unlisted` beneath a denied directory or
+as an entry of a directory that holds a denied path. For that last case, what decides is where
+the deny entry is, not the mount: the helper expands only the directories on the way to a deny
+entry.
+
+| A mount of a type other than `ext4`, `overlay` and `tmpfs` | The start |
+|---|---|
+| at `k/vol`, with `k` listed and `k/tool` denied: `k` is on the way to the deny entry, and its entries are walked one by one | refused |
+| at `far/in/vol`, with `far` listed and `far/tool` denied: `far/in` is not on the way, and gets one rule | runs |
+| beneath a listed directory of a profile without a deny-list | runs |
+
+| A denied program reached through | Answer |
+|---|---|
+| a symbolic link, anywhere | denied |
+| a second mount of its directory, such as `/bin/id` for `/usr/bin/id` | denied |
+| a file system mounted beneath a listed directory, or a listed mount beneath a denied directory | denied |
+| a hard link in the same directory | denied |
+| a hard link that existed before the start in another listed directory | runs |
+| a copy in a listed directory the run can write | runs |
+| a new file the run writes into the listed directory that holds the deny entry itself: `copied 126` | denied |
+| a file the run writes into a directory inside it that held no denied path at the start (`new file in a directory of the expanded one 0`), also once the run renamed that directory so that the file has the denied path (`copied after a rename 0`) | runs |
+| the name of an entry that was absent at the start, given to a listed program by a hard link (`linked 0`), a rename (`renamed 0`) or a symbolic link | runs |
+
+- A listed directory that holds a denied path is expanded: one rule per file in it, and one per
+  directory in it that holds no denied path. A new file in the expanded directory itself has
+  no rule, and a program removed and written again there no longer runs. Put no deny entry in
+  a directory a build writes its programs into.
+- **In a listed directory a run can write, a deny entry holds for the files that exist at the
+  start, under the names they have then.** A directory inside an expanded directory that holds
+  no denied path gets one rule: what the run creates in it executes, and the rule moves with a
+  rename. So a file the run creates or moves can run under any name, the denied name included.
+  Nothing runs that the run could not already run by copying it into a listed directory it can
+  write. **A deny-list is exact only where the run cannot write.** The figures in the table
+  are measured statuses.
+- A layer of an overlay is another file system to the kernel, and a program denied in the
+  overlay runs from the layer. So never list a lower directory of an overlay that is also in the
+  view.
+- A start with a deny-list reads every directory it expands and writes at most 65536 rules.
+  Where a directory cannot be read, or beyond that number, the run ends with status 125 and
+  nothing runs. An earlier run causes the first by taking the read permission from a
+  workspace directory. Standard error is then one line a consumer may match:
+  `substrate-exec-gate: cannot read the directory "<path>": <cause>`, with the path in the
+  run's view as a quoted string and the system's cause, such as
+  `Permission denied (os error 13)`. A program can print that line and exit 125 itself: it
+  explains an end and proves none.
+
+On `macos` the entries are Seatbelt deny rules after every allow. A hard link to a denied
+program under another path runs. **A limit on `macos`:** the deny rules were read and run only
+in the hosted macOS check, never on a workstation, and how Seatbelt matches a deny entry
+written in another letter case on a case-insensitive volume is not verified.
+
 ## Build with the macOS developer tools
 
 Inside the Seatbelt policy, the `/usr/bin/cc` and `xcrun` shims cannot find the compiler or the
@@ -285,12 +359,14 @@ Admission refuses in this order and names the first refusal it meets:
 | Order | Code | Status | When |
 |---|---|---|---|
 | 1 | `confinement.reserved-field-unserved` | 501 | a reserved field is set |
-| 2 | `confinement.adapter-unserved` | 501 | the adapter did not open, or the profile's `inner` is not the adapter it wraps |
-| 3 | `confinement.local-reason-missing` | 422 | a declared-insecure adapter and no reason |
-| 4 | `confinement.image-unpinned` | 422 | a digest-pinning adapter and an image not named by digest |
-| 5 | `confinement.local-refused` | 403 | a declared-insecure adapter the host's policy forbids |
-| 6 | `confinement.family-unserved` | 501 | the first family of `needed` not served |
-| 7 | `confinement.fact-unserved` | 501 | the first required fact not proved |
+| 2 | `confinement.exec-denied-paths-without-subpaths` | 422 | a deny-list and an empty `exec_subpaths` |
+| 3 | `confinement.exec-denied-paths-exceeded` | 422 | more than 64 deny entries |
+| 4 | `confinement.adapter-unserved` | 501 | the adapter did not open, or the profile's `inner` is not the adapter it wraps |
+| 5 | `confinement.local-reason-missing` | 422 | a declared-insecure adapter and no reason |
+| 6 | `confinement.image-unpinned` | 422 | a digest-pinning adapter and an image not named by digest |
+| 7 | `confinement.local-refused` | 403 | a declared-insecure adapter the host's policy forbids |
+| 8 | `confinement.family-unserved` | 501 | the first family of `needed` not served |
+| 9 | `confinement.fact-unserved` | 501 | the first required fact not proved |
 
 `error.code()` and `error.status()` return the code and status. A refusal from the host itself,
 met while starting, keeps its own code, such as `exec.workdir-missing`.

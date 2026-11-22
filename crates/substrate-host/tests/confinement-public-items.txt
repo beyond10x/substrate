@@ -2,7 +2,7 @@
 # tests/confinement_public_items.rs. Regenerate with
 # SUBSTRATE_BLESS_PUBLIC_ITEMS=1 cargo test -p b10x-substrate-host --test confinement_public_items
 confinement/facts.rs: pub const FAMILY_ORDER: [ContractFamily; 10] = [ContractFamily::ProcessRun, ContractFamily::ProcessWatch, ContractFamily::OutputRead, ContractFamily::Wait, ContractFamily::Workspace, ContractFamily::FilesystemView, ContractFamily::NetworkEgress, ContractFamily::NetworkIngress, ContractFamily::Limits, ContractFamily::Audit];
-confinement/facts.rs: pub const FACT_ORDER: [Fact; 13] = [Fact::DeclaredInsecure, Fact::PathsAreHostPaths, Fact::WholeTreeKill, Fact::LocalPermitted, Fact::IpcSocketAllowlist, Fact::IpcSignalsContained, Fact::SealedPaths, Fact::ExecSubpaths, Fact::PrivateTmpdir, Fact::HostNetwork, Fact::ImageDigestPinned, Fact::StdinPipe, Fact::OutputLive];
+confinement/facts.rs: pub const FACT_ORDER: [Fact; 14] = [Fact::DeclaredInsecure, Fact::PathsAreHostPaths, Fact::WholeTreeKill, Fact::LocalPermitted, Fact::IpcSocketAllowlist, Fact::IpcSignalsContained, Fact::SealedPaths, Fact::ExecSubpaths, Fact::ExecDeniedPaths, Fact::PrivateTmpdir, Fact::HostNetwork, Fact::ImageDigestPinned, Fact::StdinPipe, Fact::OutputLive];
 confinement/facts.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "snake_case")] pub enum InnerAdapter
 confinement/facts.rs: enum InnerAdapter > Local,
 confinement/facts.rs: enum InnerAdapter > Linux,
@@ -33,6 +33,7 @@ confinement/linux.rs: impl LinuxRequest > pub fn new(config: HostConfig) -> Self
 confinement/linux.rs: impl LinuxRequest > pub fn with_cgroup_root(mut self, cgroup_root: Option<PathBuf>) -> Self
 confinement/linux.rs: #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)] pub struct ExecListProof
 confinement/linux.rs: struct ExecListProof > pub subpaths: bool,
+confinement/linux.rs: struct ExecListProof > pub denied_paths: bool,
 confinement/linux.rs: struct ExecListProof > #[serde(skip_serializing_if = "Vec::is_empty")] pub withheld: Vec<super::FactWithheld>,
 confinement/linux.rs: #[cfg(target_os = "linux")] pub use imp::proof;
 confinement/linux.rs: mod imp > pub const DEFAULT_BOUNDS: ProcessBounds = ProcessBounds {timeout_ms: 600_000, processes: 256, memory_bytes: 1 << 30, cpu_millis: 600_000};
@@ -96,6 +97,9 @@ confinement/mod.rs: pub const LOCAL_REFUSED: &str = "confinement.local-refused";
 confinement/mod.rs: pub const LOCAL_REASON_MISSING: &str = "confinement.local-reason-missing";
 confinement/mod.rs: pub const IMAGE_UNPINNED: &str = "confinement.image-unpinned";
 confinement/mod.rs: pub const RESERVED_FIELD_UNSERVED: &str = "confinement.reserved-field-unserved";
+confinement/mod.rs: pub const EXEC_DENIED_PATHS_WITHOUT_SUBPATHS: &str = "confinement.exec-denied-paths-without-subpaths";
+confinement/mod.rs: pub const EXEC_DENIED_PATHS_EXCEEDED: &str = "confinement.exec-denied-paths-exceeded";
+confinement/mod.rs: pub const MAX_EXEC_DENIED_PATHS: usize = 64;
 confinement/mod.rs: pub const WORKSPACE_REQUIRED: &str = "confinement.workspace-required";
 confinement/mod.rs: pub const RENDER_UNSERVED: &str = "confinement.render-unserved";
 confinement/mod.rs: pub const WRITABLE_SUBTREE_GIT: &str = "confinement.writable-subtree-git";
@@ -121,6 +125,8 @@ confinement/mod.rs: enum ConfinementError > LocalRefused {adapter: AdapterName},
 confinement/mod.rs: enum ConfinementError > LocalReasonMissing {adapter: AdapterName},
 confinement/mod.rs: enum ConfinementError > ImageUnpinned {adapter: AdapterName},
 confinement/mod.rs: enum ConfinementError > ReservedFieldUnserved {field: ReservedField},
+confinement/mod.rs: enum ConfinementError > ExecDeniedPathsWithoutSubpaths {adapter: AdapterName},
+confinement/mod.rs: enum ConfinementError > ExecDeniedPathsExceeded {adapter: AdapterName},
 confinement/mod.rs: enum ConfinementError > Driver(#[from] DriverError),
 confinement/mod.rs: impl ConfinementError > pub fn code(&self) -> &'static str
 confinement/mod.rs: impl ConfinementError > pub fn status(&self) -> u16
@@ -271,6 +277,7 @@ confinement/profile.rs: struct ConfinementProfile > pub read_only_roots: Vec<Rea
 confinement/profile.rs: struct ConfinementProfile > pub read_only_files: Vec<ReadOnlyFile>,
 confinement/profile.rs: struct ConfinementProfile > pub sealed_paths: Vec<String>,
 confinement/profile.rs: struct ConfinementProfile > pub exec_subpaths: Vec<String>,
+confinement/profile.rs: struct ConfinementProfile > pub exec_denied_paths: Vec<String>,
 confinement/profile.rs: struct ConfinementProfile > pub private_tmpdir: bool,
 confinement/profile.rs: struct ConfinementProfile > pub network: Option<Network>,
 confinement/profile.rs: struct ConfinementProfile > pub ipc: Ipc,
@@ -358,6 +365,7 @@ generated/confinement.rs: enum ContractFamily > #[serde(rename = "wait")] Wait,
 generated/confinement.rs: enum ContractFamily > #[serde(rename = "workspace")] Workspace,
 generated/confinement.rs: #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)] pub enum Fact
 generated/confinement.rs: enum Fact > #[serde(rename = "declared_insecure")] DeclaredInsecure,
+generated/confinement.rs: enum Fact > #[serde(rename = "exec_denied_paths")] ExecDeniedPaths,
 generated/confinement.rs: enum Fact > #[serde(rename = "exec_subpaths")] ExecSubpaths,
 generated/confinement.rs: enum Fact > #[serde(rename = "host_network")] HostNetwork,
 generated/confinement.rs: enum Fact > #[serde(rename = "image_digest_pinned")] ImageDigestPinned,

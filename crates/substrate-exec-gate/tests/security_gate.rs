@@ -67,6 +67,7 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
 fn shell(root: &Path, allow: Vec<Located>, script: &str) -> Command {
     let sh = tool("sh");
     let lists = Lists {
+        deny: Vec::new(),
         program: base(&sh),
         loader: loader(),
         allow,
@@ -296,6 +297,7 @@ fn security_a_preload_named_in_the_environment_does_not_start_the_program_withou
     let script = "allowed/true; echo allowed:$?; outside/true 2>/dev/null; echo outside:$?";
     let sh = tool("sh");
     let lists = Lists {
+        deny: Vec::new(),
         program: base(&sh),
         loader: loader(),
         allow: vec![beneath(&root, "allowed")],

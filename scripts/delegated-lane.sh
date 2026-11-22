@@ -191,7 +191,12 @@ require_executed sandbox_parity \
 # Design 29: scoped workspace write and output retention, each case by its own line. Design 35:
 # the `exec` lines, runs held to an executable allow-list by the helper built above. The first
 # of them is the acceptance: a program beneath a listed directory runs, and one outside it fails
-# inside the run with status 126.
+# inside the run with status 126. The `exec deny` lines are the deny-list beside it
+# (`story:executable-deny-list`): probes K2 and K8 through the driver, the acceptance (`/usr/bin`
+# allowed, one program beneath it denied), and the two cases kept at the stakeholder's request,
+# a program that is a link to a denied program and one directory under two names, the second in
+# the base view's form (`/usr/bin` listed, `/bin/id` denied) and from two declared roots. The
+# base view's form is absent, so refused here, on a host whose `/bin` is not a link to `/usr/bin`.
 require_executed ess_confinement_linux \
   'ESS confinement linux scoped write: executed' \
   'ESS confinement linux scoped git: executed' \
@@ -241,7 +246,23 @@ require_executed ess_confinement_linux \
   'ESS confinement linux exec helper preload half: executed' \
   'ESS confinement linux exec path limit: executed' \
   'ESS confinement linux exec helper dynamic: executed' \
-  'ESS confinement linux exec limit preload file: executed'
+  'ESS confinement linux exec limit preload file: executed' \
+  'ESS confinement linux exec deny K2: executed' \
+  'ESS confinement linux exec deny K8: executed' \
+  'ESS confinement linux exec deny-list: executed' \
+  'ESS confinement linux exec deny link to denied: executed' \
+  'ESS confinement linux exec deny two names base view: executed' \
+  'ESS confinement linux exec deny two names declared roots: executed' \
+  'ESS confinement linux exec deny-only: executed' \
+  'ESS confinement linux exec deny shapes: executed' \
+  'ESS confinement linux exec deny loader: executed' \
+  'ESS confinement linux exec deny limit hard link: executed' \
+  'ESS confinement linux exec deny limit copy: executed' \
+  'ESS confinement linux exec deny limit loader: executed' \
+  'ESS confinement linux exec deny limit script: executed' \
+  'ESS confinement linux exec deny limit replaced: executed' \
+  'ESS confinement linux exec deny limit unreadable directory: executed' \
+  'ESS confinement linux exec deny probe held mount: executed'
 require_executed ess_confinement_systemd \
   'ESS confinement systemd local scoped write: executed' \
   'ESS confinement systemd linux scoped write: executed' \
@@ -253,7 +274,9 @@ require_executed ess_confinement_systemd \
   'ESS confinement systemd linux live natural end: executed' \
   'ESS confinement systemd linux live stall: executed' \
   'ESS confinement systemd linux exec_subpaths admission: executed' \
+  'ESS confinement systemd linux exec_denied_paths admission: executed' \
   'ESS confinement systemd linux exec allow-list: executed' \
+  'ESS confinement systemd linux exec deny-list: executed' \
   'ESS confinement systemd linux exec preload: executed' \
   'ESS confinement systemd linux exec withheld: executed'
 
@@ -298,6 +321,58 @@ require_executed security3_exec_gate \
   'security3 exec gate binfmt: executed' \
   'security3 exec gate unstartable image: executed, the byte test'
 
+# ADR 0050: one confined run calls `EXT4_IOC_MOVE_EXT` on two files of its writable workspace and
+# must be answered `EACCES`, with both files unchanged when read cold on the host. The case builds
+# its program with the host's `cc -static` and stages its workspace under cargo's target
+# directory, which has to be on ext4: on any other file system the request does not exist and
+# the case would show nothing.
+#
+# The case's `executed` line is required, with one absence taken instead: the case's own line
+# that the staging file system is not ext4, which a workstation's target directory may not be.
+# It is named below as absent, never as passed. Every other absence (no delegated root, no
+# bubblewrap, no `cc` that links a static program) fails the lane. On a hosted runner
+# (`GITHUB_ACTIONS` is `true`) that absence is not taken either: the lane there records a
+# release, so the `executed` line is required. Not `require_staged`: on a host that grants a
+# user namespace no mount, its `?<name>|<reason>` form takes any `ABSENT (` line of the case,
+# and a hosted runner is such a host.
+require_executed_unless() {
+  local binary="$1" name="$2" reason="$3"
+  local log
+  log="$(cargo test -p b10x-substrate-host --locked --test "${binary}" \
+    -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${log}" >&2; exit 1; }
+  printf '%s\n' "${log}"
+  local absent
+  absent="$(grep -c 'ABSENT' <<<"${log}" || true)"
+  if grep -qF "${name}: executed" <<<"${log}"; then
+    if [[ "${absent}" != 0 ]]; then
+      echo "delegated-lane: ${binary} reported a case absent" >&2
+      exit 1
+    fi
+    echo "delegated-lane: ${binary} executed its delegated cases"
+    return
+  fi
+  if [[ "${GITHUB_ACTIONS:-}" != "true" && "${absent}" == 1 ]] \
+    && grep -qF "${name}: ABSENT (${reason}" <<<"${log}"; then
+    echo "delegated-lane: ${reason}; absent, not passed: ${binary}: ${name}"
+    return
+  fi
+  echo "delegated-lane: ${binary} did not print '${name}: executed'" >&2
+  exit 1
+}
+require_executed_unless floor_refuses_block_exchange \
+  'floor block exchange' 'the staging file system is not ext4'
+# The adversary's cases of ADR 0050: the filter's answer for the f2fs request, and the ext4
+# request refused at every entry of an exec, a pipe session and a pty session. Required on the
+# hosted runner, which stages on ext4. Elsewhere they may be absent for the reason the case above
+# names; the host-crate run further up has run them, and an absence there is not read as run.
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  require_executed adversary_floor_block_exchange \
+    'adversary floor block exchange: f2fs survey: executed' \
+    'adversary floor block exchange: exec: executed' \
+    'adversary floor block exchange: pipe session: executed' \
+    'adversary floor block exchange: pty session: executed'
+fi
+
 # The helper's own cases start cargo's test build of `substrate-exec-gate`, which is dynamically
 # linked, with no sandbox and no driver around it: what they hold is the helper's own argument
 # grammar, ruleset and environment rule, which do not depend on how it is linked. They need no
@@ -315,7 +390,15 @@ require_executed -p b10x-substrate-exec-gate gate \
   'exec gate descriptors: executed' \
   'exec gate environment: executed' \
   'exec gate own environment: executed' \
-  'exec gate preload operand: executed'
+  'exec gate preload operand: executed' \
+  'exec gate deny listed file: executed' \
+  'exec gate deny directory: executed' \
+  'exec gate deny program and loader: executed' \
+  'exec gate deny limit hard link elsewhere: executed' \
+  'exec gate deny limit replaced and copied: executed' \
+  'exec gate deny entry into a writable mount: executed' \
+  'exec gate deny entry beneath a file: executed' \
+  'exec gate deny beside a name that is not UTF-8: executed'
 
 # Design 35 D30, what is mounted beneath a location a run can write, and the symbolic links a
 # followed entry reads: these roots make their own mounts, each case in a user and mount
@@ -432,6 +515,72 @@ require_staged -p b10x-substrate-exec-gate adversary5_view_mounts_gate \
   'adversary5 exec gate view mounts planted link on an unlisted type' \
   'adversary5 exec gate view mounts covered mounts' \
   '?adversary5 exec gate view mounts limit: overlay upper|no overlay mount in a user namespace on this host'
+# The deny-list across the view's mounts (`story:executable-deny-list`, D30): a program denied
+# in a mount beneath a listed directory, a listed mount beneath a denied directory, a program
+# in a mount beneath a denied directory, and the mounts that cannot be compared. The same
+# rule: each staged case by name, its `executed` line where a user namespace is granted a
+# mount and its own `ABSENT (` line where it is not. The cases of these roots that make no
+# mount are written `=<name>` and are required on every host. The adversary's nested host
+# mount mounts in the test process itself, which no lane lets it: it is absent everywhere,
+# named below, and `exec_denied_view_mounts` stages its shape in a namespace of its own.
+require_staged exec_denied_view_mounts \
+  'ESS confinement linux exec deny view mounts'
+require_staged security4_exec_denied \
+  '?security4 exec denied host mount|this host has no /usr/local/src' \
+  '?security4 exec denied unplaced|this host has no vfat mount at /boot/efi' \
+  '=security4 exec denied trace'
+# The second security review's root. Its first case is the stated limit of a deny entry in a
+# listed directory the run can write (design 35 § 8.2): it holds the measured figures. Three
+# cases make no mount; the fourth stages its mounts in a namespace of its own.
+require_staged security5_exec_denied \
+  '=security5 exec denied limit created or moved by the run' \
+  '=security5 exec denied unreadable expanded directory' \
+  '=security5 exec denied program in a declared mount' \
+  'security5 exec denied names across mounts'
+# The adversary's second round. Its routes case makes no mount. The other stages a mount of a
+# type outside the list beside, one directory below and beneath the deny entry.
+require_staged adversary5_exec_denied_round2 \
+  '=adversary5 exec deny routes' \
+  'adversary5 exec deny beside unlisted mount'
+# The third security look's root (S9-1, S9-2): one staged case of fourteen starts. The
+# refusal before dispatch for a mount among the entries of an expanded directory is what the
+# helper would end with status 125, and no start the helper would run.
+require_staged security6_exec_denied \
+  'security6 exec denied the refusal for a mount among the entries'
+require_staged adversary4_exec_denied \
+  '=adversary4 exec deny other names' \
+  '=adversary4 exec deny limit created later' \
+  '=adversary4 exec deny directory renamed' \
+  '=adversary4 exec deny spellings' \
+  '=adversary4 exec deny option names' \
+  '=adversary4 exec deny program refused' \
+  '=adversary4 exec deny equals allow' \
+  '=adversary4 exec deny link entry' \
+  '=adversary4 exec deny rule stop' \
+  '?adversary4 exec deny nested host mount|this process may not mount'
+require_staged -p b10x-substrate-exec-gate namespace_gate \
+  'exec gate namespace host bind mount' \
+  'exec gate namespace tmpfs' \
+  '?exec gate namespace overlay|no overlay mount in a user namespace on this host' \
+  '?exec gate namespace limit overlay lower directory|no overlay mount in a user namespace on this host'
+require_staged -p b10x-substrate-exec-gate adversary4_namespace_gate \
+  'adversary4 exec gate namespace second mount nested in a listed directory' \
+  'adversary4 exec gate namespace deny entry beneath a nested mount' \
+  'adversary4 exec gate namespace deny entry on a nested tmpfs' \
+  'adversary4 exec gate namespace listed mount inside a denied directory' \
+  'adversary4 exec gate namespace control without a nested mount'
+require_staged -p b10x-substrate-exec-gate security4_gate \
+  'security4 exec gate deny in a mount beneath a listed directory' \
+  'security4 exec gate listed mount beneath a denied directory' \
+  '=security4 exec gate rule bound'
+# The adversary's second round on the helper alone: every case makes its namespace.
+require_staged -p b10x-substrate-exec-gate adversary5_denied_reach_gate \
+  'adversary5 exec gate denied reach probe shape, second listed directory' \
+  'adversary5 exec gate denied reach probe shape, the expanded directory' \
+  'adversary5 exec gate denied reach unlisted mount among the entries' \
+  'adversary5 exec gate denied reach listed mount above an unlisted one' \
+  'adversary5 exec gate denied reach denied root of a file system' \
+  'adversary5 exec gate denied reach deny entry beneath a file'
 if (( ${#unstaged[@]} > 0 )); then
   if (( mounts_granted )); then
     why="this host lacks what they need"
@@ -461,6 +610,14 @@ require_executed -p b10x-substrate-exec-gate security7_gate \
   'security7 exec gate walk: no `..` asked of the kernel: executed'
 require_executed -p b10x-substrate-exec-gate adversary_gate \
   'adversary landlock failures: executed'
+# The helper's expansion at its edges, with no mount and no namespace: the stop of the walk at
+# its exact count, entries that are no regular file, a directory it cannot read, and a name
+# that is not UTF-8.
+require_executed -p b10x-substrate-exec-gate adversary4_gate \
+  'adversary4 exec gate rule stop: executed' \
+  'adversary4 exec gate special entries: executed' \
+  'adversary4 exec gate unreadable expanded directory: executed' \
+  'adversary4 exec gate non-UTF-8 name: executed'
 require_executed -p b10x-substrate-exec-gate security2_gate \
   'security2 exec gate refusals: executed'
 require_executed -p b10x-substrate-exec-gate security_gate \

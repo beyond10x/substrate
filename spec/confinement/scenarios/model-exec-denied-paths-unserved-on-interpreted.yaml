@@ -1,0 +1,38 @@
+# Model only (design 35 D10, `story:executable-deny-list`). Every declared adapter set that holds
+# `exec_subpaths` holds `exec_denied_paths` too, and where a lane's adapter proves the first its
+# probe proves the second. This scenario opens an adapter row that holds `linux`'s facts with
+# `exec_subpaths` and without `exec_denied_paths`, and checks that a profile with both lists is
+# refused naming the second fact, the first the row did not prove. It runs only against the
+# interpreted reference: no adapter lane selects a `model-*` scenario.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: model-exec-denied-paths-unserved-on-interpreted
+summary: "lane interpreted: an adapter row with exec_subpaths and without exec_denied_paths refuses a profile with both executable lists confinement.fact-unserved naming exec_denied_paths."
+
+timeline:
+  - at: 2026-11-21T10:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, exec_subpaths, stdin_pipe, output_live]
+    outcome: opened
+  - at: 2026-11-21T10:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [process_run, filesystem_view]
+      required_facts: [exec_subpaths, exec_denied_paths]
+      exec_subpath_entries: [/usr/bin]
+      exec_denied_path_entries: [/usr/bin/id]
+    outcome: fact-unserved-exec-denied-paths
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: linux, fact: exec_denied_paths}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

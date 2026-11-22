@@ -29,7 +29,11 @@ An admitted host exec receives:
 - read-only system inputs and, when requested, a digest-verified read-only `/runtime` capsule;
 - no usable network interface in the minimum no-egress profile;
 - a syscall filter that refuses new Unix-domain sockets and `io_uring_setup`, closing host-IPC and
-  asynchronous-I/O paths that namespace isolation alone does not remove;
+  asynchronous-I/O paths that namespace isolation alone does not remove, and three `ioctl`
+  requests: `EXT4_IOC_MOVE_EXT` and `XFS_IOC_SWAPEXT`, which exchange file blocks, and
+  `F2FS_IOC_SEC_TRIM_FILE`, which erases them. The first was observed to change a file's
+  content on disk without moving its size or times; the other two were read from the kernel
+  source and not run on XFS or f2fs;
 - PID and memory-plus-swap bounds with cumulatively observed CPU;
 - bounded stdout and stderr capture that keeps draining after truncation;
 - timeout, cancellation, and whole-cgroup termination.
@@ -101,8 +105,11 @@ deployment, or wait for capacity. They never masquerade as successful execution.
 ## What the minimum host does not claim
 
 The boundary does not claim protection from a compromised kernel or comprehensive syscall
-allowlisting. Its seccomp rules close the named AF_UNIX and io_uring paths; they are part of the
+allowlisting. Its seccomp rules close the named AF_UNIX and io_uring paths and the three
+`ioctl` requests named above; they are part of the
 minimum confinement floor, not a claim that every kernel interface has been reduced to an allowlist.
+Another `ioctl` request of the same kind passes until the filter names it. The `oci` and `pod`
+adapters keep their runtime's default seccomp profile, which passes all three requests.
 A development execution capsule verifies the capsule's own bytes; it does not attest the host
 kernel, interpreter, libraries, or base system.
 

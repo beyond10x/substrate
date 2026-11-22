@@ -53,6 +53,13 @@
 //!   not resolve them, when another developer root is selected than at open, when the SDK the open
 //!   resolved is gone, or when its exec subpaths hold the selected developer directory but not a
 //!   value it needs. Nothing is resolved again at a start. The policy itself gains no rule.
+//! - `exec_denied_paths` (design 35 D12, proved by its own row of the build probe): a denied
+//!   path is neither executed nor mapped as code, even beneath an exec subpath or as the
+//!   program. The entries are rendered as deny rules after every allow, because the last
+//!   matching rule decides. An entry has the form and the locations of an exec subpath and need
+//!   not exist; it is resolved through its nearest existing ancestor, as a sealed path is. A
+//!   start whose program lies in a denied path is refused `exec.sandbox-program-unlisted`. A
+//!   rule names a path: a hard link to a denied program under another path runs.
 //! - `private_tmpdir`: each start creates a directory beside the host's temporary directory,
 //!   writable by that run alone, sets `TMPDIR` to it, and removes it before `wait` returns, after
 //!   making every directory the run left in it owner-accessible again. A directory that still
@@ -400,6 +407,7 @@ pub fn proof() -> AdapterFacts {
     proved(BuildProof {
         sealed_paths: true,
         exec_subpaths: true,
+        exec_denied_paths: true,
         private_tmpdir: true,
     })
 }
@@ -427,6 +435,7 @@ fn proved(build: BuildProof) -> AdapterFacts {
             (Fact::WholeTreeKill, false),
             (Fact::SealedPaths, build.sealed_paths),
             (Fact::ExecSubpaths, build.exec_subpaths),
+            (Fact::ExecDeniedPaths, build.exec_denied_paths),
             (Fact::PrivateTmpdir, build.private_tmpdir),
             (Fact::StdinPipe, true),
             (Fact::OutputLive, true),
@@ -596,6 +605,10 @@ impl MacosAdapter {
             subpaths.push(subpath.clone());
             policy = policy.exec_subpath(subpath);
         }
+        // Design 35 D12: rendered as deny rules after every allow.
+        for denied in &profile.exec_denied_paths {
+            policy = policy.exec_denied(exec_denied_path(&workspace, &declared, denied)?);
+        }
         Ok((policy, subpaths))
     }
 
@@ -761,6 +774,49 @@ fn exec_subpath(
              directories"
         ),
         "exec_subpaths",
+    )
+    .into())
+}
+
+/// A deny-list entry, resolved (design 35 D12): the rules of [`exec_subpath`], but for one. It
+/// need not exist, absolute or relative, so an absolute entry is resolved through its nearest
+/// existing ancestor, as a sealed path is, and the location rule is asked of that result.
+fn exec_denied_path(
+    workspace: &Path,
+    declared: &[PathBuf],
+    denied: &str,
+) -> Result<PathBuf, ConfinementError> {
+    const FIELD: &str = "exec_denied_paths";
+    if !denied.starts_with('/') {
+        return beneath_without_symlink(workspace, denied, "denied path", FIELD);
+    }
+    seatbelt::absolute_literal(denied)?;
+    let resolved = seatbelt::resolve_ancestor(Path::new(denied)).map_err(|error| {
+        ConfinementError::from(DriverError::refused(
+            seatbelt::PATH_UNREPRESENTABLE,
+            error.message,
+            FIELD,
+        ))
+    })?;
+    let system = seatbelt::SYSTEM_EXEC_SUBPATHS
+        .iter()
+        .filter_map(|directory| std::fs::canonicalize(directory).ok())
+        .chain(seatbelt::developer_root());
+    if declared
+        .iter()
+        .cloned()
+        .chain(system)
+        .any(|base| resolved.starts_with(base))
+    {
+        return Ok(resolved);
+    }
+    Err(DriverError::refused(
+        seatbelt::EXEC_SUBPATH_UNDECLARED,
+        format!(
+            "{denied} is outside the workspace, every declared root and the system and developer \
+             directories"
+        ),
+        FIELD,
     )
     .into())
 }
@@ -1054,7 +1110,11 @@ impl ConfinementAdapter for MacosAdapter {
         for path in &profile.sealed_paths {
             seatbelt::relative_literal(path)?;
         }
-        for subpath in &profile.exec_subpaths {
+        for subpath in profile
+            .exec_subpaths
+            .iter()
+            .chain(&profile.exec_denied_paths)
+        {
             if subpath.starts_with('/') {
                 seatbelt::absolute_literal(subpath)?;
             } else {
@@ -1238,6 +1298,7 @@ mod tests {
                 Fact::IpcSignalsContained,
                 Fact::SealedPaths,
                 Fact::ExecSubpaths,
+                Fact::ExecDeniedPaths,
                 Fact::PrivateTmpdir,
                 Fact::StdinPipe,
                 Fact::OutputLive,
@@ -1255,16 +1316,17 @@ mod tests {
 
     #[test]
     fn a_build_fact_the_probe_did_not_show_is_not_proved_and_is_refused_by_name() {
-        let probed = |sealed_paths, exec_subpaths, private_tmpdir| {
+        let probed = |sealed_paths, exec_subpaths, exec_denied_paths, private_tmpdir| {
             MacosAdapter::with_facts(proved(BuildProof {
                 sealed_paths,
                 exec_subpaths,
+                exec_denied_paths,
                 private_tmpdir,
             }))
         };
         let cases = [
             (
-                probed(false, true, true),
+                probed(false, true, true, true),
                 ConfinementProfile {
                     sealed_paths: vec![".git".into()],
                     ..ConfinementProfile::default()
@@ -1272,7 +1334,7 @@ mod tests {
                 Fact::SealedPaths,
             ),
             (
-                probed(true, false, true),
+                probed(true, false, true, true),
                 ConfinementProfile {
                     exec_subpaths: vec!["target".into()],
                     ..ConfinementProfile::default()
@@ -1280,7 +1342,17 @@ mod tests {
                 Fact::ExecSubpaths,
             ),
             (
-                probed(true, true, false),
+                // Both lists on a build that proved only the first: the refusal names the second.
+                probed(true, true, false, true),
+                ConfinementProfile {
+                    exec_subpaths: vec!["target".into()],
+                    exec_denied_paths: vec!["target/blocked".into()],
+                    ..ConfinementProfile::default()
+                },
+                Fact::ExecDeniedPaths,
+            ),
+            (
+                probed(true, true, true, false),
                 ConfinementProfile {
                     private_tmpdir: true,
                     ..ConfinementProfile::default()
@@ -1290,7 +1362,7 @@ mod tests {
         ];
         for (adapter, profile, missing) in cases {
             assert!(!adapter.facts().proves(&missing), "{missing:?}");
-            assert_eq!(adapter.facts().facts.len(), 6, "{missing:?}");
+            assert_eq!(adapter.facts().facts.len(), 7, "{missing:?}");
             match adapter.admit(&profile) {
                 Err(ConfinementError::FactUnserved { fact, .. }) => assert_eq!(fact, missing),
                 other => panic!("{missing:?}: expected confinement.fact-unserved, got {other:?}"),
@@ -1348,6 +1420,11 @@ mod tests {
             exec_subpaths: vec![path.into()],
             ..ConfinementProfile::default()
         };
+        // A deny entry is held to the lexical rule of an exec subpath (design 35 D10).
+        let denied = |path: &str| ConfinementProfile {
+            exec_denied_paths: vec![path.into()],
+            ..exec("target")
+        };
         for mut profile in [
             sealed("quo\"te"),
             sealed("/abs/olute"),
@@ -1357,8 +1434,15 @@ mod tests {
             exec("/usr/b\"in"),
             exec("a/../b"),
             exec("/usr//bin"),
+            denied("quo\"te"),
+            denied("/usr/b\"in"),
+            denied("a/../b"),
+            denied("/usr//bin"),
         ] {
-            let named = format!("{:?}{:?}", profile.sealed_paths, profile.exec_subpaths);
+            let named = format!(
+                "{:?}{:?}{:?}",
+                profile.sealed_paths, profile.exec_subpaths, profile.exec_denied_paths
+            );
             let (sink, records) = recording();
             profile.audit = Some(sink);
             let error = adapter.admit(&profile).expect_err(&named);

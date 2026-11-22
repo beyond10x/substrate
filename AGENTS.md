@@ -168,12 +168,23 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
 - **The enforced isolation set is a floor, not a menu**: `openat2` beneath/no-link/no-mount I/O,
   atomic replacement, cleared and shaped environment, namespace no-egress, **no nested user
   namespace** — the child's own user namespace with `--disable-userns`, so it cannot create
-  another one and hold `CAP_SYS_ADMIN` in it — pids and memory+swap
+  another one and hold `CAP_SYS_ADMIN` in it — a seccomp program that refuses the `ioctl`
+  requests that exchange or erase file blocks, pids and memory+swap
   bounds with cumulatively observed CPU, backend-identity-bound capability snapshots, output
   draining, timeout, whole-tree kill, exact capsule-byte verification, read-only `/runtime` beside a
   separate writable `/workspace`, owner-private durable state, and bounded normal/restart capsule
   cleanup. Removing or weakening any of these is invariant 3's named refusal, never a quiet
-  downgrade.
+  downgrade. The refused requests are `EXT4_IOC_MOVE_EXT`, `XFS_IOC_SWAPEXT` and
+  `F2FS_IOC_SEC_TRIM_FILE`, answered `EACCES`
+  for every confined run and session of the host driver and the `linux` adapter, whatever the
+  profile asks
+  ([ADR 0050](adr/0050-the-floor-refuses-the-ioctl-requests-that-exchange-file-blocks.md)): rows
+  of `REFUSED_IOCTLS` in `crates/substrate-host/src/seccomp.rs`, which the program's `ioctl`
+  check is generated from and `seccomp::tests` declares a second time; the delegated lane holds
+  the first with one real run on ext4 (`floor_refuses_block_exchange`), required on a hosted
+  runner and absent only where a workstation's staging file system is not ext4, and nothing was
+  run on XFS or f2fs. The `oci` and `pod` adapters keep their runtime's default seccomp profile,
+  which passes all three, and `local` has no filter.
 - **Execution capsules are verified read-only inputs** (`adr/0009`), and declared host roots are
   mounted read-only (`adr/0010`). A capsule's bytes are verified exactly; a mutable ref is input
   convenience and is always resolved to and recorded as an immutable commit
@@ -249,6 +260,16 @@ seconds. Repetition counts, soak loops and load generators are local evidence re
 planning store, never a test, a CI step or a script the gate calls. A story whose acceptance needs
 "N runs under load" proves it on a workstation and records the run; the case it adds to the suite
 runs once.
+
+**No build or test job on the shared workstation runs over five minutes.** Timo, 2026-11-22 about
+04:55 CET, relayed by the session that maintains the build pool: "There is no good reason
+something compiles or tests longer than 5 minutes." A job known to go past that is not started.
+A mutation run does not rebuild a crate per mutant: at most one mutant per guard, each as one job
+that builds and runs only the test binary that should kill it, and the others are listed as not
+run. A cancelled mutant job leaves its mutant in the source and its binary in `target/`: compare
+the file with the tested state before anything else, and run no test binary by path afterwards
+(2026-11-22: a cancelled job left a changed constant in `crates/substrate-host/src/seccomp.rs`).
+Every sub-agent brief names this bound beside the 60 s and 120 s bounds of the collection.
 
 **The test step's budget: the run ends within 120 s on the hosted runner, and no test runs longer
 than 60 s** (`story:gate-test-step-ends-within-two-minutes`). The step is four commands:
@@ -553,6 +574,78 @@ with a list the run's variables are operands of the helper (`--env <name> <value
 gets no `--setenv` (D28); a start without a list keeps its argv, which
 `a_start_without_a_list_builds_the_argv_it_built_before` in `crates/substrate-host/src/process.rs`
 holds.
+
+**The same helper enforces the deny-list** (design 35 § 8). `ConfinementProfile.exec_denied_paths`
+holds at most `MAX_EXEC_DENIED_PATHS` (64) entries, and a denied path wins. Landlock has no deny
+rule, so `--deny` makes the helper grant each entry of a listed directory on its own where the
+directory holds a denied path (`grant` in `crates/substrate-exec-gate/src/landlock.rs`); whether
+one path holds another is decided by place, never by path text. The fact `exec_denied_paths`
+stands directly after `exec_subpaths`, is proved by a second open-time probe
+(`probe_exec_denied_paths`) only where the first held, and is not published: it has no wire
+property (`PROVED_WITHOUT_A_WIRE_PROPERTY` in `crates/substrate-host/src/probe.rs`). A deny-list
+beside an empty `exec_subpaths` is `confinement.exec-denied-paths-without-subpaths` (422) on
+every adapter, before any fact is read. The lane requires the `exec deny` lines of
+`ess_confinement_linux`: probes K2 and K8 through the driver, the acceptance, and the two cases
+kept at the stakeholder's request, a program that is a link to a denied program and one directory
+under two names. The base view's form of the second needs a host whose `/bin` is a link to
+`/usr/bin` and where `/usr/bin/id` is a file of that directory; elsewhere it is absent, so
+refused by the lane. **A deny entry holds across the view's mounts** (D30): what is mounted
+beneath a denied directory is denied with it, and a listed directory with a denied place in a
+mount beneath it is expanded. The helper's `step` and the driver's `judge_denied` ask
+`MountTree::reaches` for it; a mount beneath a denied directory, or beneath a listed directory
+of a start with a deny-list, that is covered or whose root was removed refuses the start
+`exec.sandbox-place-unserved` (the helper: status 125), and so does a type outside the list
+beneath a denied directory. The deny probe binds a directory no entry lists beneath a second
+listed directory (`PROBE_HELD_MOUNT`), and
+`ESS confinement linux exec deny probe held mount` holds that a helper which misses it proves
+the allow-list alone. Both functions are held on every host by cases on mount tables written
+as text (`landlock::tests`, `exec_gate::tests`). **Ten more roots are required through
+`require_staged`**, by the rule of the eleven above: the helper package's `namespace_gate`
+(a host bind mount, a tmpfs, an overlay, and the limit of an overlay listed beside its lower
+directory), `adversary4_namespace_gate`, `adversary5_denied_reach_gate` and `security4_gate`,
+and the host crate's `security4_exec_denied`, `security5_exec_denied`,
+`security6_exec_denied`, `adversary4_exec_denied`, `adversary5_exec_denied_round2` and
+`exec_denied_view_mounts`.
+Their cases
+that mount do so in a user and mount namespace of their own. Where that is granted no mount
+they print `ABSENT (` and the lane names them in its one line: on `release-lanes.yml` and
+`gate.yml` they are workstation evidence, never a passed case. The cases of those roots that
+make no mount are required on every host, and so is `adversary4_gate`, with no `ABSENT` line.
+One case is absent on every host, `adversary4 exec deny nested host mount`, which mounts in
+the test process itself; `exec_denied_view_mounts` stages its shape. An absence a case
+names for something else the host lacks is taken only with that reason: an overlay case with
+`no overlay mount in a user namespace on this host`, never with `the stage failed`. **In a
+listed directory a run can write, a deny entry holds for the files that exist at the start,
+under the names they have then** (§ 8.2, § 8.5). A directory inside an expanded directory
+that holds no denied path gets one rule, what the run creates in it executes, and the rule
+moves with a rename, so a file the run creates or moves can run under any name, the denied
+name included. A deny-list is exact only where the run cannot write. Two `limit_` cases hold
+the figures: `limit_a_deny_entry_the_run_creates_by_a_link_or_a_rename_runs` in
+`adversary4_exec_denied` (`copied 126`, `linked 0`, `renamed 0`) and
+`limit_a_file_the_run_creates_or_moves_runs_under_a_denied_name` in `security5_exec_denied`
+(`copied after a rename 0` and eight more). **A mount of a file-system type outside the list
+that is an entry of a directory a start expands refuses the start before dispatch**,
+`exec.sandbox-place-unserved` at `exec_subpaths` (`judge_denied` in
+`crates/substrate-host/src/exec_gate.rs`). What decides is where the deny entry is: the
+helper expands only the directories on the way to one, so the same mount one directory
+further away refuses nothing (design 35 § 6, amended 2026-11-22). Nor does one whose mount
+point is gone beneath a mount laid over a directory above: the helper never meets it. **The
+driver also asks what the root of a mount of a listed type reaches where the helper would
+step that mount as a directory**, and refuses the start the same way where that cannot be
+established: by place the root holds the mounts attached in its file system under another
+mount of it, which are not beneath the listed directory. The walk is by the mount tree
+(`MountTree::listed_entries` in `crates/substrate-exec-gate/src/place.rs`), so a mount the
+helper's walk would not meet is not asked. `security6_exec_denied` holds both directions in
+fourteen starts of one staged case. A start with a deny-list
+reads every directory it expands, and ends with status 125 where one cannot be read; its
+standard error is then the one line
+`substrate-exec-gate: cannot read the directory "<path>": <cause>`, a form consumers match,
+held by `limit_a_directory_the_expansion_cannot_read_ends_the_run_125_and_names_it` in the
+lane (`ESS confinement linux exec deny limit unreadable directory`).
+`macos` renders the list as Seatbelt deny rules
+after every allow (`render_exec_denied` in `crates/substrate-host/src/seatbelt.rs`); its cases
+run only in the hosted macOS check, and how Seatbelt matches a deny entry in another letter
+case on a case-insensitive volume is not verified.
 
 **The runner has a third lane, the namespace lane.** It runs only when
 `SUBSTRATE_VECTORS_KUBERNETES_CONFIG` names a namespace driver's kubeconfig. It starts the shipped
