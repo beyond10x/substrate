@@ -1,6 +1,7 @@
 //! The shipped `substrate-daemon` a test starts: found, never built by a test.
 //!
 //! In order: the program `SUBSTRATE_TEST_DAEMON` names, then the one beside the test executable.
+//! An empty variable names none, as an unset one.
 //! A workspace test build leaves that one there before any test runs: it is the setup step of
 //! the gate's test run (AGENTS.md, section *The gate*). A test that finds neither fails and names
 //! the step; it starts no build.
@@ -10,8 +11,12 @@
 //! build resolves other features than the workspace's test build, so it recompiled the daemon and
 //! everything beneath it, 95 s on the hosted runner, inside one test, and replaced the daemon
 //! every later test started. Under cargo-nextest every test is its own process, so a build kept
-//! in a `OnceLock` would run once per test. The lookup is this one file so that no copy can
-//! differ again.
+//! in a `OnceLock` would run once per test. The four CLI test files that had a copy
+//! (`adversary.rs`, `adversary_pass2.rs`, `scenarios.rs`, `security.rs`) now include this file,
+//! so that none of them can differ again, and so does `xtask/tests/adversary_gate_budget.rs`. Four
+//! other files still hold their own copy of the same two steps, none of which ever built:
+//! `managed.rs`, `remote.rs` and `unrecorded.rs` of the SDK's tests and `local_endpoint.rs` of
+//! the conformance crate's. Those copies take an empty `SUBSTRATE_TEST_DAEMON` as a path.
 //!
 //! Included with `#[path]` from a test two directories below the workspace root
 //! (`crates/<crate>/tests/`); it is test support, never part of a production path.
@@ -54,13 +59,13 @@ pub fn profile_dir(test_executable: &Path) -> PathBuf {
     directory
 }
 
-/// `named` when given; otherwise the daemon beside `test_executable`.
+/// `named` when given and not empty; otherwise the daemon beside `test_executable`.
 ///
 /// # Errors
 ///
 /// The path the daemon would have beside the test executable, when it is no file.
 pub fn resolve(named: Option<OsString>, test_executable: &Path) -> Result<PathBuf, PathBuf> {
-    if let Some(named) = named {
+    if let Some(named) = named.filter(|named| !named.is_empty()) {
         return Ok(named.into());
     }
     let sibling = profile_dir(test_executable).join(DAEMON);

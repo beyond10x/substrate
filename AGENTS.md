@@ -228,7 +228,8 @@ bash scripts/gate.sh
 
 In order: `cargo xtask check-ess`, `cargo xtask check-docs`, `cargo fetch --locked` (every
 target's dependencies, which the offline `cargo tree --target all` cases need), the test step
-(`cargo nextest run --workspace --release --locked --no-run`, the same command without `--no-run`,
+(`cargo nextest run --workspace --release --locked --no-run`, the same command with
+`--test-threads 12 --retries 0` in place of `--no-run`,
 `xtask slowest-tests` and `cargo test --workspace --release --locked --doc`; *The test step's
 budget* below), `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --release --locked -- -D warnings`, the host driver without
@@ -254,28 +255,53 @@ than 60 s** (`story:gate-test-step-ends-within-two-minutes`). The step is four c
 
 1. `cargo nextest run --workspace --release --locked --no-run` builds every test binary and every
    binary a test starts, `substrate-daemon` among them. The compile is not in the budget.
-2. `cargo nextest run --workspace --release --locked` runs every test in its own process. This is
-   the 120 s, and the runner holds it: at 120 s it cancels the run, which then fails.
+2. `cargo nextest run --workspace --release --locked --test-threads 12 --retries 0` runs every
+   test in its own process. This is the 120 s, and the runner holds it: at 120 s it kills what
+   still runs, and the run fails.
 3. `target/release/xtask slowest-tests --junit target/nextest/default/junit.xml` prints the ten
    slowest tests of that run, whether it passed or failed. It is the release `xtask` step 1 built:
    `cargo xtask` there would compile a second one.
 4. `cargo test --workspace --release --locked --doc` runs the doctests, which cargo-nextest does
-   not run and which are therefore under no per-test bound.
+   not run. Nothing kills a doctest at 60 s and nothing ends this command at 120 s. Both doctests
+   are compile-only today; one that runs code needs a bound before it is added.
 
 `scripts/gate.sh` prints `gate-time: test build: <n> s`, `gate-time: test run: <n> s` and
 `gate-time: doctests: <n> s`, so the run's time is read apart from the compile.
 [`.config/nextest.toml`](.config/nextest.toml) holds both bounds, so they apply to every
-`cargo nextest run` here, on a workstation and in CI: `slow-timeout` with a 30 s period and
-`terminate-after = 2`, so a test is reported slow at 30 s and killed at 60 s, and a killed test
-fails the run; and `global-timeout = "120s"`, so a run still going at 120 s is cancelled and
-fails. The compile is another command and outside that bound; `gate-time: test run` is the whole
-run command, cargo's freshness check and the listing of the tests included. A run over 120 s is a
-defect to fix (*An expensive product is made once*, below), never a bound to raise. `test-threads = 12` is the same on every machine,
-and more than a hosted runner's four CPUs on purpose: the suite's time is mostly waiting, so tests
-overlap where CPUs do not (measured on four CPUs, the four largest binaries: cancelled at 120 s
-with 4 threads, 48 s with 12, 103 s of CPU for 530 s of test time). `gate.yml` installs
-cargo-nextest from its release archive, pinned by `NEXTEST_VERSION` and `NEXTEST_SHA256`; moving
-one moves both.
+`cargo nextest run` here, on a workstation and in CI:
+
+- `slow-timeout` with a 30 s period, `terminate-after = 2` and `grace-period = "0s"`: a test is
+  reported slow at 30 s and killed with `SIGKILL` at 60 s, and a killed test fails the run. The
+  grace period is zero because cargo-nextest otherwise sends `SIGTERM` and waits 10 s, so a test
+  that ignores the signal would run 70 s.
+- `global-timeout = "120s"`: tests still running at 120 s are killed the same way and the run
+  fails. The clock starts when the first test starts, after cargo's freshness check and the
+  listing of the tests; `gate-time: test run` is the whole command and includes both, a few
+  seconds. The compile is another command and outside the bound. A run over 120 s is a defect to
+  fix (*An expensive product is made once*, below), never a bound to raise.
+- `test-threads = 12`, more than a hosted runner's four CPUs on purpose: the suite's time is
+  mostly waiting, so tests overlap where CPUs do not (measured on four CPUs, the four largest
+  binaries: cancelled at 120 s with 4 threads, 48 s with 12, 103 s of CPU for 530 s of test time).
+
+**The gate names the thread count and the retries on its command line, because a variable of the
+caller wins over the configuration file.** cargo-nextest reads `NEXTEST_TEST_THREADS` and
+`NEXTEST_RETRIES` before `.config/nextest.toml`. `scripts/gate.sh` therefore reads `test-threads`
+from that file, its one home, and passes it as `--test-threads`, with `--retries 0`, on both of
+its test runs: a caller's thread count does not decide the 120 s, and a caller's retries do not
+turn a failed test into a passed one. A `cargo nextest run` typed by hand has neither option: in
+a job of the workstation's build pool it runs with the pool's `NEXTEST_TEST_THREADS`, a default
+for CPU-bound tests, unless the command names its own.
+
+**A local run of the test phase asks the pool for the CPUs it uses:**
+
+```console
+SLOT_TOKENS=3 bash scripts/gate.sh tests
+```
+
+Three, because twelve threads of mostly waiting tests used about 2.3 CPUs (the 103 s of CPU over
+530 s of test time above). The time a job waits in the pool's queue is before the run and outside
+the 120 s. `gate.yml` installs cargo-nextest from its release archive, pinned by
+`NEXTEST_VERSION` and `NEXTEST_SHA256`; moving one moves both.
 
 What the budget asks of a test:
 
@@ -286,9 +312,11 @@ What the budget asks of a test:
   a confined run a test starts. Both products of this kind today are made by a setup step:
   - the daemon a test starts, by step 1. `test-support/daemon_binary.rs` finds it:
     `SUBSTRATE_TEST_DAEMON`, else the one beside the test executable, else the test fails and
-    names the step. A test never runs `cargo build`: a package-scoped build resolves other
-    features than step 1, recompiles what step 1 built and replaces the daemon other tests are
-    starting;
+    names the step. An empty variable names none. A test never runs `cargo build`: a
+    package-scoped build resolves other features than step 1, recompiles what step 1 built and
+    replaces the daemon other tests are starting. A package-scoped run of the CLI's tests
+    (`cargo test -p b10x-substrate-cli`) therefore starts whatever daemon an earlier build left
+    beside it, which may be older than the source: build the workspace's tests first;
   - the image the oci cases run, by `gate.yml`'s pull step. A case asks the runtime's store first
     and pulls only an image the store does not hold, so the test step makes no registry request.
 - **A test binary with its own `main` (`harness = false`) answers what cargo-nextest asks of

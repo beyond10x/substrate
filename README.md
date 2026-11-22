@@ -93,7 +93,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 |---|---|
 | fetch | `cargo fetch --locked` — every target's dependencies, for the offline `cargo tree --target all` cases |
 | test build | `cargo nextest run --workspace --release --locked --no-run` — every test binary and the binaries the tests start; its time is printed apart from the run's |
-| tests | `cargo nextest run --workspace --release --locked` — each test in its own process, killed at 60 s, and the run cancelled and failed at 120 s (`.config/nextest.toml`) |
+| tests | `cargo nextest run --workspace --release --locked --test-threads 12 --retries 0` — each test in its own process, killed at 60 s, and the run cancelled and failed at 120 s (`.config/nextest.toml`, which is also where the gate reads the thread count) |
 | slowest tests | `target/release/xtask slowest-tests --junit target/nextest/default/junit.xml` — the ten slowest tests of that run |
 | doctests | `cargo test --workspace --release --locked --doc` — cargo-nextest runs none |
 | format | `cargo fmt --all --check` |

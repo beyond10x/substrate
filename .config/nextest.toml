@@ -2,7 +2,7 @@
 fail-fast = false
 test-threads = 12
 global-timeout = "120s"
-slow-timeout = { period = "30s", terminate-after = 2 }
+slow-timeout = { period = "30s", terminate-after = 2, grace-period = "0s" }
 final-status-level = "slow"
 
 [profile.default.junit]

@@ -60,6 +60,19 @@ timed() {
 
 target_dir="${CARGO_TARGET_DIR:-${root}/target}"
 junit="${target_dir}/nextest/default/junit.xml"
+# The test runs name their thread count and their retries themselves. cargo-nextest reads
+# `NEXTEST_TEST_THREADS` and `NEXTEST_RETRIES` before `.config/nextest.toml`, so without the
+# options a caller's environment decides both: the workstation's build pool sets a thread count
+# for every job, and a retry count would turn a test that fails once into a passed one. The
+# thread count has one home, the configuration file, and is read from it here.
+test_threads=
+if [[ "${phase}" == all || "${phase}" == tests ]]; then
+  test_threads=$(sed -n 's/^test-threads = \([0-9][0-9]*\)$/\1/p' "${root}/.config/nextest.toml")
+  if [[ ! "${test_threads}" =~ ^[0-9]+$ ]]; then
+    echo "gate: .config/nextest.toml does not name one test-threads count" >&2
+    exit 2
+  fi
+fi
 
 step static cargo xtask check-ess
 step static cargo xtask check-docs
@@ -74,7 +87,8 @@ if [[ "${phase}" == all || "${phase}" == tests ]]; then
   rm -f "${junit}"
 fi
 tests_status=0
-timed tests 'test run' cargo nextest run --workspace --release --locked || tests_status=$?
+timed tests 'test run' cargo nextest run --workspace --release --locked \
+  --test-threads "${test_threads}" --retries 0 || tests_status=$?
 # The ten slowest tests, printed whether the run passed or failed. This is the release `xtask`
 # the build step left beside the test binaries: `cargo xtask` here would compile a second,
 # dev-profile one, and `cargo run --release -p xtask` a third, because a package-scoped build
@@ -99,7 +113,8 @@ step tests cargo clippy -p b10x-substrate-host --no-default-features --all-targe
   -- -D warnings
 timed tests 'no-default lane, its build included' env SUBSTRATE_HOST_NO_DEFAULT_FEATURES=1 \
   cargo nextest run -p b10x-substrate-host --no-default-features --release --locked \
-  --test host_features --test ess_confinement_local --test consumer_surface
+  --test host_features --test ess_confinement_local --test consumer_surface \
+  --test-threads "${test_threads}" --retries 0
 step static cargo xtask check-links
 step static cargo xtask check-adrs
 step static cargo xtask check-secrets

@@ -378,7 +378,35 @@ fn gate_steps(arguments: &[&str]) -> (Option<i32>, Vec<String>) {
 }
 
 const TEST_BUILD_STEP: &str = "gate: cargo nextest run --workspace --release --locked --no-run";
-const TEST_RUN_STEP: &str = "gate: cargo nextest run --workspace --release --locked";
+/// The `[profile.default]` table of `.config/nextest.toml`.
+fn nextest_profile() -> toml::Value {
+    let config: toml::Value = toml::from_str(
+        &fs::read_to_string(repository_root().join(".config/nextest.toml"))
+            .expect("the nextest configuration is readable"),
+    )
+    .expect("the nextest configuration is TOML");
+    config["profile"]["default"].clone()
+}
+
+/// The thread count of a test run: `.config/nextest.toml` is its one home.
+fn test_threads() -> i64 {
+    nextest_profile()["test-threads"]
+        .as_integer()
+        .expect("the configuration names a test-threads count")
+}
+
+/// What a test run of the gate names itself, so that no variable of its caller decides it.
+fn run_options() -> String {
+    format!("--test-threads {} --retries 0", test_threads())
+}
+
+/// The gate's line for the workspace's test run.
+fn test_run_step() -> String {
+    format!(
+        "gate: cargo nextest run --workspace --release --locked {}",
+        run_options()
+    )
+}
 const SLOWEST_STEP: &str =
     "gate: <target>/release/xtask slowest-tests --junit <target>/nextest/default/junit.xml";
 const DOCTEST_STEP: &str = "gate: cargo test --workspace --release --locked --doc";
@@ -416,15 +444,17 @@ fn the_two_gate_phases_partition_every_gate_step() {
     let mut every: Vec<&String> = all.iter().collect();
     every.sort();
     assert_eq!(union, every, "the phases are not a partition of the gate");
-    for step in [TEST_BUILD_STEP, TEST_RUN_STEP, SLOWEST_STEP, DOCTEST_STEP] {
+    for step in [
+        TEST_BUILD_STEP.to_owned(),
+        test_run_step(),
+        SLOWEST_STEP.to_owned(),
+        DOCTEST_STEP.to_owned(),
+    ] {
         assert!(
-            phases[0].contains(&step.to_owned()),
+            phases[0].contains(&step),
             "the tests phase does not run {step}"
         );
-        assert!(
-            !phases[1].contains(&step.to_owned()),
-            "the static phase runs {step}"
-        );
+        assert!(!phases[1].contains(&step), "the static phase runs {step}");
     }
     // The `tests` phase fetches every target's dependencies before it tests: the package-rule
     // cases run `cargo tree --target all` offline, and a cold runner cache holds only what the
@@ -463,7 +493,7 @@ fn the_gate_times_its_test_build_and_run_apart_and_names_the_slowest_tests() {
         "gate: cargo fetch --locked\n",
         "gate: cargo nextest run --workspace --release --locked --no-run\n",
         "gate-time: test build: ",
-        "gate: cargo nextest run --workspace --release --locked\n",
+        &format!("{}\n", test_run_step()),
         "gate-time: test run: ",
         "gate: <target>/release/xtask slowest-tests --junit <target>/nextest/default/junit.xml\n",
         "slowest 2 of 2 tests (the 2 test times sum to 12.750 s):\n",
@@ -484,9 +514,18 @@ fn the_gate_times_its_test_build_and_run_apart_and_names_the_slowest_tests() {
             "{line} runs tests under libtest, which kills none at the bound"
         );
         assert!(
-            !line.contains("--profile") && !line.contains("--test-threads"),
-            "{line} leaves the profile or the thread count .config/nextest.toml holds"
+            !line.contains("--profile"),
+            "{line} leaves the profile .config/nextest.toml holds"
         );
+        // A run that executes tests names the configuration's thread count and no retry, so
+        // neither `NEXTEST_TEST_THREADS` nor `NEXTEST_RETRIES` of its caller decides them.
+        if line.contains("cargo nextest run ") && !line.ends_with(" --no-run") {
+            assert!(
+                line.ends_with(&format!(" {}", run_options())),
+                "{line} does not end with {}",
+                run_options()
+            );
+        }
     }
 
     let config: toml::Value = toml::from_str(
@@ -494,7 +533,7 @@ fn the_gate_times_its_test_build_and_run_apart_and_names_the_slowest_tests() {
             .expect("the nextest configuration is readable"),
     )
     .expect("the nextest configuration is TOML");
-    let profile = &config["profile"]["default"];
+    let profile = &nextest_profile();
     let period = profile["slow-timeout"]["period"]
         .as_str()
         .and_then(|period| period.strip_suffix('s'))
@@ -507,6 +546,13 @@ fn the_gate_times_its_test_build_and_run_apart_and_names_the_slowest_tests() {
         period * terminate_after,
         60,
         "a test is killed after {period} s x {terminate_after}, not after 60 s"
+    );
+    // Killed, not asked: with a grace period a test that ignores the request runs on for it,
+    // and a cancelled run with it.
+    assert_eq!(
+        profile["slow-timeout"]["grace-period"].as_str(),
+        Some("0s"),
+        "a test past its bound is given time before it is killed"
     );
     // The run itself is bound too, by the runner and so wherever it runs: it is cancelled and
     // fails at 120 s. The build is another command and outside that bound.
