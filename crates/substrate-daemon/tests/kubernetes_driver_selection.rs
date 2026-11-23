@@ -401,7 +401,10 @@ async fn only_a_daemon_that_opened_a_confinement_adapter_names_it_to_the_operato
         require_facts: Vec::new(),
     });
     let host_daemon = tokio::spawn(serve(host));
-    let host_scrape = metrics_once_listening(host_ops).await;
+    // The listener answers before the driver has opened its adapter, and a scrape taken in
+    // between carries no adapter series yet: wait for the series, then hold its three lines.
+    let host_scrape =
+        metrics_until(host_ops, |scrape| scrape.contains("substrate_adapter_info")).await;
     host_daemon.abort();
     let adapter = host_scrape
         .lines()
@@ -431,6 +434,23 @@ async fn metrics_once_listening(ops: std::net::SocketAddr) -> String {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// `/metrics` until `done` holds for a `200` body or 10 s have passed; the last body, which the
+/// caller's own assertion then reads.
+async fn metrics_until(ops: std::net::SocketAddr, mut done: impl FnMut(&str) -> bool) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        if let Some((200, body)) = ops_get(ops, "/metrics").await {
+            if done(&body) {
+                return body;
+            }
+            last = body;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    last
 }
 
 /// `/readyz` until `done` holds for its answer or 10 s have passed; the last answer.
