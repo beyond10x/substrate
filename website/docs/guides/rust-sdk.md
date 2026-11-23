@@ -297,6 +297,13 @@ names, so an exec naming any host root is refused that way, and a session start 
 More than `MAX_WRITABLE_ROOTS` roots are refused by the SDK with `SdkError::Protocol` before any
 request is sent.
 
+The same builders take `.workdir(..)`, the directory the program starts in, at or beneath
+`/workspace` or a mount of the run. The SDK refuses any other path with `SdkError::Protocol`; an
+exec start on a host without the `exec.workdir` fact is `exec.workdir-unserved`.
+
+Without confinement, a session start is refused `session.confinement-unavailable` before its
+working directory is read.
+
 ## Recover and observe
 
 Mutation builders mint one operation id unless you provide one. If a response is lost, the SDK

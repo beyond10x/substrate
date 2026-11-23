@@ -548,9 +548,10 @@ async fn workspace(client: &Client, command: WorkspaceCommand) -> Result<Answer,
             workspace,
             operation_id,
         } => {
-            let observed = client.get_workspace(&workspace).await?;
-            let id = observed.id().to_owned();
-            let absent = observed.destroy_with_operation_id(operation_id).await?;
+            // No read before the delete: a retry under the same operation id must reach the
+            // daemon, which replays the stored outcome of a workspace that is already gone.
+            let absent = client.destroy_workspace(&workspace, operation_id).await?;
+            let id = workspace;
             Ok(Answer::Result {
                 human: format!(
                     "workspace {id} {}",

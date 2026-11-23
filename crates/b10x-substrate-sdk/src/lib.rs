@@ -56,7 +56,7 @@ pub use substrate_wire::{
 };
 pub use transport::{EventStream, MetricsStream, ProcessEventStream, RemoteEndpoint};
 
-use transport::{Transport, decode_result, encode_path};
+use transport::{IdKind, Transport, decode_result, encode_path, id_segment};
 
 /// Largest input budget accepted by one session.
 pub const MAX_SESSION_INPUT_BYTES: u64 = 16 * 1024 * 1024;
@@ -249,7 +249,10 @@ impl Client {
     }
 
     pub async fn get_workspace(&self, id: impl AsRef<str>) -> Result<Workspace, SdkError> {
-        let path = format!("/v1/workspaces/{}", encode_path(id.as_ref()));
+        let path = format!(
+            "/v1/workspaces/{}",
+            id_segment(IdKind::Workspace, id.as_ref())?
+        );
         let observed: substrate_wire::Workspace = self.get(&path).await?;
         Ok(Workspace {
             client: self.clone(),
@@ -257,8 +260,37 @@ impl Client {
         })
     }
 
+    /// Destroy a workspace by id, without reading it first.
+    ///
+    /// A retry under the same operation id is answered with the stored outcome, also once the
+    /// workspace is gone and [`Client::get_workspace`] answers `resource.not-found`.
+    ///
+    /// The id is one path segment, as at every call that names a resource by id: an id that is
+    /// empty, `.` or `..`, or holds `/`, `?`, `#`, `%` or a control character, is refused with
+    /// [`SdkError::Protocol`] before anything is sent, so this call addresses a workspace and
+    /// never a route beneath one.
+    pub async fn destroy_workspace(
+        &self,
+        id: impl AsRef<str>,
+        operation_id: Option<String>,
+    ) -> Result<bool, SdkError> {
+        let target = format!(
+            "/v1/workspaces/{}",
+            id_segment(IdKind::Workspace, id.as_ref())?
+        );
+        let (_, absent): (_, substrate_wire::WorkspaceAbsence) = self
+            .mutation(
+                "DELETE",
+                &target,
+                &substrate_wire::EmptyInput {},
+                operation_id,
+            )
+            .await?;
+        Ok(absent.absent)
+    }
+
     pub async fn get_exec(&self, id: impl AsRef<str>) -> Result<Exec, SdkError> {
-        let path = format!("/v1/execs/{}", encode_path(id.as_ref()));
+        let path = format!("/v1/execs/{}", id_segment(IdKind::Exec, id.as_ref())?);
         let observed: substrate_wire::Exec = self.get(&path).await?;
         Ok(Exec {
             client: self.clone(),
@@ -267,7 +299,7 @@ impl Client {
     }
 
     pub async fn get_pipe_session(&self, id: impl AsRef<str>) -> Result<PipeSession, SdkError> {
-        let path = format!("/v1/sessions/{}", encode_path(id.as_ref()));
+        let path = format!("/v1/sessions/{}", id_segment(IdKind::Session, id.as_ref())?);
         let observed: substrate_wire::PipeSession = self.get(&path).await?;
         Ok(PipeSession {
             client: self.clone(),
@@ -276,7 +308,7 @@ impl Client {
     }
 
     pub async fn operation(&self, id: impl AsRef<str>) -> Result<Operation, SdkError> {
-        let path = format!("/v1/ops/{}", encode_path(id.as_ref()));
+        let path = format!("/v1/ops/{}", id_segment(IdKind::Operation, id.as_ref())?);
         let record: substrate_wire::OperationRecord = self.get(&path).await?;
         Ok(record.into())
     }
@@ -333,7 +365,7 @@ impl Client {
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
         self.get(&format!(
             "/v1/reconciliation-snapshots/{}?{query}",
-            encode_path(snapshot_id.as_ref())
+            id_segment(IdKind::Snapshot, snapshot_id.as_ref())?
         ))
         .await
     }
@@ -409,6 +441,32 @@ impl Client {
         input: &I,
         operation_id: Option<String>,
     ) -> Result<(String, O), SdkError> {
+        self.recovered_mutation(method, path, input, operation_id, None)
+            .await
+    }
+
+    async fn mutation_with_source_authority<I: Serialize, O: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        input: &I,
+        operation_id: Option<String>,
+        source_authority: &str,
+    ) -> Result<(String, O), SdkError> {
+        self.recovered_mutation(method, path, input, operation_id, Some(source_authority))
+            .await
+    }
+
+    /// One mutation under one operation id (design 18). A transport failure without an answer is
+    /// reconciled against the operation ledger, with or without a source authority.
+    async fn recovered_mutation<I: Serialize, O: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        input: &I,
+        operation_id: Option<String>,
+        source_authority: Option<&str>,
+    ) -> Result<(String, O), SdkError> {
         let operation_id = operation_id.unwrap_or_else(|| Ulid::generate().to_string());
         substrate_wire::validate_operation_id(&operation_id)
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
@@ -420,44 +478,35 @@ impl Client {
         let body =
             serde_json::to_vec(&envelope).map_err(|error| SdkError::Protocol(error.to_string()))?;
         match self
-            .inner
-            .transport
-            .request(method, path, Some(&body))
+            .send_mutation(method, path, &body, source_authority)
             .await
         {
             Ok(response) => decode_result(&response).map(|result| (operation_id, result)),
             Err(SdkError::Transport(_)) => {
-                self.recover_mutation(method, path, &body, &operation_id)
+                self.recover_mutation(method, path, &body, &operation_id, source_authority)
                     .await
             }
             Err(error) => Err(error),
         }
     }
 
-    async fn mutation_with_source_authority<I: Serialize, O: DeserializeOwned>(
+    /// Sends one serialized mutation, with the workspace source authority when it has one.
+    async fn send_mutation(
         &self,
         method: &str,
         path: &str,
-        input: &I,
-        operation_id: Option<String>,
-        source_authority: &str,
-    ) -> Result<(String, O), SdkError> {
-        let operation_id = operation_id.unwrap_or_else(|| Ulid::generate().to_string());
-        substrate_wire::validate_operation_id(&operation_id)
-            .map_err(|error| SdkError::Protocol(error.to_string()))?;
-        let envelope = substrate_wire::Mutation {
-            op: operation_id.clone(),
-            input,
-            delegated_context: None,
-        };
-        let body =
-            serde_json::to_vec(&envelope).map_err(|error| SdkError::Protocol(error.to_string()))?;
-        let response = self
-            .inner
-            .transport
-            .request_with_source_authority(method, path, Some(&body), source_authority)
-            .await?;
-        decode_result(&response).map(|result| (operation_id, result))
+        body: &[u8],
+        source_authority: Option<&str>,
+    ) -> Result<transport::HttpResponse, SdkError> {
+        let transport = &self.inner.transport;
+        match source_authority {
+            Some(source_authority) => {
+                transport
+                    .request_with_source_authority(method, path, Some(body), source_authority)
+                    .await
+            }
+            None => transport.request(method, path, Some(body)).await,
+        }
     }
 
     async fn recover_mutation<O: DeserializeOwned>(
@@ -466,11 +515,15 @@ impl Client {
         path: &str,
         body: &[u8],
         operation_id: &str,
+        source_authority: Option<&str>,
     ) -> Result<(String, O), SdkError> {
         match self.operation(operation_id).await {
             Ok(operation) => outcome::<O>(operation, operation_id),
             Err(SdkError::Refusal(refusal)) if refusal.code == "resource.not-found" => {
-                match self.inner.transport.request(method, path, Some(body)).await {
+                match self
+                    .send_mutation(method, path, body, source_authority)
+                    .await
+                {
                     Ok(response) => {
                         decode_result(&response).map(|result| (operation_id.to_owned(), result))
                     }
@@ -615,10 +668,15 @@ pub struct WorkspaceBuilder {
 }
 
 impl WorkspaceBuilder {
-    pub fn empty(self) -> Self {
+    /// Selects the empty source, replacing any earlier selection: a Git source selected before
+    /// is dropped together with its source authority.
+    pub fn empty(mut self) -> Self {
+        self.source = substrate_wire::WorkspaceSource::Empty(substrate_wire::EmptySource::Empty);
+        self.source_authorization = None;
         self
     }
 
+    /// Selects a Git source and its source authority, replacing any earlier selection.
     pub fn git(
         mut self,
         source: impl Into<String>,
@@ -747,6 +805,11 @@ impl Workspace {
         &self.observed.id
     }
 
+    /// This workspace's id as the path segment of a request target ([`id_segment`]).
+    fn id_segment(&self) -> Result<String, SdkError> {
+        id_segment(IdKind::Workspace, &self.observed.id)
+    }
+
     pub fn command(&self, program: impl Into<String>) -> CommandBuilder {
         CommandBuilder {
             workspace: self.clone(),
@@ -763,6 +826,7 @@ impl Workspace {
             read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,
+            workdir: None,
             policy: None,
             lease_ttl: None,
             operation_id: None,
@@ -786,6 +850,7 @@ impl Workspace {
             read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,
+            workdir: None,
             policy: None,
             lease_ttl: None,
             input_limit_bytes: None,
@@ -833,7 +898,7 @@ impl Workspace {
         .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let target = format!(
             "/v1/workspaces/{}/files/{}?{query}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             encode_path(path.as_ref())
         );
         let result: substrate_wire::FileReadResult = self.client.get(&target).await?;
@@ -892,7 +957,7 @@ impl Workspace {
         .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let target = format!(
             "/v1/workspaces/{}/files/{}?{query}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             encode_path(path.as_ref())
         );
         let result: WithOmissions<substrate_wire::FileReadResult> =
@@ -936,7 +1001,7 @@ impl Workspace {
         };
         let target = format!(
             "/v1/workspaces/{}/files/{}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             encode_path(path.as_ref())
         );
         let (_, observed): (_, substrate_wire::FileObservation) = self
@@ -960,7 +1025,7 @@ impl Workspace {
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let target = format!(
             "/v1/workspaces/{}/files/{}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             encode_path(path.as_ref())
         );
         let (_, absent): (_, substrate_wire::FileAbsence) = self
@@ -988,10 +1053,7 @@ impl Workspace {
         let input = substrate_wire::LeaseRenewInput {
             ttl_ms: required_duration_millis(ttl)?,
         };
-        let target = format!(
-            "/v1/workspaces/{}/lease/renew",
-            encode_path(&self.observed.id)
-        );
+        let target = format!("/v1/workspaces/{}/lease/renew", self.id_segment()?);
         let (_, observed): (_, substrate_wire::Workspace) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -1008,17 +1070,9 @@ impl Workspace {
         self,
         operation_id: impl Into<Option<String>>,
     ) -> Result<bool, SdkError> {
-        let target = format!("/v1/workspaces/{}", encode_path(&self.observed.id));
-        let (_, absent): (_, substrate_wire::WorkspaceAbsence) = self
-            .client
-            .mutation(
-                "DELETE",
-                &target,
-                &substrate_wire::EmptyInput {},
-                operation_id.into(),
-            )
-            .await?;
-        Ok(absent.absent)
+        self.client
+            .destroy_workspace(&self.observed.id, operation_id.into())
+            .await
     }
 
     pub async fn read_file_v2(
@@ -1038,7 +1092,7 @@ impl Workspace {
         .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let target = format!(
             "/v2/workspaces/{}/files/{}?{query}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             encode_path(path.as_ref())
         );
         let slice: substrate_wire::DigestedFileSlice = self.client.get(&target).await?;
@@ -1076,7 +1130,7 @@ impl Workspace {
         self.client
             .get_with_omissions(&format!(
                 "/v2/workspaces/{}/tree?{query}",
-                encode_path(&self.observed.id)
+                self.id_segment()?
             ))
             .await
     }
@@ -1097,7 +1151,7 @@ impl Workspace {
             .client
             .get(&format!(
                 "/v2/workspaces/{}/git/baseline/{}?{query}",
-                encode_path(&self.observed.id),
+                self.id_segment()?,
                 encode_path(path.as_ref())
             ))
             .await?;
@@ -1124,7 +1178,7 @@ impl Workspace {
         self.client
             .get(&format!(
                 "/v2/workspaces/{}/git/changes?{query}",
-                encode_path(&self.observed.id)
+                self.id_segment()?
             ))
             .await
     }
@@ -1196,7 +1250,7 @@ impl Workspace {
     ) -> Result<FileMutationResult, SdkError> {
         let target = format!(
             "/v2/workspaces/{}/{}/{}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             route,
             encode_path(path)
         );
@@ -1224,6 +1278,7 @@ pub struct CommandBuilder {
     read_only_files: Vec<ReadOnlyFile>,
     secret_slots: Vec<SecretSlotRequest>,
     capsule: Option<ExecutionCapsuleInput>,
+    workdir: Option<String>,
     policy: Option<ExecutionPolicy>,
     lease_ttl: Option<Duration>,
     operation_id: Option<String>,
@@ -1246,6 +1301,7 @@ pub struct PipeSessionBuilder {
     read_only_files: Vec<ReadOnlyFile>,
     secret_slots: Vec<SecretSlotRequest>,
     capsule: Option<ExecutionCapsuleInput>,
+    workdir: Option<String>,
     policy: Option<ExecutionPolicy>,
     lease_ttl: Option<Duration>,
     input_limit_bytes: Option<u64>,
@@ -1361,6 +1417,22 @@ impl PipeSessionBuilder {
         self
     }
 
+    /// Selects the directory the program starts in (design 26 § 1), replacing any earlier
+    /// selection. Without one it starts in `/workspace`.
+    ///
+    /// The path is absolute and lexically normal, at most [`substrate_wire::MAX_WORKDIR_BYTES`]
+    /// bytes, and at or beneath `/workspace` or another mount this start places. Any other path
+    /// is refused with [`SdkError::Protocol`] before anything is sent.
+    ///
+    /// A session start is answered `session.confinement-unavailable` first on a host that cannot
+    /// confine a session, before its working directory is read. On a host that can, one that
+    /// publishes no `exec.workdir` fact answers `exec.workdir-unserved`, and a directory that is
+    /// absent, or reached through a symlink, `exec.workdir-missing`.
+    pub fn workdir(mut self, path: impl Into<String>) -> Self {
+        self.workdir = Some(path.into());
+        self
+    }
+
     pub fn policy(mut self, policy: ExecutionPolicy) -> Self {
         self.policy = Some(policy);
         self
@@ -1460,8 +1532,9 @@ impl PipeSessionBuilder {
             secret_slots: self.secret_slots,
             capsule: self.capsule,
             lease_ttl_ms: Some(required_duration_millis(lease_ttl)?),
-            workdir: None,
+            workdir: self.workdir,
         };
+        validate_workdir(&exec)?;
         let input = substrate_wire::PipeSessionStartInput {
             capture: self.capture,
             exec,
@@ -1496,6 +1569,11 @@ impl PipeSession {
 
     pub fn id(&self) -> &str {
         &self.observed.id
+    }
+
+    /// This session's id as the path segment of a request target ([`id_segment`]).
+    fn id_segment(&self) -> Result<String, SdkError> {
+        id_segment(IdKind::Session, &self.observed.id)
     }
 
     pub async fn refresh(&mut self) -> Result<&PipeSessionObservation, SdkError> {
@@ -1545,7 +1623,7 @@ impl PipeSession {
             signal: signal.into(),
             grace_ms: required_duration_millis(grace)?,
         };
-        let target = format!("/v1/sessions/{}/signal", encode_path(&self.observed.id));
+        let target = format!("/v1/sessions/{}/signal", self.id_segment()?);
         let (_, observed): (_, substrate_wire::PipeSession) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -1570,10 +1648,7 @@ impl PipeSession {
         let input = substrate_wire::LeaseRenewInput {
             ttl_ms: required_duration_millis(ttl)?,
         };
-        let target = format!(
-            "/v1/sessions/{}/lease/renew",
-            encode_path(&self.observed.id)
-        );
+        let target = format!("/v1/sessions/{}/lease/renew", self.id_segment()?);
         let (_, observed): (_, substrate_wire::PipeSession) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -1590,7 +1665,7 @@ impl PipeSession {
         self,
         operation_id: impl Into<Option<String>>,
     ) -> Result<bool, SdkError> {
-        let target = format!("/v1/sessions/{}", encode_path(&self.observed.id));
+        let target = format!("/v1/sessions/{}", self.id_segment()?);
         let (_, absent): (_, substrate_wire::SessionAbsence) = self
             .client
             .mutation(
@@ -1863,6 +1938,19 @@ impl CommandBuilder {
         self
     }
 
+    /// Selects the directory the program starts in (design 26 § 1), replacing any earlier
+    /// selection. Without one it starts in `/workspace`.
+    ///
+    /// The path is absolute and lexically normal, at most [`substrate_wire::MAX_WORKDIR_BYTES`]
+    /// bytes, and at or beneath `/workspace` or another mount this start places. Any other path
+    /// is refused with [`SdkError::Protocol`] before anything is sent. An exec start on a host that
+    /// publishes no `exec.workdir` fact is answered `exec.workdir-unserved`, and one in a
+    /// directory that is absent, or reached through a symlink, `exec.workdir-missing`.
+    pub fn workdir(mut self, path: impl Into<String>) -> Self {
+        self.workdir = Some(path.into());
+        self
+    }
+
     pub fn policy(mut self, policy: ExecutionPolicy) -> Self {
         self.policy = Some(policy);
         self
@@ -1938,8 +2026,9 @@ impl CommandBuilder {
             secret_slots: self.secret_slots,
             capsule: self.capsule,
             lease_ttl_ms: duration_millis(self.lease_ttl)?,
-            workdir: None,
+            workdir: self.workdir,
         };
+        validate_workdir(&input)?;
         let (_, observed): (_, substrate_wire::Exec) = self
             .workspace
             .client
@@ -1965,6 +2054,11 @@ impl Exec {
 
     pub fn id(&self) -> &str {
         &self.observed.id
+    }
+
+    /// This exec's id as the path segment of a request target ([`id_segment`]).
+    fn id_segment(&self) -> Result<String, SdkError> {
+        id_segment(IdKind::Exec, &self.observed.id)
     }
 
     pub async fn refresh(&mut self) -> Result<&ExecObservation, SdkError> {
@@ -2008,7 +2102,7 @@ impl Exec {
             signal: signal.into(),
             grace_ms: required_duration_millis(grace)?,
         };
-        let target = format!("/v1/execs/{}/signal", encode_path(&self.observed.id));
+        let target = format!("/v1/execs/{}/signal", self.id_segment()?);
         let (_, observed): (_, substrate_wire::Exec) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -2030,7 +2124,7 @@ impl Exec {
         let input = substrate_wire::LeaseRenewInput {
             ttl_ms: required_duration_millis(ttl)?,
         };
-        let target = format!("/v1/execs/{}/lease/renew", encode_path(&self.observed.id));
+        let target = format!("/v1/execs/{}/lease/renew", self.id_segment()?);
         let (_, observed): (_, substrate_wire::Exec) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -2047,7 +2141,7 @@ impl Exec {
         self,
         operation_id: impl Into<Option<String>>,
     ) -> Result<bool, SdkError> {
-        let target = format!("/v1/execs/{}", encode_path(&self.observed.id));
+        let target = format!("/v1/execs/{}", self.id_segment()?);
         let (_, absent): (_, substrate_wire::ExecAbsence) = self
             .client
             .mutation(
@@ -2071,10 +2165,7 @@ impl Exec {
                 limit_bytes: substrate_wire::MAX_IO_BYTES,
             })
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
-            let target = format!(
-                "/v1/execs/{}/output?{query}",
-                encode_path(&self.observed.id)
-            );
+            let target = format!("/v1/execs/{}/output?{query}", self.id_segment()?);
             let slice: substrate_wire::OutputSlice = self.client.get(&target).await?;
             bytes.extend(
                 slice
@@ -2107,10 +2198,7 @@ impl Exec {
             limit_bytes,
         })
         .map_err(|error| SdkError::Protocol(error.to_string()))?;
-        let target = format!(
-            "/v1/execs/{}/output?{query}",
-            encode_path(&self.observed.id)
-        );
+        let target = format!("/v1/execs/{}/output?{query}", self.id_segment()?);
         let slice: substrate_wire::OutputSlice = self.client.get(&target).await?;
         Ok(OutputPage {
             exec: slice.exec,
@@ -2206,6 +2294,15 @@ fn validate_writable_root_bound(roots: &[WritableRoot]) -> Result<(), SdkError> 
         ));
     }
     Ok(())
+}
+
+/// Refuses a working directory the wire's lexical rule refuses (design 26 § 1) before a request is
+/// sent, with [`substrate_wire::validate_workdir`]: a path that is not absolute and normal within
+/// its bound, or one outside every mount this start places. Whether the host serves a working
+/// directory and whether the directory exists are the daemon's answers, `exec.workdir-unserved`
+/// and `exec.workdir-missing`.
+fn validate_workdir(input: &substrate_wire::ExecStartInput) -> Result<(), SdkError> {
+    substrate_wire::validate_workdir(input).map_err(|error| SdkError::Protocol(error.to_string()))
 }
 
 /// Writes a builder's aperture selection in the wire's two forms (design 26 § 2): one name as
@@ -2496,6 +2593,109 @@ mod tests {
         assert_eq!(transport::encode_path("src/a file.rs"), "src/a%20file.rs");
     }
 
+    /// The source selected last decides what a workspace builder creates: `empty()` after
+    /// `git(..)` sends the empty source and no source authority, and `git(..)` after `empty()`
+    /// sends the Git source with its authority.
+    #[tokio::test]
+    async fn the_workspace_builder_takes_the_source_selected_last() {
+        const AUTHORITY: &str = "source-authority-of-the-case";
+        const HEADER: &str = "x-b10x-workspace-source-authorization";
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
+        ))
+        .expect("machine vector");
+        let machine = serde_json::to_vec(
+            vector
+                .pointer("/expected/response/body")
+                .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let server = tokio::spawn(async move {
+            answer_one(
+                &listener,
+                "GET /v1/machine HTTP/1.1\r\n",
+                "200 OK",
+                &machine,
+            )
+            .await;
+            let workspace = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_workspace",
+                "operation": "01ARZ3NDEKTSV4RRFFQ69G5FB4",
+                "result": {
+                    "id": "ws_example",
+                    "kind": "workspace",
+                    "labels": {},
+                    "observed_at": "2026-11-08T00:00:00Z",
+                    "state": "ready",
+                    "origin": "created",
+                    "root_name": "ws_example"
+                }
+            }))
+            .expect("workspace response JSON");
+            let create = "POST /v1/workspaces HTTP/1.1\r\n";
+            [
+                answer_one(&listener, create, "201 Created", &workspace).await,
+                answer_one(&listener, create, "201 Created", &workspace).await,
+            ]
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let git = |builder: WorkspaceBuilder| {
+            builder.git(
+                "origin",
+                "example/repository",
+                "refs/heads/main",
+                "0123456789abcdef0123456789abcdef01234567",
+                1,
+                AUTHORITY,
+            )
+        };
+        git(client.workspace())
+            .empty()
+            .create()
+            .await
+            .expect("an empty workspace after git(..).empty()");
+        git(client.workspace().empty())
+            .create()
+            .await
+            .expect("a Git workspace after empty().git(..)");
+
+        let requests = server.await.expect("fake daemon task");
+        let source = |request: &[u8]| {
+            serde_json::from_slice::<Value>(request_body(request)).expect("create JSON")["input"]
+                ["source"]
+                .clone()
+        };
+        let names_authority =
+            |request: &[u8]| String::from_utf8_lossy(request).contains(&format!("{HEADER}: "));
+        assert_eq!(
+            source(&requests[0]),
+            "empty",
+            "empty() selected last sends the empty source"
+        );
+        assert!(
+            !names_authority(&requests[0]),
+            "an empty source carries no source authority"
+        );
+        assert_eq!(
+            source(&requests[1])["git"]["commit"],
+            "0123456789abcdef0123456789abcdef01234567",
+            "git(..) selected last sends the Git source"
+        );
+        assert!(
+            String::from_utf8_lossy(&requests[1]).contains(&format!("{HEADER}: {AUTHORITY}\r\n")),
+            "a Git source carries its authority"
+        );
+    }
+
     #[test]
     fn command_bytes_do_not_claim_unadvertised_additions() {
         let input = substrate_wire::ExecStartInput {
@@ -2653,6 +2853,193 @@ mod tests {
             .expect("recover lost mutation response");
         assert_eq!(workspace.id(), "ws_recovered");
         server.await.expect("fake daemon task");
+    }
+
+    /// Design 18: a Git workspace create whose reply is lost is recovered like every other
+    /// create. The ledger's stored answer is returned; when the ledger has no row, the identical
+    /// request is sent once more with its source authority; and when the ledger cannot be asked
+    /// either, the error carries the operation id the request was sent under.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One fake daemon answers the three recoveries, in order.
+    async fn a_lost_git_create_response_is_recovered_from_the_ledger() {
+        const STORED: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB1";
+        const REPLAYED: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB2";
+        const AUTHORITY: &str = "source-authority-of-the-case";
+        /// Reads one request whose line starts with `head`, then drops the connection unanswered.
+        async fn lose_reply(listener: &UnixListener, head: &str) -> Vec<u8> {
+            let (mut stream, _) = listener.accept().await.expect("accept SDK request");
+            let request = read_request(&mut stream).await;
+            assert!(
+                request.starts_with(head.as_bytes()),
+                "expected {head:?}, got {:?}",
+                String::from_utf8_lossy(&request[..request.len().min(80)])
+            );
+            request
+        }
+        fn created(operation: &str, id: &str) -> Vec<u8> {
+            serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_create",
+                "operation": operation,
+                "result": {
+                    "id": id,
+                    "kind": "workspace",
+                    "labels": {},
+                    "observed_at": "2026-11-08T00:00:00Z",
+                    "state": "ready",
+                    "origin": "created",
+                    "root_name": id
+                }
+            }))
+            .expect("workspace response JSON")
+        }
+        fn operation_of(request: &[u8]) -> String {
+            serde_json::from_slice::<Value>(request_body(request)).expect("mutation JSON")["op"]
+                .as_str()
+                .expect("operation id")
+                .to_owned()
+        }
+        fn carries_authority(request: &[u8]) -> bool {
+            String::from_utf8_lossy(request).contains(&format!(
+                "x-b10x-workspace-source-authorization: {AUTHORITY}\r\n"
+            ))
+        }
+        const CREATE: &str = "POST /v1/workspaces HTTP/1.1\r\n";
+
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
+        ))
+        .expect("machine vector");
+        let machine = serde_json::to_vec(
+            vector
+                .pointer("/expected/response/body")
+                .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let server = tokio::spawn(async move {
+            answer_one(
+                &listener,
+                "GET /v1/machine HTTP/1.1\r\n",
+                "200 OK",
+                &machine,
+            )
+            .await;
+
+            // The daemon accepted the create and its reply is lost: the ledger holds the answer.
+            let first = lose_reply(&listener, CREATE).await;
+            assert_eq!(operation_of(&first), STORED);
+            assert!(carries_authority(&first));
+            let record = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_ledger",
+                "result": {
+                    "accepted_at": "2026-11-08T00:00:00Z",
+                    "actor": "local:1000",
+                    "capability_snapshot": null,
+                    "operation": STORED,
+                    "operation_kind": "workspace.create",
+                    "outcome": {
+                        "kind": "success",
+                        "result": {
+                            "id": "ws_stored",
+                            "kind": "workspace",
+                            "labels": {},
+                            "observed_at": "2026-11-08T00:00:00Z",
+                            "state": "ready",
+                            "origin": "created",
+                            "root_name": "ws_stored"
+                        }
+                    },
+                    "principal": null,
+                    "request_hash": "7".repeat(64),
+                    "resource": "ws_stored",
+                    "state": "terminal",
+                    "terminal_at": "2026-11-08T00:00:00Z"
+                }
+            }))
+            .expect("operation record JSON");
+            answer_one(
+                &listener,
+                &format!("GET /v1/ops/{STORED} HTTP/1.1\r\n"),
+                "200 OK",
+                &record,
+            )
+            .await;
+
+            // The ledger has no row: the identical request is sent once more, authority included.
+            let first = lose_reply(&listener, CREATE).await;
+            let missing = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_ledger",
+                "error": {
+                    "class": "refused",
+                    "code": "resource.not-found",
+                    "message": "The operation does not exist.",
+                    "retriable": false
+                }
+            }))
+            .expect("missing operation JSON");
+            answer_one(
+                &listener,
+                &format!("GET /v1/ops/{REPLAYED} HTTP/1.1\r\n"),
+                "404 Not Found",
+                &missing,
+            )
+            .await;
+            let replay = answer_one(
+                &listener,
+                CREATE,
+                "201 Created",
+                &created(REPLAYED, "ws_replayed"),
+            )
+            .await;
+            assert_eq!(request_body(&replay), request_body(&first));
+            assert!(carries_authority(&replay));
+
+            // Neither the create nor the ledger answers: the outcome stays open.
+            let lost = operation_of(&lose_reply(&listener, CREATE).await);
+            lose_reply(&listener, &format!("GET /v1/ops/{lost} HTTP/1.1\r\n")).await;
+            lost
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let git = || {
+            client.workspace().git(
+                "origin",
+                "example/repository",
+                "refs/heads/main",
+                "0123456789abcdef0123456789abcdef01234567",
+                1,
+                AUTHORITY,
+            )
+        };
+        let workspace = git()
+            .operation_id(STORED)
+            .create()
+            .await
+            .expect("the ledger's stored answer recovers the lost reply");
+        assert_eq!(workspace.id(), "ws_stored");
+        let workspace = git()
+            .operation_id(REPLAYED)
+            .create()
+            .await
+            .expect("an absent ledger row replays the identical request");
+        assert_eq!(workspace.id(), "ws_replayed");
+        let open = git()
+            .create()
+            .await
+            .map(|workspace| workspace.id().to_owned());
+        let Err(SdkError::UnknownOperation { operation_id }) = open else {
+            panic!("an open outcome carries its operation id, got {open:?}")
+        };
+        assert_eq!(operation_id, server.await.expect("fake daemon task"));
     }
 
     /// Accepts one connection, checks its request line starts with `head`, answers `status` with
@@ -3041,5 +3428,447 @@ mod tests {
         };
         assert_eq!(refusal.code, "resource.not-found");
         server.await.expect("fake daemon task");
+    }
+
+    /// Design 26 § 1: `workdir(..)` on the exec and session builders reaches the start request as
+    /// the wire's `workdir` member, a start that names none carries no such member, and the
+    /// daemon's refusal keeps its name. A path the wire's lexical rule refuses is refused with
+    /// that rule's text before any request is sent: the fake daemon's next request after the
+    /// refused builds is the sentinel lookup.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One fake daemon answers the whole journey, in order.
+    async fn a_working_directory_reaches_the_start_request_and_is_checked_before_sending() {
+        const SENTINEL: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB3";
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
+        ))
+        .expect("machine vector");
+        let machine = serde_json::to_vec(
+            vector
+                .pointer("/expected/response/body")
+                .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let server = tokio::spawn(async move {
+            answer_one(
+                &listener,
+                "GET /v1/machine HTTP/1.1\r\n",
+                "200 OK",
+                &machine,
+            )
+            .await;
+            let workspace = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_workspace",
+                "operation": "01ARZ3NDEKTSV4RRFFQ69G5FB5",
+                "result": {
+                    "id": "ws_example",
+                    "kind": "workspace",
+                    "labels": {},
+                    "observed_at": "2026-11-08T00:00:00Z",
+                    "state": "ready",
+                    "origin": "created",
+                    "root_name": "ws_example"
+                }
+            }))
+            .expect("workspace response JSON");
+            answer_one(
+                &listener,
+                "POST /v1/workspaces HTTP/1.1\r\n",
+                "201 Created",
+                &workspace,
+            )
+            .await;
+            let unserved = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_unserved",
+                "error": {
+                    "class": "unserved",
+                    "code": "exec.workdir-unserved",
+                    "message": "A working directory is not served by this host.",
+                    "retriable": false,
+                    "address": "workdir"
+                }
+            }))
+            .expect("refusal JSON");
+            let mut inputs = Vec::new();
+            for (head, pointer) in [
+                ("POST /v1/execs HTTP/1.1\r\n", "/input"),
+                ("POST /v1/sessions HTTP/1.1\r\n", "/input/exec"),
+                ("POST /v1/execs HTTP/1.1\r\n", "/input"),
+            ] {
+                let request = answer_one(&listener, head, "501 Not Implemented", &unserved).await;
+                let body: Value = serde_json::from_slice(request_body(&request)).expect("JSON");
+                inputs.push(body.pointer(pointer).expect("exec start input").clone());
+            }
+            let missing = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_sentinel",
+                "error": {
+                    "class": "refused",
+                    "code": "resource.not-found",
+                    "message": "The operation does not exist.",
+                    "retriable": false
+                }
+            }))
+            .expect("missing operation JSON");
+            answer_one(
+                &listener,
+                &format!("GET /v1/ops/{SENTINEL} HTTP/1.1\r\n"),
+                "404 Not Found",
+                &missing,
+            )
+            .await;
+            inputs
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let workspace = client
+            .workspace()
+            .empty()
+            .create()
+            .await
+            .expect("workspace create");
+        let policy = || {
+            ExecutionPolicy::builder()
+                .timeout(Duration::from_secs(5))
+                .cpu_time(Duration::from_secs(1))
+                .memory_bytes(64 * 1024 * 1024)
+                .processes(16)
+                .output_bytes(64 * 1024)
+                .build()
+                .expect("complete execution policy")
+        };
+        let command = || workspace.command("/usr/bin/true").policy(policy());
+        let session = || {
+            workspace
+                .pipe_session("/usr/bin/true")
+                .policy(policy())
+                .lease(Duration::from_secs(5))
+                .input_limit_bytes(1024)
+                .frame_limit_bytes(1024)
+                .queued_frames(4)
+        };
+        let unserved = |result: Result<(), SdkError>| {
+            let Err(SdkError::Refusal(refusal)) = result else {
+                panic!("the fake daemon refuses the start")
+            };
+            assert_eq!(refusal.code, "exec.workdir-unserved");
+            assert_eq!(refusal.class, RefusalClass::Unserved);
+        };
+        unserved(
+            command()
+                .workdir("/workspace/crates/gate")
+                .start()
+                .await
+                .map(drop),
+        );
+        // Beneath a mount this start places itself.
+        unserved(
+            session()
+                .read_only_root(ReadOnlyRoot {
+                    host_path: "/srv/tool".to_owned(),
+                    mount: "/opt/tool".to_owned(),
+                })
+                .workdir("/opt/tool/bin")
+                .start()
+                .await
+                .map(drop),
+        );
+        unserved(command().start().await.map(drop));
+
+        let invalid = substrate_wire::WireValidationError::WorkdirInvalid.to_string();
+        let outside = substrate_wire::WireValidationError::WorkdirOutsideMounts.to_string();
+        for (workdir, expected) in [
+            ("workspace/crates", &invalid),
+            ("/workspace/../etc", &invalid),
+            ("/workspace/", &invalid),
+            ("/tmp", &outside),
+            ("/opt/tool/bin", &outside),
+        ] {
+            let Err(SdkError::Protocol(message)) = command().workdir(workdir).start().await else {
+                panic!("an exec in {workdir:?} is refused by the SDK")
+            };
+            assert_eq!(&message, expected, "{workdir:?}");
+            let Err(SdkError::Protocol(message)) = session().workdir(workdir).start().await else {
+                panic!("a session in {workdir:?} is refused by the SDK")
+            };
+            assert_eq!(&message, expected, "{workdir:?}");
+        }
+
+        let Err(SdkError::Refusal(refusal)) = client.operation(SENTINEL).await else {
+            panic!("the sentinel operation is absent")
+        };
+        assert_eq!(refusal.code, "resource.not-found");
+        let inputs = server.await.expect("fake daemon task");
+        assert_eq!(
+            inputs[0]["workdir"], "/workspace/crates/gate",
+            "{}",
+            inputs[0]
+        );
+        assert_eq!(inputs[1]["workdir"], "/opt/tool/bin", "{}", inputs[1]);
+        assert!(inputs[2].get("workdir").is_none(), "{}", inputs[2]);
+    }
+
+    /// An identifier is one path segment, at every entry point that names a resource by id. A
+    /// word that is not one segment is refused naming the kind of identifier, whether a caller
+    /// passed it or a handle holds it as the member of a daemon's answer, and nothing is sent:
+    /// the fake daemon keeps the line of every request after the machine probe and holds none.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One table: every by-id entry point against every word.
+    async fn an_identifier_that_is_not_one_path_segment_sends_no_request() {
+        fn refused<T>(named: &str, entry: &str, word: &str, result: Result<T, SdkError>) {
+            match result {
+                Err(SdkError::Protocol(message)) => {
+                    assert!(
+                        message.starts_with(named),
+                        "{entry} with {word:?}: {message}"
+                    );
+                }
+                Err(error) => panic!("{entry} with {word:?} answered {error:?}"),
+                Ok(_) => panic!("{entry} with {word:?} was sent and answered"),
+            }
+        }
+        fn result_of(vector: &str) -> Value {
+            serde_json::from_str::<Value>(vector)
+                .expect("vector")
+                .pointer("/expected/response/body/result")
+                .expect("response result")
+                .clone()
+        }
+
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let machine = serde_json::to_vec(
+            serde_json::from_str::<Value>(include_str!(
+                "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
+            ))
+            .expect("machine vector")
+            .pointer("/expected/response/body")
+            .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let kept = Arc::clone(&seen);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept SDK request");
+                let request = read_request(&mut stream).await;
+                if request.starts_with(b"GET /v1/machine HTTP/1.1\r\n") {
+                    stream
+                        .write_all(&response("200 OK", &machine))
+                        .await
+                        .expect("write machine response");
+                } else {
+                    let text = String::from_utf8_lossy(&request);
+                    let line = text.lines().next().unwrap_or_default().to_owned();
+                    kept.lock().expect("kept request lines").push(line);
+                }
+            }
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let workspace_of = |word: &str| Workspace {
+            client: client.clone(),
+            observed: serde_json::from_value::<substrate_wire::Workspace>(serde_json::json!({
+                "id": word,
+                "kind": "workspace",
+                "labels": {},
+                "observed_at": "2026-11-08T00:00:00Z",
+                "state": "ready",
+                "origin": "created",
+                "root_name": "ws_example"
+            }))
+            .expect("workspace observation")
+            .into(),
+        };
+        let exec_vector = result_of(include_str!(
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/exec-get.json"
+        ));
+        let exec_of = |word: &str| {
+            let mut observed = exec_vector.clone();
+            observed["id"] = word.into();
+            Exec {
+                client: client.clone(),
+                observed: serde_json::from_value::<substrate_wire::Exec>(observed)
+                    .expect("exec observation")
+                    .into(),
+            }
+        };
+        let session_vector = result_of(include_str!(
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/pipe-session-start.json"
+        ));
+        let session_of = |word: &str| {
+            let mut observed = session_vector.clone();
+            observed["id"] = word.into();
+            observed["exec"] = word.into();
+            PipeSession {
+                client: client.clone(),
+                observed: serde_json::from_value::<substrate_wire::PipeSession>(observed)
+                    .expect("session observation")
+                    .into(),
+            }
+        };
+        let second = Duration::from_secs(1);
+        let digest = "0".repeat(64);
+
+        for word in [
+            "a/b",
+            "ws/files/x",
+            "..",
+            "%2F",
+            "",
+            ".",
+            "a?b",
+            "a#b",
+            "a\nb",
+        ] {
+            let named = "workspace id";
+            refused(
+                named,
+                "Client::get_workspace",
+                word,
+                client.get_workspace(word).await,
+            );
+            refused(
+                named,
+                "Client::destroy_workspace",
+                word,
+                client.destroy_workspace(word, None).await,
+            );
+            refused(
+                "exec id",
+                "Client::get_exec",
+                word,
+                client.get_exec(word).await,
+            );
+            refused(
+                "session id",
+                "Client::get_pipe_session",
+                word,
+                client.get_pipe_session(word).await,
+            );
+            refused(
+                "operation id",
+                "Client::operation",
+                word,
+                client.operation(word).await,
+            );
+            refused(
+                "snapshot id",
+                "Client::reconciliation_snapshot_page",
+                word,
+                client.reconciliation_snapshot_page(word, None, 10).await,
+            );
+            refused(
+                "process id",
+                "Client::process_events",
+                word,
+                client.process_events(word, None).await,
+            );
+
+            let mut workspace = workspace_of(word);
+            let refresh = workspace.refresh().await.map(drop);
+            refused(named, "Workspace::refresh", word, refresh);
+            let read = workspace.read_file("a.txt", 0, 16).await;
+            refused(named, "Workspace::read_file", word, read);
+            let listed = workspace.read_directory("dir", None, 10).await;
+            refused(named, "Workspace::read_directory", word, listed);
+            let written = workspace.write_file("a.txt", b"x").await;
+            refused(named, "Workspace::write_file", word, written);
+            let deleted = workspace.delete_file("a.txt").await;
+            refused(named, "Workspace::delete_file", word, deleted);
+            let renewed = workspace.renew_lease(second).await.map(drop);
+            refused(named, "Workspace::renew_lease", word, renewed);
+            let read = workspace.read_file_v2("a.txt", 0, 16).await;
+            refused(named, "Workspace::read_file_v2", word, read);
+            let tree = workspace.tree(10, false).await;
+            refused(named, "Workspace::tree", word, tree);
+            let baseline = workspace.read_git_file("a.txt", 16).await;
+            refused(named, "Workspace::read_git_file", word, baseline);
+            let changes = workspace.git_changes(1, 1024, 1024).await;
+            refused(named, "Workspace::git_changes", word, changes);
+            let replaced = workspace
+                .replace_file(
+                    "a.txt",
+                    b"x",
+                    ExpectedFileState::Absent,
+                    false,
+                    None::<String>,
+                )
+                .await;
+            refused(named, "Workspace::replace_file", word, replaced);
+            let edit = FileEditInput {
+                expected_sha256: digest.clone(),
+                old_text: "a".to_owned(),
+                new_text: "b".to_owned(),
+                match_policy: TextMatchPolicy::Exact,
+            };
+            let edited = workspace.edit_file("a.txt", edit, None::<String>).await;
+            refused(named, "Workspace::edit_file", word, edited);
+            let patch = FilePatchInput {
+                expected_sha256: digest.clone(),
+                edits: vec![LinePatchEdit::InsertBefore {
+                    line: 1,
+                    text: "x".to_owned(),
+                }],
+            };
+            let patched = workspace.patch_file("a.txt", patch, None::<String>).await;
+            refused(named, "Workspace::patch_file", word, patched);
+            refused(named, "Workspace::destroy", word, workspace.destroy().await);
+
+            let named = "exec id";
+            let mut exec = exec_of(word);
+            let refresh = exec.refresh().await.map(drop);
+            refused(named, "Exec::refresh", word, refresh);
+            let waited = exec.wait_for(Duration::from_millis(1)).await.map(drop);
+            refused(named, "Exec::wait_for", word, waited);
+            let signalled = exec.signal(Signal::Terminate, second).await.map(drop);
+            refused(named, "Exec::signal", word, signalled);
+            let renewed = exec.renew_lease(second).await.map(drop);
+            refused(named, "Exec::renew_lease", word, renewed);
+            let page = exec.output_page(OutputStream::Stdout, 0, 16).await;
+            refused(named, "Exec::output_page", word, page);
+            let output = exec.output(substrate_wire::OutputStream::Stdout).await;
+            refused(named, "Exec::output", word, output);
+            refused(named, "Exec::retire", word, exec.retire().await);
+
+            let named = "session id";
+            let mut session = session_of(word);
+            let refresh = session.refresh().await.map(drop);
+            refused(named, "PipeSession::refresh", word, refresh);
+            let signalled = session.signal(Signal::Terminate, second).await.map(drop);
+            refused(named, "PipeSession::signal", word, signalled);
+            let renewed = session.renew_lease(second).await.map(drop);
+            refused(named, "PipeSession::renew_lease", word, renewed);
+            let attached = session.attach().await;
+            refused(named, "PipeSession::attach", word, attached);
+            let exec = session.exec_observation().await;
+            refused("exec id", "PipeSession::exec_observation", word, exec);
+            refused(named, "PipeSession::retire", word, session.retire().await);
+        }
+
+        let sent = seen.lock().expect("kept request lines").clone();
+        assert!(sent.is_empty(), "requests were sent: {sent:?}");
+        // The control: an id that is one segment reaches the fake daemon, which keeps its line.
+        assert!(matches!(
+            client.get_workspace("ws_example").await,
+            Err(SdkError::Transport(_))
+        ));
+        server.abort();
+        let sent = seen.lock().expect("kept request lines").clone();
+        assert_eq!(sent, ["GET /v1/workspaces/ws_example HTTP/1.1"]);
     }
 }
