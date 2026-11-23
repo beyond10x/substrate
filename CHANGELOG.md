@@ -18,6 +18,87 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   synthesis of the confinement suite took 28 s (0.86.0: 92 s) and `cargo xtask check-ess` as a
   whole 54 s.
 
+- A Git create whose root name already has a commit-id file or a store is refused
+  `workspace.git-target-exists` before any request to the source. A create whose store would
+  be larger than the create's byte limit (the requested storage limit, else 2 GiB), or whose
+  baseline holds an object whose header states more, is refused `workspace.git-storage-limit`,
+  and the workspace is proved absent.
+- A Git create whose baseline nests directories deeper than 1,024 is refused
+  `workspace.git-path-unrepresentable` before its store is written, and the workspace is
+  proved absent.
+- A Git create whose baseline names more paths than its inode limit (the requested storage
+  limit, else 200,000) is refused `workspace.git-storage-limit` before anything is checked
+  out, and the workspace is proved absent. Every entry of every tree counts once for each
+  place the baseline names it, a directory that holds nothing included.
+- A Git create whose baseline holds a name longer than 255 bytes or a path longer than 4,096
+  bytes is refused `workspace.git-path-unrepresentable`. One whose paths together are longer
+  than 256 bytes for each path its inode limit admits, or which holds a tree whose header
+  states more than 283 bytes for each such path, is refused `workspace.git-storage-limit`.
+  Each is refused before anything is checked out, and the workspace is proved absent.
+- A Git create whose baseline holds a name with a `/` in it is refused
+  `workspace.git-path-unrepresentable`. One that holds a tree which states more than 283
+  bytes for each entry it holds, or whose files and links together state more bytes than the
+  create's byte limit, each counted once for each place the baseline names it, is refused
+  `workspace.git-storage-limit`. Each is refused before anything is checked out, and the
+  workspace is proved absent.
+- A Git workspace's baseline objects are on disk a second time, compressed, outside its
+  reported usage: a Git workspace under a project quota holds at most twice its byte limit.
+- The changes observation answers whatever the workspace's `.git/objects` holds. Where the
+  reader of 0.24.0 refused `workspace.git-repository-failed` for an object store with a link,
+  an entry that is not a regular file, an `info/alternates` file, more than eight nested
+  directories or more than 262,144 entries, the observation now answers from the store.
+- A Git workspace created by a release before this one has no baseline store. After the
+  upgrade both Git observations of it (changes and baseline file) are refused
+  `workspace.git-baseline-missing` until the workspace is created again; its files, sessions
+  and execs are unaffected.
+
+### Security
+
+- **Both Git observations read the baseline from a store the driver keeps, and open nothing
+  beneath the workspace's `.git/objects`** (design 21, § *The baseline store*;
+  `story:daemon-holds-the-baseline-objects-of-a-git-workspace`). What that directory holds, and
+  what a program running in the workspace does to it during an observation, changes neither
+  the answer of the change-set observation and of the baseline-file observation nor whether
+  there is one. No route, schema or refusal code changes.
+  - The store is `.substrate-git-baselines/.objects/<root name>/` in the directory that holds
+    all workspaces, beside the commit-id file `.substrate-git-baselines/<root name>`. It is
+    one pack and its index and holds the baseline commit, every tree it reaches and every
+    file and link object those trees name: no history, and no commit of another repository a
+    tree records. Directories are mode 0700 and files 0400. It lies in no workspace, is not
+    part of a workspace's reported usage and is under no workspace's project quota.
+  - A create writes the store after the checkout is verified, then the commit-id file, then
+    installs the workspace. Each object is read by its id and checked against it. The store
+    is made in a staging directory inside `.substrate-git-baselines` and renamed into place.
+  - A Git workspace with a commit-id file and no store has no Git observation: both are
+    refused `workspace.git-baseline-missing`. The same refusal answers a store that does not
+    hold the commit the commit-id file names, and a store whose pack or index the Git library
+    cannot read as one. A store that cannot be opened for any other reason is refused
+    `workspace.git-baseline-read-failed`. No observation writes, removes or replaces a store,
+    and the driver never reads a file a workspace wrote as a Git object, a pack or the index
+    of a pack.
+  - A Git create whose fetched pack stores an object behind more than 4,095 entries is refused
+    `workspace.git-storage-limit` before the header of any object is read. One whose baseline
+    holds objects stored behind more than 64 entries together for each path its inode limit
+    admits is refused the same way before anything is checked out, once the headers within
+    that bound are read. One whose fetched pack holds an object twice is refused
+    `workspace.git-checkout-failed`.
+  - The fetch of a Git create allocates for one object no more than the create's byte limit:
+    an object that states more ends the fetch `workspace.git-storage-limit`, and an allocation
+    within the limit that the host refuses carries the same name.
+  - The driver refuses a root name outside the root-name set, `workspace.path-escape`, before
+    it writes or removes a commit-id file or a store; a Git create with such a name is refused
+    before dispatch.
+  - Wherever the driver removes a workspace's commit-id file, it removes the store with it, in
+    a build without the `git` feature too. A failed create leaves neither entry, also when its
+    staging tree cannot be removed. At start, a driver with a Git source configured removes
+    every entry of `.substrate-git-baselines` that is neither the commit-id file nor the store
+    of a workspace directory that exists; a staging directory an interrupted write left is
+    such an entry. In a build without the `git` feature that start rule is new.
+  - Design 23 holds unchanged: a driver with no Git source configured neither reads nor
+    removes anything in `.substrate-git-baselines`, at start or at destroy. A Git workspace
+    destroyed by such a driver leaves its commit-id file and its store until a start with a
+    Git source configured removes them.
+
 ### Security
 
 - **A stored operation outcome is returned to a mutation request only after the recorded grant

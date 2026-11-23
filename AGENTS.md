@@ -1161,6 +1161,16 @@ request with
 not retry the direct push or loosen the ruleset; this is the ordinary path for every
 workstation-authored change, including release preparation.
 
+**A pull request's branch must hold `main` before it merges.** A third ruleset on `main`
+(id 23511358, read on 2026-11-23 with `gh api repos/beyond10x/substrate/rules/branches/main`)
+requires the check `common / Security and privacy` with the strict policy: a branch behind `main`
+is `BEHIND`, and the merge call answers 405 "Required status check … is expected" although every
+check of the head is green. So every merge to `main` puts each other open pull request one forge
+round back. Merge `main` into the branch as the bot (`scripts/as-bot.sh merge --no-ff origin/main`),
+or for a branch without conflicts `PUT /repos/beyond10x/substrate/pulls/<n>/update-branch`, and
+merge after that head's checks. Two branches that both add entries under `## [Unreleased]` of
+`CHANGELOG.md` conflict there; keep both sides.
+
 **One exception, and it is narrower rather than looser: CI releases use `GITHUB_TOKEN` for registry
 and GitHub-release API writes.** `.github/workflows/release.yml` uses the run's own token for both
 GHCR artifacts and the GitHub release, makes no git commit or push, and holds no App key. The App is

@@ -3,6 +3,9 @@
 #[path = "quota_tests.rs"]
 mod quota_tests;
 
+#[path = "baseline_store_tests.rs"]
+mod baseline_store_tests;
+
 #[path = "../backend_recheck_conformance_tests.rs"]
 mod backend_recheck_conformance_tests;
 

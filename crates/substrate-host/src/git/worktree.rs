@@ -1,4 +1,4 @@
-//! The worktree side of the Git changes observation, and the check of the object store.
+//! The worktree side of the Git changes observation.
 //!
 //! Every entry is observed and read beneath the pinned workspace directory with the guarded file
 //! system: `openat2` beneath that directory, no link followed, no open that waits. Nothing the
@@ -28,10 +28,6 @@ pub(super) const LINK: u32 = 0o120_000;
 
 /// Directories nested deeper than this beneath the workspace root are not entered.
 const MAX_WALK_DEPTH: usize = 100;
-/// An object store with more entries than this is not handed to the Git library.
-const MAX_STORE_ENTRIES: usize = 262_144;
-/// Directories nested deeper than this beneath the object store are refused.
-const MAX_STORE_DEPTH: usize = 8;
 
 /// One regular file or link beneath the workspace root, observed without following it.
 #[derive(Clone, Copy)]
@@ -67,10 +63,7 @@ pub(super) fn open(directory: &OwnedFd, path: &str) -> Result<Option<std::fs::Fi
 }
 
 /// The directory at `path` beneath `directory`; `None` when it is absent or not a directory.
-pub(super) fn open_directory(
-    directory: &OwnedFd,
-    path: &str,
-) -> Result<Option<OwnedFd>, DriverError> {
+fn open_directory(directory: &OwnedFd, path: &str) -> Result<Option<OwnedFd>, DriverError> {
     let Some(entry) = open(directory, path)? else {
         return Ok(None);
     };
@@ -305,49 +298,6 @@ impl Walk<'_> {
             .find_map(|rules| rules.decide(path, is_directory))
             .unwrap_or(false)
     }
-}
-
-/// Whether the object store at `objects` holds only what the Git library may open by path:
-/// directories and regular files, no `info/alternates`, within the entry and depth bounds.
-pub(super) fn store_is_plain(objects: &OwnedFd) -> Result<bool, DriverError> {
-    let mut entries_left = MAX_STORE_ENTRIES;
-    plain(objects, "", 0, &mut entries_left)
-}
-
-fn plain(
-    directory: &OwnedFd,
-    prefix: &str,
-    level: usize,
-    entries_left: &mut usize,
-) -> Result<bool, DriverError> {
-    // The entry bound is applied while the directory is listed: no listing is held whole.
-    let listing = std::fs::read_dir(descriptor_path(directory))
-        .map_err(|_| failed("workspace.git-diff-failed"))?;
-    for entry in listing {
-        let Some(left) = entries_left.checked_sub(1) else {
-            return Ok(false);
-        };
-        *entries_left = left;
-        let (name, kind) = entry
-            .and_then(|entry| Ok((entry.file_name(), entry.file_type()?)))
-            .map_err(|_| failed("workspace.git-diff-failed"))?;
-        if kind.is_dir() {
-            let Some(name) = name.to_str() else {
-                return Ok(false);
-            };
-            let Some(child) = open_directory(directory, name)? else {
-                return Ok(false);
-            };
-            if level == MAX_STORE_DEPTH
-                || !plain(&child, &format!("{prefix}{name}/"), level + 1, entries_left)?
-            {
-                return Ok(false);
-            }
-        } else if !kind.is_file() || (prefix == "info/" && name == "alternates") {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// The names in `directory` and what kind of entry each is, in byte order.
