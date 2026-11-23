@@ -447,8 +447,11 @@ pub(super) fn validate_exec_input(
     if !shape_valid {
         return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
     }
-    let facts = app.driver.machine().facts;
-    if input.sandbox.capability_snapshot != app.driver.machine().snapshot {
+    // One snapshot: the digest the start names is compared with, and every check below reads the
+    // facts of, the same reading of the driver (design 34 § 6.3).
+    let machine = app.driver.machine();
+    let facts = machine.facts;
+    if input.sandbox.capability_snapshot != machine.snapshot {
         return Err(failure(
             StatusCode::UNPROCESSABLE_ENTITY,
             request_id,

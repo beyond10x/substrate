@@ -651,7 +651,7 @@ fn config_invalid(message: String) -> StartupRefusal {
     refusal(CONFIG_INVALID, message)
 }
 
-fn stale(why: &str) -> DriverError {
+pub(crate) fn stale(why: &str) -> DriverError {
     DriverError::refused(
         CAPABILITY_STALE,
         format!("The admitted capability snapshot is stale: {why}."),
