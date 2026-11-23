@@ -1063,6 +1063,16 @@ the tag's trailer, then the hosted annotation; when the tag or the dispatch reco
 is read, and a tagged source without the workflow has only those carriers. A failed hosted run, or
 two annotations of one lane, is refused. No self-hosted runner is involved (Timo, 2026-11-19).
 
+**A `release-lanes.yml` run of a commit that will be tagged is never repaired with "re-run failed
+jobs".** The preflight lists the jobs of the run's latest attempt, and the jobs a partial rerun
+carries over have new check runs without annotations: the run turns green and three of its four
+records are gone. When one lane fails on that commit, dispatch `release-lanes.yml` on `main` again
+(`workflow_dispatch`, a whole new run), or re-run all jobs. Release 0.26.0, 2026-11-23: the
+confinement lane failed once at `d0bd8be`, its job alone was run again, and the tag-push release
+run was refused "no recorded quota lane run"; the release was published by a recovery dispatch
+with the three records of the first attempt as inputs
+(`story:release-reads-lane-records-across-the-attempts-of-a-run` removes the trap).
+
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
