@@ -11,10 +11,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The Rust SDK's command and session builders take `.workdir(..)`, the directory the program
   starts in (design 26). The SDK applies the wire's lexical rule before any request and answers
-  `SdkError::Protocol`. A host without the `exec.workdir` fact refuses the start with
-  `exec.workdir-unserved`.
+  `SdkError::Protocol`. An exec start on a host without the `exec.workdir` fact is refused
+  `exec.workdir-unserved`. A session start on a host without confinement is refused
+  `session.confinement-unavailable` first, before its working directory is read.
 
 ### Changed
+
+- In the Rust SDK an identifier is one path segment. Every call that names a workspace, an exec,
+  a session, a host process or a reconciliation snapshot by id refuses an id that is empty, `.`
+  or `..`, or holds `/`, `?`, `#`, `%` or a control character, with `SdkError::Protocol` naming
+  the kind of id, before any request is sent; a handle's own id is held to the same rule.
+  `Client::operation` refuses an operation id outside its published form the same way. A call
+  therefore reaches the route its method names and no route beneath it. The CLI passes its id
+  arguments through these calls.
 
 - The ESS pin is 0.97.4, from 0.86.0 (the six `ess-inputs.yaml` under `spec/`, and `ESS_VERSION`
   and `ESS_SHA256` in `gate.yml`). The host-process suite is regenerated: its 92 scenarios keep
@@ -29,7 +38,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - `b10x-substrate workspace destroy` run again with the same `--operation-id` exits 0 and prints
   the stored result. It read the workspace before the delete and answered `resource.not-found`.
-  The SDK gains `Client::destroy_workspace`, which destroys by id without that read.
+  The SDK gains `Client::destroy_workspace`, which destroys by id without that read. Only
+  `workspace destroy` changes: `workspace renew`, `exec run` and `session signal` still read
+  their resource before the mutation, and a retry of one of them after that resource is gone
+  answers the read's `resource.not-found`.
 - The Rust SDK recovers a Git workspace create whose reply is lost from the operation ledger, as
   it recovers every other mutation. It returned the transport error, without the operation id.
 - The Rust SDK's workspace builder takes the source selected last: `git(..).empty()` creates an

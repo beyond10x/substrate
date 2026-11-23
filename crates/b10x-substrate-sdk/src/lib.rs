@@ -56,7 +56,7 @@ pub use substrate_wire::{
 };
 pub use transport::{EventStream, MetricsStream, ProcessEventStream, RemoteEndpoint};
 
-use transport::{Transport, decode_result, encode_path};
+use transport::{IdKind, Transport, decode_result, encode_path, id_segment};
 
 /// Largest input budget accepted by one session.
 pub const MAX_SESSION_INPUT_BYTES: u64 = 16 * 1024 * 1024;
@@ -249,7 +249,10 @@ impl Client {
     }
 
     pub async fn get_workspace(&self, id: impl AsRef<str>) -> Result<Workspace, SdkError> {
-        let path = format!("/v1/workspaces/{}", encode_path(id.as_ref()));
+        let path = format!(
+            "/v1/workspaces/{}",
+            id_segment(IdKind::Workspace, id.as_ref())?
+        );
         let observed: substrate_wire::Workspace = self.get(&path).await?;
         Ok(Workspace {
             client: self.clone(),
@@ -261,12 +264,20 @@ impl Client {
     ///
     /// A retry under the same operation id is answered with the stored outcome, also once the
     /// workspace is gone and [`Client::get_workspace`] answers `resource.not-found`.
+    ///
+    /// The id is one path segment, as at every call that names a resource by id: an id that is
+    /// empty, `.` or `..`, or holds `/`, `?`, `#`, `%` or a control character, is refused with
+    /// [`SdkError::Protocol`] before anything is sent, so this call addresses a workspace and
+    /// never a route beneath one.
     pub async fn destroy_workspace(
         &self,
         id: impl AsRef<str>,
         operation_id: Option<String>,
     ) -> Result<bool, SdkError> {
-        let target = format!("/v1/workspaces/{}", encode_path(id.as_ref()));
+        let target = format!(
+            "/v1/workspaces/{}",
+            id_segment(IdKind::Workspace, id.as_ref())?
+        );
         let (_, absent): (_, substrate_wire::WorkspaceAbsence) = self
             .mutation(
                 "DELETE",
@@ -279,7 +290,7 @@ impl Client {
     }
 
     pub async fn get_exec(&self, id: impl AsRef<str>) -> Result<Exec, SdkError> {
-        let path = format!("/v1/execs/{}", encode_path(id.as_ref()));
+        let path = format!("/v1/execs/{}", id_segment(IdKind::Exec, id.as_ref())?);
         let observed: substrate_wire::Exec = self.get(&path).await?;
         Ok(Exec {
             client: self.clone(),
@@ -288,7 +299,7 @@ impl Client {
     }
 
     pub async fn get_pipe_session(&self, id: impl AsRef<str>) -> Result<PipeSession, SdkError> {
-        let path = format!("/v1/sessions/{}", encode_path(id.as_ref()));
+        let path = format!("/v1/sessions/{}", id_segment(IdKind::Session, id.as_ref())?);
         let observed: substrate_wire::PipeSession = self.get(&path).await?;
         Ok(PipeSession {
             client: self.clone(),
@@ -297,7 +308,7 @@ impl Client {
     }
 
     pub async fn operation(&self, id: impl AsRef<str>) -> Result<Operation, SdkError> {
-        let path = format!("/v1/ops/{}", encode_path(id.as_ref()));
+        let path = format!("/v1/ops/{}", id_segment(IdKind::Operation, id.as_ref())?);
         let record: substrate_wire::OperationRecord = self.get(&path).await?;
         Ok(record.into())
     }
@@ -354,7 +365,7 @@ impl Client {
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
         self.get(&format!(
             "/v1/reconciliation-snapshots/{}?{query}",
-            encode_path(snapshot_id.as_ref())
+            id_segment(IdKind::Snapshot, snapshot_id.as_ref())?
         ))
         .await
     }
@@ -794,6 +805,11 @@ impl Workspace {
         &self.observed.id
     }
 
+    /// This workspace's id as the path segment of a request target ([`id_segment`]).
+    fn id_segment(&self) -> Result<String, SdkError> {
+        id_segment(IdKind::Workspace, &self.observed.id)
+    }
+
     pub fn command(&self, program: impl Into<String>) -> CommandBuilder {
         CommandBuilder {
             workspace: self.clone(),
@@ -882,7 +898,7 @@ impl Workspace {
         .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let target = format!(
             "/v1/workspaces/{}/files/{}?{query}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             encode_path(path.as_ref())
         );
         let result: substrate_wire::FileReadResult = self.client.get(&target).await?;
@@ -941,7 +957,7 @@ impl Workspace {
         .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let target = format!(
             "/v1/workspaces/{}/files/{}?{query}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             encode_path(path.as_ref())
         );
         let result: WithOmissions<substrate_wire::FileReadResult> =
@@ -985,7 +1001,7 @@ impl Workspace {
         };
         let target = format!(
             "/v1/workspaces/{}/files/{}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             encode_path(path.as_ref())
         );
         let (_, observed): (_, substrate_wire::FileObservation) = self
@@ -1009,7 +1025,7 @@ impl Workspace {
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let target = format!(
             "/v1/workspaces/{}/files/{}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             encode_path(path.as_ref())
         );
         let (_, absent): (_, substrate_wire::FileAbsence) = self
@@ -1037,10 +1053,7 @@ impl Workspace {
         let input = substrate_wire::LeaseRenewInput {
             ttl_ms: required_duration_millis(ttl)?,
         };
-        let target = format!(
-            "/v1/workspaces/{}/lease/renew",
-            encode_path(&self.observed.id)
-        );
+        let target = format!("/v1/workspaces/{}/lease/renew", self.id_segment()?);
         let (_, observed): (_, substrate_wire::Workspace) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -1079,7 +1092,7 @@ impl Workspace {
         .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let target = format!(
             "/v2/workspaces/{}/files/{}?{query}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             encode_path(path.as_ref())
         );
         let slice: substrate_wire::DigestedFileSlice = self.client.get(&target).await?;
@@ -1117,7 +1130,7 @@ impl Workspace {
         self.client
             .get_with_omissions(&format!(
                 "/v2/workspaces/{}/tree?{query}",
-                encode_path(&self.observed.id)
+                self.id_segment()?
             ))
             .await
     }
@@ -1138,7 +1151,7 @@ impl Workspace {
             .client
             .get(&format!(
                 "/v2/workspaces/{}/git/baseline/{}?{query}",
-                encode_path(&self.observed.id),
+                self.id_segment()?,
                 encode_path(path.as_ref())
             ))
             .await?;
@@ -1165,7 +1178,7 @@ impl Workspace {
         self.client
             .get(&format!(
                 "/v2/workspaces/{}/git/changes?{query}",
-                encode_path(&self.observed.id)
+                self.id_segment()?
             ))
             .await
     }
@@ -1237,7 +1250,7 @@ impl Workspace {
     ) -> Result<FileMutationResult, SdkError> {
         let target = format!(
             "/v2/workspaces/{}/{}/{}",
-            encode_path(&self.observed.id),
+            self.id_segment()?,
             route,
             encode_path(path)
         );
@@ -1409,9 +1422,12 @@ impl PipeSessionBuilder {
     ///
     /// The path is absolute and lexically normal, at most [`substrate_wire::MAX_WORKDIR_BYTES`]
     /// bytes, and at or beneath `/workspace` or another mount this start places. Any other path
-    /// is refused with [`SdkError::Protocol`] before anything is sent. A host that publishes no
-    /// `exec.workdir` fact answers `exec.workdir-unserved`, and a directory that is absent, or
-    /// reached through a symlink, `exec.workdir-missing`.
+    /// is refused with [`SdkError::Protocol`] before anything is sent.
+    ///
+    /// A session start is answered `session.confinement-unavailable` first on a host that cannot
+    /// confine a session, before its working directory is read. On a host that can, one that
+    /// publishes no `exec.workdir` fact answers `exec.workdir-unserved`, and a directory that is
+    /// absent, or reached through a symlink, `exec.workdir-missing`.
     pub fn workdir(mut self, path: impl Into<String>) -> Self {
         self.workdir = Some(path.into());
         self
@@ -1555,6 +1571,11 @@ impl PipeSession {
         &self.observed.id
     }
 
+    /// This session's id as the path segment of a request target ([`id_segment`]).
+    fn id_segment(&self) -> Result<String, SdkError> {
+        id_segment(IdKind::Session, &self.observed.id)
+    }
+
     pub async fn refresh(&mut self) -> Result<&PipeSessionObservation, SdkError> {
         let fresh = self.client.get_pipe_session(&self.observed.id).await?;
         self.observed = fresh.observed;
@@ -1602,7 +1623,7 @@ impl PipeSession {
             signal: signal.into(),
             grace_ms: required_duration_millis(grace)?,
         };
-        let target = format!("/v1/sessions/{}/signal", encode_path(&self.observed.id));
+        let target = format!("/v1/sessions/{}/signal", self.id_segment()?);
         let (_, observed): (_, substrate_wire::PipeSession) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -1627,10 +1648,7 @@ impl PipeSession {
         let input = substrate_wire::LeaseRenewInput {
             ttl_ms: required_duration_millis(ttl)?,
         };
-        let target = format!(
-            "/v1/sessions/{}/lease/renew",
-            encode_path(&self.observed.id)
-        );
+        let target = format!("/v1/sessions/{}/lease/renew", self.id_segment()?);
         let (_, observed): (_, substrate_wire::PipeSession) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -1647,7 +1665,7 @@ impl PipeSession {
         self,
         operation_id: impl Into<Option<String>>,
     ) -> Result<bool, SdkError> {
-        let target = format!("/v1/sessions/{}", encode_path(&self.observed.id));
+        let target = format!("/v1/sessions/{}", self.id_segment()?);
         let (_, absent): (_, substrate_wire::SessionAbsence) = self
             .client
             .mutation(
@@ -1925,9 +1943,9 @@ impl CommandBuilder {
     ///
     /// The path is absolute and lexically normal, at most [`substrate_wire::MAX_WORKDIR_BYTES`]
     /// bytes, and at or beneath `/workspace` or another mount this start places. Any other path
-    /// is refused with [`SdkError::Protocol`] before anything is sent. A host that publishes no
-    /// `exec.workdir` fact answers `exec.workdir-unserved`, and a directory that is absent, or
-    /// reached through a symlink, `exec.workdir-missing`.
+    /// is refused with [`SdkError::Protocol`] before anything is sent. An exec start on a host that
+    /// publishes no `exec.workdir` fact is answered `exec.workdir-unserved`, and one in a
+    /// directory that is absent, or reached through a symlink, `exec.workdir-missing`.
     pub fn workdir(mut self, path: impl Into<String>) -> Self {
         self.workdir = Some(path.into());
         self
@@ -2038,6 +2056,11 @@ impl Exec {
         &self.observed.id
     }
 
+    /// This exec's id as the path segment of a request target ([`id_segment`]).
+    fn id_segment(&self) -> Result<String, SdkError> {
+        id_segment(IdKind::Exec, &self.observed.id)
+    }
+
     pub async fn refresh(&mut self) -> Result<&ExecObservation, SdkError> {
         let fresh = self.client.get_exec(&self.observed.id).await?;
         self.observed = fresh.observed;
@@ -2079,7 +2102,7 @@ impl Exec {
             signal: signal.into(),
             grace_ms: required_duration_millis(grace)?,
         };
-        let target = format!("/v1/execs/{}/signal", encode_path(&self.observed.id));
+        let target = format!("/v1/execs/{}/signal", self.id_segment()?);
         let (_, observed): (_, substrate_wire::Exec) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -2101,7 +2124,7 @@ impl Exec {
         let input = substrate_wire::LeaseRenewInput {
             ttl_ms: required_duration_millis(ttl)?,
         };
-        let target = format!("/v1/execs/{}/lease/renew", encode_path(&self.observed.id));
+        let target = format!("/v1/execs/{}/lease/renew", self.id_segment()?);
         let (_, observed): (_, substrate_wire::Exec) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -2118,7 +2141,7 @@ impl Exec {
         self,
         operation_id: impl Into<Option<String>>,
     ) -> Result<bool, SdkError> {
-        let target = format!("/v1/execs/{}", encode_path(&self.observed.id));
+        let target = format!("/v1/execs/{}", self.id_segment()?);
         let (_, absent): (_, substrate_wire::ExecAbsence) = self
             .client
             .mutation(
@@ -2142,10 +2165,7 @@ impl Exec {
                 limit_bytes: substrate_wire::MAX_IO_BYTES,
             })
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
-            let target = format!(
-                "/v1/execs/{}/output?{query}",
-                encode_path(&self.observed.id)
-            );
+            let target = format!("/v1/execs/{}/output?{query}", self.id_segment()?);
             let slice: substrate_wire::OutputSlice = self.client.get(&target).await?;
             bytes.extend(
                 slice
@@ -2178,10 +2198,7 @@ impl Exec {
             limit_bytes,
         })
         .map_err(|error| SdkError::Protocol(error.to_string()))?;
-        let target = format!(
-            "/v1/execs/{}/output?{query}",
-            encode_path(&self.observed.id)
-        );
+        let target = format!("/v1/execs/{}/output?{query}", self.id_segment()?);
         let slice: substrate_wire::OutputSlice = self.client.get(&target).await?;
         Ok(OutputPage {
             exec: slice.exec,
@@ -3598,5 +3615,260 @@ mod tests {
         );
         assert_eq!(inputs[1]["workdir"], "/opt/tool/bin", "{}", inputs[1]);
         assert!(inputs[2].get("workdir").is_none(), "{}", inputs[2]);
+    }
+
+    /// An identifier is one path segment, at every entry point that names a resource by id. A
+    /// word that is not one segment is refused naming the kind of identifier, whether a caller
+    /// passed it or a handle holds it as the member of a daemon's answer, and nothing is sent:
+    /// the fake daemon keeps the line of every request after the machine probe and holds none.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One table: every by-id entry point against every word.
+    async fn an_identifier_that_is_not_one_path_segment_sends_no_request() {
+        fn refused<T>(named: &str, entry: &str, word: &str, result: Result<T, SdkError>) {
+            match result {
+                Err(SdkError::Protocol(message)) => {
+                    assert!(
+                        message.starts_with(named),
+                        "{entry} with {word:?}: {message}"
+                    );
+                }
+                Err(error) => panic!("{entry} with {word:?} answered {error:?}"),
+                Ok(_) => panic!("{entry} with {word:?} was sent and answered"),
+            }
+        }
+        fn result_of(vector: &str) -> Value {
+            serde_json::from_str::<Value>(vector)
+                .expect("vector")
+                .pointer("/expected/response/body/result")
+                .expect("response result")
+                .clone()
+        }
+
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let machine = serde_json::to_vec(
+            serde_json::from_str::<Value>(include_str!(
+                "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
+            ))
+            .expect("machine vector")
+            .pointer("/expected/response/body")
+            .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let kept = Arc::clone(&seen);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept SDK request");
+                let request = read_request(&mut stream).await;
+                if request.starts_with(b"GET /v1/machine HTTP/1.1\r\n") {
+                    stream
+                        .write_all(&response("200 OK", &machine))
+                        .await
+                        .expect("write machine response");
+                } else {
+                    let text = String::from_utf8_lossy(&request);
+                    let line = text.lines().next().unwrap_or_default().to_owned();
+                    kept.lock().expect("kept request lines").push(line);
+                }
+            }
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let workspace_of = |word: &str| Workspace {
+            client: client.clone(),
+            observed: serde_json::from_value::<substrate_wire::Workspace>(serde_json::json!({
+                "id": word,
+                "kind": "workspace",
+                "labels": {},
+                "observed_at": "2026-11-08T00:00:00Z",
+                "state": "ready",
+                "origin": "created",
+                "root_name": "ws_example"
+            }))
+            .expect("workspace observation")
+            .into(),
+        };
+        let exec_vector = result_of(include_str!(
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/exec-get.json"
+        ));
+        let exec_of = |word: &str| {
+            let mut observed = exec_vector.clone();
+            observed["id"] = word.into();
+            Exec {
+                client: client.clone(),
+                observed: serde_json::from_value::<substrate_wire::Exec>(observed)
+                    .expect("exec observation")
+                    .into(),
+            }
+        };
+        let session_vector = result_of(include_str!(
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/pipe-session-start.json"
+        ));
+        let session_of = |word: &str| {
+            let mut observed = session_vector.clone();
+            observed["id"] = word.into();
+            observed["exec"] = word.into();
+            PipeSession {
+                client: client.clone(),
+                observed: serde_json::from_value::<substrate_wire::PipeSession>(observed)
+                    .expect("session observation")
+                    .into(),
+            }
+        };
+        let second = Duration::from_secs(1);
+        let digest = "0".repeat(64);
+
+        for word in [
+            "a/b",
+            "ws/files/x",
+            "..",
+            "%2F",
+            "",
+            ".",
+            "a?b",
+            "a#b",
+            "a\nb",
+        ] {
+            let named = "workspace id";
+            refused(
+                named,
+                "Client::get_workspace",
+                word,
+                client.get_workspace(word).await,
+            );
+            refused(
+                named,
+                "Client::destroy_workspace",
+                word,
+                client.destroy_workspace(word, None).await,
+            );
+            refused(
+                "exec id",
+                "Client::get_exec",
+                word,
+                client.get_exec(word).await,
+            );
+            refused(
+                "session id",
+                "Client::get_pipe_session",
+                word,
+                client.get_pipe_session(word).await,
+            );
+            refused(
+                "operation id",
+                "Client::operation",
+                word,
+                client.operation(word).await,
+            );
+            refused(
+                "snapshot id",
+                "Client::reconciliation_snapshot_page",
+                word,
+                client.reconciliation_snapshot_page(word, None, 10).await,
+            );
+            refused(
+                "process id",
+                "Client::process_events",
+                word,
+                client.process_events(word, None).await,
+            );
+
+            let mut workspace = workspace_of(word);
+            let refresh = workspace.refresh().await.map(drop);
+            refused(named, "Workspace::refresh", word, refresh);
+            let read = workspace.read_file("a.txt", 0, 16).await;
+            refused(named, "Workspace::read_file", word, read);
+            let listed = workspace.read_directory("dir", None, 10).await;
+            refused(named, "Workspace::read_directory", word, listed);
+            let written = workspace.write_file("a.txt", b"x").await;
+            refused(named, "Workspace::write_file", word, written);
+            let deleted = workspace.delete_file("a.txt").await;
+            refused(named, "Workspace::delete_file", word, deleted);
+            let renewed = workspace.renew_lease(second).await.map(drop);
+            refused(named, "Workspace::renew_lease", word, renewed);
+            let read = workspace.read_file_v2("a.txt", 0, 16).await;
+            refused(named, "Workspace::read_file_v2", word, read);
+            let tree = workspace.tree(10, false).await;
+            refused(named, "Workspace::tree", word, tree);
+            let baseline = workspace.read_git_file("a.txt", 16).await;
+            refused(named, "Workspace::read_git_file", word, baseline);
+            let changes = workspace.git_changes(1, 1024, 1024).await;
+            refused(named, "Workspace::git_changes", word, changes);
+            let replaced = workspace
+                .replace_file(
+                    "a.txt",
+                    b"x",
+                    ExpectedFileState::Absent,
+                    false,
+                    None::<String>,
+                )
+                .await;
+            refused(named, "Workspace::replace_file", word, replaced);
+            let edit = FileEditInput {
+                expected_sha256: digest.clone(),
+                old_text: "a".to_owned(),
+                new_text: "b".to_owned(),
+                match_policy: TextMatchPolicy::Exact,
+            };
+            let edited = workspace.edit_file("a.txt", edit, None::<String>).await;
+            refused(named, "Workspace::edit_file", word, edited);
+            let patch = FilePatchInput {
+                expected_sha256: digest.clone(),
+                edits: vec![LinePatchEdit::InsertBefore {
+                    line: 1,
+                    text: "x".to_owned(),
+                }],
+            };
+            let patched = workspace.patch_file("a.txt", patch, None::<String>).await;
+            refused(named, "Workspace::patch_file", word, patched);
+            refused(named, "Workspace::destroy", word, workspace.destroy().await);
+
+            let named = "exec id";
+            let mut exec = exec_of(word);
+            let refresh = exec.refresh().await.map(drop);
+            refused(named, "Exec::refresh", word, refresh);
+            let waited = exec.wait_for(Duration::from_millis(1)).await.map(drop);
+            refused(named, "Exec::wait_for", word, waited);
+            let signalled = exec.signal(Signal::Terminate, second).await.map(drop);
+            refused(named, "Exec::signal", word, signalled);
+            let renewed = exec.renew_lease(second).await.map(drop);
+            refused(named, "Exec::renew_lease", word, renewed);
+            let page = exec.output_page(OutputStream::Stdout, 0, 16).await;
+            refused(named, "Exec::output_page", word, page);
+            let output = exec.output(substrate_wire::OutputStream::Stdout).await;
+            refused(named, "Exec::output", word, output);
+            refused(named, "Exec::retire", word, exec.retire().await);
+
+            let named = "session id";
+            let mut session = session_of(word);
+            let refresh = session.refresh().await.map(drop);
+            refused(named, "PipeSession::refresh", word, refresh);
+            let signalled = session.signal(Signal::Terminate, second).await.map(drop);
+            refused(named, "PipeSession::signal", word, signalled);
+            let renewed = session.renew_lease(second).await.map(drop);
+            refused(named, "PipeSession::renew_lease", word, renewed);
+            let attached = session.attach().await;
+            refused(named, "PipeSession::attach", word, attached);
+            let exec = session.exec_observation().await;
+            refused("exec id", "PipeSession::exec_observation", word, exec);
+            refused(named, "PipeSession::retire", word, session.retire().await);
+        }
+
+        let sent = seen.lock().expect("kept request lines").clone();
+        assert!(sent.is_empty(), "requests were sent: {sent:?}");
+        // The control: an id that is one segment reaches the fake daemon, which keeps its line.
+        assert!(matches!(
+            client.get_workspace("ws_example").await,
+            Err(SdkError::Transport(_))
+        ));
+        server.abort();
+        let sent = seen.lock().expect("kept request lines").clone();
+        assert_eq!(sent, ["GET /v1/workspaces/ws_example HTTP/1.1"]);
     }
 }

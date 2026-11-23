@@ -156,7 +156,10 @@ impl Transport {
         process_id: &str,
         cursor: Option<&str>,
     ) -> Result<ProcessEventStream, SdkError> {
-        let mut path = format!("/v1/processes/{}/events", encode_path(process_id));
+        let mut path = format!(
+            "/v1/processes/{}/events",
+            id_segment(IdKind::Process, process_id)?
+        );
         if let Some(cursor) = cursor {
             path.push_str("?cursor=");
             path.push_str(&encode_path(cursor));
@@ -194,10 +197,11 @@ impl Transport {
     }
 
     pub(crate) async fn session_websocket(&self, session_id: &str) -> Result<WebSocket, SdkError> {
-        let path = format!("/v1/sessions/{}/attach", encode_path(session_id));
+        let session = id_segment(IdKind::Session, session_id)?;
+        let path = format!("/v1/sessions/{session}/attach");
         match &self.kind {
             TransportKind::Unix(_) => self.websocket(&path).await,
-            TransportKind::Remote(remote) => remote.session_websocket(session_id, &path).await,
+            TransportKind::Remote(remote) => remote.session_websocket(&session, &path).await,
         }
     }
 }
@@ -329,17 +333,15 @@ impl RemoteTransport {
         }
     }
 
-    async fn session_websocket(&self, session_id: &str, path: &str) -> Result<WebSocket, SdkError> {
+    /// `session` is the session id as [`id_segment`] returned it, and `path` its attach path.
+    async fn session_websocket(&self, session: &str, path: &str) -> Result<WebSocket, SdkError> {
         let mut seed = zeroize::Zeroizing::new([0_u8; 32]);
         getrandom::fill(seed.as_mut())
             .map_err(|_| SdkError::Transport("secure randomness is unavailable".to_owned()))?;
         let signing_key = SigningKey::from_bytes(&seed);
         let public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(signing_key.verifying_key().to_bytes());
-        let mint_path = format!(
-            "/v1/sessions/{}/attachment-authorities",
-            encode_path(session_id)
-        );
+        let mint_path = format!("/v1/sessions/{session}/attachment-authorities");
         let body = serde_json::to_vec(&substrate_wire::SessionAuthorityMintInput { public_key })
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let response = self.request("POST", &mint_path, Some(&body), None).await?;
@@ -892,6 +894,68 @@ pub(crate) fn decode_result<T: DeserializeOwned>(response: &HttpResponse) -> Res
     Err(SdkError::Refusal(failure.error.into()))
 }
 
+/// What an identifier names. A refusal of [`id_segment`] says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdKind {
+    Workspace,
+    Exec,
+    Session,
+    Process,
+    Snapshot,
+    Operation,
+}
+
+impl IdKind {
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Exec => "exec",
+            Self::Session => "session",
+            Self::Process => "process",
+            Self::Snapshot => "snapshot",
+            Self::Operation => "operation",
+        }
+    }
+}
+
+/// One identifier as the one path segment it occupies in a request target, percent-encoded.
+///
+/// An identifier is one path segment. Every request target that names a resource by id is built
+/// with this function, whether the id is a caller's string or the member of a daemon's answer, so
+/// a request reaches the route its method names and no deeper one, and carries no query.
+///
+/// An operation id has the wire's published form, [`substrate_wire::validate_operation_id`]. The
+/// wire crate exports no predicate for a workspace, exec, session, process or snapshot id, so
+/// each of those is held to what any one segment is: not empty, not `.` or `..`, and without
+/// `/`, `?`, `#`, `%` and control characters. Whether such a segment names a resource is the
+/// daemon's answer. A file path is not an identifier: it fills the route's catch-all through
+/// [`encode_path`], after `substrate_wire::validate_relative_path`.
+///
+/// # Errors
+///
+/// [`SdkError::Protocol`], naming the kind of identifier, before any request is sent.
+pub(crate) fn id_segment(kind: IdKind, id: &str) -> Result<String, SdkError> {
+    if kind == IdKind::Operation {
+        substrate_wire::validate_operation_id(id)
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+    } else if !is_one_segment(id) {
+        return Err(SdkError::Protocol(format!(
+            "{} id is not one path segment",
+            kind.noun()
+        )));
+    }
+    Ok(encode_path(id))
+}
+
+fn is_one_segment(id: &str) -> bool {
+    !matches!(id, "" | "." | "..")
+        && !id
+            .chars()
+            .any(|character| matches!(character, '/' | '?' | '#' | '%') || character.is_control())
+}
+
+/// Percent-encodes a file path for a route's catch-all, keeping `/` between its components, or a
+/// cursor for a query. An identifier never passes here directly: [`id_segment`] checks it first.
 pub(crate) fn encode_path(path: &str) -> String {
     let mut encoded = String::with_capacity(path.len());
     for byte in path.bytes() {
@@ -1088,5 +1152,106 @@ content-length: not-a-number\r\n\r\n",
             other => panic!("gap produced another error: {other}"),
         }
         server.await.expect("fake daemon task");
+    }
+
+    /// An identifier is one path segment: a minted id of each kind passes unchanged, any other
+    /// single segment is percent-encoded into one, and what is not one segment is refused naming
+    /// the kind. An operation id has the wire's published form.
+    #[test]
+    fn an_identifier_is_one_path_segment() {
+        use super::{IdKind, id_segment};
+        let minted = [
+            (IdKind::Workspace, "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            (IdKind::Exec, "ex_01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            (IdKind::Session, "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            (IdKind::Process, "proc_01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            (IdKind::Snapshot, "snap_01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            (IdKind::Operation, "01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            (IdKind::Operation, "op-chosen_by-the-caller"),
+        ];
+        for (kind, id) in minted {
+            assert_eq!(id_segment(kind, id).ok().as_deref(), Some(id), "{kind:?}");
+        }
+        let kinds = [
+            (IdKind::Workspace, "workspace id"),
+            (IdKind::Exec, "exec id"),
+            (IdKind::Session, "session id"),
+            (IdKind::Process, "process id"),
+            (IdKind::Snapshot, "snapshot id"),
+            (IdKind::Operation, "operation id"),
+        ];
+        for (kind, named) in kinds {
+            for word in [
+                "",
+                ".",
+                "..",
+                "a/b",
+                "/",
+                "ws_a/files/keep.txt",
+                "ws_a/",
+                "../ws_a",
+                "%2F",
+                "ws_a%2Ffiles",
+                "ws_a?limit=1",
+                "ws_a#fragment",
+                "ws_a\r\nx-header: 1",
+                "ws_a\0",
+                "ws_a\u{7f}",
+                "ws_a\u{85}",
+            ] {
+                let Err(SdkError::Protocol(message)) = id_segment(kind, word) else {
+                    panic!("{word:?} is not one {named}")
+                };
+                assert!(message.starts_with(named), "{word:?}: {message}");
+            }
+        }
+        // One segment the daemon did not mint is still one segment: whether it names a resource
+        // is the daemon's answer. Its bytes outside the unreserved set are percent-encoded.
+        assert_eq!(
+            id_segment(IdKind::Workspace, "no such workspace")
+                .ok()
+                .as_deref(),
+            Some("no%20such%20workspace")
+        );
+        assert_eq!(id_segment(IdKind::Exec, "...").ok().as_deref(), Some("..."));
+        // An operation id is held to its published form, which no other single segment has.
+        assert!(id_segment(IdKind::Operation, "too-short").is_err());
+        assert!(id_segment(IdKind::Operation, "no such operation id").is_err());
+    }
+
+    /// An identifier reaches a request target through `id_segment` and no other way: outside the
+    /// tests, the SDK's sources call `encode_path` on a file path or a cursor, and `id_segment`
+    /// calls it on the id it has checked. A new call names its argument `path` or `cursor`, or
+    /// goes through `id_segment`.
+    #[test]
+    fn only_a_file_path_or_a_cursor_is_encoded_beside_the_identifier_rule() {
+        let sources = [
+            ("lib.rs", include_str!("lib.rs")),
+            ("transport.rs", include_str!("transport.rs")),
+        ];
+        let mut calls = 0;
+        for (file, source) in sources {
+            let (production, _) = source
+                .split_once("\n#[cfg(test)]\nmod tests {")
+                .unwrap_or_else(|| panic!("{file} has a test module"));
+            for (index, line) in production.lines().enumerate() {
+                let Some((before, call)) = line.split_once("encode_path(") else {
+                    continue;
+                };
+                if before.trim_start().starts_with("//") || before.ends_with("fn ") {
+                    continue;
+                }
+                calls += 1;
+                let argument = call.split(')').next().unwrap_or_default();
+                let admitted = matches!(argument, "path" | "path.as_ref(" | "cursor")
+                    || (file == "transport.rs" && argument == "id");
+                assert!(
+                    admitted,
+                    "{file}:{}: encode_path({argument}..) is neither a file path nor a cursor",
+                    index + 1
+                );
+            }
+        }
+        assert!(calls > 0, "the sources hold no call: the reading is wrong");
     }
 }

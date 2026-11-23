@@ -1065,3 +1065,7 @@ async fn delegated_working_directory_is_where_an_exec_and_a_session_start() {
     eprintln!("sdk workdir delegated: executed");
     managed.shutdown().await.expect("managed shutdown");
 }
+
+/// Adversary pass on the SDK and CLI review of 0.24.0 (`tests/adversary_review_0_24/mod.rs`).
+#[path = "adversary_review_0_24/mod.rs"]
+mod adversary_review_0_24;

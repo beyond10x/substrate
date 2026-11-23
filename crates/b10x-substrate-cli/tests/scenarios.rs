@@ -443,3 +443,7 @@ async fn cli_socket_is_required() {
         "{text}"
     );
 }
+
+/// Adversary pass on the SDK and CLI review of 0.24.0 (`tests/adversary_review_0_24/mod.rs`).
+#[path = "adversary_review_0_24/mod.rs"]
+mod adversary_review_0_24;

@@ -298,8 +298,11 @@ More than `MAX_WRITABLE_ROOTS` roots are refused by the SDK with `SdkError::Prot
 request is sent.
 
 The same builders take `.workdir(..)`, the directory the program starts in, at or beneath
-`/workspace` or a mount of the run. The SDK refuses another path with `SdkError::Protocol`; a
-host without the `exec.workdir` fact answers `exec.workdir-unserved`.
+`/workspace` or a mount of the run. The SDK refuses any other path with `SdkError::Protocol`; an
+exec start on a host without the `exec.workdir` fact is `exec.workdir-unserved`.
+
+Without confinement, a session start is refused `session.confinement-unavailable` before its
+working directory is read.
 
 ## Recover and observe
 
