@@ -35,6 +35,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - The Rust SDK's workspace builder takes the source selected last: `git(..).empty()` creates an
   empty workspace and sends no source authority. `empty()` left an earlier Git selection in place.
 
+### Security
+
+- An exec on the Kubernetes namespace driver is held to what it was admitted for until the
+  request that creates its Pod is sent (design 34 § 6.3). After every wait the start can sit
+  in, the driver computes its capability snapshot again and creates the Pod only when that
+  snapshot is a valid proof of every fact the start requires, on the node the workspace's keeper
+  runs on, and under the binding, the policy set and the Lease of the admission. A proof the
+  driver renewed while the start waited serves it when it proves the same facts. Otherwise the
+  start is `exec.capability-stale` (422) before dispatch, recorded as refused, and no Pod is
+  created. Daemon admission of an exec start takes the facts and the digest from one capability
+  snapshot and still refuses a start that names any snapshot but the current one.
+- A proof of the namespace driver is valid for a span measured on the driver's monotonic clock
+  from the probe that made it, and the next probe is due on that clock. The wall clock states
+  `probed_at` and `valid_until` in the snapshot and can only end a proof early, when it passes
+  `valid_until`: it never keeps a proof valid. No wire schema, capability fact or refusal code
+  changes.
+
 ## [0.24.0] — 2026-11-22
 
 ### Added
