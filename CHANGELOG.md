@@ -25,6 +25,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   The SDK gains `Client::destroy_workspace`, which destroys by id without that read.
 - The Rust SDK recovers a Git workspace create whose reply is lost from the operation ledger, as
   it recovers every other mutation. It returned the transport error, without the operation id.
+- The Rust SDK's workspace builder takes the source selected last: `git(..).empty()` creates an
+  empty workspace and sends no source authority. `empty()` left an earlier Git selection in place.
 
 ## [0.24.0] — 2026-11-22
 

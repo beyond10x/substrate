@@ -657,10 +657,15 @@ pub struct WorkspaceBuilder {
 }
 
 impl WorkspaceBuilder {
-    pub fn empty(self) -> Self {
+    /// Selects the empty source, replacing any earlier selection: a Git source selected before
+    /// is dropped together with its source authority.
+    pub fn empty(mut self) -> Self {
+        self.source = substrate_wire::WorkspaceSource::Empty(substrate_wire::EmptySource::Empty);
+        self.source_authorization = None;
         self
     }
 
+    /// Selects a Git source and its source authority, replacing any earlier selection.
     pub fn git(
         mut self,
         source: impl Into<String>,
@@ -2528,6 +2533,109 @@ mod tests {
     #[test]
     fn path_encoding_preserves_separators_and_escapes_request_bytes() {
         assert_eq!(transport::encode_path("src/a file.rs"), "src/a%20file.rs");
+    }
+
+    /// The source selected last decides what a workspace builder creates: `empty()` after
+    /// `git(..)` sends the empty source and no source authority, and `git(..)` after `empty()`
+    /// sends the Git source with its authority.
+    #[tokio::test]
+    async fn the_workspace_builder_takes_the_source_selected_last() {
+        const AUTHORITY: &str = "source-authority-of-the-case";
+        const HEADER: &str = "x-b10x-workspace-source-authorization";
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
+        ))
+        .expect("machine vector");
+        let machine = serde_json::to_vec(
+            vector
+                .pointer("/expected/response/body")
+                .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let server = tokio::spawn(async move {
+            answer_one(
+                &listener,
+                "GET /v1/machine HTTP/1.1\r\n",
+                "200 OK",
+                &machine,
+            )
+            .await;
+            let workspace = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_workspace",
+                "operation": "01ARZ3NDEKTSV4RRFFQ69G5FB4",
+                "result": {
+                    "id": "ws_example",
+                    "kind": "workspace",
+                    "labels": {},
+                    "observed_at": "2026-11-08T00:00:00Z",
+                    "state": "ready",
+                    "origin": "created",
+                    "root_name": "ws_example"
+                }
+            }))
+            .expect("workspace response JSON");
+            let create = "POST /v1/workspaces HTTP/1.1\r\n";
+            [
+                answer_one(&listener, create, "201 Created", &workspace).await,
+                answer_one(&listener, create, "201 Created", &workspace).await,
+            ]
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let git = |builder: WorkspaceBuilder| {
+            builder.git(
+                "origin",
+                "example/repository",
+                "refs/heads/main",
+                "0123456789abcdef0123456789abcdef01234567",
+                1,
+                AUTHORITY,
+            )
+        };
+        git(client.workspace())
+            .empty()
+            .create()
+            .await
+            .expect("an empty workspace after git(..).empty()");
+        git(client.workspace().empty())
+            .create()
+            .await
+            .expect("a Git workspace after empty().git(..)");
+
+        let requests = server.await.expect("fake daemon task");
+        let source = |request: &[u8]| {
+            serde_json::from_slice::<Value>(request_body(request)).expect("create JSON")["input"]
+                ["source"]
+                .clone()
+        };
+        let names_authority =
+            |request: &[u8]| String::from_utf8_lossy(request).contains(&format!("{HEADER}: "));
+        assert_eq!(
+            source(&requests[0]),
+            "empty",
+            "empty() selected last sends the empty source"
+        );
+        assert!(
+            !names_authority(&requests[0]),
+            "an empty source carries no source authority"
+        );
+        assert_eq!(
+            source(&requests[1])["git"]["commit"],
+            "0123456789abcdef0123456789abcdef01234567",
+            "git(..) selected last sends the Git source"
+        );
+        assert!(
+            String::from_utf8_lossy(&requests[1]).contains(&format!("{HEADER}: {AUTHORITY}\r\n")),
+            "a Git source carries its authority"
+        );
     }
 
     #[test]
