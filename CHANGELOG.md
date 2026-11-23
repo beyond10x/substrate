@@ -7,6 +7,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+Four fixes of the v2 changes of one file (design 01, § 3.1, *The v2 changes of one file*). No
+route, schema or refusal code changes.
+
+- A line patch (`workspace.file.patch-v2`) changes only the lines it names. A line no edit
+  names keeps its bytes, its LF or CRLF included; a line an edit writes ends as the line the
+  edit names ends; and a file whose every line is deleted is empty. One case is as before:
+  deleting a last line that has no line ending leaves the file without one.
+- A text edit (`workspace.file.edit-v2`) is refused `workspace.edit-ambiguous` when `old_text`
+  starts at more than one offset of the file, also when the occurrences overlap, under both
+  match policies: `ana` in `banana` is refused.
+- The `diff.text` of a v2 file change is a unified diff that `git apply` applies to the former
+  file, when it is not empty, not `truncated` and not `binary`: one hunk with both line ranges
+  in its header, at most three unchanged lines on either side of the changed ones,
+  `\ No newline at end of file` where a last line has no ending, and `/dev/null` as the former
+  file of a file the change creates. A change without a changed line carries an empty text. This
+  holds for a path Git admits in a working tree. For a path Git refuses by its own path rule (a
+  component it reads as its `.git` directory, such as `.GIT`, `git~1` or `.git.`) the text has
+  the same form and `git apply` refuses it by name (`invalid path`). Two changes far apart in
+  one file are one hunk, which is `truncated` over 200 lines.
+- A v2 replacement with `create_parents` whose write fails removes the directories it created,
+  deepest first; a directory that existed before, or that holds an entry the request did not
+  create, stays. A replacement with `create_parents` whose write finds the file's directory
+  removed by another writer runs once more from its precondition and creates the parents
+  again; a second failure is the answer.
+
 ## [0.25.0] — 2026-11-23
 
 ### Added
