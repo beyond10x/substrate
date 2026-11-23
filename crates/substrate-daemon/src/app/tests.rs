@@ -24,6 +24,13 @@ use super::service::{
 };
 use super::{BODY_LIMIT, MAINTENANCE_DRIVER_TIMEOUT, REQUEST_BODY_READ_TIMEOUT};
 
+/// A minimum host driver whose workspaces live beneath `directory`. For a test module of this
+/// harness that builds its own application: this file is the test composition root, and no
+/// other file names the host driver (`tests/driver_port.rs`).
+fn minimum_host_driver(directory: &std::path::Path) -> Arc<HostDriver> {
+    HostDriver::open(HostConfig::minimum(directory.join("workspaces"))).expect("host driver")
+}
+
 /// An application over an in-memory store and a minimum host driver, with the directory its
 /// workspaces live in. For the `app` modules' own tests, which are clients of the driver port.
 pub(super) fn host_app(deployment: &str) -> (tempfile::TempDir, Arc<super::App>) {

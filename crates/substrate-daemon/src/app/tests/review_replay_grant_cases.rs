@@ -19,7 +19,6 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use substrate_host::{HostConfig, HostDriver};
 use substrate_store::{LeaseClock, NewOperation, Reservation, Scope, Store};
 use substrate_wire::{
     DELEGATED_CONTEXT_AUDIENCE, DELEGATED_CONTEXT_TYPE, ErrorClass, ErrorDetail, OperationRecord,
@@ -124,8 +123,7 @@ struct Daemon {
 fn daemon(required: bool) -> Daemon {
     let directory = tempfile::tempdir().expect("temporary directory");
     let store = Arc::new(Store::open(":memory:").expect("state store"));
-    let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
-        .expect("host driver");
+    let driver = super::minimum_host_driver(directory.path());
     let policy = DelegatedContextPolicy::new(
         vec![TrustedKey {
             kid: KID.to_owned(),
