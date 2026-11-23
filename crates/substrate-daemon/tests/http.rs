@@ -11,8 +11,9 @@ use substrate_daemon::{App, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity, r
 use substrate_host::{HostConfig, HostDriver};
 use substrate_store::{ExecWrite, NewOperation, Reservation, Scope, Store, StoredExec};
 use substrate_wire::{
-    ConfinementRequest, Exec, ExecExit, ExecKind, ExecState, ExecUsage, NetworkMode, ResourceUsage,
-    SandboxProfile,
+    ConfinementRequest, Exec, ExecExit, ExecKind, ExecState, ExecUsage, MAX_FILE_BYTES,
+    MAX_FILE_DIFF_TEXT_CHARS, MAX_FILE_TEXT_CHARS, NetworkMode, OperationOutcome, OperationState,
+    ResourceUsage, SandboxProfile,
 };
 use tempfile::TempDir;
 use tower::ServiceExt as _;
@@ -625,6 +626,362 @@ async fn v2_file_mutations_enforce_digest_cas_and_return_bounded_diffs() {
     assert_eq!(stale["error"]["code"], "workspace.stale-content");
 }
 
+/// The three v2 file changes (story:file-change-result-fits-the-ledger-before-the-file-changes).
+#[derive(Clone, Copy)]
+enum FileChange {
+    Replacement,
+    Edit,
+    Patch,
+}
+
+const SEED: &str = "seed\n";
+
+/// A text within the file limit in three lines. A result is held to bytes of JSON, whatever the
+/// number of its lines.
+fn text_with_long_lines() -> String {
+    vec!["a".repeat(250_000); 3].join("\n")
+}
+
+/// A text within the file limit made of a quote, a backslash, control characters and a character
+/// outside the basic plane. A result is held to bytes of JSON with every escape counted.
+fn text_that_json_escapes() -> String {
+    vec!["\"\\\u{1}\u{1f}\t\u{1f600}".repeat(400); 100].join("\n")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn ledger_scope() -> Scope {
+    Scope {
+        deployment: "dep_http_test".to_owned(),
+        subject: "local:1000".to_owned(),
+    }
+}
+
+impl Harness {
+    /// An empty workspace holding `main.txt` with [`SEED`]; returns the workspace id.
+    async fn workspace_with_seed_file(&self) -> String {
+        use base64::Engine as _;
+
+        let (status, created) = self
+            .call(
+                "local:1000",
+                Method::POST,
+                "/v1/workspaces",
+                "req_change_create",
+                mutation(
+                    "01JFILECHANGECREATE0001",
+                    json!({ "source": "empty", "labels": {} }),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let workspace = created["result"]["id"]
+            .as_str()
+            .expect("workspace id")
+            .to_owned();
+        let (status, seeded) = self
+            .call(
+                "local:1000",
+                Method::PUT,
+                &format!("/v2/workspaces/{workspace}/files/main.txt"),
+                "req_change_seed",
+                mutation(
+                    "01JFILECHANGESEED000001",
+                    json!({
+                        "content": {
+                            "encoding": "base64",
+                            "data": base64::engine::general_purpose::STANDARD.encode(SEED),
+                        },
+                        "expected": { "state": "absent" }
+                    }),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{seeded}");
+        workspace
+    }
+
+    /// The digest of the complete file as the read route observes it now.
+    async fn file_sha256(&self, workspace: &str, path: &str) -> String {
+        let (status, read) = self
+            .call(
+                "local:1000",
+                Method::GET,
+                &format!(
+                    "/v2/workspaces/{workspace}/files/{path}?mode=file&offset=0&limit_bytes=1"
+                ),
+                "req_change_read",
+                Body::empty(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        read["result"]["sha256"]
+            .as_str()
+            .expect("file digest")
+            .to_owned()
+    }
+}
+
+/// The rule: a v2 file change is written only when its result fits what the ledger reserved for
+/// it, so a change that is written is answered `200` and recorded. The file holds the new
+/// content, the diff is inside its published length and cut to the reserved bytes, the ledger row
+/// is terminal with the answered result, and the same request answers that result again.
+async fn a_v2_file_change_completes_its_ledger_row(change: FileChange, text: &str) {
+    const OPERATION: &str = "01JFILECHANGERESULT0001";
+    let harness = Harness::open();
+    let workspace = harness.workspace_with_seed_file().await;
+    let (method, uri, input, content) =
+        change_putting_text_where_the_seed_was(change, &workspace, text);
+    assert!(
+        u64::try_from(content.len()).expect("usize fits u64") <= MAX_FILE_BYTES,
+        "the new file is within the limit"
+    );
+
+    let (status, changed) = harness
+        .call(
+            "local:1000",
+            method.clone(),
+            &uri,
+            "req_change_first",
+            mutation(OPERATION, input.clone()),
+        )
+        .await;
+    let on_disk = harness.file_sha256(&workspace, "main.txt").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a change that is written is answered 200: answered {changed}; the file held {} and holds {on_disk}",
+        sha256_hex(SEED.as_bytes())
+    );
+    let result = &changed["result"];
+    assert_eq!(on_disk, sha256_hex(content.as_bytes()), "the file changed");
+    assert_eq!(result["after_sha256"], on_disk);
+    assert_eq!(result["before_sha256"], sha256_hex(SEED.as_bytes()));
+    assert_eq!(result["size"], content.len());
+    assert_eq!(result["diff"]["binary"], false);
+    assert_eq!(
+        result["diff"]["truncated"], true,
+        "a diff over the reserved bytes is cut, and says so"
+    );
+    let diff = result["diff"]["text"].as_str().expect("diff text");
+    assert!(diff.starts_with("--- a/main.txt\n+++ b/main.txt\n"));
+    assert!(diff.chars().count() <= MAX_FILE_DIFF_TEXT_CHARS);
+
+    let record = harness
+        .store
+        .operation(&ledger_scope(), OPERATION)
+        .expect("ledger read")
+        .expect("ledger row");
+    assert_eq!(record.state, OperationState::Terminal);
+    assert_eq!(
+        record.outcome,
+        Some(OperationOutcome::Success {
+            result: result.clone()
+        }),
+        "the ledger row holds the answered result"
+    );
+
+    let (status, replayed) = harness
+        .call(
+            "local:1000",
+            method,
+            &uri,
+            "req_change_replay",
+            mutation(OPERATION, input),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(
+        replayed["result"], changed["result"],
+        "the replay is the same result"
+    );
+    assert_eq!(harness.file_sha256(&workspace, "main.txt").await, on_disk);
+}
+
+/// The request of one v2 file change that puts `text` where [`SEED`] was in `main.txt`: its
+/// method, address and input, and the content the file must hold afterwards.
+fn change_putting_text_where_the_seed_was(
+    change: FileChange,
+    workspace: &str,
+    text: &str,
+) -> (Method, String, Value, String) {
+    use base64::Engine as _;
+
+    match change {
+        FileChange::Replacement => (
+            Method::PUT,
+            format!("/v2/workspaces/{workspace}/files/main.txt"),
+            json!({
+                "content": {
+                    "encoding": "base64",
+                    "data": base64::engine::general_purpose::STANDARD.encode(text),
+                },
+                "expected": { "state": "sha256", "sha256": sha256_hex(SEED.as_bytes()) }
+            }),
+            text.to_owned(),
+        ),
+        FileChange::Edit => (
+            Method::POST,
+            format!("/v2/workspaces/{workspace}/file-edits/main.txt"),
+            json!({
+                "expected_sha256": sha256_hex(SEED.as_bytes()),
+                "old_text": "seed",
+                "new_text": text,
+                "match_policy": "exact"
+            }),
+            format!("{text}\n"),
+        ),
+        FileChange::Patch => (
+            Method::POST,
+            format!("/v2/workspaces/{workspace}/file-patches/main.txt"),
+            json!({
+                "expected_sha256": sha256_hex(SEED.as_bytes()),
+                "edits": [
+                    { "kind": "replace_range", "start_line": 1, "end_line": 1, "text": text }
+                ]
+            }),
+            format!("{text}\n"),
+        ),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v2_replacement_with_long_lines_changes_the_file_and_completes_its_ledger_row() {
+    a_v2_file_change_completes_its_ledger_row(FileChange::Replacement, &text_with_long_lines())
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v2_edit_with_long_lines_changes_the_file_and_completes_its_ledger_row() {
+    a_v2_file_change_completes_its_ledger_row(FileChange::Edit, &text_with_long_lines()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v2_patch_with_long_lines_changes_the_file_and_completes_its_ledger_row() {
+    a_v2_file_change_completes_its_ledger_row(FileChange::Patch, &text_with_long_lines()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v2_replacement_with_json_escaped_text_changes_the_file_and_completes_its_ledger_row() {
+    a_v2_file_change_completes_its_ledger_row(FileChange::Replacement, &text_that_json_escapes())
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v2_edit_with_json_escaped_text_changes_the_file_and_completes_its_ledger_row() {
+    a_v2_file_change_completes_its_ledger_row(FileChange::Edit, &text_that_json_escapes()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v2_patch_with_json_escaped_text_changes_the_file_and_completes_its_ledger_row() {
+    a_v2_file_change_completes_its_ledger_row(FileChange::Patch, &text_that_json_escapes()).await;
+}
+
+/// The rule: the server itself holds the `maxLength` its schema publishes for the text of an edit
+/// and of a patch. A text one character over it is `request.schema-invalid` before dispatch: the
+/// refusal is the operation's recorded answer, and the file is the one that was there.
+async fn a_v2_text_over_its_published_length_is_refused_before_anything_is_written(
+    uri_segment: &str,
+    input: Value,
+) {
+    const OPERATION: &str = "01JFILECHANGEBOUND00001";
+    let harness = Harness::open();
+    let workspace = harness.workspace_with_seed_file().await;
+    let uri = format!("/v2/workspaces/{workspace}/{uri_segment}/main.txt");
+
+    let (status, refused) = harness
+        .call(
+            "local:1000",
+            Method::POST,
+            &uri,
+            "req_bound_first",
+            mutation(OPERATION, input.clone()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["error"]["code"], "request.schema-invalid");
+    assert_eq!(
+        harness.file_sha256(&workspace, "main.txt").await,
+        sha256_hex(SEED.as_bytes()),
+        "the file is unchanged"
+    );
+
+    let record = harness
+        .store
+        .operation(&ledger_scope(), OPERATION)
+        .expect("ledger read")
+        .expect("ledger row");
+    assert_eq!(
+        record.state,
+        OperationState::Refused,
+        "refused before dispatch, never accepted"
+    );
+    let Some(OperationOutcome::Error { error }) = record.outcome else {
+        panic!("the ledger row holds the refusal");
+    };
+    assert_eq!(error.code, "request.schema-invalid");
+
+    let (status, replayed) = harness
+        .call(
+            "local:1000",
+            Method::POST,
+            &uri,
+            "req_bound_replay",
+            mutation(OPERATION, input),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{replayed}");
+    assert_eq!(replayed["error"], refused["error"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v2_edit_old_text_over_its_published_length_is_refused_before_anything_is_written() {
+    a_v2_text_over_its_published_length_is_refused_before_anything_is_written(
+        "file-edits",
+        json!({
+            "expected_sha256": sha256_hex(SEED.as_bytes()),
+            "old_text": "a".repeat(MAX_FILE_TEXT_CHARS + 1),
+            "new_text": "changed",
+            "match_policy": "exact"
+        }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v2_edit_new_text_over_its_published_length_is_refused_before_anything_is_written() {
+    a_v2_text_over_its_published_length_is_refused_before_anything_is_written(
+        "file-edits",
+        json!({
+            "expected_sha256": sha256_hex(SEED.as_bytes()),
+            "old_text": "seed",
+            "new_text": "a".repeat(MAX_FILE_TEXT_CHARS + 1),
+            "match_policy": "exact"
+        }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v2_patch_text_over_its_published_length_is_refused_before_anything_is_written() {
+    a_v2_text_over_its_published_length_is_refused_before_anything_is_written(
+        "file-patches",
+        json!({
+            "expected_sha256": sha256_hex(SEED.as_bytes()),
+            "edits": [{
+                "kind": "insert_after",
+                "line": 1,
+                "text": "a".repeat(MAX_FILE_TEXT_CHARS + 1)
+            }]
+        }),
+    )
+    .await;
+}
+
 /// A FIFO, a socket and a non-UTF-8 name are entries a confined process can create in its own
 /// workspace. Both listing routes omit them, answer `200` and count them in the
 /// `x-b10x-omitted-entries` header (ADR 0043); neither names an escape.
@@ -871,3 +1228,9 @@ fn advertised_contract_bundle_digest_matches_the_named_bundle() {
         bundle.display()
     );
 }
+
+#[path = "http/file_change_ledger_review.rs"]
+mod file_change_ledger_review;
+
+#[path = "http/driver_answer_bound.rs"]
+mod driver_answer_bound;

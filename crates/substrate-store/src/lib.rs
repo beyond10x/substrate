@@ -76,6 +76,17 @@ pub const DEFAULT_OPERATION_MAX_ROW_BYTES: u64 = 1024 * 1024;
 
 pub const DEFAULT_OPERATION_TERMINAL_HEADROOM_BYTES: u64 = 512 * 1024;
 
+/// The longest `terminal_at` a success completion within
+/// [`StoreConfig::success_result_json_bytes`] may carry: an RFC 3339 instant with nanoseconds and
+/// a numeric offset, `2026-11-23T12:34:56.123456789+00:00`.
+pub const OPERATION_TERMINAL_AT_MAX_BYTES: u64 = 35;
+
+/// What the row accounting charges for a recorded response status (`operation_row_bytes`).
+const OPERATION_RESPONSE_STATUS_BYTES: u64 = 8;
+
+/// The bytes of `{"kind":"success","result":}`, the outcome a success result is recorded inside.
+const OPERATION_SUCCESS_OUTCOME_ENVELOPE_BYTES: u64 = 28;
+
 pub const DEFAULT_SNAPSHOT_MAX_WORKSPACES: u64 = 1_024;
 
 pub const DEFAULT_SNAPSHOT_MAX_EXECS: u64 = 2_048;
@@ -114,6 +125,27 @@ impl Default for StoreConfig {
             snapshot_max_provenance_events: DEFAULT_SNAPSHOT_MAX_PROVENANCE_EVENTS,
             snapshot_prune_batch_size: DEFAULT_SNAPSHOT_PRUNE_BATCH_SIZE,
         }
+    }
+}
+
+impl StoreConfig {
+    /// The largest success result, in bytes of compact JSON, that an accepted operation can
+    /// always record as its terminal outcome.
+    ///
+    /// Acceptance reserves [`StoreConfig::operation_terminal_headroom_bytes`] for everything the
+    /// terminal update adds to the row, and a completion that needs more is rolled back (ADR
+    /// 0005). Besides the result, a success adds its `terminal_at`, its response status and the
+    /// outcome's envelope. This is what is left for the result when the completion names the
+    /// resource the acceptance named and its `terminal_at` is at most
+    /// [`OPERATION_TERMINAL_AT_MAX_BYTES`] long. A caller holds a result to this before it
+    /// completes, so the completion cannot fail for size.
+    #[must_use]
+    pub const fn success_result_json_bytes(&self) -> u64 {
+        self.operation_terminal_headroom_bytes.saturating_sub(
+            OPERATION_TERMINAL_AT_MAX_BYTES
+                + OPERATION_RESPONSE_STATUS_BYTES
+                + OPERATION_SUCCESS_OUTCOME_ENVELOPE_BYTES,
+        )
     }
 }
 

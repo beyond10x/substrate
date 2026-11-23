@@ -468,3 +468,6 @@ fn a_check_that_cannot_make_its_scratch_directory_proves_nothing() {
     );
     assert!(names(root).is_empty());
 }
+
+#[path = "fs_ops/result_bound_review.rs"]
+mod result_bound_review;

@@ -20,6 +20,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Security
 
+- A v2 file replacement, edit or patch is written only when its result fits what the operation
+  ledger reserved for it. The daemon decides that before it dispatches the change to any driver,
+  and holds the driver's answer to the reserved bytes of JSON, escaping counted, and to the
+  `maxLength` the result schema publishes, by cutting the diff and marking it `truncated`.
+- A replacement that is refused creates no directory: the parents it asks for are created
+  directly before the write, after its text bounds, its size and its precondition are decided.
+- The server itself refuses an `old_text`, a `new_text` or a patch `text` over its published
+  `maxLength`, and a replacement `content.data` outside the two lengths its schema publishes, as
+  `request.schema-invalid` before dispatch. No wire schema, route or refusal code changes, and
+  the request the daemon sends an executor is unchanged.
+
 - An exec on the Kubernetes namespace driver is held to what it was admitted for until the
   request that creates its Pod is sent (design 34 § 6.3). After every wait the start can sit
   in, the driver computes its capability snapshot again and creates the Pod only when that
