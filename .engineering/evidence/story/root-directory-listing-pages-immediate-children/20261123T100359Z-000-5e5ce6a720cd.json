@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-23T10:03:59Z",
+  "actor": "agent:substrate",
+  "artifact": "story:root-directory-listing-pages-immediate-children",
+  "kind": "story",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:root-directory-page-security",
+    "review": "review-result:root-directory-page-security",
+    "outcome": "no-op"
+  }
+}
