@@ -18,6 +18,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   synthesis of the confinement suite took 28 s (0.86.0: 92 s) and `cargo xtask check-ess` as a
   whole 54 s.
 
+### Fixed
+
+- `b10x-substrate workspace destroy` run again with the same `--operation-id` exits 0 and prints
+  the stored result. It read the workspace before the delete and answered `resource.not-found`.
+  The SDK gains `Client::destroy_workspace`, which destroys by id without that read.
+
 ## [0.24.0] — 2026-11-22
 
 ### Added

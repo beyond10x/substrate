@@ -257,6 +257,27 @@ impl Client {
         })
     }
 
+    /// Destroy a workspace by id, without reading it first.
+    ///
+    /// A retry under the same operation id is answered with the stored outcome, also once the
+    /// workspace is gone and [`Client::get_workspace`] answers `resource.not-found`.
+    pub async fn destroy_workspace(
+        &self,
+        id: impl AsRef<str>,
+        operation_id: Option<String>,
+    ) -> Result<bool, SdkError> {
+        let target = format!("/v1/workspaces/{}", encode_path(id.as_ref()));
+        let (_, absent): (_, substrate_wire::WorkspaceAbsence) = self
+            .mutation(
+                "DELETE",
+                &target,
+                &substrate_wire::EmptyInput {},
+                operation_id,
+            )
+            .await?;
+        Ok(absent.absent)
+    }
+
     pub async fn get_exec(&self, id: impl AsRef<str>) -> Result<Exec, SdkError> {
         let path = format!("/v1/execs/{}", encode_path(id.as_ref()));
         let observed: substrate_wire::Exec = self.get(&path).await?;
@@ -1008,17 +1029,9 @@ impl Workspace {
         self,
         operation_id: impl Into<Option<String>>,
     ) -> Result<bool, SdkError> {
-        let target = format!("/v1/workspaces/{}", encode_path(&self.observed.id));
-        let (_, absent): (_, substrate_wire::WorkspaceAbsence) = self
-            .client
-            .mutation(
-                "DELETE",
-                &target,
-                &substrate_wire::EmptyInput {},
-                operation_id.into(),
-            )
-            .await?;
-        Ok(absent.absent)
+        self.client
+            .destroy_workspace(&self.observed.id, operation_id.into())
+            .await
     }
 
     pub async fn read_file_v2(

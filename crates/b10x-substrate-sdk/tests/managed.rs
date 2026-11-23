@@ -212,10 +212,20 @@ async fn managed_external_daemon_serves_the_typed_workspace_journey() {
             .any(|event| event.transition == "workspace.created")
     );
     let destroy_operation = ulid::Ulid::generate().to_string();
-    workspace
+    let destroyed = workspace.id().to_owned();
+    let absent = workspace
         .destroy_with_operation_id(Some(destroy_operation.clone()))
         .await
         .expect("workspace destroy");
+    // A destroy by id, without a read first, under the same operation id: the stored outcome.
+    assert_eq!(
+        managed
+            .client()
+            .destroy_workspace(&destroyed, Some(destroy_operation.clone()))
+            .await
+            .expect("a retried destroy replays its stored outcome"),
+        absent
+    );
     assert_eq!(
         managed
             .client()
