@@ -189,6 +189,13 @@ impl Store {
         Ok(Reservation::Replay(answer))
     }
 
+    /// The largest success result, in bytes of compact JSON, this store can always record for an
+    /// accepted operation: [`StoreConfig::success_result_json_bytes`] of the open configuration.
+    #[must_use]
+    pub const fn success_result_json_bytes(&self) -> u64 {
+        self.config.success_result_json_bytes()
+    }
+
     pub fn complete_success<T: Serialize>(
         &self,
         scope: &Scope,

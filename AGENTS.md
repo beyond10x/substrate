@@ -416,7 +416,7 @@ already ahead of `0.4.0` — `ExecStartInput::read_only_roots` (the `ExecStartIn
 `crates/substrate-wire/src/lib.rs`) has no `0.4.0` schema — and no bound sits *on* a type as a
 derive attribute. The bounds the schemas state are free constants: the wire crate's own
 `pub const MAX_…`/`MIN_…` items (`grep -c '^pub const \(MAX\|MIN\)_' crates/substrate-wire/src/lib.rs`
-= 56), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
+= 59), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
 host-local literals their enforcement sites hold — `PIPE_MAX_FRAME_BYTES`,
 `PIPE_MAX_INPUT_BYTES` and `PIPE_MAX_QUEUED_FRAMES` in `crates/substrate-daemon/src/app.rs`, and
 `PIPE_FRAME_BYTES` and `PIPE_QUEUED_FRAMES` in `crates/substrate-host/src/process.rs`.
@@ -1133,6 +1133,18 @@ sibling-checkout links, `file://` URLs or editor URIs. `cargo xtask check-links`
 Keep changes reviewable and preserve the direction from composition and products *toward* substrate.
 A contract change must identify affected capabilities, refusal behaviour, observations, events and
 consumer compatibility **before implementation begins**.
+
+**A fix for a defect of a released version states the rule, everywhere that is pushed.** This
+repository is public. Until the fix is on `main`, a commit message, a pull request, a story, a
+changelog entry, a test name and a code comment say what holds after the change and how it was
+proved: the rule, the cases, their counts. They do not say what the released version does, which
+input shows it, or that a case "was red before" with the input named. The detail belongs to the
+operator's private record until the release that carries the fix, whose changelog *Security*
+entry names it (`approval-record:operator-decides-how-security-review-fixes-travel-2026-11-22`).
+A pushed commit message cannot be taken back without a force-push, which no session does: read
+the message for this before the commit. It was broken twice, on 2026-11-22 and 2026-11-23, each
+time by a commit body whose sentence began with what the code did before; the second branch was
+closed and replaced on the operator's decision.
 
 Use the managed `worktree` CLI and keep primary checkouts clean. Existing worktrees and their changes belong to their active owners; never clear another session's lease.
 
