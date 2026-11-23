@@ -1550,6 +1550,7 @@ mod tests {
             "APERTURE_LOOPBACK_ADDRESS",
             "EXECUTION_CAPSULE_HASH_DOMAIN",
             "SESSION_AUTHORITY_TRANSCRIPT_DOMAIN",
+            "WORKSPACE_ROOT_DIRECTORY",
         ];
         let named = source
             .lines()

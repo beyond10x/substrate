@@ -929,7 +929,9 @@ impl IdKind {
 /// each of those is held to what any one segment is: not empty, not `.` or `..`, and without
 /// `/`, `?`, `#`, `%` and control characters. Whether such a segment names a resource is the
 /// daemon's answer. A file path is not an identifier: it fills the route's catch-all through
-/// [`encode_path`], after `substrate_wire::validate_relative_path`.
+/// [`encode_path`], after `substrate_wire::validate_relative_path`. A directory page's path is
+/// held to `substrate_wire::validate_directory_address` instead, which also admits `.`, the
+/// workspace's root (ADR 0052); [`encode_path`] sends that segment as written.
 ///
 /// # Errors
 ///

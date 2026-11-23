@@ -7,6 +7,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The root of a workspace is the directory `.` on the v1 directory page (ADR 0052).
+  `GET /v1/workspaces/{workspace_id}/files/.?mode=directory` lists the root's immediate children
+  in name order with the page's `cursor` and `limit_items`, and its result's `path` is `"."`. A
+  root with more children than one page is listed completely by following the cursor. ADR 0043
+  holds there as in a named directory: an entry the wire cannot name is counted in
+  `x-b10x-omitted-entries` on every page, `.git` is neither listed nor counted, and a symbolic
+  link is listed as a link. `.` is admitted on that page only: a read in file mode, a write, a
+  delete and every v2 file route still refuse it `workspace.path-escape` (422), and the directory
+  page still refuses `a/.`, `./a` and `..`. The namespace driver's workspace keeper serves the
+  same page. No bundle changes: the request and the result validate against the schemas of
+  `substrate-wire/0.27.0`. A daemon or keeper older than this entry answers `/files/.` with
+  `workspace.path-escape`, which a client reads as "no root page". In the Rust SDK
+  `Workspace::read_directory` and `Workspace::read_directory_with_omissions` take `"."`, and
+  `substrate_wire::validate_directory_address` is the rule.
+
 ### Fixed
 
 Four fixes of the v2 changes of one file (design 01, § 3.1, *The v2 changes of one file*). No

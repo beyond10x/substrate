@@ -14,11 +14,11 @@ use substrate_store::{
     WorkspaceObservationWrite, WorkspaceRootHolder, adopt_not_found,
 };
 use substrate_wire::{
-    EmptyInput, ErrorClass, FileEditInput, FileMutationResult, FilePatchInput, FileReadQuery,
-    FileReplaceInput, FileWriteInput, GitBaselineFileQuery, GitChangesQuery, LeaseRenewInput,
-    MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, OMITTED_ENTRIES_HEADER, Success, WorkspaceAdoptInput,
-    WorkspaceCreateInput, WorkspaceKind, WorkspaceOrigin, WorkspaceState, WorkspaceTreeQuery,
-    validate_relative_path,
+    EmptyInput, ErrorClass, FileEditInput, FileMode, FileMutationResult, FilePatchInput,
+    FileReadQuery, FileReplaceInput, FileWriteInput, GitBaselineFileQuery, GitChangesQuery,
+    LeaseRenewInput, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, OMITTED_ENTRIES_HEADER, Success,
+    WorkspaceAdoptInput, WorkspaceCreateInput, WorkspaceKind, WorkspaceOrigin, WorkspaceState,
+    WorkspaceTreeQuery, validate_directory_address, validate_relative_path,
 };
 
 use super::operations::{
@@ -490,14 +490,26 @@ pub(super) async fn workspace_file_read(
     RawQuery(raw_query): RawQuery,
 ) -> Response {
     let request_id = request_id(&app, &headers);
-    if let Err(error) = validate_relative_path(&path) {
+    let query = serde_urlencoded::from_str::<FileReadQuery>(raw_query.as_deref().unwrap_or(""))
+        .ok()
+        .filter(|query| query.validate_shape().is_ok());
+    // The path is still answered before the query. Only a well-formed directory page is held to
+    // the directory rule, which admits `.`, the workspace's root (ADR 0052); every other request
+    // on this route, a malformed one included, refuses `.` as it always did.
+    let directory_page = query
+        .as_ref()
+        .is_some_and(|query| query.mode == FileMode::Directory);
+    let path_checked = if directory_page {
+        validate_directory_address(&path)
+    } else {
+        validate_relative_path(&path)
+    };
+    if let Err(error) = path_checked {
         return path_refusal(&request_id, None, &error);
     }
-    let query: FileReadQuery =
-        match serde_urlencoded::from_str::<FileReadQuery>(raw_query.as_deref().unwrap_or("")) {
-            Ok(value) if value.validate_shape().is_ok() => value,
-            _ => return schema_invalid(&request_id, None, "query"),
-        };
+    let Some(query) = query else {
+        return schema_invalid(&request_id, None, "query");
+    };
     let scope = app.scope(&identity);
     let _workspace_guard = app.lock_workspace(&scope, &workspace_id).await;
     let root_name = match app.admit_workspace(&scope, &workspace_id).await {

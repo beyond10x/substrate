@@ -3372,6 +3372,12 @@ async fn check_http_journey(
         passed += check_process_event_readers_vector(daemon).await;
     }
     passed += check_omitted_entries(daemon, &workspace).await;
+    // The root is empty again here, which the root page's cases start from (ADR 0052). The
+    // wire-only cases leave one empty directory, which only the host can remove.
+    passed += check_root_page(daemon, &workspace).await;
+    std::fs::remove_dir(daemon.workspaces.join(&workspace).join(ROOT_PAGE_DIRECTORY))
+        .expect("remove the directory the root page's cases left");
+    passed += check_root_page_host_entries(daemon, &workspace).await;
 
     let (status, replay) = daemon
         .call(
@@ -7567,12 +7573,522 @@ async fn check_confinement_requires(
 }
 
 // ---------------------------------------------------------------------------------------------
+// The workspace root on the v1 directory page (ADR 0052)
+// ---------------------------------------------------------------------------------------------
+
+/// The files [`check_root_page`] writes into the root, in name order around
+/// [`ROOT_PAGE_DIRECTORY`].
+const ROOT_PAGE_FILES: [&str; 6] = [
+    "root-a.txt",
+    "root-b.txt",
+    "root-c.txt",
+    "root-e.txt",
+    "root-f.txt",
+    "root-g.txt",
+];
+/// The directory [`check_root_page`] makes in the root and leaves there, empty: no file route
+/// removes a directory.
+const ROOT_PAGE_DIRECTORY: &str = "root-d";
+/// The file beneath [`ROOT_PAGE_DIRECTORY`]: a descendant of the root that is not its child.
+const ROOT_PAGE_NESTED: &str = "root-d/inner.txt";
+/// The page size [`check_root_page`] asks for: its seven children are more than two such pages.
+const ROOT_PAGE_LIMIT: u32 = 3;
+
+/// Every page of one root listing, in the order the cursor gave them.
+struct RootListing {
+    /// The items of every page, in the order answered.
+    items: Vec<Value>,
+    /// Each page's `x-b10x-omitted-entries` header.
+    omitted: Vec<Option<String>>,
+    /// Each page's `next_cursor`, the last page's `null` left out.
+    cursors: Vec<String>,
+}
+
+impl RootListing {
+    fn names(&self) -> Vec<&str> {
+        self.items
+            .iter()
+            .map(|item| item["name"].as_str().expect("entry name"))
+            .collect()
+    }
+}
+
+/// The address of one page of the workspace's root: the path `.` in directory mode.
+fn root_page(workspace: &str, limit: u32, cursor: Option<&str>) -> String {
+    let cursor = cursor.map_or_else(String::new, |cursor| format!("&cursor={cursor}"));
+    format!("/v1/workspaces/{workspace}/files/.?mode=directory&limit_items={limit}{cursor}")
+}
+
+/// Lists the root by following `next_cursor` from the first page to the page without one. Every
+/// page is a directory page of this workspace whose `path` is `.`, holds at most `limit` items,
+/// and is full when another page follows.
+async fn list_root(daemon: &Daemon, workspace: &str, limit: u32, request_id: &str) -> RootListing {
+    let mut listing = RootListing {
+        items: Vec::new(),
+        omitted: Vec::new(),
+        cursors: Vec::new(),
+    };
+    let mut cursor: Option<String> = None;
+    loop {
+        let (status, headers, page) = daemon
+            .get_with_response_headers(&root_page(workspace, limit, cursor.as_deref()), request_id)
+            .await;
+        assert_eq!(status, 200, "the root page: {page}");
+        let result = &page["result"];
+        assert_eq!(result["kind"], "directory", "{page}");
+        assert_eq!(result["workspace"], workspace, "{page}");
+        assert_eq!(result["path"], ".", "the root page names its path: {page}");
+        let items = result["items"].as_array().expect("page items");
+        let limit = usize::try_from(limit).expect("limit fits usize");
+        assert!(items.len() <= limit, "a page holds at most its limit");
+        listing.items.extend(items.iter().cloned());
+        listing
+            .omitted
+            .push(headers.get(OMITTED_ENTRIES_HEADER).cloned());
+        let Some(next) = result["next_cursor"].as_str() else {
+            assert!(result["next_cursor"].is_null(), "{page}");
+            return listing;
+        };
+        assert_eq!(items.len(), limit, "a page with a successor is full");
+        assert!(
+            listing.cursors.len() < 16,
+            "the root page's cursor does not reach an end"
+        );
+        listing.cursors.push(next.to_owned());
+        cursor = Some(next.to_owned());
+    }
+}
+
+/// ADR 0052 on the wire alone, so every lane runs it: the root of a workspace is the path `.` on
+/// the v1 directory page, paged by cursor like any directory, and `.` is refused by name on every
+/// other file route.
+///
+/// The root must be empty when this starts. It ends holding [`ROOT_PAGE_DIRECTORY`], empty,
+/// because no file route removes a directory.
+#[allow(clippy::too_many_lines)] // One root, in the order its entries come and go.
+async fn check_root_page(daemon: &Daemon, workspace: &str) -> usize {
+    let mut passed = 0;
+
+    // An empty root is one empty page without a cursor and without the omission header.
+    let empty = list_root(daemon, workspace, ROOT_PAGE_LIMIT, "req_root_empty").await;
+    assert_eq!(empty.items, Vec::<Value>::new(), "an empty root");
+    assert_eq!(empty.omitted, [None], "an empty root omits nothing");
+    passed += 1;
+
+    for (index, name) in ROOT_PAGE_FILES.iter().enumerate() {
+        let (status, written) = daemon
+            .call(
+                "PUT",
+                &format!("/v1/workspaces/{workspace}/files/{name}"),
+                &format!("req_root_write_{index}"),
+                Some(&mutation(
+                    &format!("01JADR0052ROOTWRITE000{index}"),
+                    &json!({ "content": { "encoding": "base64", "data": BASE64.encode(name) } }),
+                )),
+            )
+            .await;
+        assert_eq!(status, 200, "{written}");
+    }
+    let (status, nested) = daemon
+        .call(
+            "PUT",
+            &format!("/v2/workspaces/{workspace}/files/{ROOT_PAGE_NESTED}"),
+            "req_root_write_nested",
+            Some(&mutation(
+                "01JADR0052ROOTWRITENESTED",
+                &json!({
+                    "content": { "encoding": "base64", "data": "aW5uZXI=" },
+                    "expected": { "state": "absent" },
+                    "create_parents": true
+                }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{nested}");
+
+    // Seven children at three a page: three pages, complete, in name order, each child once, and
+    // the file beneath the directory on none of them.
+    let listed = list_root(daemon, workspace, ROOT_PAGE_LIMIT, "req_root_pages").await;
+    assert_eq!(
+        listed.names(),
+        [
+            "root-a.txt",
+            "root-b.txt",
+            "root-c.txt",
+            ROOT_PAGE_DIRECTORY,
+            "root-e.txt",
+            "root-f.txt",
+            "root-g.txt",
+        ],
+        "the root's immediate children in name order, each once"
+    );
+    assert_eq!(listed.omitted.len(), 3, "seven children at three a page");
+    assert_eq!(listed.items[0]["kind"], "file", "{:?}", listed.items);
+    assert_eq!(listed.items[3]["kind"], "directory", "{:?}", listed.items);
+    let named = daemon
+        .call(
+            "GET",
+            &format!(
+                "/v1/workspaces/{workspace}/files/{ROOT_PAGE_DIRECTORY}?mode=directory&limit_items=3"
+            ),
+            "req_root_named_directory",
+            None,
+        )
+        .await;
+    assert_eq!(named.0, 200, "{}", named.1);
+    assert_eq!(
+        named.1["result"]["items"],
+        json!([{ "name": "inner.txt", "kind": "file", "size": 5 }]),
+        "the descendant is on its own directory's page"
+    );
+    passed += 1;
+
+    // `.` is the root on the directory page only. A read in file mode refuses it as before.
+    expect_error_at(
+        &daemon
+            .call(
+                "GET",
+                &format!("/v1/workspaces/{workspace}/files/.?mode=file&offset=0&limit_bytes=16"),
+                "req_root_file_mode",
+                None,
+            )
+            .await,
+        422,
+        "workspace.path-escape",
+        "path",
+    );
+    passed += 1;
+
+    // A write to `.` is refused before dispatch and recorded as refused.
+    expect_error_at(
+        &daemon
+            .call(
+                "PUT",
+                &format!("/v1/workspaces/{workspace}/files/."),
+                "req_root_write_dot",
+                Some(&mutation(
+                    "01JADR0052ROOTWRITEDOT01",
+                    &json!({ "content": { "encoding": "base64", "data": "aGVsbG8=" } }),
+                )),
+            )
+            .await,
+        422,
+        "workspace.path-escape",
+        "path",
+    );
+    assert_eq!(
+        ledger_row(
+            daemon,
+            "01JADR0052ROOTWRITEDOT01",
+            "req_root_write_dot_ledger"
+        )
+        .await["state"],
+        "refused"
+    );
+    passed += 1;
+
+    // So is a delete of `.`.
+    expect_error_at(
+        &daemon
+            .call(
+                "DELETE",
+                &format!("/v1/workspaces/{workspace}/files/."),
+                "req_root_delete_dot",
+                Some(&mutation("01JADR0052ROOTDELETEDOT1", &json!({}))),
+            )
+            .await,
+        422,
+        "workspace.path-escape",
+        "path",
+    );
+    assert_eq!(
+        ledger_row(
+            daemon,
+            "01JADR0052ROOTDELETEDOT1",
+            "req_root_delete_dot_ledger"
+        )
+        .await["state"],
+        "refused"
+    );
+    passed += 1;
+
+    // Every v2 file route refuses `.`: the two reads, the directory query included because the v2
+    // route has no directory page, the Git baseline read, and the three mutations.
+    for (index, query) in [
+        "files/.?mode=file&offset=0&limit_bytes=16",
+        "files/.?mode=directory&limit_items=3",
+        "git/baseline/.?max_bytes=16",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        expect_error_at(
+            &daemon
+                .call(
+                    "GET",
+                    &format!("/v2/workspaces/{workspace}/{query}"),
+                    &format!("req_root_v2_read_{index}"),
+                    None,
+                )
+                .await,
+            422,
+            "workspace.path-escape",
+            "path",
+        );
+    }
+    let absent_digest = sha256_hex(b"");
+    for (index, (method, route, input)) in [
+        (
+            "PUT",
+            "files",
+            json!({
+                "content": { "encoding": "base64", "data": "aGVsbG8=" },
+                "expected": { "state": "absent" },
+                "create_parents": true
+            }),
+        ),
+        (
+            "POST",
+            "file-edits",
+            json!({
+                "expected_sha256": absent_digest,
+                "old_text": "old",
+                "new_text": "new",
+                "match_policy": "exact"
+            }),
+        ),
+        (
+            "POST",
+            "file-patches",
+            json!({
+                "expected_sha256": absent_digest,
+                "edits": [{ "kind": "insert_before", "line": 1, "text": "new\n" }]
+            }),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let operation = format!("01JADR0052ROOTV2MUTATE0{index}");
+        expect_error_at(
+            &daemon
+                .call(
+                    method,
+                    &format!("/v2/workspaces/{workspace}/{route}/."),
+                    &format!("req_root_v2_mutation_{index}"),
+                    Some(&mutation(&operation, &input)),
+                )
+                .await,
+            422,
+            "workspace.path-escape",
+            "path",
+        );
+        assert_eq!(
+            ledger_row(
+                daemon,
+                &operation,
+                &format!("req_root_v2_mutation_{index}_ledger")
+            )
+            .await["state"],
+            "refused",
+            "{route}"
+        );
+    }
+    passed += 1;
+
+    // On the directory page `.` is the whole path or it is refused: a `.` or `..` component is
+    // still an escape, beside a directory that exists.
+    for (index, path) in [
+        format!("{ROOT_PAGE_DIRECTORY}/."),
+        format!("./{ROOT_PAGE_DIRECTORY}"),
+        "./.".to_owned(),
+        "..".to_owned(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        expect_error_at(
+            &daemon
+                .call(
+                    "GET",
+                    &format!(
+                        "/v1/workspaces/{workspace}/files/{path}?mode=directory&limit_items=3"
+                    ),
+                    &format!("req_root_dotted_{index}"),
+                    None,
+                )
+                .await,
+            422,
+            "workspace.path-escape",
+            "path",
+        );
+    }
+    passed += 1;
+
+    // A cursor past the end is refused by name. The cursor is the one the second page gave, which
+    // names the seventh child; the root then shrinks to one child, so it points past the end.
+    let past = listed.cursors[1].clone();
+    for (index, name) in ROOT_PAGE_FILES
+        .iter()
+        .copied()
+        .chain([ROOT_PAGE_NESTED])
+        .enumerate()
+    {
+        let (status, deleted) = daemon
+            .call(
+                "DELETE",
+                &format!("/v1/workspaces/{workspace}/files/{name}"),
+                &format!("req_root_delete_{index}"),
+                Some(&mutation(
+                    &format!("01JADR0052ROOTDELETE00{index}"),
+                    &json!({}),
+                )),
+            )
+            .await;
+        assert_eq!(status, 200, "{deleted}");
+        assert_eq!(deleted["result"]["absent"], true, "{deleted}");
+    }
+    let (status, headers, refused) = daemon
+        .get_with_response_headers(
+            &root_page(workspace, ROOT_PAGE_LIMIT, Some(&past)),
+            "req_root_cursor_past",
+        )
+        .await;
+    expect_error_at(
+        &(status, refused),
+        422,
+        "workspace.cursor-invalid",
+        "cursor",
+    );
+    assert_eq!(
+        headers.get(OMITTED_ENTRIES_HEADER),
+        None,
+        "a refused cursor names no omission"
+    );
+    let left = list_root(daemon, workspace, ROOT_PAGE_LIMIT, "req_root_left").await;
+    assert_eq!(left.names(), [ROOT_PAGE_DIRECTORY]);
+    passed += 1;
+    passed
+}
+
+/// How many files [`check_root_page_host_entries`] puts in the root: more than two pages of the
+/// largest page a client may ask for, `MAX_LIST_ITEMS` (1,000).
+const ROOT_PAGE_MANY: usize = 2_001;
+/// The largest directory page, `MAX_LIST_ITEMS`.
+const ROOT_PAGE_MAXIMUM: u32 = 1_000;
+
+/// ADR 0052 decision 3, with entries only the host can make: ADR 0043's rules hold at the root.
+/// A root of 2,001 files is listed completely at 1,000 a page, where the recursive tree stops at
+/// 1,000 entries; a FIFO is counted on every page; a symbolic link is listed as a link and not
+/// followed; `.git` is neither listed nor counted.
+///
+/// The root must be empty when this starts, and is empty again when it returns.
+async fn check_root_page_host_entries(daemon: &Daemon, workspace: &str) -> usize {
+    let host = daemon.workspaces.join(workspace);
+    let files: Vec<String> = (0..ROOT_PAGE_MANY)
+        .map(|index| format!("f{index:04}.txt"))
+        .collect();
+    for name in &files {
+        std::fs::write(host.join(name), b"").expect("root file");
+    }
+    let fifo = host.join("a-fifo");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o644))
+        .unwrap_or_else(|error| panic!("mkfifo {}: {error}", fifo.display()));
+    let git = host.join(".git");
+    std::fs::create_dir(&git).expect("root .git");
+    std::fs::write(git.join("config"), b"control data").expect("root .git/config");
+    let outside = TempDir::with_prefix("substrate-root-link-").expect("link target");
+    std::fs::write(outside.path().join("beyond.txt"), b"outside").expect("file beyond the link");
+    let link = host.join("z-link");
+    std::os::unix::fs::symlink(outside.path(), &link).expect("root symlink");
+    let mut passed = 0;
+
+    // Complete at the largest page: every file and the link, in name order, each once.
+    let listed = list_root(daemon, workspace, ROOT_PAGE_MAXIMUM, "req_root_many").await;
+    let names = listed.names();
+    let expected: Vec<&str> = files.iter().map(String::as_str).chain(["z-link"]).collect();
+    let differs = names
+        .iter()
+        .zip(&expected)
+        .position(|(listed, expected)| listed != expected);
+    assert_eq!(
+        (names.len(), differs),
+        (expected.len(), None),
+        "the root's {} children, complete and in name order",
+        expected.len()
+    );
+    assert_eq!(listed.omitted.len(), 3, "2,002 entries at 1,000 a page");
+    passed += 1;
+
+    // The FIFO is on no page and counted on every page (ADR 0043 decision 3).
+    assert_eq!(
+        listed.omitted,
+        [
+            Some("1".to_owned()),
+            Some("1".to_owned()),
+            Some("1".to_owned())
+        ],
+        "every page of the root names its one omitted entry"
+    );
+    passed += 1;
+
+    // The link is listed as a link, and the page of its name refuses to follow it.
+    assert_eq!(
+        listed.items.last(),
+        Some(&json!({ "name": "z-link", "kind": "symlink", "size": null })),
+        "a symbolic link at the root is listed as a link"
+    );
+    expect_error(
+        &daemon
+            .call(
+                "GET",
+                &format!("/v1/workspaces/{workspace}/files/z-link?mode=directory&limit_items=10"),
+                "req_root_link_followed",
+                None,
+            )
+            .await,
+        422,
+        "workspace.path-escape",
+    );
+    passed += 1;
+
+    // `.git` is neither listed nor counted: with the FIFO gone and `.git` still there, the root
+    // page carries no omission header.
+    assert!(!names.contains(&".git"), "`.git` is on no page of the root");
+    std::fs::remove_file(&fifo).expect("remove the FIFO");
+    let (status, headers, page) = daemon
+        .get_with_response_headers(
+            &root_page(workspace, ROOT_PAGE_MAXIMUM, None),
+            "req_root_git_uncounted",
+        )
+        .await;
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        git.join("config").exists(),
+        "the fixture's `.git` is still there"
+    );
+    assert_eq!(
+        headers.get(OMITTED_ENTRIES_HEADER),
+        None,
+        "`.git` is left out by policy and is not counted"
+    );
+    passed += 1;
+
+    for name in &files {
+        std::fs::remove_file(host.join(name)).expect("remove a root file");
+    }
+    std::fs::remove_file(&link).expect("remove the root symlink");
+    std::fs::remove_dir_all(&git).expect("remove the root .git");
+    passed
+}
+
+// ---------------------------------------------------------------------------------------------
 // The lane
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 124;
-const DELEGATED_CASES: usize = 189;
+const PORTABLE_CASES: usize = 136;
+const DELEGATED_CASES: usize = 201;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
@@ -7675,8 +8191,10 @@ const NAMESPACE_SERVING: Duration = Duration::from_mins(4);
 const NAMESPACE_DESTROY: Duration = Duration::from_mins(3);
 /// The cases the namespace lane executes, selected by the facts the driver publishes. Its exec
 /// cases are absent, never counted: no exec is admitted while `confinement.no-egress` is absent,
-/// which it is on every cluster this lane has run on (design 34 § 10.3 O3).
-const NAMESPACE_CASES: usize = 56;
+/// which it is on every cluster this lane has run on (design 34 § 10.3 O3). Of ADR 0052's root
+/// page it runs the eight cases the wire alone can set up ([`check_root_page`]); a FIFO, a
+/// symbolic link and `.git` at the root are absent here, because no route of this lane makes one.
+const NAMESPACE_CASES: usize = 64;
 
 /// The shipped daemon over the Kubernetes namespace driver, through its Unix socket: the same
 /// wire the other lanes assert, against a cluster. Unset, the lane is absent: nothing runs and
@@ -7747,6 +8265,9 @@ async fn check_namespace_journey(daemon: &Daemon) -> usize {
     executed += 1;
 
     executed += check_promoted_route_inventory(daemon, &workspace, false).await;
+    // The keeper serves the root page (ADR 0052). The workspace is new, so its root is empty; the
+    // one empty directory these cases leave goes with the workspace.
+    executed += check_root_page(daemon, &workspace).await;
 
     let (status, replay) = daemon
         .call(
