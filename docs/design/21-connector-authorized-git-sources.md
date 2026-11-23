@@ -113,11 +113,16 @@ the baseline once, however often the baseline names it, and holds these bounds:
   each entry of the fetched pack is stored behind: one step for each entry, from the entry's
   own header and the pack's index, with ten bytes kept for each. A pack with an entry stored
   behind more than 4,095 entries, the deepest chain `git pack-objects --depth` writes, is
-  refused `workspace.git-storage-limit`. So is a baseline whose commit, trees and file objects
-  are stored behind more than 64 entries together for each path the inode limit admits; a pack
-  of Git's default depth, 50, is within that with one object for each such path. A pack with
-  an entry stored behind what is no entry of it, or behind itself, is not one a fetch writes:
-  the create ends `workspace.git-checkout-failed`.
+  refused `workspace.git-storage-limit` before the header of any object is read. A baseline
+  whose commit, trees and file objects are stored behind more than 64 entries together for
+  each path the inode limit admits is refused the same way before anything is checked out:
+  the check ends before it reads the header that would take it over that bound. A pack of
+  Git's default depth, 50, is within the bound with one object for each such path. A pack
+  with an entry stored behind what is no entry of it, or behind itself, is refused
+  `workspace.git-checkout-failed`. So is a pack whose index holds an id twice or out of
+  ascending order, or whose fan-out table is not the count of its ids' first bytes: with ids
+  that ascend, each once, and that table, the Git library and the reading of the chains find
+  the same entry by an id.
 - **Nesting.** A baseline whose directories nest deeper than 1,024 is refused
   `workspace.git-path-unrepresentable`.
 - **Names and path lengths.** A name longer than 255 bytes, a name that holds a `/`, or a path
@@ -127,12 +132,14 @@ the baseline once, however often the baseline names it, and holds these bounds:
 - **Object sizes.** While the fetch indexes the pack it received, it allocates for one object
   no more than the byte limit: an object that states more, whether the pack stores it as it is
   or behind another entry, ends the fetch `workspace.git-storage-limit` before those bytes are
-  allocated. The fetch inflates each entry once as it arrives, to find where it ends, and keeps
-  none of those bytes. The check then reads the header of the commit, of each tree and of each
-  file object before the object: one that states more than the byte limit is not read and is
-  refused `workspace.git-storage-limit`. A tree is also not read when its header states more
-  than 283 bytes for each path the inode limit admits, and is refused when it states more than
-  283 bytes for each entry it holds, the most one entry with a 255-byte name takes.
+  allocated, and an allocation within the limit that the host refuses carries the same name.
+  The fetch inflates each entry as it arrives and again when it computes the ids; the limit
+  bounds what it allocates for one object. The check then reads the header of the commit, of
+  each tree and of each file object before the object: one that states more than the byte
+  limit is not read and is refused `workspace.git-storage-limit`. A tree is also not read when
+  its header states more than 283 bytes for each path the inode limit admits, and is refused
+  when it states more than 283 bytes for each entry it holds, the most one entry with a
+  255-byte name takes.
 - **Paths.** A baseline that names more paths than the inode limit is refused
   `workspace.git-storage-limit`. Every entry of every tree counts once for each place the
   baseline names it, a directory that holds nothing included. The check also refuses as soon as

@@ -58,7 +58,7 @@ pub(super) enum Unadmitted {
     /// The commit is absent from the object store, is no commit, or is not what its id names.
     Commit,
     /// A tree or a file object of the baseline is absent or is not what the baseline names
-    /// it as; or a pack of the object store is not one a fetch wrote ([`Chains::read`]).
+    /// it as; or [`Chains::read`] cannot read a pack of the object store or its index.
     Object,
     /// An object of the baseline or its files together are over the byte bound; or the
     /// baseline names more paths than the inode limit, or its paths together or one of its
@@ -475,9 +475,11 @@ impl Check<'_> {
 /// tree it has left it keeps by the tree's id, relative to the tree. It reads the header of
 /// each file and link object once, and keeps the bytes it states by the object's id. It keeps
 /// the directories it is in as a list, never longer than the nesting bound, and of the
-/// directories it has yet to enter their ids, never more than the inode limit. So its work
-/// and what it keeps follow the objects of the baseline up to that limit and the entries of
-/// the fetched pack: not the paths those objects name, and not how the pack stores them.
+/// directories it has yet to enter their ids, never more than the inode limit. So what it
+/// keeps and its reads of object headers follow the objects of the baseline up to that limit
+/// and the entries of the fetched pack, not the paths those objects name. Reading a tree
+/// whole applies each entry the pack stores it behind: at most [`chains::MAX_CHAIN`], and in
+/// a pack the fetch of a create indexed each of at most `limit.max_bytes`.
 pub(super) fn check_baseline_keeping(
     repository: &git2::Repository,
     commit: Oid,

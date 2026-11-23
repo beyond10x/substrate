@@ -2,6 +2,7 @@
 //! driver and the real TLS/upload-pack peer.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -580,4 +581,85 @@ fn an_object_that_states_more_than_the_byte_limit_ends_the_fetch_before_it_is_al
             .len(),
         u64::try_from(FILE).expect("file length")
     );
+}
+
+/// An observation takes one of the places the driver keeps for file operations, and waits
+/// for no other observation. The commit-id file of `ws_b` is a FIFO here: an observation of
+/// `ws_b` takes its place and then waits there for its commit id, until the case writes it.
+/// Opening the FIFO for writing returns when the observation has opened it for reading, which
+/// is how the case knows that the observation is in its place; no time is waited for. One
+/// place is taken then. With every other place but one held, both observations of `ws_a`
+/// answer while the observation of `ws_b` still waits. Once its commit id is written, that
+/// one answers too. Each of the two observations is held that way once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_observation_takes_one_place_and_waits_for_no_other_observation() {
+    let (source, commit) = repository(0);
+    let server = Server::start(source.path(), Mode::V2);
+    let root = tempdir().expect("workspace root");
+    let driver = driver(root.path(), &server);
+    for name in ["ws_a", "ws_b"] {
+        served(
+            driver
+                .create_workspace_authorized(name, name, &input(&server, commit), Some(AUTHORITY))
+                .await,
+        );
+    }
+    let fifo = baselines(root.path()).join("ws_b");
+    std::fs::remove_file(&fifo).expect("commit-id file removed");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).expect("FIFO");
+    let places = driver.blocking_slots.available_permits();
+
+    for held_observation in ["changes", "baseline file"] {
+        let observing = Arc::clone(&driver);
+        let observation = tokio::spawn(async move {
+            if held_observation == "changes" {
+                observing
+                    .read_workspace_git_changes_v2("ws_b", "ws_b", &QUERY)
+                    .await
+                    .map(|_| ())
+            } else {
+                observing
+                    .read_workspace_git_baseline_file_v2("ws_b", "ws_b", "README.md", 1024)
+                    .await
+                    .map(|_| ())
+            }
+        });
+        let opened = fifo.clone();
+        let mut commit_id = tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new().write(true).open(opened)
+        })
+        .await
+        .expect("the FIFO is opened")
+        .expect("the FIFO, open for writing");
+        assert_eq!(
+            driver.blocking_slots.available_permits(),
+            places - 1,
+            "{held_observation}: the places one observation holds"
+        );
+        let others = Arc::clone(&driver.blocking_slots)
+            .acquire_many_owned(u32::try_from(places - 2).expect("places"))
+            .await
+            .expect("every other place but one");
+
+        let (changes, file) = observe(&driver).await;
+
+        assert_eq!(changes, Vec::new(), "{held_observation}");
+        assert!(file.is_some(), "{held_observation}: the baseline file");
+        assert!(
+            !observation.is_finished(),
+            "{held_observation}: the observation ended without its commit id"
+        );
+        drop(others);
+        commit_id
+            .write_all(format!("{commit}\n").as_bytes())
+            .expect("commit id written");
+        drop(commit_id);
+        let answered = observation.await.expect("observation");
+        assert_eq!(
+            answered.map_err(|error| error.code),
+            Ok(()),
+            "{held_observation}"
+        );
+    }
+    assert_eq!(driver.blocking_slots.available_permits(), places);
 }

@@ -118,11 +118,39 @@ fn id(number: u8) -> Oid {
     Oid::from_bytes(&[number; 20]).expect("id")
 }
 
+/// For each first byte, how many of `ids` begin with it or with a lower one: the fan-out table
+/// of an index that holds them.
+fn counted(ids: &[[u8; 20]]) -> [u32; 256] {
+    let mut table = [0_u32; 256];
+    for (first_byte, upto) in table.iter_mut().enumerate() {
+        let count = ids
+            .iter()
+            .filter(|id| usize::from(id[0]) <= first_byte)
+            .count();
+        *upto = u32::try_from(count).expect("count");
+    }
+    table
+}
+
 /// An object store whose one pack holds `entries` in this order, each an empty object, and
 /// the index of that pack: the entry at place `n` has the id of `n` repeated twenty times.
 /// The index is written here and names every entry at its offset, whatever the entry is
-/// stored behind, as no fetch writes one.
+/// stored behind.
 fn object_store_of(entries: &[Behind]) -> tempfile::TempDir {
+    let ids: Vec<[u8; 20]> = (0..entries.len())
+        .map(|number| [u8::try_from(number).expect("fewer than 256 entries"); 20])
+        .collect();
+    object_store_with(entries, &ids, &counted(&ids))
+}
+
+/// The object store of [`object_store_of`] with an index that holds `ids` in this order, the
+/// id at place `n` for the entry at place `n`, and the fan-out table `table`.
+fn object_store_with(
+    entries: &[Behind],
+    ids: &[[u8; 20]],
+    table: &[u32; 256],
+) -> tempfile::TempDir {
+    assert_eq!(entries.len(), ids.len(), "one id for each entry");
     let objects = tempdir().expect("object store");
     let mut pack = b"PACK".to_vec();
     pack.extend(2_u32.to_be_bytes());
@@ -149,12 +177,11 @@ fn object_store_of(entries: &[Behind]) -> tempfile::TempDir {
     pack.extend([0; 20]);
     let mut index = b"\xfftOc".to_vec();
     index.extend(2_u32.to_be_bytes());
-    for first_byte in 0..=u8::MAX {
-        let upto = entries.len().min(usize::from(first_byte) + 1);
-        index.extend(u32::try_from(upto).expect("count").to_be_bytes());
+    for upto in table {
+        index.extend(upto.to_be_bytes());
     }
-    for number in 0..entries.len() {
-        index.extend([u8::try_from(number).expect("fewer than 256 entries"); 20]);
+    for id in ids {
+        index.extend(id);
     }
     index.extend(vec![0; 4 * entries.len()]);
     for offset in offsets {
@@ -195,9 +222,9 @@ fn the_chain_of_an_entry_is_followed_by_id_and_by_distance_wherever_its_base_lie
 }
 
 /// A pack with an entry stored behind what is no entry of it, or with entries stored behind
-/// each other in a circle, is not one a fetch wrote: it is refused as an object that cannot
-/// be read, which a create names `workspace.git-checkout-failed`, and its chains are not
-/// followed further. The pass ends for each of them.
+/// each other in a circle, is refused as an object that cannot be read, which a create names
+/// `workspace.git-checkout-failed`, and its chains are not followed further. The pass ends
+/// for each of them.
 #[test]
 fn a_pack_with_an_entry_stored_behind_no_entry_or_behind_itself_is_refused() {
     let refused = |entries: &[Behind]| {
@@ -229,5 +256,104 @@ fn a_pack_with_an_entry_stored_behind_no_entry_or_behind_itself_is_refused() {
         refused(&[Behind::Id(0)]),
         Some(Unadmitted::Object),
         "itself, by its id"
+    );
+}
+
+/// Five ids for an index, ascending: one that begins with the lowest first byte, two that
+/// share a first byte, one after first bytes no id begins with, and one that begins with the
+/// highest first byte.
+fn five_ids() -> [[u8; 20]; 5] {
+    let id = |first: u8, last: u8| {
+        let mut id = [first; 20];
+        id[19] = last;
+        id
+    };
+    [
+        id(0x00, 0),
+        id(0x10, 1),
+        id(0x10, 2),
+        id(0x40, 0),
+        id(0xff, 0),
+    ]
+}
+
+/// The pass and the Git library find an entry by its id in the index of the pack, between the
+/// two places the fan-out table gives for the id's first byte. An index that holds its ids in
+/// ascending order, each once, with a table that states for each first byte how many ids
+/// begin with it or with a lower one, is read, and the pass finds the chain of each id: also
+/// of two ids that share a first byte, and of ids before and after first bytes no id begins
+/// with. Each of the five entries here is stored behind the one before it.
+#[test]
+fn an_index_whose_table_counts_its_ids_in_ascending_order_is_read() {
+    let ids = five_ids();
+    let table = counted(&ids);
+    assert_eq!(
+        [0x00, 0x0f, 0x10, 0x3f, 0x40, 0xfe, 0xff].map(|first_byte: usize| table[first_byte]),
+        [1, 1, 3, 3, 4, 4, 5]
+    );
+    // An empty object takes eleven bytes behind its header: one byte for an entry the pack
+    // stores as it is, two for one stored behind another.
+    let entries = [
+        Behind::Nothing,
+        Behind::Bytes(12),
+        Behind::Bytes(13),
+        Behind::Bytes(13),
+        Behind::Bytes(13),
+    ];
+    let objects = object_store_with(&entries, &ids, &table);
+
+    let chains = Chains::read(objects.path()).expect("an index the pass reads");
+
+    assert_eq!(
+        ids.map(|id| chains.behind(Oid::from_bytes(&id).expect("id"))),
+        [0, 1, 2, 3, 4]
+    );
+}
+
+/// An index in which a search for an id could end at another entry than the one of that id,
+/// or at none, is refused as a pack that cannot be read, which a create names
+/// `workspace.git-checkout-failed`: one whose fan-out table counts one id too few for a first
+/// byte two ids begin with, one whose table counts an id for a first byte before the id's
+/// own, one that holds two ids out of order, and one that holds an id twice. Each differs in
+/// that one thing from an index that is read.
+#[test]
+fn an_index_whose_table_does_not_count_its_ids_or_whose_ids_do_not_ascend_is_refused() {
+    let ids = five_ids();
+    let read = |ids: &[[u8; 20]; 5], table: &[u32; 256]| {
+        let objects = object_store_with(&[Behind::Nothing; 5], ids, table);
+        Chains::read(objects.path()).map(|_| ())
+    };
+    assert_eq!(read(&ids, &counted(&ids)), Ok(()));
+
+    let mut one_too_few = counted(&ids);
+    one_too_few[0x10] = 2;
+    assert_eq!(
+        read(&ids, &one_too_few),
+        Err(Unadmitted::Object),
+        "a first byte two ids begin with counts one of them"
+    );
+
+    let mut one_too_early = counted(&ids);
+    one_too_early[0x3f] = 4;
+    assert_eq!(
+        read(&ids, &one_too_early),
+        Err(Unadmitted::Object),
+        "a first byte no id begins with counts the id after it"
+    );
+
+    let mut out_of_order = ids;
+    out_of_order.swap(1, 2);
+    assert_eq!(
+        read(&out_of_order, &counted(&ids)),
+        Err(Unadmitted::Object),
+        "two ids out of order"
+    );
+
+    let mut twice = ids;
+    twice[2] = twice[1];
+    assert_eq!(
+        read(&twice, &counted(&ids)),
+        Err(Unadmitted::Object),
+        "an id twice"
     );
 }

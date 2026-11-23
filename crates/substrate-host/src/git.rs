@@ -2302,6 +2302,7 @@ mod tests {
     mod chain_cases;
     mod guard_cases;
     mod review5_cases;
+    mod review6_cases;
     pub(super) mod shape_cases;
     mod store_cases;
     pub(super) mod store_failure_cases;

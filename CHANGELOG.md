@@ -76,12 +76,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     `workspace.git-baseline-read-failed`. No observation writes, removes or replaces a store,
     and the driver never reads a file a workspace wrote as a Git object, a pack or the index
     of a pack.
-  - A Git create whose fetched pack stores an object behind more than 4,095 entries, or the
-    objects of its baseline behind more than 64 entries together for each path its inode limit
-    admits, is refused `workspace.git-storage-limit` before the header of any object is read
-    and before anything is checked out.
+  - A Git create whose fetched pack stores an object behind more than 4,095 entries is refused
+    `workspace.git-storage-limit` before the header of any object is read. One whose baseline
+    holds objects stored behind more than 64 entries together for each path its inode limit
+    admits is refused the same way before anything is checked out, once the headers within
+    that bound are read. One whose fetched pack holds an object twice is refused
+    `workspace.git-checkout-failed`.
   - The fetch of a Git create allocates for one object no more than the create's byte limit:
-    an object that states more ends the fetch `workspace.git-storage-limit`.
+    an object that states more ends the fetch `workspace.git-storage-limit`, and an allocation
+    within the limit that the host refuses carries the same name.
   - The driver refuses a root name outside the root-name set, `workspace.path-escape`, before
     it writes or removes a commit-id file or a store; a Git create with such a name is refused
     before dispatch.
