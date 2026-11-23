@@ -75,7 +75,7 @@ means the limit only, so raising the limit helps. With the header, at least one 
 omitted whatever the limit. The Rust SDK's `Workspace::tree_with_omissions` and
 `Workspace::read_directory_with_omissions` return the count beside the listing.
 
-Release `0.16.1` advertises `substrate-wire/0.25.0` in `x-b10x-contract` and its inner
+Release `0.24.0` advertises `substrate-wire/0.27.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest, because it identifies the distribution package and not
 the inner contract manifest.
@@ -84,7 +84,7 @@ the inner contract manifest.
 `/v1/sessions` in bundle `0.15.0`, and no `/v1/pipe-sessions` compatibility alias is served.
 
 Frozen compatibility declarations and route/schema details are in the
-[0.25.0 bundle](https://github.com/beyond10x/substrate/tree/0.16.1/contracts/substrate-wire/0.25.0).
+[0.27.0 bundle](https://github.com/beyond10x/substrate/tree/0.24.0/contracts/substrate-wire/0.27.0).
 See [system model and derivation](../concepts/model.md) for which artifacts are generated and
 [status](../status.md) for release maturity.
 
@@ -156,7 +156,7 @@ older daemon's contract before issuing mutations.
 
 ### `0.27.0`
 
-Development source now advertises `substrate-wire/0.27.0`, and no release advertises it yet. It
+Release `0.22.0` was the first to advertise `substrate-wire/0.27.0`. It
 adds no route and moves three bounds (issue #236):
 
 - A sandbox's `apertures` list holds two to eight names, and the applied list's eighth aperture
@@ -197,7 +197,7 @@ adapter.
 
 ### `0.25.0`
 
-Release `0.16.1` advertises `substrate-wire/0.25.0`, which adds no route. A capability
+Release `0.16.1` was the first to advertise `substrate-wire/0.25.0`, which adds no route. A capability
 snapshot's `driver` may now be `kubernetes` as well as `host`, and a driver may publish the
 optional fact `confinement.no-egress` when a mechanism it verified keeps a workload off the
 network.
@@ -209,9 +209,10 @@ is `workspace.adopt-unserved`. The host daemon's answers are unchanged: it still
 `driver: host`, does not publish the new fact and raises none of the new codes.
 
 The [Kubernetes namespace driver](../guides/deployment.md#kubernetes-namespace-driver) reports
-`driver: kubernetes` and answers every adopt `workspace.adopt-unserved`. Its probe proves neither
-the four Linux confinement facts nor `confinement.no-egress`, so it refuses every exec start
-`exec.sandbox-unavailable`, and the two exec codes are not reached yet.
+`driver: kubernetes` and answers every adopt `workspace.adopt-unserved`. In releases 0.16.1 and 0.17.0
+its probe proved neither the four Linux confinement facts nor `confinement.no-egress`. It refused
+every exec start `exec.sandbox-unavailable`, and the two exec codes were not reached. From 0.18.0 it
+admits an exec on the confinement its probe observed.
 
 ### `0.24.0`
 

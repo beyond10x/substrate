@@ -55,7 +55,7 @@ const GROUPS: [&str; 5] = ["Start", "Concepts", "Guides", "Reference", "Project"
 const RELEASES: &str = "releases";
 const RELEASES_FILE: &str = "website/docs/releases.md";
 /// The line after which `website/docs/releases.md` is generated; everything above it is authored.
-const RELEASES_MARKER: &str = "<!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->";
+pub(crate) const RELEASES_MARKER: &str = "<!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->";
 /// Where a repository-relative link inside the changelog points once it is published.
 const SOURCE_BLOB: &str = "https://github.com/beyond10x/substrate/blob/main/";
 /// The start page: authored HTML that Docusaurus copies unchanged to the site root.
@@ -248,24 +248,30 @@ fn render(page: &str, source: &str, ids: &mut BTreeSet<String>) -> Result<Render
     }
     Ok(rendered)
 }
+/// A public input, by its path below the repository root. Every failure names that path: an I/O
+/// error alone reads `No such file or directory`, which says nothing about which input is missing.
 pub(crate) fn read_public(root: &Path, relative: &str) -> Result<String> {
+    let reading = || format!("reading the public input {relative}");
     let mut path = root.to_path_buf();
     for component in Path::new(relative).components() {
         ensure!(
             matches!(component, Component::Normal(_)),
-            "invalid public input"
+            "invalid public input: {relative}"
         );
         path.push(component);
         ensure!(
-            !fs::symlink_metadata(&path)?.file_type().is_symlink(),
+            !fs::symlink_metadata(&path)
+                .with_context(reading)?
+                .file_type()
+                .is_symlink(),
             "public input is a symlink: {relative}"
         );
     }
     ensure!(
-        fs::metadata(&path)?.is_file(),
+        fs::metadata(&path).with_context(reading)?.is_file(),
         "public input is not a regular file: {relative}"
     );
-    Ok(fs::read_to_string(path)?)
+    fs::read_to_string(path).with_context(reading)
 }
 /// The newest released section of a Keep a Changelog file, as Markdown whose headings name the
 /// version, so the sections of one page never share a heading ID, and whose repository-relative
@@ -373,7 +379,7 @@ pub(crate) fn rendered(root: &Path) -> Result<BTreeMap<&'static str, Rendered>> 
 /// one that `PAGES` does not list would be an undeclared page.
 fn docs_files(root: &Path) -> Result<BTreeSet<String>> {
     fn walk(dir: &Path, prefix: &str, out: &mut BTreeSet<String>) -> Result<()> {
-        for entry in fs::read_dir(dir)? {
+        for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let kind = entry.file_type()?;
@@ -450,10 +456,10 @@ fn structure(root: &Path) -> Result<Vec<String>> {
     Ok(failures)
 }
 /// Every local link on the static start page names a published route, the stylesheet beside it
-/// or an ID on the page itself. Docusaurus does not check a static file's links.
+/// or an ID on the page itself. Docusaurus does not check a static file's links. The page's one
+/// script is the theme script, which `site_style` holds to its exact text.
 fn start_page(root: &Path) -> Result<Vec<String>> {
     let html = read_public(root, START_PAGE)?;
-    ensure!(!html.contains("<script"), "{START_PAGE} runs a script");
     let ids = attribute_values(&html, "id");
     let mut failures = Vec::new();
     for href in attribute_values(&html, "href") {
@@ -487,14 +493,15 @@ pub fn check(root: &Path) -> Result<crate::report::Report> {
         ));
     }
     failures.extend(start_page(root)?);
-    read_public(root, "website/static/styles.css")?;
+    failures.extend(crate::site_style::check(root)?);
     failures.extend(crate::site_drift::check(root, &rendered)?);
+    failures.extend(crate::site_release::check(root)?);
     failures.extend(crate::site_ux::check(root, &rendered)?);
     if !failures.is_empty() {
         return Ok(crate::report::Report::failed(failures));
     }
     Ok(crate::report::Report::passed(format!(
-        "Substrate documentation: {} pages match the sidebar, the release notes match CHANGELOG.md, the start page's links resolve, derived tables match the specification, the reading-load ratchet holds",
+        "Substrate documentation: {} pages match the sidebar, the release notes match CHANGELOG.md, the start page's links resolve and it follows the chosen theme, article links are underlined and article text is 14 px or more, derived tables match the specification, the pages name the current release, bundle and facts, the reading-load ratchet holds",
         rendered.len()
     )))
 }
@@ -783,6 +790,29 @@ fn tables_scroll_in_a_frame(route: &str, html: &str) -> Vec<String> {
     }
     failures
 }
+/// What a page's theme script reads the stored theme with, up to the key.
+const THEME_READ: &str = "localStorage.getItem(\"";
+/// UXF-013: the start page reads the stored theme under the key the built docs pages read it
+/// under. Docusaurus derives that key from the site's `url` and `baseUrl`, so only the built
+/// site shows it; a start page with another key would follow the system and never the reader.
+fn start_page_reads_the_docs_theme_key(pages: &BTreeMap<String, String>) -> Vec<String> {
+    let key = pages.get(BASE).and_then(|start| {
+        let rest = &start[start.find(THEME_READ)? + THEME_READ.len()..];
+        rest.split_once('"').map(|(key, _)| key)
+    });
+    let Some(key) = key else {
+        return vec![format!("{BASE}: the start page reads no stored theme")];
+    };
+    let read = format!("{THEME_READ}{key}\")");
+    PAGES
+        .iter()
+        .map(|(page, _, _)| route(page))
+        .filter(|route| pages.get(route).is_some_and(|html| !html.contains(&read)))
+        .map(|route| {
+            format!("{BASE}: the start page reads the theme under {key:?}, {route} reads it under another key")
+        })
+        .collect()
+}
 /// Every link on the start page into the site reaches a built page and, when it names one, an ID
 /// on that page. Docusaurus checks its own pages' links, not a static file's.
 fn start_page_links_resolve(pages: &BTreeMap<String, String>) -> Vec<String> {
@@ -841,6 +871,7 @@ fn check_built(built: &BuiltSite) -> Vec<String> {
     let pages = &built.pages;
     let mut failures = only_declared_routes(built);
     failures.extend(start_page_links_resolve(pages));
+    failures.extend(start_page_reads_the_docs_theme_key(pages));
     for (page, _, _) in PAGES {
         let route = route(page);
         let Some(html) = pages.get(&route) else {
@@ -1177,6 +1208,32 @@ mod tests {
         );
         fs::write(dir.path().join("docs/index.html"), "<h1 id=b></h1>").unwrap();
         assert!(built_pages(dir.path()).is_err());
+    }
+    /// UXF-013: the start page and the built docs pages read the stored theme under one key.
+    #[test]
+    fn the_start_page_reads_the_theme_under_the_built_docs_pages_key() {
+        let docs = "<script>window.localStorage.getItem(\"theme-07d\")</script>";
+        let site = |start: &str, page: &str| -> BTreeMap<String, String> {
+            [
+                (BASE.to_owned(), start.to_owned()),
+                (route("index"), page.to_owned()),
+                (route("status"), docs.to_owned()),
+            ]
+            .into()
+        };
+        let start = crate::site_style::START_THEME_SCRIPT;
+        assert!(start_page_reads_the_docs_theme_key(&site(start, docs)).is_empty());
+        let renamed = docs.replace("theme-07d", "theme-a1b");
+        assert_eq!(
+            start_page_reads_the_docs_theme_key(&site(start, &renamed)),
+            [
+                "/substrate/: the start page reads the theme under \"theme-07d\", /substrate/docs/ reads it under another key"
+            ]
+        );
+        assert_eq!(
+            start_page_reads_the_docs_theme_key(&site("<main></main>", docs)).len(),
+            1
+        );
     }
     #[test]
     fn start_page_links_must_reach_a_built_page_and_its_anchor() {

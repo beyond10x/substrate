@@ -9,8 +9,8 @@ description: Create, control, and observe Substrate workspaces with builders, ty
 owner-private Unix socket, verifies the daemon's advertised contract, and returns typed workspace,
 process, event, operation, and refusal observations.
 
-The SDK and wire contract are development releases below 1.0. Release 0.16.1 verifies
-the explicitly promoted `substrate-wire/0.25.0` name and inner manifest digest before it serves an
+The SDK and wire contract are development releases below 1.0.
+Release 0.24.0 verifies the explicitly promoted `substrate-wire/0.27.0` name and inner manifest digest before it serves an
 operation. Missing, older, unknown, and wrong-digest daemon claims are refused. A newer Rust type in
 the workspace does not by itself advance that pair.
 

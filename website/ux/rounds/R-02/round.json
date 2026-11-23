@@ -1,0 +1,370 @@
+{
+  "round": "R-02",
+  "date": "2026-11-22",
+  "probe": "Playwright 1.65.0 headless Chromium 158.0.8127.18 (revision 1254) with @axe-core/playwright 4.14.0 and axe-core 4.14.1 (tags wcag2a, wcag2aa, wcag21a, wcag21aa, wcag22aa), dark and light themes, reduced motion, 2 workers, gating viewports 1280x800 and 390x844, measured 1440x900, 1024x768 and 768x1024; local build served on 127.0.0.1 under /substrate/; kept outside the repository",
+  "scope": "dark theme, 22 routes (the start page and 21 docs pages) x 5 viewports; R-01 counted 21 docs pages x 5 viewports = 105",
+  "before": {
+    "gate": {
+      "pages": 110,
+      "scrollX": 0,
+      "clipped": 0,
+      "always_miss": 42,
+      "axe_serious": 90,
+      "tab_miss": 0
+    },
+    "gate_by_theme": {
+      "dark": {
+        "pages": 44,
+        "scrollX": 0,
+        "clipped": 0,
+        "always_miss": 21,
+        "axe_serious": 36,
+        "tab_miss": 0
+      },
+      "light": {
+        "pages": 44,
+        "scrollX": 0,
+        "clipped": 0,
+        "always_miss": 21,
+        "axe_serious": 36,
+        "tab_miss": 0
+      }
+    },
+    "axe_pages_by_rule": {
+      "link-in-text-block@390x844": 18,
+      "link-in-text-block@768x1024": 18,
+      "link-in-text-block@1024x768": 18,
+      "link-in-text-block@1280x800": 18,
+      "link-in-text-block@1440x900": 18
+    },
+    "axe_nodes_by_rule_dark": {
+      "link-in-text-block@390x844": 73,
+      "link-in-text-block@768x1024": 73,
+      "link-in-text-block@1024x768": 73,
+      "link-in-text-block@1280x800": 73,
+      "link-in-text-block@1440x900": 73
+    },
+    "always_absent_pages_dark": {
+      "docs: search": 105,
+      "start: search": 5,
+      "start: theme-toggle": 5
+    },
+    "start_page_background": {
+      "dark asked, body rgb(12, 19, 25)": 5,
+      "light asked, body rgb(12, 19, 25)": 5
+    },
+    "docs_article_top_390x844_px": {
+      "90": 21
+    },
+    "docs_h1_top_390x844_px": {
+      "134": 1,
+      "186": 20
+    },
+    "largest_block_words": 235,
+    "tasks_completed": "12 of 12",
+    "tasks": {
+      "install-cli@1280x800": {
+        "actions": 2
+      },
+      "refusal-meaning@1280x800": {
+        "actions": 2
+      },
+      "choose-adapter-for-kubernetes@1280x800": {
+        "actions": 1
+      },
+      "what-changed-in-0-12-0@1280x800": {
+        "actions": 1
+      },
+      "confine-run-flags@1280x800": {
+        "actions": 2
+      },
+      "contract-families@1280x800": {
+        "actions": 1
+      },
+      "install-cli@390x844": {
+        "actions": 2
+      },
+      "refusal-meaning@390x844": {
+        "actions": 2
+      },
+      "choose-adapter-for-kubernetes@390x844": {
+        "actions": 1
+      },
+      "what-changed-in-0-12-0@390x844": {
+        "actions": 1
+      },
+      "confine-run-flags@390x844": {
+        "actions": 2
+      },
+      "contract-families@390x844": {
+        "actions": 1
+      }
+    },
+    "keyboard_key_presses": {
+      "install-cli@1280x800": 68,
+      "install-cli@390x844": 57,
+      "refusal-meaning@1280x800": 65,
+      "refusal-meaning@390x844": 35
+    },
+    "sideways_scroll_regions_px_outside_dark": {
+      "390x844": {
+        "start": 24,
+        "concepts/adapters": 614,
+        "concepts/model": 30,
+        "guides/confinement-profiles": 149,
+        "guides/deployment": 104,
+        "guides/storage-and-metrics": 93,
+        "reference/contract": 304,
+        "reference/contracts": 549,
+        "status": 18
+      },
+      "1280x800": {
+        "concepts/adapters": 269,
+        "reference/contracts": 204
+      },
+      "1440x900": {
+        "concepts/adapters": 149,
+        "reference/contracts": 84
+      },
+      "1024x768": {
+        "concepts/adapters": 461,
+        "reference/contract": 151,
+        "reference/contracts": 396
+      },
+      "768x1024": {
+        "concepts/adapters": 236,
+        "reference/contracts": 171
+      }
+    },
+    "page_list_taller_than_its_box_pages_dark": {
+      "1280x800": {
+        "226 px": 21
+      },
+      "1440x900": {
+        "126 px": 21
+      },
+      "1024x768": {
+        "258 px": 21
+      }
+    },
+    "page_height_in_screens_390x844": {
+      "guides/confinement-profiles": 25,
+      "guides/deployment": 24.4,
+      "reference/contract": 20.4,
+      "concepts/adapters": 18.7,
+      "guides/run-a-command": 16.9,
+      "guides/rust-sdk": 16.8,
+      "releases": 14.1,
+      "guides/cli": 11.5,
+      "reference/contracts": 10.8,
+      "concepts/model": 8.7,
+      "guides/storage-and-metrics": 8.5,
+      "status": 8.3,
+      "concepts/confinement": 7.5,
+      "start": 7.3,
+      "guides/mcp-adapter": 7.3,
+      "concepts/operations": 6.9,
+      "getting-started": 6,
+      "guides/remote-conformance": 5.7,
+      "start/docs": 5,
+      "use-cases": 4.9,
+      "concepts/boundary": 4,
+      "security": 1.5
+    }
+  },
+  "after": {
+    "gate": {
+      "pages": 110,
+      "scrollX": 0,
+      "clipped": 0,
+      "always_miss": 42,
+      "axe_serious": 0,
+      "tab_miss": 0
+    },
+    "gate_by_theme": {
+      "dark": {
+        "pages": 44,
+        "scrollX": 0,
+        "clipped": 0,
+        "always_miss": 21,
+        "axe_serious": 0,
+        "tab_miss": 0
+      },
+      "light": {
+        "pages": 44,
+        "scrollX": 0,
+        "clipped": 0,
+        "always_miss": 21,
+        "axe_serious": 0,
+        "tab_miss": 0
+      }
+    },
+    "axe_pages_by_rule": {},
+    "axe_nodes_by_rule_dark": {},
+    "always_absent_pages_dark": {
+      "docs: search": 105,
+      "start: search": 5,
+      "start: theme-toggle": 5
+    },
+    "start_page_background": {
+      "dark asked, body rgb(12, 19, 25)": 5,
+      "light asked, body rgb(244, 242, 235)": 5
+    },
+    "docs_article_top_390x844_px": {
+      "90": 21
+    },
+    "docs_h1_top_390x844_px": {
+      "134": 1,
+      "186": 20
+    },
+    "largest_block_words": 137,
+    "tasks_completed": "12 of 12",
+    "tasks": {
+      "install-cli@1280x800": {
+        "actions": 2
+      },
+      "refusal-meaning@1280x800": {
+        "actions": 2
+      },
+      "choose-adapter-for-kubernetes@1280x800": {
+        "actions": 1
+      },
+      "what-changed-in-0-12-0@1280x800": {
+        "actions": 1
+      },
+      "confine-run-flags@1280x800": {
+        "actions": 2
+      },
+      "contract-families@1280x800": {
+        "actions": 1
+      },
+      "install-cli@390x844": {
+        "actions": 2
+      },
+      "refusal-meaning@390x844": {
+        "actions": 2
+      },
+      "choose-adapter-for-kubernetes@390x844": {
+        "actions": 1
+      },
+      "what-changed-in-0-12-0@390x844": {
+        "actions": 1
+      },
+      "confine-run-flags@390x844": {
+        "actions": 2
+      },
+      "contract-families@390x844": {
+        "actions": 1
+      }
+    },
+    "keyboard_key_presses": {
+      "install-cli@1280x800": 68,
+      "install-cli@390x844": 57,
+      "refusal-meaning@1280x800": 65,
+      "refusal-meaning@390x844": 35
+    },
+    "sideways_scroll_regions_px_outside_dark": {
+      "390x844": {
+        "start": 24,
+        "concepts/adapters": 614,
+        "concepts/model": 30,
+        "guides/confinement-profiles": 143,
+        "guides/deployment": 104,
+        "guides/storage-and-metrics": 93,
+        "reference/contract": 303,
+        "reference/contracts": 549,
+        "status": 18
+      },
+      "1280x800": {
+        "concepts/adapters": 269,
+        "reference/contracts": 204
+      },
+      "1440x900": {
+        "concepts/adapters": 149,
+        "reference/contracts": 84
+      },
+      "1024x768": {
+        "concepts/adapters": 461,
+        "reference/contract": 150,
+        "reference/contracts": 396
+      },
+      "768x1024": {
+        "concepts/adapters": 236,
+        "reference/contracts": 171
+      }
+    },
+    "page_list_taller_than_its_box_pages_dark": {
+      "1280x800": {
+        "226 px": 21
+      },
+      "1440x900": {
+        "126 px": 21
+      },
+      "1024x768": {
+        "258 px": 21
+      }
+    },
+    "page_height_in_screens_390x844": {
+      "guides/confinement-profiles": 25.7,
+      "guides/deployment": 24.8,
+      "reference/contract": 21.1,
+      "concepts/adapters": 19.7,
+      "guides/run-a-command": 18.2,
+      "guides/rust-sdk": 17.6,
+      "releases": 14,
+      "guides/cli": 11.6,
+      "reference/contracts": 10.8,
+      "concepts/model": 8.7,
+      "guides/storage-and-metrics": 8.7,
+      "status": 8.4,
+      "concepts/confinement": 7.6,
+      "guides/mcp-adapter": 7.5,
+      "start": 7.3,
+      "concepts/operations": 6.9,
+      "getting-started": 6.2,
+      "guides/remote-conformance": 5.8,
+      "start/docs": 5,
+      "use-cases": 4.9,
+      "concepts/boundary": 4,
+      "security": 1.5
+    }
+  },
+  "text_px": {
+    "before": {
+      "code_block": 13.12,
+      "table_header": 10.88,
+      "chip": 11.23
+    },
+    "after": {
+      "code_block": 14,
+      "table_header": 14,
+      "chip": 11.23
+    },
+    "note": "1280x800, measured on three pages by the build's own probe, not by the round's probe"
+  },
+  "change_set": [
+    "UXF-008",
+    "UXF-009",
+    "UXF-013",
+    "UXF-015"
+  ],
+  "caveats": [
+    "before is the build of main at 75e7d5e50; after also holds the prose edit merged as e11fcc988",
+    "R-01 measured the site before its port to Docusaurus; only click counts and the largest block compare with it",
+    "always_miss counts the theme toggle, which is behind the menu below 997 px (UXF-020, known loss)",
+    "390x844 is a narrow desktop window: no touch, no device pixel ratio",
+    "task actions are the fewest over a survey of every page, a lower bound",
+    "axe ran on the load state; results it could not decide were not kept",
+    "page heights at 390x844 grew with the 14 px code blocks"
+  ],
+  "not_measured": [
+    "the 404 page (not in sitemap.xml)",
+    "the published site (the local build was measured)",
+    "the screen-only bot at 1440x900, 1024x768 and 768x1024",
+    "the keyboard in the light theme, for the non-anchor tasks, and with the skip link",
+    "the contrast of every flagged link (axe message kept for the first 3 nodes of each page state)",
+    "focus-ring visibility, hover states, motion (reduced motion is on), layout shift, load time, Firefox, WebKit",
+    "levels L4 to L8 of the loop: replayed sessions, vision probe, people, review agents",
+    "R-01's own definitions of clipped, always_miss and article top (its probe code is not available; inferred from trend.md and the finding records)"
+  ]
+}
