@@ -282,9 +282,11 @@ impl substrate_host::Driver for NamespaceDriver {
         root_name: &str,
         path: &str,
         input: &substrate_wire::FileReplaceInput,
+        result_json_bytes: u64,
     ) -> Result<substrate_wire::FileMutationResult, substrate_host::DriverError> {
         self.check_root(workspace_id, root_name)?;
-        self.file_replace_v2(workspace_id, path, input).await
+        self.file_replace_v2(workspace_id, path, input, result_json_bytes)
+            .await
     }
 
     async fn edit_workspace_file_v2(
@@ -293,9 +295,11 @@ impl substrate_host::Driver for NamespaceDriver {
         root_name: &str,
         path: &str,
         input: &substrate_wire::FileEditInput,
+        result_json_bytes: u64,
     ) -> Result<substrate_wire::FileMutationResult, substrate_host::DriverError> {
         self.check_root(workspace_id, root_name)?;
-        self.file_edit_v2(workspace_id, path, input).await
+        self.file_edit_v2(workspace_id, path, input, result_json_bytes)
+            .await
     }
 
     async fn patch_workspace_file_v2(
@@ -304,9 +308,11 @@ impl substrate_host::Driver for NamespaceDriver {
         root_name: &str,
         path: &str,
         input: &substrate_wire::FilePatchInput,
+        result_json_bytes: u64,
     ) -> Result<substrate_wire::FileMutationResult, substrate_host::DriverError> {
         self.check_root(workspace_id, root_name)?;
-        self.file_patch_v2(workspace_id, path, input).await
+        self.file_patch_v2(workspace_id, path, input, result_json_bytes)
+            .await
     }
 
     async fn destroy_workspace(

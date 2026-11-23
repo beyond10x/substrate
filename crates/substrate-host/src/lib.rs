@@ -784,12 +784,20 @@ pub trait Driver: Send + Sync {
         ))
     }
 
+    /// Compare-and-set replacement of one file.
+    ///
+    /// `result_json_bytes`, here and on the edit and the patch, is the most bytes the returned
+    /// result may occupy as compact JSON: what the caller's operation ledger reserved for it. A
+    /// driver bounds the result to it **before** it changes the file, cutting the diff and
+    /// marking it `truncated`, and refuses before any write when no result fits, so a change
+    /// that is written always has a result the caller can record (ADR 0005).
     async fn replace_workspace_file_v2(
         &self,
         _workspace_id: &str,
         _root_name: &str,
         _path: &str,
         _input: &FileReplaceInput,
+        _result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
         Err(DriverError::unserved(
             "workspace.file-v2-unserved",
@@ -804,6 +812,7 @@ pub trait Driver: Send + Sync {
         _root_name: &str,
         _path: &str,
         _input: &FileEditInput,
+        _result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
         Err(DriverError::unserved(
             "workspace.file-v2-unserved",
@@ -818,6 +827,7 @@ pub trait Driver: Send + Sync {
         _root_name: &str,
         _path: &str,
         _input: &FilePatchInput,
+        _result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
         Err(DriverError::unserved(
             "workspace.file-v2-unserved",
@@ -1870,13 +1880,14 @@ impl Driver for HostDriver {
         root_name: &str,
         path: &str,
         input: &FileReplaceInput,
+        result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
         let workspace_id = workspace_id.to_owned();
         let root_name = root_name.to_owned();
         let path = path.to_owned();
         let input = input.clone();
         self.filesystem_io(move |filesystem| {
-            filesystem.replace_cas(&workspace_id, &root_name, &path, &input)
+            filesystem.replace_cas(&workspace_id, &root_name, &path, &input, result_json_bytes)
         })
         .await
     }
@@ -1887,13 +1898,14 @@ impl Driver for HostDriver {
         root_name: &str,
         path: &str,
         input: &FileEditInput,
+        result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
         let workspace_id = workspace_id.to_owned();
         let root_name = root_name.to_owned();
         let path = path.to_owned();
         let input = input.clone();
         self.filesystem_io(move |filesystem| {
-            filesystem.edit_cas(&workspace_id, &root_name, &path, &input)
+            filesystem.edit_cas(&workspace_id, &root_name, &path, &input, result_json_bytes)
         })
         .await
     }
@@ -1904,13 +1916,14 @@ impl Driver for HostDriver {
         root_name: &str,
         path: &str,
         input: &FilePatchInput,
+        result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
         let workspace_id = workspace_id.to_owned();
         let root_name = root_name.to_owned();
         let path = path.to_owned();
         let input = input.clone();
         self.filesystem_io(move |filesystem| {
-            filesystem.patch_cas(&workspace_id, &root_name, &path, &input)
+            filesystem.patch_cas(&workspace_id, &root_name, &path, &input, result_json_bytes)
         })
         .await
     }

@@ -189,6 +189,7 @@ fn every_fs_operation_is_served_beneath_the_root() {
                 new_text: "$(HOME)".to_owned(),
                 match_policy: TextMatchPolicy::Exact,
             },
+            result_json_bytes: u64::MAX,
         },
         b"",
     ));
@@ -209,6 +210,7 @@ fn every_fs_operation_is_served_beneath_the_root() {
                     text: "zero".to_owned(),
                 }],
             },
+            result_json_bytes: u64::MAX,
         },
         b"",
     ));
@@ -230,6 +232,7 @@ fn every_fs_operation_is_served_beneath_the_root() {
                 },
                 create_parents: false,
             },
+            result_json_bytes: u64::MAX,
         },
         b"",
     );
@@ -247,6 +250,7 @@ fn every_fs_operation_is_served_beneath_the_root() {
                 },
                 create_parents: true,
             },
+            result_json_bytes: u64::MAX,
         },
         b"",
     ));
@@ -357,6 +361,7 @@ fn a_symlink_out_of_the_root_is_refused_for_every_operation() {
                 workspace: workspace.clone(),
                 path: "out/new.txt".to_owned(),
                 input: replace,
+                result_json_bytes: u64::MAX,
             },
             Vec::new(),
         ),

@@ -626,9 +626,10 @@ async fn every_served_file_route_is_one_executor_call_in_the_keeper() {
         "expected": {"state": "sha256", "sha256": sha(b"one\ntwo\n")},
     }))
     .expect("a replacement");
-    let replaced = Driver::replace_workspace_file_v2(d, WORKSPACE, &pvc, "a.txt", &replace)
-        .await
-        .expect("replaced");
+    let replaced =
+        Driver::replace_workspace_file_v2(d, WORKSPACE, &pvc, "a.txt", &replace, u64::MAX)
+            .await
+            .expect("replaced");
     assert_eq!(replaced.after_sha256, sha(b"one\ntwo\nthree\n"));
 
     let edit: FileEditInput = serde_json::from_value(json!({
@@ -636,7 +637,7 @@ async fn every_served_file_route_is_one_executor_call_in_the_keeper() {
         "new_text": "TWO", "match_policy": "exact",
     }))
     .expect("an edit");
-    let edited = Driver::edit_workspace_file_v2(d, WORKSPACE, &pvc, "a.txt", &edit)
+    let edited = Driver::edit_workspace_file_v2(d, WORKSPACE, &pvc, "a.txt", &edit, u64::MAX)
         .await
         .expect("edited");
     assert_eq!(edited.after_sha256, sha(b"one\nTWO\nthree\n"));
@@ -646,7 +647,7 @@ async fn every_served_file_route_is_one_executor_call_in_the_keeper() {
         "edits": [{"kind": "insert_before", "line": 1, "text": "zero\n"}],
     }))
     .expect("a patch");
-    let patched = Driver::patch_workspace_file_v2(d, WORKSPACE, &pvc, "a.txt", &patch)
+    let patched = Driver::patch_workspace_file_v2(d, WORKSPACE, &pvc, "a.txt", &patch, u64::MAX)
         .await
         .expect("patched");
     let on_volume = std::fs::read(s.file("a.txt")).expect("on the volume");
@@ -743,9 +744,10 @@ async fn lost_answers_resolve_only_unconditional_mutations_by_their_stat() {
         "expected": {"state": "sha256", "sha256": sha(b"old\n")},
     }))
     .expect("a replacement");
-    let replaced = Driver::replace_workspace_file_v2(&s.driver, WORKSPACE, &pvc, "a.txt", &replace)
-        .await
-        .expect_err("a conditional replace is never resolved by its stat");
+    let replaced =
+        Driver::replace_workspace_file_v2(&s.driver, WORKSPACE, &pvc, "a.txt", &replace, u64::MAX)
+            .await
+            .expect_err("a conditional replace is never resolved by its stat");
     assert_eq!(replaced.class, DriverErrorClass::Failed);
     assert_eq!(replaced.code, EXECUTOR_UNANSWERED);
     assert!(replaced.retriable);
@@ -757,9 +759,10 @@ async fn lost_answers_resolve_only_unconditional_mutations_by_their_stat() {
         "new_text": "edited", "match_policy": "exact",
     }))
     .expect("an edit");
-    let edited = Driver::edit_workspace_file_v2(&s.driver, WORKSPACE, &pvc, "a.txt", &edit)
-        .await
-        .expect_err("an edit states no resulting digest");
+    let edited =
+        Driver::edit_workspace_file_v2(&s.driver, WORKSPACE, &pvc, "a.txt", &edit, u64::MAX)
+            .await
+            .expect_err("an edit states no resulting digest");
     assert_eq!(edited.code, EXECUTOR_UNANSWERED);
     assert!(edited.retriable);
     assert_eq!(std::fs::read(s.file("a.txt")).expect("kept"), b"edited\n");
@@ -770,9 +773,10 @@ async fn lost_answers_resolve_only_unconditional_mutations_by_their_stat() {
         "edits": [{"kind": "insert_before", "line": 1, "text": "zero\n"}],
     }))
     .expect("a patch");
-    let patched = Driver::patch_workspace_file_v2(&s.driver, WORKSPACE, &pvc, "a.txt", &patch)
-        .await
-        .expect_err("a conditional patch is never resolved by its stat");
+    let patched =
+        Driver::patch_workspace_file_v2(&s.driver, WORKSPACE, &pvc, "a.txt", &patch, u64::MAX)
+            .await
+            .expect_err("a conditional patch is never resolved by its stat");
     assert_eq!(patched.code, EXECUTOR_UNANSWERED);
     assert!(patched.retriable);
     assert_eq!(
@@ -1078,8 +1082,15 @@ async fn sec_a_lost_answer_never_turns_a_refused_create_if_absent_into_success()
         "expected": {"state": "absent"},
     }))
     .expect("a create-if-absent");
-    let answer =
-        Driver::replace_workspace_file_v2(&s.driver, WORKSPACE, &pvc_name(), "lock", &create).await;
+    let answer = Driver::replace_workspace_file_v2(
+        &s.driver,
+        WORKSPACE,
+        &pvc_name(),
+        "lock",
+        &create,
+        u64::MAX,
+    )
+    .await;
     assert_eq!(s.executor.fs_ops(), ["replace-v2", "stat"]);
     let error = answer.expect_err(
         "the executor refused the create (the file existed); a lost answer must not report it \
@@ -1101,9 +1112,15 @@ async fn sec_a_lost_answer_never_reports_a_compare_and_swap_from_a_digest_the_fi
         "expected": {"state": "sha256", "sha256": sha(b"old\n")},
     }))
     .expect("a replacement");
-    let answer =
-        Driver::replace_workspace_file_v2(&s.driver, WORKSPACE, &pvc_name(), "a.txt", &replace)
-            .await;
+    let answer = Driver::replace_workspace_file_v2(
+        &s.driver,
+        WORKSPACE,
+        &pvc_name(),
+        "a.txt",
+        &replace,
+        u64::MAX,
+    )
+    .await;
     assert_eq!(s.executor.fs_ops(), ["replace-v2", "stat"]);
     let error = answer.expect_err(
         "the executor refused the swap (the file never held the expected digest); a lost answer \

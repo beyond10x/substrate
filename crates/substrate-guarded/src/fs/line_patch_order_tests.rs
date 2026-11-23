@@ -254,6 +254,7 @@ fn the_patch_route_writes_identical_bytes_for_two_permutations_of_one_patch() {
                     expected_sha256: expected_sha256.clone(),
                     edits,
                 },
+                u64::MAX,
             )
             .expect("patch applies");
         written.push(std::fs::read(directory.path().join("ws/notes.txt")).expect("patched"));

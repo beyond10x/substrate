@@ -223,11 +223,13 @@ impl NamespaceDriver {
         workspace: &str,
         path: &str,
         input: &FileReplaceInput,
+        result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
         let request = Request::ReplaceV2 {
             workspace: workspace.to_owned(),
             path: path.to_owned(),
             input: input.clone(),
+            result_json_bytes,
         };
         self.conditional_mutation(workspace, path, &request).await
     }
@@ -242,11 +244,13 @@ impl NamespaceDriver {
         workspace: &str,
         path: &str,
         input: &FileEditInput,
+        result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
         let request = Request::EditV2 {
             workspace: workspace.to_owned(),
             path: path.to_owned(),
             input: input.clone(),
+            result_json_bytes,
         };
         self.conditional_mutation(workspace, path, &request).await
     }
@@ -261,11 +265,13 @@ impl NamespaceDriver {
         workspace: &str,
         path: &str,
         input: &FilePatchInput,
+        result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
         let request = Request::PatchV2 {
             workspace: workspace.to_owned(),
             path: path.to_owned(),
             input: input.clone(),
+            result_json_bytes,
         };
         self.conditional_mutation(workspace, path, &request).await
     }

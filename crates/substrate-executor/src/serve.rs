@@ -151,22 +151,25 @@ pub fn handle(filesystem: &GuardedFilesystem, request: Request, content: &[u8]) 
             workspace,
             path,
             input,
+            result_json_bytes,
         } => filesystem
-            .replace_cas(&workspace, ROOT_NAME, &path, &input)
+            .replace_cas(&workspace, ROOT_NAME, &path, &input, result_json_bytes)
             .and_then(complete),
         Request::EditV2 {
             workspace,
             path,
             input,
+            result_json_bytes,
         } => filesystem
-            .edit_cas(&workspace, ROOT_NAME, &path, &input)
+            .edit_cas(&workspace, ROOT_NAME, &path, &input, result_json_bytes)
             .and_then(complete),
         Request::PatchV2 {
             workspace,
             path,
             input,
+            result_json_bytes,
         } => filesystem
-            .patch_cas(&workspace, ROOT_NAME, &path, &input)
+            .patch_cas(&workspace, ROOT_NAME, &path, &input, result_json_bytes)
             .and_then(complete),
         Request::Stat { workspace, path } => stat(filesystem, &workspace, path),
         Request::Check {} => complete(Check::new(

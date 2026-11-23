@@ -19,6 +19,19 @@ pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.27.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
     "b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
+/// Most characters of `old_text` and `new_text` in a v2 file edit and of `text` in a line-patch
+/// edit: the `maxLength` their input schemas publish, which JSON Schema counts in characters, not
+/// bytes. The server refuses a longer text `request.schema-invalid` before dispatch
+/// ([`FileEditInput::validate_text_bounds`], [`FilePatchInput::validate_text_bounds`]).
+pub const MAX_FILE_TEXT_CHARS: usize = 1_048_576;
+/// Most characters of `content.data` in a v2 file replacement: the canonical base64 of a file of
+/// [`MAX_FILE_BYTES`], the longer `maxLength` of `canonical-base64-file`. The server refuses a
+/// longer one `request.schema-invalid` before dispatch
+/// ([`FileReplaceInput::validate_text_bounds`]).
+pub const MAX_FILE_CONTENT_BASE64_CHARS: usize = 1_398_104;
+/// Most characters of `diff.text` in the result of a v2 file change: the `maxLength` the result
+/// schema publishes. A longer diff is cut to it and marked `truncated`.
+pub const MAX_FILE_DIFF_TEXT_CHARS: usize = 2_097_152;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
 pub const MAX_PATH_DEPTH: usize = 64;
@@ -1216,6 +1229,30 @@ pub struct FileReplaceInput {
     pub create_parents: bool,
 }
 
+impl FileReplaceInput {
+    /// Checks `content.data` against the length its schema publishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::FileTextBounds`] when the data is longer than
+    /// [`MAX_FILE_CONTENT_BASE64_CHARS`].
+    pub const fn validate_text_bounds(&self) -> Result<(), WireValidationError> {
+        // Canonical base64 is ASCII, and a longer string in any other alphabet is over the bound
+        // as well: a character is at least one byte.
+        if self.content.data.len() > MAX_FILE_CONTENT_BASE64_CHARS {
+            return Err(WireValidationError::FileTextBounds);
+        }
+        Ok(())
+    }
+}
+
+/// Whether `text` is within [`MAX_FILE_TEXT_CHARS`], counted in characters as JSON Schema's
+/// `maxLength` counts them.
+fn within_file_text_bound(text: &str) -> bool {
+    // A character is at least one byte, so a text within the bound in bytes needs no count.
+    text.len() <= MAX_FILE_TEXT_CHARS || text.chars().count() <= MAX_FILE_TEXT_CHARS
+}
+
 /// Matching policy for one textual replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1232,6 +1269,22 @@ pub struct FileEditInput {
     pub old_text: String,
     pub new_text: String,
     pub match_policy: TextMatchPolicy,
+}
+
+impl FileEditInput {
+    /// Checks `old_text` and `new_text` against the length their schema publishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::FileTextBounds`] when either holds more than
+    /// [`MAX_FILE_TEXT_CHARS`] characters.
+    pub fn validate_text_bounds(&self) -> Result<(), WireValidationError> {
+        if within_file_text_bound(&self.old_text) && within_file_text_bound(&self.new_text) {
+            Ok(())
+        } else {
+            Err(WireValidationError::FileTextBounds)
+        }
+    }
 }
 
 /// One line-based patch edit, addressed against the original file.
@@ -1263,6 +1316,28 @@ pub enum LinePatchEdit {
 pub struct FilePatchInput {
     pub expected_sha256: String,
     pub edits: Vec<LinePatchEdit>,
+}
+
+impl FilePatchInput {
+    /// Checks the `text` of every edit against the length its schema publishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::FileTextBounds`] when one holds more than
+    /// [`MAX_FILE_TEXT_CHARS`] characters.
+    pub fn validate_text_bounds(&self) -> Result<(), WireValidationError> {
+        let within = self.edits.iter().all(|edit| match edit {
+            LinePatchEdit::InsertBefore { text, .. }
+            | LinePatchEdit::InsertAfter { text, .. }
+            | LinePatchEdit::ReplaceRange { text, .. } => within_file_text_bound(text),
+            LinePatchEdit::DeleteRange { .. } => true,
+        });
+        if within {
+            Ok(())
+        } else {
+            Err(WireValidationError::FileTextBounds)
+        }
+    }
 }
 
 /// Directory creation request.
@@ -1304,6 +1379,31 @@ pub struct FileMutationResult {
     pub atomic_replacement: bool,
     pub diff: UnifiedDiff,
     pub observed_at: DateTime<Utc>,
+}
+
+impl FileMutationResult {
+    /// The bytes this result occupies as compact JSON, every escape counted: what the operation
+    /// ledger records for it and what the daemon answers.
+    ///
+    /// The code that produces a result bounds it with this before it writes the file, so that an
+    /// admitted change always ends with a recorded result. Should serialization ever fail, the
+    /// answer is `usize::MAX`, which fits no bound.
+    #[must_use]
+    pub fn json_bytes(&self) -> usize {
+        struct Count(usize);
+        impl std::io::Write for Count {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self.0.saturating_add(bytes.len());
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut count = Count(0);
+        serde_json::to_writer(&mut count, self).map_or(usize::MAX, |()| count.0)
+    }
 }
 
 /// V2 file read slice with a digest of the complete file.
@@ -4622,6 +4722,8 @@ pub enum WireValidationError {
     ConfinementRequiresEmpty,
     #[error("a confinement requirement names one family or property twice")]
     ConfinementRequiresDuplicate,
+    #[error("a file change carries a text longer than its schema admits")]
+    FileTextBounds,
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -7057,6 +7159,9 @@ mod namespace_driver_tests;
 
 #[cfg(test)]
 mod confinement_facts_tests;
+
+#[cfg(test)]
+mod file_text_bound_tests;
 
 #[cfg(test)]
 mod adoption_tests {

@@ -1021,6 +1021,28 @@ async fn workspace_file_mutation_v2(
         )
         .await;
     }
+    // The server holds the `maxLength` the input schema publishes for every text of the request
+    // itself; a client that does not validate is refused here, before dispatch and before any
+    // driver reads or writes.
+    let within_text_bounds = match &mutation.input {
+        V2FileMutation::Replace(input) => input.validate_text_bounds(),
+        V2FileMutation::Edit(input) => input.validate_text_bounds(),
+        V2FileMutation::Patch(input) => input.validate_text_bounds(),
+    };
+    if within_text_bounds.is_err() {
+        let response = schema_invalid(&request_id, Some(&mutation.op), "input");
+        return refuse_before_dispatch_response(
+            &app,
+            &identity,
+            &request_id,
+            operation_kind,
+            method,
+            &address,
+            &mutation,
+            response,
+        )
+        .await;
+    }
     let scope = app.scope(&identity);
     let _workspace_guard = app.lock_workspace(&scope, &workspace_id).await;
     let root_name = match app.admit_workspace(&scope, &workspace_id).await {
@@ -1069,20 +1091,30 @@ async fn workspace_file_mutation_v2(
     {
         return response;
     }
+    // What the ledger reserved for this operation's terminal result. The driver cuts the diff to
+    // it before it changes the file, so the completion below cannot fail for size after the
+    // change (ADR 0005).
+    let result_json_bytes = app.store.success_result_json_bytes();
     let result = match &mutation.input {
         V2FileMutation::Replace(input) => {
             app.driver
-                .replace_workspace_file_v2(&workspace_id, &root_name, &path, input)
+                .replace_workspace_file_v2(
+                    &workspace_id,
+                    &root_name,
+                    &path,
+                    input,
+                    result_json_bytes,
+                )
                 .await
         }
         V2FileMutation::Edit(input) => {
             app.driver
-                .edit_workspace_file_v2(&workspace_id, &root_name, &path, input)
+                .edit_workspace_file_v2(&workspace_id, &root_name, &path, input, result_json_bytes)
                 .await
         }
         V2FileMutation::Patch(input) => {
             app.driver
-                .patch_workspace_file_v2(&workspace_id, &root_name, &path, input)
+                .patch_workspace_file_v2(&workspace_id, &root_name, &path, input, result_json_bytes)
                 .await
         }
     };

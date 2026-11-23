@@ -900,3 +900,7 @@ memory, so it does not survive a restart (§ 5, the signal row).
 ## Amendments of 2026-11-04
 
 - § 7.1 (`story:failed-get-review-keeps-the-create-denial`): a `get` review that is refused, fails, answers no `allowed` or outlasts the 5 s after a review that denied `create` no longer drops that denial. The refusal keeps the API's answer and says `a SelfSubjectAccessReview denies pods/exec create, and the refused verb is unknown: ` followed by why, as the evaluation-error branch already did since 2026-11-02. The 5 s bound still holds both reviews together; the denials collected before it pass survive it. This line is not the namespace lane's S6 line either, because `get` stays undecided.
+
+## Amendments of 2026-11-23
+
+- § 7.2 (`story:file-change-result-fits-the-ledger-before-the-file-changes`): the `replace-v2`, `edit-v2` and `patch-v2` request headers carry one more member, `result_json_bytes`, an unsigned integer: the bytes the whole result may occupy as compact JSON. The daemon states what its operation ledger reserved for the terminal result of the operation, and the guarded code cuts the diff to that before it writes the file, or refuses `workspace.write-limit` when no result fits. The header stays closed and the protocol stays `substrate-executor/1`: the release equality of § 7.1 already pins the executor to the driver.

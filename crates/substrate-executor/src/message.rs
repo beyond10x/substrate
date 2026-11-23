@@ -12,6 +12,11 @@
 //! `FileEditInput` holds two texts, and a read answer holds its slice inline. The bound is
 //! therefore [`MAX_HEADER_BYTES`], which holds a [`MAX_CONTENT_BYTES`] file inline even when
 //! every byte is JSON-escaped twice, plus the request's other members.
+//!
+//! **The result bound.** `replace-v2`, `edit-v2` and `patch-v2` carry `result_json_bytes`: the
+//! bytes the whole result may occupy as compact JSON, which the daemon states from what its
+//! operation ledger reserved. The guarded code cuts the diff to it before it writes the file, so
+//! a change that is written always has a result the daemon can record.
 
 use std::io::{self, Read, Write};
 
@@ -220,16 +225,22 @@ pub enum Request {
         workspace: String,
         path: String,
         input: FileReplaceInput,
+        /// The bytes the whole result may occupy as compact JSON (design 34 § 7.2).
+        result_json_bytes: u64,
     },
     EditV2 {
         workspace: String,
         path: String,
         input: FileEditInput,
+        /// As `replace-v2`.
+        result_json_bytes: u64,
     },
     PatchV2 {
         workspace: String,
         path: String,
         input: FilePatchInput,
+        /// As `replace-v2`.
+        result_json_bytes: u64,
     },
     /// The size and digest of one regular file, or its absence: how an unanswered call is
     /// resolved once (design 34 § 13 D10).

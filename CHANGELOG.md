@@ -18,6 +18,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   synthesis of the confinement suite took 28 s (0.86.0: 92 s) and `cargo xtask check-ess` as a
   whole 54 s.
 
+### Security
+
+- Every admitted v2 file replacement, edit and patch ends with a successful, replayable terminal
+  record. The diff in its result is cut, in bytes of JSON with escaping counted, to what the
+  operation ledger reserved for the result and to the `maxLength` its schema publishes, before
+  the file is written, and a cut diff is marked `truncated`. The server itself refuses an
+  `old_text`, a `new_text`, a patch `text` or a replacement `content.data` over its published
+  `maxLength` as `request.schema-invalid` before dispatch; no wire schema, route or refusal code
+  changes.
+
 ## [0.24.0] — 2026-11-22
 
 ### Added

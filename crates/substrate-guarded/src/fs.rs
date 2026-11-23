@@ -12,8 +12,8 @@ use substrate_wire::{
     Base64Content, Base64Encoding, DigestedFileSlice, DirectoryEntry, DirectoryEntryKind,
     DirectoryKind, DirectoryPage, ExpectedFileState, FileAbsence, FileEditInput, FileKind,
     FileMode, FileMutationResult, FileObservation, FilePatchInput, FileReadQuery, FileReadResult,
-    FileReplaceInput, FileSlice, LinePatchEdit, TextMatchPolicy, UnifiedDiff, WorkspaceTree,
-    WorkspaceTreeEntry, WorkspaceTreeQuery, validate_relative_path,
+    FileReplaceInput, FileSlice, LinePatchEdit, MAX_FILE_DIFF_TEXT_CHARS, TextMatchPolicy,
+    UnifiedDiff, WorkspaceTree, WorkspaceTreeEntry, WorkspaceTreeQuery, validate_relative_path,
 };
 use ulid::Ulid;
 
@@ -409,39 +409,65 @@ impl GuardedFilesystem {
         })
     }
 
+    /// Replaces the complete file when its current state is the expected one.
+    ///
+    /// **A change is written only when its result can be recorded.** `result_json_bytes` is the
+    /// most bytes the returned result may occupy as compact JSON, every escape counted: what the
+    /// caller reserved to record it. This, [`GuardedFilesystem::edit_cas`] and
+    /// [`GuardedFilesystem::patch_cas`] decide the diff the result carries before they write:
+    /// cut to the bytes the bound leaves and to [`MAX_FILE_DIFF_TEXT_CHARS`], and marked
+    /// `truncated` when cut. A bound that holds no result for this workspace and path at all is
+    /// refused `workspace.write-limit` before anything is read, created or written. A caller
+    /// without a bound passes `u64::MAX`.
+    ///
+    /// A `content.data` longer than its schema publishes is `request.schema-invalid`, before
+    /// anything is decoded, created or written.
     pub fn replace_cas(
         &self,
         workspace_id: &str,
         root_name: &str,
         path: &str,
         input: &FileReplaceInput,
+        result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
+        input
+            .validate_text_bounds()
+            .map_err(|_| text_over_published_length("content"))?;
         input.expected.validate().map_err(|_| invalid_digest())?;
         let content = canonical_content(&input.content)?;
+        let diff_json_bytes = diff_text_json_bytes(workspace_id, path, result_json_bytes)?;
         if input.create_parents {
             self.create_parent_directories(root_name, path)?;
         }
         let before = self.current_file(root_name, path)?;
         verify_expected(&input.expected, before.as_deref())?;
         let before_sha256 = before.as_deref().map(sha256);
+        let diff = bounded_diff(path, before.as_deref(), &content, diff_json_bytes);
         let observation = self.write_atomic(workspace_id, root_name, path, &content)?;
         Ok(mutation_result(
             workspace_id,
             path,
-            before.as_deref(),
-            &content,
             before_sha256,
+            diff,
             observation,
         ))
     }
 
+    /// Replaces one match of `old_text` when the file has the expected digest. The result is
+    /// bounded by `result_json_bytes` before the write, as [`GuardedFilesystem::replace_cas`]
+    /// states, and an `old_text` or `new_text` longer than its schema publishes is
+    /// `request.schema-invalid` before anything is read.
     pub fn edit_cas(
         &self,
         workspace_id: &str,
         root_name: &str,
         path: &str,
         input: &FileEditInput,
+        result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
+        input
+            .validate_text_bounds()
+            .map_err(|_| text_over_published_length("input"))?;
         if !is_sha256(&input.expected_sha256) {
             return Err(invalid_digest());
         }
@@ -452,30 +478,39 @@ impl GuardedFilesystem {
                 "old_text",
             ));
         }
+        let diff_json_bytes = diff_text_json_bytes(workspace_id, path, result_json_bytes)?;
         let before = self
             .current_file(root_name, path)?
             .ok_or_else(DriverError::not_found)?;
         verify_sha256(&input.expected_sha256, &before)?;
         let source = std::str::from_utf8(&before).map_err(|_| binary_text_refusal())?;
         let after = apply_text_edit(source, input)?.into_bytes();
+        let diff = bounded_diff(path, Some(&before), &after, diff_json_bytes);
         let observation = self.write_atomic(workspace_id, root_name, path, &after)?;
         Ok(mutation_result(
             workspace_id,
             path,
-            Some(&before),
-            &after,
             Some(input.expected_sha256.clone()),
+            diff,
             observation,
         ))
     }
 
+    /// Applies a line patch when the file has the expected digest. The result is bounded by
+    /// `result_json_bytes` before the write, as [`GuardedFilesystem::replace_cas`] states, and an
+    /// edit `text` longer than its schema publishes is `request.schema-invalid` before anything
+    /// is read.
     pub fn patch_cas(
         &self,
         workspace_id: &str,
         root_name: &str,
         path: &str,
         input: &FilePatchInput,
+        result_json_bytes: u64,
     ) -> Result<FileMutationResult, DriverError> {
+        input
+            .validate_text_bounds()
+            .map_err(|_| text_over_published_length("edits"))?;
         if !is_sha256(&input.expected_sha256) {
             return Err(invalid_digest());
         }
@@ -486,19 +521,20 @@ impl GuardedFilesystem {
                 "edits",
             ));
         }
+        let diff_json_bytes = diff_text_json_bytes(workspace_id, path, result_json_bytes)?;
         let before = self
             .current_file(root_name, path)?
             .ok_or_else(DriverError::not_found)?;
         verify_sha256(&input.expected_sha256, &before)?;
         let source = std::str::from_utf8(&before).map_err(|_| binary_text_refusal())?;
         let after = apply_line_patch(source, &input.edits)?.into_bytes();
+        let diff = bounded_diff(path, Some(&before), &after, diff_json_bytes);
         let observation = self.write_atomic(workspace_id, root_name, path, &after)?;
         Ok(mutation_result(
             workspace_id,
             path,
-            Some(&before),
-            &after,
             Some(input.expected_sha256.clone()),
+            diff,
             observation,
         ))
     }
@@ -1202,12 +1238,21 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn text_over_published_length(address: &str) -> DriverError {
+    DriverError::refused(
+        "request.schema-invalid",
+        "A text of this file change is longer than its schema admits.",
+        address,
+    )
+}
+
+/// The result of a written change. `diff` was decided before the write
+/// ([`diff_text_json_bytes`], [`bounded_diff`]); nothing here can grow it.
 fn mutation_result(
     workspace_id: &str,
     path: &str,
-    before: Option<&[u8]>,
-    after: &[u8],
     before_sha256: Option<String>,
+    diff: UnifiedDiff,
     observation: FileObservation,
 ) -> FileMutationResult {
     FileMutationResult {
@@ -1218,12 +1263,42 @@ fn mutation_result(
         before_sha256,
         after_sha256: observation.sha256,
         atomic_replacement: observation.atomic_replacement,
-        diff: bounded_diff(path, before, after),
+        diff,
         observed_at: observation.observed_at,
     }
 }
 
-fn bounded_diff(path: &str, before: Option<&[u8]>, after: &[u8]) -> UnifiedDiff {
+/// The bytes of JSON left for the diff text of a change to `path` when its whole result may
+/// occupy `result_json_bytes`: the bound less the widest result this workspace and path can have
+/// without that text ([`widest_result_json_bytes`]). A bound smaller than that holds no result,
+/// and the change is refused here, before the caller reads, creates or writes anything.
+fn diff_text_json_bytes(
+    workspace_id: &str,
+    path: &str,
+    result_json_bytes: u64,
+) -> Result<usize, DriverError> {
+    usize::try_from(result_json_bytes)
+        .unwrap_or(usize::MAX)
+        .checked_sub(widest_result_json_bytes(workspace_id, path))
+        .ok_or_else(|| {
+            DriverError::exhausted(
+                "workspace.write-limit",
+                "The result of this file change exceeds what the operation can record.",
+                "limit",
+            )
+        })
+}
+
+/// The diff a result carries: at most [`MAX_DIFF_LINES`] lines, then cut between two characters
+/// to at most `text_json_bytes` bytes inside a JSON string and to at most
+/// [`MAX_FILE_DIFF_TEXT_CHARS`] characters, the `maxLength` its schema publishes. A cut of either
+/// kind sets `truncated`.
+fn bounded_diff(
+    path: &str,
+    before: Option<&[u8]>,
+    after: &[u8],
+    text_json_bytes: usize,
+) -> UnifiedDiff {
     let before = before.unwrap_or_default();
     let (Ok(before), Ok(after)) = (std::str::from_utf8(before), std::str::from_utf8(after)) else {
         return UnifiedDiff {
@@ -1239,13 +1314,67 @@ fn bounded_diff(path: &str, before: Option<&[u8]>, after: &[u8]) -> UnifiedDiff 
     ];
     lines.extend(before.split_inclusive('\n').map(|line| format!("-{line}")));
     lines.extend(after.split_inclusive('\n').map(|line| format!("+{line}")));
-    let truncated = lines.len() > MAX_DIFF_LINES;
+    let over_lines = lines.len() > MAX_DIFF_LINES;
     lines.truncate(MAX_DIFF_LINES);
+    let mut text = lines.join("\n");
+    let fitting = fitting_prefix(&text, text_json_bytes, MAX_FILE_DIFF_TEXT_CHARS);
+    let over_bytes = fitting < text.len();
+    text.truncate(fitting);
     UnifiedDiff {
-        text: lines.join("\n"),
-        truncated,
+        text,
+        truncated: over_lines || over_bytes,
         binary: false,
     }
+}
+
+/// The bytes the result of a change to `path` in `workspace_id` occupies as compact JSON when
+/// its diff text is empty and every other member is as wide as it can be: a size of twenty
+/// digits, both digests present, `false` where a boolean may be either, and an observation time
+/// with nanoseconds. It depends on nothing the file holds, so it is known before the file is
+/// read, and no result for this path is wider apart from its diff text.
+fn widest_result_json_bytes(workspace_id: &str, path: &str) -> usize {
+    FileMutationResult {
+        kind: FileKind::File,
+        workspace: workspace_id.to_owned(),
+        path: path.to_owned(),
+        size: u64::MAX,
+        before_sha256: Some("0".repeat(64)),
+        after_sha256: "0".repeat(64),
+        atomic_replacement: false,
+        diff: UnifiedDiff {
+            text: String::new(),
+            truncated: false,
+            binary: false,
+        },
+        observed_at: chrono::DateTime::from_timestamp_nanos(999_999_999),
+    }
+    .json_bytes()
+}
+
+/// The bytes one character of a string occupies in compact JSON as the result's serializer
+/// writes it: two for a quote, a backslash and the five short escapes, six for any other control
+/// character (`\u00XX`), and the character's own UTF-8 bytes otherwise, outside the basic plane
+/// too. `the_json_cost_counted_for_every_character_is_what_the_result_serializer_writes` holds
+/// this to the serializer.
+const fn json_char_bytes(character: char) -> usize {
+    match character {
+        '"' | '\\' | '\u{8}' | '\t' | '\n' | '\u{c}' | '\r' => 2,
+        '\u{0}'..='\u{1f}' => 6,
+        _ => character.len_utf8(),
+    }
+}
+
+/// The length in bytes of the longest prefix of `text` that ends between two characters, costs at
+/// most `json_bytes` bytes inside a JSON string and holds at most `max_chars` characters.
+fn fitting_prefix(text: &str, json_bytes: usize, max_chars: usize) -> usize {
+    let mut cost = 0_usize;
+    for (count, (offset, character)) in text.char_indices().enumerate() {
+        cost = cost.saturating_add(json_char_bytes(character));
+        if count >= max_chars || cost > json_bytes {
+            return offset;
+        }
+    }
+    text.len()
 }
 
 fn apply_text_edit(source: &str, input: &FileEditInput) -> Result<String, DriverError> {
@@ -2378,6 +2507,7 @@ mod tests {
                             expected: substrate_wire::ExpectedFileState::Absent,
                             create_parents: false,
                         },
+                        u64::MAX,
                     ),
                     "edit" => filesystem.edit_cas(
                         &name,
@@ -2389,6 +2519,7 @@ mod tests {
                             new_text: "b".to_owned(),
                             match_policy: substrate_wire::TextMatchPolicy::Exact,
                         },
+                        u64::MAX,
                     ),
                     _ => filesystem.patch_cas(
                         &name,
@@ -2398,6 +2529,7 @@ mod tests {
                             expected_sha256: digest,
                             edits: vec![insert_before(1, "x")],
                         },
+                        u64::MAX,
                     ),
                 };
                 result.map(|_| ()).map_err(|error| error.code)
@@ -2659,3 +2791,6 @@ mod tests {
 
 #[cfg(test)]
 mod line_patch_order_tests;
+
+#[cfg(test)]
+mod result_budget_tests;
