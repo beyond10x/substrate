@@ -23,6 +23,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `b10x-substrate workspace destroy` run again with the same `--operation-id` exits 0 and prints
   the stored result. It read the workspace before the delete and answered `resource.not-found`.
   The SDK gains `Client::destroy_workspace`, which destroys by id without that read.
+- The Rust SDK recovers a Git workspace create whose reply is lost from the operation ledger, as
+  it recovers every other mutation. It returned the transport error, without the operation id.
 
 ## [0.24.0] — 2026-11-22
 

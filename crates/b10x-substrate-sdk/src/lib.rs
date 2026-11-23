@@ -430,6 +430,32 @@ impl Client {
         input: &I,
         operation_id: Option<String>,
     ) -> Result<(String, O), SdkError> {
+        self.recovered_mutation(method, path, input, operation_id, None)
+            .await
+    }
+
+    async fn mutation_with_source_authority<I: Serialize, O: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        input: &I,
+        operation_id: Option<String>,
+        source_authority: &str,
+    ) -> Result<(String, O), SdkError> {
+        self.recovered_mutation(method, path, input, operation_id, Some(source_authority))
+            .await
+    }
+
+    /// One mutation under one operation id (design 18). A transport failure without an answer is
+    /// reconciled against the operation ledger, with or without a source authority.
+    async fn recovered_mutation<I: Serialize, O: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        input: &I,
+        operation_id: Option<String>,
+        source_authority: Option<&str>,
+    ) -> Result<(String, O), SdkError> {
         let operation_id = operation_id.unwrap_or_else(|| Ulid::generate().to_string());
         substrate_wire::validate_operation_id(&operation_id)
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
@@ -441,44 +467,35 @@ impl Client {
         let body =
             serde_json::to_vec(&envelope).map_err(|error| SdkError::Protocol(error.to_string()))?;
         match self
-            .inner
-            .transport
-            .request(method, path, Some(&body))
+            .send_mutation(method, path, &body, source_authority)
             .await
         {
             Ok(response) => decode_result(&response).map(|result| (operation_id, result)),
             Err(SdkError::Transport(_)) => {
-                self.recover_mutation(method, path, &body, &operation_id)
+                self.recover_mutation(method, path, &body, &operation_id, source_authority)
                     .await
             }
             Err(error) => Err(error),
         }
     }
 
-    async fn mutation_with_source_authority<I: Serialize, O: DeserializeOwned>(
+    /// Sends one serialized mutation, with the workspace source authority when it has one.
+    async fn send_mutation(
         &self,
         method: &str,
         path: &str,
-        input: &I,
-        operation_id: Option<String>,
-        source_authority: &str,
-    ) -> Result<(String, O), SdkError> {
-        let operation_id = operation_id.unwrap_or_else(|| Ulid::generate().to_string());
-        substrate_wire::validate_operation_id(&operation_id)
-            .map_err(|error| SdkError::Protocol(error.to_string()))?;
-        let envelope = substrate_wire::Mutation {
-            op: operation_id.clone(),
-            input,
-            delegated_context: None,
-        };
-        let body =
-            serde_json::to_vec(&envelope).map_err(|error| SdkError::Protocol(error.to_string()))?;
-        let response = self
-            .inner
-            .transport
-            .request_with_source_authority(method, path, Some(&body), source_authority)
-            .await?;
-        decode_result(&response).map(|result| (operation_id, result))
+        body: &[u8],
+        source_authority: Option<&str>,
+    ) -> Result<transport::HttpResponse, SdkError> {
+        let transport = &self.inner.transport;
+        match source_authority {
+            Some(source_authority) => {
+                transport
+                    .request_with_source_authority(method, path, Some(body), source_authority)
+                    .await
+            }
+            None => transport.request(method, path, Some(body)).await,
+        }
     }
 
     async fn recover_mutation<O: DeserializeOwned>(
@@ -487,11 +504,15 @@ impl Client {
         path: &str,
         body: &[u8],
         operation_id: &str,
+        source_authority: Option<&str>,
     ) -> Result<(String, O), SdkError> {
         match self.operation(operation_id).await {
             Ok(operation) => outcome::<O>(operation, operation_id),
             Err(SdkError::Refusal(refusal)) if refusal.code == "resource.not-found" => {
-                match self.inner.transport.request(method, path, Some(body)).await {
+                match self
+                    .send_mutation(method, path, body, source_authority)
+                    .await
+                {
                     Ok(response) => {
                         decode_result(&response).map(|result| (operation_id.to_owned(), result))
                     }
@@ -2666,6 +2687,193 @@ mod tests {
             .expect("recover lost mutation response");
         assert_eq!(workspace.id(), "ws_recovered");
         server.await.expect("fake daemon task");
+    }
+
+    /// Design 18: a Git workspace create whose reply is lost is recovered like every other
+    /// create. The ledger's stored answer is returned; when the ledger has no row, the identical
+    /// request is sent once more with its source authority; and when the ledger cannot be asked
+    /// either, the error carries the operation id the request was sent under.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One fake daemon answers the three recoveries, in order.
+    async fn a_lost_git_create_response_is_recovered_from_the_ledger() {
+        const STORED: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB1";
+        const REPLAYED: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB2";
+        const AUTHORITY: &str = "source-authority-of-the-case";
+        /// Reads one request whose line starts with `head`, then drops the connection unanswered.
+        async fn lose_reply(listener: &UnixListener, head: &str) -> Vec<u8> {
+            let (mut stream, _) = listener.accept().await.expect("accept SDK request");
+            let request = read_request(&mut stream).await;
+            assert!(
+                request.starts_with(head.as_bytes()),
+                "expected {head:?}, got {:?}",
+                String::from_utf8_lossy(&request[..request.len().min(80)])
+            );
+            request
+        }
+        fn created(operation: &str, id: &str) -> Vec<u8> {
+            serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_create",
+                "operation": operation,
+                "result": {
+                    "id": id,
+                    "kind": "workspace",
+                    "labels": {},
+                    "observed_at": "2026-11-08T00:00:00Z",
+                    "state": "ready",
+                    "origin": "created",
+                    "root_name": id
+                }
+            }))
+            .expect("workspace response JSON")
+        }
+        fn operation_of(request: &[u8]) -> String {
+            serde_json::from_slice::<Value>(request_body(request)).expect("mutation JSON")["op"]
+                .as_str()
+                .expect("operation id")
+                .to_owned()
+        }
+        fn carries_authority(request: &[u8]) -> bool {
+            String::from_utf8_lossy(request).contains(&format!(
+                "x-b10x-workspace-source-authorization: {AUTHORITY}\r\n"
+            ))
+        }
+        const CREATE: &str = "POST /v1/workspaces HTTP/1.1\r\n";
+
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
+        ))
+        .expect("machine vector");
+        let machine = serde_json::to_vec(
+            vector
+                .pointer("/expected/response/body")
+                .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let server = tokio::spawn(async move {
+            answer_one(
+                &listener,
+                "GET /v1/machine HTTP/1.1\r\n",
+                "200 OK",
+                &machine,
+            )
+            .await;
+
+            // The daemon accepted the create and its reply is lost: the ledger holds the answer.
+            let first = lose_reply(&listener, CREATE).await;
+            assert_eq!(operation_of(&first), STORED);
+            assert!(carries_authority(&first));
+            let record = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_ledger",
+                "result": {
+                    "accepted_at": "2026-11-08T00:00:00Z",
+                    "actor": "local:1000",
+                    "capability_snapshot": null,
+                    "operation": STORED,
+                    "operation_kind": "workspace.create",
+                    "outcome": {
+                        "kind": "success",
+                        "result": {
+                            "id": "ws_stored",
+                            "kind": "workspace",
+                            "labels": {},
+                            "observed_at": "2026-11-08T00:00:00Z",
+                            "state": "ready",
+                            "origin": "created",
+                            "root_name": "ws_stored"
+                        }
+                    },
+                    "principal": null,
+                    "request_hash": "7".repeat(64),
+                    "resource": "ws_stored",
+                    "state": "terminal",
+                    "terminal_at": "2026-11-08T00:00:00Z"
+                }
+            }))
+            .expect("operation record JSON");
+            answer_one(
+                &listener,
+                &format!("GET /v1/ops/{STORED} HTTP/1.1\r\n"),
+                "200 OK",
+                &record,
+            )
+            .await;
+
+            // The ledger has no row: the identical request is sent once more, authority included.
+            let first = lose_reply(&listener, CREATE).await;
+            let missing = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_ledger",
+                "error": {
+                    "class": "refused",
+                    "code": "resource.not-found",
+                    "message": "The operation does not exist.",
+                    "retriable": false
+                }
+            }))
+            .expect("missing operation JSON");
+            answer_one(
+                &listener,
+                &format!("GET /v1/ops/{REPLAYED} HTTP/1.1\r\n"),
+                "404 Not Found",
+                &missing,
+            )
+            .await;
+            let replay = answer_one(
+                &listener,
+                CREATE,
+                "201 Created",
+                &created(REPLAYED, "ws_replayed"),
+            )
+            .await;
+            assert_eq!(request_body(&replay), request_body(&first));
+            assert!(carries_authority(&replay));
+
+            // Neither the create nor the ledger answers: the outcome stays open.
+            let lost = operation_of(&lose_reply(&listener, CREATE).await);
+            lose_reply(&listener, &format!("GET /v1/ops/{lost} HTTP/1.1\r\n")).await;
+            lost
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let git = || {
+            client.workspace().git(
+                "origin",
+                "example/repository",
+                "refs/heads/main",
+                "0123456789abcdef0123456789abcdef01234567",
+                1,
+                AUTHORITY,
+            )
+        };
+        let workspace = git()
+            .operation_id(STORED)
+            .create()
+            .await
+            .expect("the ledger's stored answer recovers the lost reply");
+        assert_eq!(workspace.id(), "ws_stored");
+        let workspace = git()
+            .operation_id(REPLAYED)
+            .create()
+            .await
+            .expect("an absent ledger row replays the identical request");
+        assert_eq!(workspace.id(), "ws_replayed");
+        let open = git()
+            .create()
+            .await
+            .map(|workspace| workspace.id().to_owned());
+        let Err(SdkError::UnknownOperation { operation_id }) = open else {
+            panic!("an open outcome carries its operation id, got {open:?}")
+        };
+        assert_eq!(operation_id, server.await.expect("fake daemon task"));
     }
 
     /// Accepts one connection, checks its request line starts with `head`, answers `status` with
