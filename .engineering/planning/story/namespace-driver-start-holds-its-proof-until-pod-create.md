@@ -8,7 +8,7 @@ summary: The driver compares digest, required facts, node and validity again bef
 tags:
 - defect
 - security
-revision: 1
+revision: 2
 ---
 # Story: a start on the namespace driver is refused when its confinement proof no longer holds at Pod creation
 
@@ -45,3 +45,18 @@ finding 3 (high priority). The operator ordered its findings handled on 2026-11-
 states the rule that must hold; the review's detail stays with the operator until the fix is
 on `main`. Checked against the source at `1af046902` by reading; nothing was run. Release
 0.23.0 has the same source. Stakeholder: the operator.
+
+## Delivery
+
+## Delivery
+
+Branch `story/namespace-proof`, pull request 263. Reviewed twice
+(`review-result:namespace-proof-security-1`, `review-result:namespace-proof-security-2`). The
+first review replaced the rule of the first commit: a start is held to facts, node, Lease
+epoch, binding and policy set, and the admission's digest is looked up in the driver's memory
+of 2,048 stated snapshots, never compared. The second review found the comparison in place
+after the last wait; its three findings are closed: a proof ends when either clock says so, a
+digest remembered with two statements is stale, and the design states what 2,048 spans.
+
+Open after this story, on `main` too: two older test cases race a sleep against a delayed read
+and can fail when the test thread stalls 300 to 500 ms (`exec_tests.rs`, `driver_tests.rs`).
