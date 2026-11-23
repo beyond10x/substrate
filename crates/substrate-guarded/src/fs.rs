@@ -36,6 +36,8 @@ const GUARDED_RESOLVE: u64 =
 const FILE_READ_FLAGS: i32 = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
 const MAX_DIRECTORY_SCAN_ITEMS: usize = 100_000;
 const MAX_DIFF_LINES: usize = 200;
+/// Unchanged lines a diff shows above and below the changed ones.
+const DIFF_CONTEXT_LINES: usize = 3;
 const MAX_PATCH_EDITS: usize = 128;
 pub const DESTROY_BATCH_ITEMS: usize = 4_096;
 type RawDirectoryEntry = (CString, libc::mode_t, Option<u64>);
@@ -418,6 +420,15 @@ impl GuardedFilesystem {
     /// is not the expected one (`workspace.stale-content`). The parent directories a request
     /// asks for are created directly before the write, after all of these.
     ///
+    /// **So does one whose write fails.** A name the file system refuses, a quota, a failed
+    /// write, sync or rename of the temporary file: the directories this call created are
+    /// removed again, deepest first ([`CreatedDirectories::remove`]). A directory that existed
+    /// before the call stays, and so does one that holds an entry this call did not create.
+    ///
+    /// **Another writer's removal of a parent does not refuse a request that asked for its
+    /// parents.** When the write finds the file's directory absent, the call runs once more from
+    /// its precondition: see [`GuardedFilesystem::write_when_expected`].
+    ///
     /// The diff the result carries is held to the length its schema publishes
     /// ([`bounded_diff`]). Holding the whole result to what a caller can record is the caller's:
     /// `FileMutationResult::widest_json_bytes` before it dispatches, and
@@ -436,13 +447,14 @@ impl GuardedFilesystem {
         let content = canonical_content(&input.content)?;
         validate_api_path(path)?;
         self.refuse_content_over_the_file_limit(&content)?;
-        let before = self.current_file(root_name, path)?;
-        verify_expected(&input.expected, before.as_deref())?;
+        let (before, observation) = self.write_when_expected(
+            root_name,
+            path,
+            &input.expected,
+            input.create_parents,
+            || self.write_atomic(workspace_id, root_name, path, &content),
+        )?;
         let before_sha256 = before.as_deref().map(sha256);
-        if input.create_parents {
-            self.create_parent_directories(root_name, path)?;
-        }
-        let observation = self.write_atomic(workspace_id, root_name, path, &content)?;
         Ok(mutation_result(
             workspace_id,
             path,
@@ -451,6 +463,79 @@ impl GuardedFilesystem {
             before_sha256,
             observation,
         ))
+    }
+
+    /// The part of a replacement that reads and changes the workspace: the precondition, the
+    /// parent directories when `create_parents` asks for them, and `write`, which is
+    /// [`GuardedFilesystem::write_atomic`] of the checked content. Answers the former content
+    /// the precondition read beside what the write observed.
+    ///
+    /// A write that fails removes the directories created for it.
+    ///
+    /// **One retry, for a request that asked for its parents.** Another writer can remove a
+    /// parent between this call's creation of the parents and its write: another request's
+    /// cleanup of a directory both found empty, or a program running in the workspace. The write
+    /// then answers `resource.not-found`, or fails in a directory that is gone. With
+    /// `create_parents` the call then runs once more from the start: it reads the file and
+    /// verifies the precondition again, creates the parents again and writes again. No check
+    /// that ran before the first write is skipped, and the content and its size are the ones
+    /// checked before this function. The bound is one retry: a second write that fails is the
+    /// answer, also when a parent is absent again, and the directories the retry created are
+    /// removed like the first ones. A request without `create_parents` is written once and
+    /// creates no directory.
+    fn write_when_expected(
+        &self,
+        root_name: &str,
+        path: &str,
+        expected: &ExpectedFileState,
+        create_parents: bool,
+        mut write: impl FnMut() -> Result<FileObservation, DriverError>,
+    ) -> Result<(Option<Vec<u8>>, FileObservation), DriverError> {
+        let mut retried = false;
+        loop {
+            let before = self.current_file(root_name, path)?;
+            verify_expected(expected, before.as_deref())?;
+            let created = if create_parents {
+                self.create_parent_directories(root_name, path)?
+            } else {
+                CreatedDirectories::default()
+            };
+            let error = match write() {
+                Ok(observation) => return Ok((before, observation)),
+                Err(error) => error,
+            };
+            // Decided before the cleanup, which removes this call's own parents.
+            let parent_was_removed = create_parents
+                && !retried
+                && (error.class == crate::DriverErrorClass::NotFound
+                    || self.parent_is_absent(root_name, path));
+            created.remove();
+            if !parent_was_removed {
+                return Err(error);
+            }
+            retried = true;
+        }
+    }
+
+    /// Whether the directory `path` lies in is absent now. A path directly beneath the
+    /// workspace has no parent to lose.
+    fn parent_is_absent(&self, root_name: &str, path: &str) -> bool {
+        let Ok((parent, _)) = split_parent(path) else {
+            return false;
+        };
+        if parent == "." {
+            return false;
+        }
+        let Ok(workspace) = self.workspace_fd(root_name) else {
+            return false;
+        };
+        openat2(
+            workspace.as_raw_fd(),
+            parent,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0,
+        )
+        .is_err_and(|error| error.class == crate::DriverErrorClass::NotFound)
     }
 
     /// Replaces one match of `old_text` when the file has the expected digest. An `old_text` or
@@ -559,43 +644,32 @@ impl GuardedFilesystem {
         read_bounded_complete(File::from(fd), size, self.max_file_bytes)
     }
 
-    fn create_parent_directories(&self, root_name: &str, path: &str) -> Result<(), DriverError> {
+    /// Creates the directories above `path` that are absent and answers which ones it created,
+    /// for the caller to remove again when its write fails. When it fails itself, it has removed
+    /// the ones it created.
+    fn create_parent_directories(
+        &self,
+        root_name: &str,
+        path: &str,
+    ) -> Result<CreatedDirectories, DriverError> {
         validate_api_path(path)?;
         let (parent, _) = split_parent(path)?;
+        let mut created = CreatedDirectories::default();
         if parent == "." {
-            return Ok(());
+            return Ok(created);
         }
         let workspace = self.workspace_fd(root_name)?;
         let mut current = duplicate(workspace.as_raw_fd())?;
         for component in parent.split('/') {
-            let name = CString::new(component).map_err(|_| path_escape())?;
-            match openat2_cstr(
-                current.as_raw_fd(),
-                &name,
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                0,
-            ) {
+            match open_or_create_directory(current, component, &mut created) {
                 Ok(next) => current = next,
-                Err(error) if error.class == crate::DriverErrorClass::NotFound => {
-                    // SAFETY: current is guarded and component came from a validated relative path.
-                    if unsafe { libc::mkdirat(current.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
-                        return Err(io_failed(
-                            "workspace.mkdir-failed",
-                            std::io::Error::last_os_error(),
-                        ));
-                    }
-                    sync_fd(current.as_raw_fd())?;
-                    current = openat2_cstr(
-                        current.as_raw_fd(),
-                        &name,
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                        0,
-                    )?;
+                Err(error) => {
+                    created.remove();
+                    return Err(error);
                 }
-                Err(error) => return Err(error),
             }
         }
-        Ok(())
+        Ok(created)
     }
 
     /// The one size refusal of a write. [`GuardedFilesystem::replace_cas`] decides it before it
@@ -1267,43 +1341,195 @@ fn mutation_result(
     }
 }
 
-/// The diff a result carries: at most [`MAX_DIFF_LINES`] lines, then cut between two characters
-/// to at most [`MAX_FILE_DIFF_TEXT_CHARS`] characters, the `maxLength` its schema publishes. A
-/// cut of either kind sets `truncated`.
+/// The lines of a diff as they are written, held to [`MAX_DIFF_LINES`].
+struct DiffText {
+    text: String,
+    lines: usize,
+    truncated: bool,
+}
+
+impl DiffText {
+    /// Writes one line of the diff, ended by LF, unless the line bound is reached; a line that
+    /// is not written marks the diff `truncated`.
+    fn line(&mut self, marker: &str, content: &str) {
+        if self.lines == MAX_DIFF_LINES {
+            self.truncated = true;
+            return;
+        }
+        self.text.push_str(marker);
+        self.text.push_str(content);
+        self.text.push('\n');
+        self.lines += 1;
+    }
+
+    /// Writes one line of a file behind `marker`. The file's own LF ends the diff line; a last
+    /// line without one is followed by the line Git reads as "no newline at end of file".
+    fn file_line(&mut self, marker: &str, line: &str) {
+        if let Some(content) = line.strip_suffix('\n') {
+            self.line(marker, content);
+        } else {
+            self.line(marker, line);
+            self.line("\\ No newline at end of file", "");
+        }
+    }
+}
+
+/// The name of one side of a diff as Git reads it back: `a/<path>` or `b/<path>`, followed by a
+/// tab when it holds a space, and in double quotes with C escapes when it holds a quote, a
+/// backslash or a control character.
+fn diff_file_name(side: char, path: &str) -> String {
+    use std::fmt::Write as _;
+
+    let quoted = path
+        .chars()
+        .any(|character| character.is_ascii_control() || matches!(character, '"' | '\\'));
+    if !quoted {
+        let end = if path.contains(' ') { "\t" } else { "" };
+        return format!("{side}/{path}{end}");
+    }
+    let mut name = format!("\"{side}/");
+    for character in path.chars() {
+        match character {
+            '"' => name.push_str("\\\""),
+            '\\' => name.push_str("\\\\"),
+            '\u{7}' => name.push_str("\\a"),
+            '\u{8}' => name.push_str("\\b"),
+            '\t' => name.push_str("\\t"),
+            '\n' => name.push_str("\\n"),
+            '\u{b}' => name.push_str("\\v"),
+            '\u{c}' => name.push_str("\\f"),
+            '\r' => name.push_str("\\r"),
+            control if control.is_ascii_control() => {
+                write!(name, "\\{:03o}", u32::from(control)).expect("a String takes every write");
+            }
+            other => name.push(other),
+        }
+    }
+    name.push('"');
+    name
+}
+
+/// One side's range in a hunk header: its first line, counted from one, and its line count. A
+/// side without a line names the line before it, which is zero in an empty file.
+fn hunk_range(lines_above: usize, count: usize) -> String {
+    if count == 0 {
+        format!("{lines_above},0")
+    } else {
+        format!("{},{count}", lines_above + 1)
+    }
+}
+
+/// The diff a result carries: a unified diff that `git apply` applies to the file as it was and
+/// that gives the file as it is, for a path Git admits in a working tree.
+///
+/// Git refuses some paths by its own path rule, whatever the patch: a component it reads as its
+/// `.git` directory, such as `.GIT`, `git~1`, or `.git` followed by dots, spaces or a colon. This
+/// file system changes such a file, and its diff has the same form; `git apply` refuses it by
+/// name (`invalid path`), and applies the same hunk under any name it admits.
+///
+/// It is one hunk: the lines that differ between the first and the last changed line, with at
+/// most [`DIFF_CONTEXT_LINES`] unchanged lines on either side, under a header that names both
+/// line ranges. A file that did not exist is `/dev/null`. A change without a changed line has no
+/// hunk, and its text is empty: the same bytes written again, or an empty file created.
+///
+/// The text is at most [`MAX_DIFF_LINES`] lines, then cut between two characters to at most
+/// [`MAX_FILE_DIFF_TEXT_CHARS`] characters, the `maxLength` its schema publishes. A cut of
+/// either kind sets `truncated`, and a truncated diff is not claimed to apply.
 fn bounded_diff(path: &str, before: Option<&[u8]>, after: &[u8]) -> UnifiedDiff {
-    let before = before.unwrap_or_default();
-    let (Ok(before), Ok(after)) = (std::str::from_utf8(before), std::str::from_utf8(after)) else {
+    let (Ok(old), Ok(new)) = (
+        std::str::from_utf8(before.unwrap_or_default()),
+        std::str::from_utf8(after),
+    ) else {
         return UnifiedDiff {
             text: String::new(),
             truncated: false,
             binary: true,
         };
     };
-    let mut lines = vec![
-        format!("--- a/{path}"),
-        format!("+++ b/{path}"),
-        "@@".to_owned(),
-    ];
-    lines.extend(before.split_inclusive('\n').map(|line| format!("-{line}")));
-    lines.extend(after.split_inclusive('\n').map(|line| format!("+{line}")));
-    let truncated = lines.len() > MAX_DIFF_LINES;
-    lines.truncate(MAX_DIFF_LINES);
+    let old: Vec<&str> = old.split_inclusive('\n').collect();
+    let new: Vec<&str> = new.split_inclusive('\n').collect();
+    let same_above = old
+        .iter()
+        .zip(&new)
+        .take_while(|(old, new)| old == new)
+        .count();
+    let same_below = old[same_above..]
+        .iter()
+        .rev()
+        .zip(new[same_above..].iter().rev())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let removed = &old[same_above..old.len() - same_below];
+    let added = &new[same_above..new.len() - same_below];
+    let mut diff = DiffText {
+        text: String::new(),
+        lines: 0,
+        truncated: false,
+    };
+    if !removed.is_empty() || !added.is_empty() {
+        let above = same_above.min(DIFF_CONTEXT_LINES);
+        let below = same_below.min(DIFF_CONTEXT_LINES);
+        let first = same_above - above;
+        let former = before.map_or_else(|| "/dev/null".to_owned(), |_| diff_file_name('a', path));
+        diff.line("--- ", &former);
+        diff.line("+++ ", &diff_file_name('b', path));
+        diff.line(
+            "@@ ",
+            &format!(
+                "-{} +{} @@",
+                hunk_range(first, above + removed.len() + below),
+                hunk_range(first, above + added.len() + below)
+            ),
+        );
+        for line in &old[first..same_above] {
+            diff.file_line(" ", line);
+        }
+        for line in removed {
+            diff.file_line("-", line);
+        }
+        for line in added {
+            diff.file_line("+", line);
+        }
+        for line in &old[old.len() - same_below..][..below] {
+            diff.file_line(" ", line);
+        }
+    }
     let mut diff = UnifiedDiff {
-        text: lines.join("\n"),
-        truncated,
+        text: diff.text,
+        truncated: diff.truncated,
         binary: false,
     };
     diff.cut_text(usize::MAX, MAX_FILE_DIFF_TEXT_CHARS);
     diff
 }
 
+/// Replaces `old_text` where `source` holds it at exactly one offset.
+///
+/// Every offset at which `old_text` starts counts, also one inside another occurrence: `ana`
+/// starts at offsets 1 and 3 of `banana`, which is `workspace.edit-ambiguous`. The count stops at
+/// two and is two searches, so it stays linear in the file. Under the whitespace-normalized
+/// policy the exact occurrences are counted first, by this rule; with none, every range of whole
+/// lines that matches after normalization counts, overlapping ranges too.
 fn apply_text_edit(source: &str, input: &FileEditInput) -> Result<String, DriverError> {
-    let exact_matches = source.match_indices(&input.old_text).count();
-    if exact_matches == 1 {
-        return Ok(source.replacen(&input.old_text, &input.new_text, 1));
-    }
-    if exact_matches > 1 || input.match_policy == TextMatchPolicy::Exact {
-        return Err(edit_match_refusal(exact_matches));
+    let first = source.find(&input.old_text);
+    let second = first.and_then(|at| {
+        // The nearest offset a second occurrence can start at is one character on.
+        let next = at + source[at..].chars().next().map_or(1, char::len_utf8);
+        source.get(next..)?.find(&input.old_text)
+    });
+    match (first, second) {
+        (Some(at), None) => {
+            let mut result = String::with_capacity(source.len() + input.new_text.len());
+            result.push_str(&source[..at]);
+            result.push_str(&input.new_text);
+            result.push_str(&source[at + input.old_text.len()..]);
+            return Ok(result);
+        }
+        (Some(_), Some(_)) => return Err(edit_match_refusal(2)),
+        (None, _) if input.match_policy == TextMatchPolicy::Exact => {
+            return Err(edit_match_refusal(0));
+        }
+        (None, _) => {}
     }
     let normalized_old = normalize_text_match(&input.old_text);
     let source_lines: Vec<&str> = source.split_inclusive('\n').collect();
@@ -1349,15 +1575,61 @@ fn edit_match_refusal(matches: usize) -> DriverError {
     DriverError::refused(code, message, "old_text")
 }
 
+/// One line of a file under a line patch: its text and the line ending that follows it, `"\n"`,
+/// `"\r\n"`, or nothing for a last line that has none.
+struct PatchLine {
+    text: String,
+    ending: &'static str,
+}
+
+impl PatchLine {
+    /// One piece of `str::split_inclusive('\n')`.
+    fn of(piece: &str) -> Self {
+        let (text, ending) = if let Some(text) = piece.strip_suffix("\r\n") {
+            (text, "\r\n")
+        } else if let Some(text) = piece.strip_suffix('\n') {
+            (text, "\n")
+        } else {
+            (piece, "")
+        };
+        Self {
+            text: text.to_owned(),
+            ending,
+        }
+    }
+}
+
+/// Applies `edits`, each addressed in the lines of `source`, and changes only the lines they
+/// name.
+///
+/// - A line no edit names keeps its bytes, its line ending included: LF stays LF and CRLF stays
+///   CRLF in one file, and a carriage return that is not part of a line ending is text.
+/// - A line an edit writes ends as the line the edit names ends: `line` of an insert,
+///   `start_line` of a replaced range. The line breaks inside an edit's `text` only separate its
+///   lines, whether LF or CRLF, and a break at its end adds no line.
+/// - A file ends without a line ending after the patch exactly when it did before. When the
+///   named line is such a last line, a written line ends as the line above it ends, or with LF
+///   in a file of one line, and so does that last line once a line follows it.
+/// - No line ending is written for a line that is gone: a file whose every line is deleted is
+///   empty.
 fn apply_line_patch(source: &str, edits: &[LinePatchEdit]) -> Result<String, DriverError> {
-    let newline = if source.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
+    let mut lines: Vec<PatchLine> = source.split_inclusive('\n').map(PatchLine::of).collect();
+    let endings: Vec<&'static str> = lines.iter().map(|line| line.ending).collect();
+    // Only a last line has no ending; the line above it, if there is one, has.
+    let ending_above_the_last = match endings.as_slice() {
+        [.., above, _] => *above,
+        _ => "\n",
     };
-    let final_newline = source.ends_with('\n');
-    let normalized = source.replace("\r\n", "\n");
-    let mut lines: Vec<String> = normalized.lines().map(str::to_owned).collect();
+    let ending_at = |line: u32| match endings[index(line)] {
+        "" => ending_above_the_last,
+        ending => ending,
+    };
+    let written = |text: &str, ending: &'static str| -> Vec<PatchLine> {
+        text_lines(text)
+            .into_iter()
+            .map(|text| PatchLine { text, ending })
+            .collect()
+    };
     let line_count = u32::try_from(lines.len()).unwrap_or(u32::MAX);
     let mut ranges = Vec::with_capacity(edits.len());
     for edit in edits {
@@ -1399,11 +1671,11 @@ fn apply_line_patch(source: &str, edits: &[LinePatchEdit]) -> Result<String, Dri
     for (_, edit) in ranges.into_iter().rev() {
         match edit {
             LinePatchEdit::InsertBefore { line, text } => {
-                lines.splice(index(*line)..index(*line), text_lines(text));
+                lines.splice(index(*line)..index(*line), written(text, ending_at(*line)));
             }
             LinePatchEdit::InsertAfter { line, text } => {
                 let at = usize::try_from(*line).expect("u32 fits usize");
-                lines.splice(at..at, text_lines(text));
+                lines.splice(at..at, written(text, ending_at(*line)));
             }
             LinePatchEdit::ReplaceRange {
                 start_line,
@@ -1412,7 +1684,7 @@ fn apply_line_patch(source: &str, edits: &[LinePatchEdit]) -> Result<String, Dri
             } => {
                 lines.splice(
                     index(*start_line)..usize::try_from(*end_line).unwrap(),
-                    text_lines(text),
+                    written(text, ending_at(*start_line)),
                 );
             }
             LinePatchEdit::DeleteRange {
@@ -1423,9 +1695,21 @@ fn apply_line_patch(source: &str, edits: &[LinePatchEdit]) -> Result<String, Dri
             }
         }
     }
-    let mut result = lines.join(newline);
-    if final_newline {
-        result.push_str(newline);
+    let ends_without_an_ending = !source.is_empty() && !source.ends_with('\n');
+    if let Some((last, above)) = lines.split_last_mut() {
+        for line in above {
+            if line.ending.is_empty() {
+                line.ending = ending_above_the_last;
+            }
+        }
+        if ends_without_an_ending {
+            last.ending = "";
+        }
+    }
+    let mut result = String::with_capacity(source.len());
+    for line in &lines {
+        result.push_str(&line.text);
+        result.push_str(line.ending);
     }
     Ok(result)
 }
@@ -1440,6 +1724,100 @@ fn text_lines(value: &str) -> Vec<String> {
         .lines()
         .map(str::to_owned)
         .collect()
+}
+
+/// One directory a replacement created: the descriptor of the directory it is in, its name
+/// there, and its own identity.
+struct CreatedDirectory {
+    parent: OwnedFd,
+    name: CString,
+    device: libc::dev_t,
+    inode: libc::ino_t,
+}
+
+/// The parent directories one replacement created, outermost first.
+#[derive(Default)]
+struct CreatedDirectories(Vec<CreatedDirectory>);
+
+impl CreatedDirectories {
+    /// Removes the directories again, deepest first, after the write they were made for failed,
+    /// so that a replacement that does not write its file leaves the workspace as it was.
+    ///
+    /// Each is removed by its name beneath the descriptor it was created under, only while that
+    /// name is still the directory this call created, and only when it is empty: `unlinkat` with
+    /// `AT_REMOVEDIR` refuses a directory that holds an entry. A directory another request has
+    /// put an entry into therefore stays, and so does every directory above it. A directory
+    /// that existed before the call is not in this list. Removal is best effort: the caller
+    /// answers the failure of its write, not of this.
+    fn remove(self) {
+        for directory in self.0.into_iter().rev() {
+            let parent = directory.parent.as_raw_fd();
+            let still_the_created_one = fstatat(parent, &directory.name).is_ok_and(|stat| {
+                stat.st_dev == directory.device && stat.st_ino == directory.inode
+            });
+            // SAFETY: parent is a live guarded descriptor and name one NUL-terminated component.
+            if !still_the_created_one
+                || unsafe { libc::unlinkat(parent, directory.name.as_ptr(), libc::AT_REMOVEDIR) }
+                    != 0
+            {
+                return;
+            }
+            // SAFETY: fsync only reads descriptor state; a failure here changes no answer.
+            unsafe { libc::fsync(parent) };
+        }
+    }
+}
+
+/// Opens the directory `component` beneath `parent`, creating it when it is absent. A created
+/// directory is recorded in `created` before anything else is done with it.
+fn open_or_create_directory(
+    parent: OwnedFd,
+    component: &str,
+    created: &mut CreatedDirectories,
+) -> Result<OwnedFd, DriverError> {
+    let name = CString::new(component).map_err(|_| path_escape())?;
+    match openat2_cstr(
+        parent.as_raw_fd(),
+        &name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        0,
+    ) {
+        Ok(directory) => Ok(directory),
+        Err(error) if error.class == crate::DriverErrorClass::NotFound => {
+            // SAFETY: parent is guarded and component came from a validated relative path.
+            if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+                return Err(io_failed(
+                    "workspace.mkdir-failed",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            let stat = match fstatat(parent.as_raw_fd(), &name) {
+                Ok(stat) => stat,
+                Err(error) => {
+                    // SAFETY: removes the empty directory created two statements above.
+                    unsafe {
+                        libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
+                    };
+                    return Err(error);
+                }
+            };
+            created.0.push(CreatedDirectory {
+                parent,
+                name,
+                device: stat.st_dev,
+                inode: stat.st_ino,
+            });
+            let made = created.0.last().expect("pushed above");
+            sync_fd(made.parent.as_raw_fd())?;
+            openat2_cstr(
+                made.parent.as_raw_fd(),
+                &made.name,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0,
+            )
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn existing_file_is_executable(parent: RawFd, name: &str) -> Result<bool, DriverError> {
@@ -2710,4 +3088,28 @@ mod tests {
 mod line_patch_order_tests;
 
 #[cfg(test)]
+mod line_patch_bytes_tests;
+
+#[cfg(test)]
+mod replacement_cleanup_tests;
+
+#[cfg(test)]
 mod result_budget_tests;
+
+#[cfg(test)]
+mod text_edit_match_tests;
+
+#[cfg(test)]
+mod unified_diff_tests;
+
+#[cfg(test)]
+mod unified_diff_adversary_tests;
+
+#[cfg(test)]
+mod line_patch_adversary_tests;
+
+#[cfg(test)]
+mod text_edit_adversary_tests;
+
+#[cfg(test)]
+mod replacement_cleanup_adversary_tests;
