@@ -760,6 +760,14 @@ toolchain is pinned by `rust-toolchain.toml`, not by whatever `stable` is that d
 disagree. Read the gate's own exit status, never a pipeline's (`gate.sh 2>&1 | tail` reports
 `tail`'s status, not the gate's).
 
+**A change that adds or moves a file under `crates/substrate-daemon/src/` runs
+`cargo test -p b10x-substrate-daemon --release --locked --test driver_port` before it is pushed.**
+That target reads every source file of the crate and fails when one outside `src/runtime.rs` and
+`src/app/tests.rs` names a `substrate_host` item (invariant 4). The crate's library tests do not
+run it, so a run of the touched tests alone stays green: a new test module under `src/app/tests/`
+named the host driver, passed its own 8 cases, and failed the forge's gate on 2026-11-23. A test
+module takes its driver from `src/app/tests.rs` (`host_app`, `minimum_host_driver`).
+
 **A planning-only pull request passes `Full gate` without a build or a test.**
 [`.github/planning-only-paths`](.github/planning-only-paths) is the one path list: everything under
 `.engineering/`, the Markdown under `adr/`, `architecture/` and `docs/`, and `ROADMAP.md`,

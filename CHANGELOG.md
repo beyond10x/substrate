@@ -20,6 +20,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Security
 
+- **A stored operation outcome is returned to a mutation request only after the recorded grant
+  is compared, in every transaction in which such a request can find the row**
+  ([ADR 0017](adr/0017-delegated-context-is-verified-before-replay.md)). The comparison
+  holds for requests that arrive at the same time: a request that verified another grant than the
+  row records is answered `delegated-context.grant-conflict` (409) whichever of them wrote the
+  row, and a refusal decided from a request's own envelope or delegated context, such as a
+  missing or invalid context, is never replaced by another request's stored outcome. Reads of an
+  operation (`GET /v1/ops/{op}`, the event stream) are as before and need no context. The wire
+  and the bundle are unchanged.
+
 - An exec on the Kubernetes namespace driver is held to what it was admitted for until the
   request that creates its Pod is sent (design 34 § 6.3). After every wait the start can sit
   in, the driver computes its capability snapshot again and creates the Pod only when that
