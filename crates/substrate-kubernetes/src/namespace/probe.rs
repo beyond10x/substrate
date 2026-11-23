@@ -27,11 +27,13 @@
 //! `exec.no-egress`, which a namespace cannot state, and every family and property § 6.2 has no
 //! row for. Each stays absent, and admission refuses an exec without what it needs (invariant 3).
 //!
-//! A proof lasts one probe interval plus 60 s from its probe, a span measured on the driver's
-//! monotonic clock (§ 6.3), and only under the binding and the Lease it was taken under: a failed
-//! or late probe, a lost Lease or a new binding leaves the facts absent, never stale. The wall
-//! clock decides neither that nor when the next probe runs; it states `probed_at` and
-//! `valid_until` in the snapshot.
+//! A proof lasts one probe interval plus 60 s from its probe, and only under the binding and the
+//! Lease it was taken under: a failed or late probe, a lost Lease or a new binding leaves the
+//! facts absent, never stale. It ends when either clock says so (§ 6.3): when that span has
+//! elapsed on the driver's monotonic clock, or when the wall clock reads the `valid_until` the
+//! snapshot states or later. The wall clock can end a proof early and never lengthens it. The
+//! probe schedule is the monotonic clock's alone: a proof the wall clock ended early leaves its
+//! facts absent until the next scheduled probe.
 //!
 //! Every run proof is an observation of one node, the one the probe's keeper was scheduled on.
 //! The driver publishes that node beside the snapshot, never in it, and an exec start whose
@@ -96,13 +98,14 @@ const PROBE_WORKSPACE: &str = "probe";
 pub(crate) struct Probed {
     generation: u64,
     lease_epoch: u64,
-    /// When the probe ended, on the driver's monotonic clock: what the proof's validity is
-    /// measured from.
+    /// When the probe ended, on the driver's monotonic clock: what the proof's span is measured
+    /// from.
     since: Instant,
-    /// How long the proof is valid from `since`: the probe interval plus [`VALIDITY_SLACK`].
+    /// How long the proof is valid from `since` at most: the probe interval plus
+    /// [`VALIDITY_SLACK`].
     valid_for: Duration,
     /// The wall clock's reading at `since`. It states the snapshot's `probed_at` and, with
-    /// `valid_for`, its `valid_until`, and decides nothing.
+    /// `valid_for`, its `valid_until`, at which the proof ends on the wall clock.
     at: DateTime<Utc>,
     workspace: WorkspaceProofs,
     run: RunProofs,
@@ -498,9 +501,9 @@ impl NamespaceDriver {
     /// The snapshot (§ 6.3): the daemon's own facts always; the declared bounds while the driver
     /// is open, which takes a probe under the current binding that passed the handshake, and
     /// holds the Lease; each proved fact only under that binding and Lease, and while the proof
-    /// is younger than its span on the monotonic clock. Beside it, from the same proof, the node
-    /// that proof observed (§ 6.4), which is neither in the digest nor in the snapshot, and the
-    /// Lease epoch it was computed under.
+    /// is younger than its span on the monotonic clock and the wall clock reads before its
+    /// `valid_until`. Beside it, from the same proof, the node that proof observed (§ 6.4), which
+    /// is neither in the digest nor in the snapshot, and the Lease epoch it was computed under.
     pub(crate) fn capability_snapshot(&self) -> Computed {
         use sha2::Digest as _;
         let binding = self.binding();
@@ -519,10 +522,14 @@ impl NamespaceDriver {
             (opened, state.lease_epoch)
         };
         let serving = opened.is_some();
-        // The proof's age is read on the monotonic clock (§ 6.3): setting the wall clock neither
-        // lengthens nor shortens it.
+        // A proof ends when either clock says so (§ 6.3). Its span is read on the monotonic
+        // clock, which setting the wall clock does not lengthen. The wall clock ends it at the
+        // `valid_until` the snapshot states, so no snapshot states one that has passed beside
+        // its facts; the next probe keeps its monotonic schedule (`probe_due`).
         let age = |proved: &Probed| self.clock.now().saturating_duration_since(proved.since);
-        let proved = opened.filter(|proved| age(proved) < proved.valid_for);
+        let wall = self.clock.wall();
+        let proved = opened
+            .filter(|proved| age(proved) < proved.valid_for && wall < proved.at + proved.valid_for);
         let workspace = proved
             .as_ref()
             .map_or_else(WorkspaceProofs::default, |proved| proved.workspace);
@@ -580,7 +587,7 @@ impl NamespaceDriver {
             driver: HostDriverKind::Kubernetes,
             driver_version: driver_version.to_owned(),
             config_generation,
-            probed_at: proved.map_or_else(|| self.clock.wall(), |proved| proved.at),
+            probed_at: proved.map_or(wall, |proved| proved.at),
             valid_until,
             facts,
         };

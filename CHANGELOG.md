@@ -30,9 +30,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   created. Daemon admission of an exec start takes the facts and the digest from one capability
   snapshot and still refuses a start that names any snapshot but the current one.
 - A proof of the namespace driver is valid for a span measured on the driver's monotonic clock
-  from the probe that made it, and the next probe is due on that clock. The wall clock decides
-  neither; it states `probed_at` and `valid_until` in the snapshot. No wire schema, capability
-  fact or refusal code changes.
+  from the probe that made it, and the next probe is due on that clock. The wall clock states
+  `probed_at` and `valid_until` in the snapshot and can only end a proof early, when it passes
+  `valid_until`: it never keeps a proof valid. No wire schema, capability fact or refusal code
+  changes.
 
 ## [0.24.0] — 2026-11-22
 

@@ -63,19 +63,21 @@ const WALL_BOUND_GRACE: Duration = Duration::from_mins(1);
 /// How long after the API accepted the driver's deletion of an exec Pod the kubelet has to
 /// confirm it (design 28): a Pod still holding the bound uid then leaves the exec `unknown`.
 const DELETION_CONFIRM: Duration = Duration::from_mins(1);
-/// How many stated snapshots the driver remembers (§ 6.3). A snapshot's digest moves with every
-/// probe, at most once in 60 s (`probe_interval_seconds`), and a run a start waits behind is
-/// bounded at 24 h, which is 1440 probes. A start that names a snapshot stated longer ago than
-/// this many others is `exec.capability-stale`.
+/// How many stated snapshots the driver remembers (§ 6.3): 2,048 probes' worth, a snapshot's
+/// digest moving with every probe. That is 34 h at the shortest probe interval of 60 s and 14
+/// days at the default of 600 s (`probe_interval_seconds`). A start that waited longer than
+/// that names a snapshot the driver no longer remembers and is `exec.capability-stale`.
 pub(crate) const MAX_STATED_SNAPSHOTS: usize = 2_048;
 
 /// The exec state one driver keeps.
 #[derive(Debug, Default)]
 pub(crate) struct Execs {
-    /// What the driver stated with each snapshot the daemon read, oldest first and at most
-    /// [`MAX_STATED_SNAPSHOTS`]: how a start that names a digest is held to the binding, the
-    /// Lease and the node it was admitted under (§ 6.3). A set: the order in which two reads
-    /// record does not decide a start.
+    /// What the driver stated with each digest the daemon read, one entry a digest, oldest
+    /// first and at most [`MAX_STATED_SNAPSHOTS`]: how a start that names a digest is held to
+    /// the binding, the Lease and the node it was admitted under (§ 6.3). A digest stated with
+    /// more than one of them names no one admission, and its entry says so for as long as it is
+    /// remembered: the newest is never taken for it. The order in which two reads record does
+    /// not decide a start.
     stated: Mutex<VecDeque<Stated>>,
     tracked: Mutex<BTreeMap<String, Tracked>>,
     /// Pods of ended execs whose rows a garbage round settles once they read absent.
@@ -138,12 +140,19 @@ enum Holder {
     Absent,
 }
 
+/// One digest the driver stated, and what it stated it with; `None` once the driver stated it
+/// with more than one [`Admission`].
+#[derive(Debug)]
+struct Stated {
+    digest: String,
+    with: Option<Admission>,
+}
+
 /// What the driver stated with one snapshot, beside the digest a start names: the binding
 /// generation and the Lease epoch it was computed under, and the node its proof observed. None
 /// of the three can be read from the digest, and the digest is all a start carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Stated {
-    digest: String,
+struct Admission {
     generation: u64,
     lease_epoch: u64,
     node: Option<String>,
@@ -153,20 +162,26 @@ impl NamespaceDriver {
     /// Remembers what the driver stated with `computed`, which the daemon is about to admit
     /// starts under.
     pub(crate) fn note_stated(&self, computed: &Computed) {
-        let entry = Stated {
-            digest: computed.snapshot.snapshot.clone(),
+        let digest = &computed.snapshot.snapshot;
+        let with = Admission {
             generation: computed.snapshot.config_generation,
             lease_epoch: computed.lease_epoch,
             node: computed.node.clone(),
         };
         let mut stated = lock(&self.execs().stated);
-        if stated.contains(&entry) {
+        if let Some(known) = stated.iter_mut().find(|known| known.digest == *digest) {
+            if known.with.as_ref().is_some_and(|before| *before != with) {
+                known.with = None;
+            }
             return;
         }
         if stated.len() == MAX_STATED_SNAPSHOTS {
             stated.pop_front();
         }
-        stated.push_back(entry);
+        stated.push_back(Stated {
+            digest: digest.clone(),
+            with: Some(with),
+        });
     }
 
     /// Execs whose executor read back bounds other than its spec's (§ 7.3 run step 1).
@@ -320,24 +335,35 @@ impl NamespaceDriver {
     }
 
     /// What the start was admitted under (§ 6.3): the binding, the Lease and the node the driver
-    /// stated with the snapshot the start names, or `exec.capability-stale` for a snapshot this
-    /// driver did not state. The digest is looked up, not compared with the snapshot the driver
-    /// would state now: a proof renewed since the admission has another one.
-    fn admission(&self, sandbox: &ConfinementRequest) -> Result<Stated, DriverError> {
-        lock(&self.execs().stated)
+    /// stated with the snapshot the start names. `exec.capability-stale` for a snapshot this
+    /// driver did not state or no longer remembers, and for a digest it stated with more than
+    /// one binding, Lease or node, which names no one admission. The digest is looked up, not
+    /// compared with the snapshot the driver would state now: a proof renewed since the
+    /// admission has another one.
+    fn admission(&self, sandbox: &ConfinementRequest) -> Result<Admission, DriverError> {
+        let stated = lock(&self.execs().stated);
+        let Some(named) = stated
             .iter()
-            .rev()
             .find(|stated| stated.digest == sandbox.capability_snapshot)
-            .cloned()
-            .ok_or_else(|| stale("the start names a snapshot this driver did not state"))
+        else {
+            return Err(stale(
+                "the start names a snapshot this driver did not state",
+            ));
+        };
+        named.with.clone().ok_or_else(|| {
+            stale(
+                "the start names a digest this driver stated under more than one binding, Lease \
+                 or node",
+            )
+        })
     }
 
     /// The last comparison before the Pod create (§ 6.3), after every wait of the start. The
     /// binding and the policy set are the admission's by the re-read before it
     /// ([`NamespaceDriver::check_binding`]). Here the snapshot computed now is held to the rest:
     /// it is computed under the Lease of the admission, it is a valid proof on the keeper's node
-    /// (§ 6.4), and it states every fact the start requires. A proof that is gone or older than
-    /// its span observed no node and states none of its facts
+    /// (§ 6.4), and it states every fact the start requires. A proof that is gone or has ended
+    /// on either clock observed no node and states none of its facts
     /// ([`NamespaceDriver::capability_snapshot`]). A renewed proof passes: its digest is not
     /// compared.
     ///
@@ -350,7 +376,7 @@ impl NamespaceDriver {
     /// admission or now.
     fn held_to_its_proof(
         &self,
-        admission: &Stated,
+        admission: &Admission,
         keeper_node: &str,
         sandbox: &ConfinementRequest,
     ) -> Result<(), DriverError> {
@@ -364,8 +390,8 @@ impl NamespaceDriver {
             Some(node) if node == keeper_node => {}
             _ if admission.node.as_deref() == Some(keeper_node) => {
                 return Err(stale(
-                    "the proof the start was admitted with is gone, older than its validity or \
-                     renewed on another node than the workspace keeper's",
+                    "the proof the start was admitted with is gone, has ended or was renewed on \
+                     another node than the workspace keeper's",
                 ));
             }
             other => observed_on(keeper_node, other)?,

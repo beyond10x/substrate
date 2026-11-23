@@ -1964,6 +1964,9 @@ async fn security_the_applied_record_echoes_the_requires_the_start_carried() {
 #[path = "restart_tests.rs"]
 mod restart;
 
+#[path = "review2_proof_cases.rs"]
+mod review2_proof_cases;
+
 /// Adversary, wave 2026-10-31 (design 30 § 4.4, claim 2): the applied record echoes exactly the
 /// `sandbox.requires` that was checked. Design 34 § 6.4 now admits an exec on the neutral set, so
 /// a start whose requirement the daemon checked and found held reaches this driver; the record it
@@ -2090,6 +2093,8 @@ mod d354 {
         rig.running(&name).await;
         let pod_uid = uid(&rig.pod(&name).expect("the first Pod runs"));
 
+        // A later probe runs at a later instant, so its snapshot has a digest of its own.
+        rig.clock.set(Duration::from_secs(1));
         rig.driver.prove_on(OTHER_NODE);
         refused_before_any_pod(&rig, "exec_after").await;
         assert_eq!(rig.pod_creates(), 1, "only the first start created a Pod");
@@ -2560,9 +2565,48 @@ mod proof_held_until_pod_create {
         );
     }
 
-    /// § 6.3: a proof is valid for a span measured on the driver's monotonic clock from the probe
-    /// that made it. The wall clock does not decide it: set back to the probe's time, it leaves
-    /// a proof older than its span as invalid as before, as it leaves the Lease (§ 6.1 step 3).
+    /// § 6.3: a proof ends when either clock says so. The wall clock ends it at the
+    /// `valid_until` the snapshot states, with the monotonic span not yet elapsed: the start
+    /// admitted before is stale. The probe schedule is the monotonic clock's alone, so the
+    /// facts stay absent until the next scheduled probe, which is not brought forward.
+    #[tokio::test]
+    async fn a_proof_whose_valid_until_passed_on_the_wall_clock_is_stale_until_the_next_scheduled_probe()
+     {
+        let (rig, clock) = rig_on_two_clocks().await;
+        let proved = rig.driver.machine();
+        let window = (proved.valid_until.expect("a proved snapshot is bounded") - proved.probed_at)
+            .to_std()
+            .expect("the proof is valid after the probe");
+        let mut start = input(&["/bin/true"]);
+        start
+            .sandbox
+            .capability_snapshot
+            .clone_from(&proved.snapshot);
+
+        // The wall clock reads `valid_until`. The monotonic clock has not moved since the probe.
+        clock.set(TAKEOVER, TAKEOVER + window);
+        assert!(rig.driver.lease_held(), "the control: the Lease is held");
+        let id = "exec_valid_until_passed";
+        let outcome = rig.start(id, &start).await;
+        assert_stale_before_any_pod(&rig, id, outcome);
+        assert!(
+            !rig.driver.probe_due(),
+            "the wall clock brings no probe forward"
+        );
+
+        let interval = Duration::from_secs(rig.driver.config().probe_interval_seconds);
+        clock.set(TAKEOVER + interval, TAKEOVER + window);
+        rig.driver.renew().await;
+        assert!(rig.driver.lease_held(), "the control: the Lease is held");
+        assert!(
+            rig.driver.probe_due(),
+            "the next probe is due one interval after the last on the monotonic clock"
+        );
+    }
+
+    /// § 6.3: the wall clock never lengthens a proof. Set back to the probe's time, it leaves a
+    /// proof whose span has elapsed on the monotonic clock as ended as before, as it leaves the
+    /// Lease (§ 6.1 step 3).
     #[tokio::test]
     async fn a_proof_older_than_its_validity_window_is_stale_whatever_the_wall_clock_reads() {
         let (rig, clock) = rig_on_two_clocks().await;
@@ -2686,15 +2730,44 @@ mod proof_held_until_pod_create {
         let rig = rig().await;
         let start = admitted(&rig);
         let id = "exec_moved_node";
+        let admission = rig.driver.machine();
         let outcome = changed_during_the_policy_reread(&rig, id, &start, || {
+            rig.clock.set(LATER);
             rig.driver.prove_on(OTHER_NODE);
+            let renewed = rig.driver.machine();
+            assert_ne!(
+                renewed.snapshot, admission.snapshot,
+                "the control: the renewed proof has a digest of its own"
+            );
             assert_eq!(
-                rig.driver.machine().snapshot,
-                start.sandbox.capability_snapshot,
+                renewed.facts, admission.facts,
                 "the control: only the node differs"
             );
         })
         .await;
+        assert_stale_before_any_pod(&rig, id, outcome);
+    }
+
+    /// One digest stated with two nodes names no one admission: a start that names it is stale,
+    /// although the proof is on the keeper's node again when the start runs.
+    #[tokio::test]
+    async fn one_digest_stated_on_two_nodes_is_stale() {
+        let rig = rig().await;
+        let start = admitted(&rig);
+        rig.driver.prove_on(OTHER_NODE);
+        assert_eq!(
+            rig.driver.machine().snapshot,
+            start.sandbox.capability_snapshot,
+            "the control: the proof on the other node has the same digest"
+        );
+        rig.driver.prove_on(NODE);
+        assert_eq!(
+            rig.driver.machine().snapshot,
+            start.sandbox.capability_snapshot,
+            "the control: and so has the proof on the keeper's node again"
+        );
+        let id = "exec_one_digest_two_nodes";
+        let outcome = rig.start(id, &start).await;
         assert_stale_before_any_pod(&rig, id, outcome);
     }
 
