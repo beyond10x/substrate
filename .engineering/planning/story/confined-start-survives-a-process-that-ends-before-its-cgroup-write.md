@@ -8,7 +8,12 @@ summary: One hosted confinement-lane run answered exec.cgroup-write-failed with 
 tags:
 - defect
 - flaky
-revision: 1
+scope:
+- confidence: cited
+  path: crates/substrate-host/src/process.rs
+- confidence: cited
+  path: crates/substrate-host/tests/writable_root_bind.rs
+revision: 3
 ---
 # Story: a confined start does not fail when its process ends before it is moved into its cgroup
 
@@ -51,3 +56,17 @@ the operator.
 ## Acceptance
 
 The case of step 3 holds, and the lane's case above has not failed this way in ten release runs.
+
+## Closed by the change of the sibling story, 2026-11-23
+
+Step 1: the driver wrote the process id of the spawned backend, and of each process it found
+beneath it, to `cgroup.procs` after the spawn. Step 2 took the first alternative: the forked
+child joins the cgroup itself before it executes the backend, so the process cannot run before
+it is placed (`join_cgroup`, `crates/substrate-host/src/process.rs`). Step 3:
+`a_backend_that_forks_short_lived_children_is_started_inside_its_cgroup` in
+`crates/substrate-host/tests/writable_root_bind.rs`, with no retry; 100 of 100 starts in a loop
+on a workstation. The cause, the run and the other cases are in
+`story:delegated-start-names-a-child-that-ended-before-its-cgroup-attach`.
+
+The second half of the acceptance (ten release runs of the lane without this refusal) is open
+and is read from the hosted `Release lanes` runs on `main` after the change.
