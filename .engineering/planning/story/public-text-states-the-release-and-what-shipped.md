@@ -7,7 +7,7 @@ title: The site, STATUS.md and the README state the current release, what shippe
 summary: Public pages named 0.16.1 as current, listed shipped Kubernetes capabilities as absent, and the README gives the Connectors relationship the wrong way round
 tags:
 - defect
-revision: 1
+revision: 2
 ---
 # Story: the site, STATUS.md and the README state the current release, what shipped and who owns what
 
@@ -51,7 +51,17 @@ steps. The status page lists neither shipped capability as absent.
 
 ## Where the requirement comes from
 
+## Where the requirement comes from
+
 A review of release 0.24.0 dated 2026-11-23, findings 9, 12, 13 and 14, which the operator
-handed to this session on 2026-11-23 with the order to address every finding. Findings 10, 11,
-15, 16 and the consumer side of 9 belong to the repositories `zwirn`, `conductor`, `atlas`,
-`agent-stack`, `mantle` and `workspace` and are filed there. Stakeholder: the operator.
+handed to this session on 2026-11-23 with the order to address every finding. Stakeholder: the
+operator.
+
+The findings of that review that are not Substrate's:
+
+- Finding 9, consumer side: `mantle` and `workspace` pin an SDK that expects an earlier bundle
+  and need a paired upgrade; filed in those repositories.
+- Finding 15 (`atlas`) and finding 16 (`agent-stack`): filed in those repositories.
+- Findings 10 and 11, and `conductor`'s part of 9: not filed. The operator said on 2026-11-23
+  that `zwirn` and `conductor` are retired. `zwirn` was archived on the forge that day;
+  `conductor` is retired and not archived.
