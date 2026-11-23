@@ -40,6 +40,8 @@ use tower::ServiceExt as _;
 
 const SUBJECT: &str = "local:1000";
 const SNAPSHOT: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+/// The digest of the other snapshot a [`Facts::Moving`] driver states.
+const EARLIER: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 /// The facts a fixture publishes beside the host's own workspace facts.
 #[derive(Clone, Copy)]
@@ -55,6 +57,10 @@ enum Facts {
     Neutral { missing: Option<NeutralFact> },
     /// Neither set.
     Neither,
+    /// A driver that states one of two snapshots, in turn: the neutral set under [`EARLIER`],
+    /// then neither set under [`SNAPSHOT`], and so on. No one snapshot both carries `SNAPSHOT`
+    /// and admits a start.
+    Moving,
 }
 
 /// The six facts of design 34 § 6.4's neutral set.
@@ -97,6 +103,8 @@ struct Fixture {
     host: Arc<HostDriver>,
     facts: Facts,
     starts: AtomicUsize,
+    /// How often the snapshot was read.
+    reads: AtomicUsize,
 }
 
 #[async_trait]
@@ -106,13 +114,16 @@ impl Driver for Fixture {
     }
 
     fn machine(&self) -> CapabilitySnapshot {
+        let read = self.reads.fetch_add(1, Ordering::SeqCst);
         let mut capability = self.host.machine();
         SNAPSHOT.clone_into(&mut capability.snapshot);
         let facts = &mut capability.facts;
         facts.exec_argv_only = Some(true);
         let (linux, capsule) = match self.facts {
             Facts::Linux { capsule } => (true, capsule),
-            Facts::NoEgressOnly | Facts::Neutral { .. } | Facts::Neither => (false, false),
+            Facts::NoEgressOnly | Facts::Neutral { .. } | Facts::Neither | Facts::Moving => {
+                (false, false)
+            }
         };
         facts.exec_namespaces = linux.then_some(substrate_wire::NamespaceFacts {
             user: true,
@@ -132,6 +143,10 @@ impl Driver for Fixture {
         facts.confinement_no_egress = matches!(self.facts, Facts::NoEgressOnly).then_some(true);
         if let Facts::Neutral { missing } = self.facts {
             neutral(facts, missing);
+        }
+        if matches!(self.facts, Facts::Moving) && read.is_multiple_of(2) {
+            neutral(facts, None);
+            EARLIER.clone_into(&mut capability.snapshot);
         }
         facts.exec_inline_capsule = capsule.then_some(ExecutionCapsuleFacts {
             mount: substrate_wire::EXECUTION_CAPSULE_MOUNT.to_owned(),
@@ -274,6 +289,7 @@ impl Harness {
                 .expect("host driver"),
             facts,
             starts: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
         });
         let app = App::new(
             Arc::clone(&store),
@@ -326,6 +342,16 @@ impl Harness {
 
     async fn start(&self, operation: &str, capsule: bool) -> (StatusCode, Value) {
         let workspace = self.workspace(&format!("{operation}W")).await;
+        self.start_in(&workspace, operation, capsule).await
+    }
+
+    /// One exec start in `workspace`, naming [`SNAPSHOT`].
+    async fn start_in(
+        &self,
+        workspace: &str,
+        operation: &str,
+        capsule: bool,
+    ) -> (StatusCode, Value) {
         let mut body = json!({
             "workspace": workspace,
             "argv": ["/fixture/run"],
@@ -471,6 +497,31 @@ async fn without_either_set_a_capsule_hears_sandbox_unavailable_first() {
         assert_refused(&response, "exec.sandbox-unavailable", "exec.namespaces");
         assert_eq!(harness.starts(), 0);
     }
+}
+
+/// Design 34 § 6.3: admission takes the facts and the digest from one snapshot. A start is
+/// admitted only when one snapshot both carries the digest it names and proves what it requires.
+/// The start names a snapshot that proves neither set, and the driver states the neutral set only
+/// under another digest, so the start is `exec.capability-stale` (422) against the one snapshot
+/// admission reads, and is never dispatched.
+#[tokio::test(flavor = "multi_thread")]
+async fn admission_takes_the_facts_and_the_digest_from_one_snapshot() {
+    let harness = Harness::open(Facts::Moving);
+    let workspace = harness.workspace("01JNSADMISSIONONEREAD001W").await;
+    harness.driver.reads.store(0, Ordering::SeqCst);
+    let (status, body) = harness
+        .start_in(&workspace, "01JNSADMISSIONONEREAD001", false)
+        .await;
+    assert_eq!(
+        harness.driver.reads.load(Ordering::SeqCst),
+        1,
+        "admission read the snapshot once: {body}"
+    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["class"], "refused", "{body}");
+    assert_eq!(body["error"]["code"], "exec.capability-stale", "{body}");
+    assert_eq!(body["error"]["address"], "capability_snapshot", "{body}");
+    assert_eq!(harness.starts(), 0, "{body}");
 }
 
 /// The host lane: whatever this host proves, its snapshot names the host driver and never the

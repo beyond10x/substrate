@@ -18,9 +18,7 @@ use substrate_kubernetes_client::Method;
 use substrate_kubernetes_client::fake::Fault;
 use substrate_wire::ExecState;
 
-use super::{
-    DEPLOYMENT, NODE, Rig, SNAPSHOT, applied_line, driver_over, exit_line, frame, input, rig, uid,
-};
+use super::{DEPLOYMENT, Rig, applied_line, driver_over, exit_line, frame, input, rig, uid};
 use crate::names::{self, DEPLOYMENT_LABEL, MANAGED_BY, MANAGED_BY_LABEL, OPERATION_ANNOTATION};
 use crate::pod::KILL_GRACE_SECONDS;
 use crate::{API_FAILED, LEASE_HELD, NamespaceDriver};
@@ -48,8 +46,6 @@ async fn take_over(rig: &mut Rig, reopened: NamespaceDriver) {
     assert_eq!(held.code, LEASE_HELD, "{}", held.message);
     rig.clock.set(TAKEOVER);
     reopened.open().await.expect("the Lease is taken over");
-    let generation = reopened.binding().expect("bound").config_generation();
-    reopened.publish_exec_snapshot(SNAPSHOT, generation, Some(NODE));
     drop(std::mem::replace(&mut rig.driver, reopened));
 }
 
@@ -67,7 +63,7 @@ async fn a_driver_taken_over_publishes_no_probe_node_until_its_own_probe() {
     let mut rig = rig().await;
     restart(&mut rig).await;
     let snapshot = rig.driver.machine();
-    assert_eq!(rig.driver.published_exec_node(), None);
+    assert_eq!(rig.driver.capability_snapshot().node, None);
     let mut start = input(&["/bin/true"]);
     start.sandbox.capability_snapshot = snapshot.snapshot;
     let DispatchOutcome::NotDispatched(refused) = rig.start("exec_taken_over", &start).await else {
