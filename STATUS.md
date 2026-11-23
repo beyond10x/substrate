@@ -1,16 +1,17 @@
 # Repository status
 
 Release [0.26.0](https://github.com/beyond10x/substrate/releases/tag/0.26.0), published on 23 November 2026,
-is the latest release. These lines were written with its release-prepare change, before its tag
-existed: its commit, its tag-push run and the carrier of its lane records were not observed, and
-the GitHub release states them. The release before it, `0.25.0`, is at commit `ca9cdc4`
-(2026-11-23: `git rev-parse --short=7 '0.25.0^{commit}'` and
-`gh release view 0.25.0 -R beyond10x/substrate`), and its tag-push release run is
-[`45116015427`](https://github.com/beyond10x/substrate/actions/runs/45116015427).
-Release `0.24.0` is at commit `85da2e2`, and its tag-push release run is
+is the latest release, at commit `d0bd8be` (2026-11-23: `git rev-parse --short=7 '0.26.0^{commit}'`
+and `gh release view 0.26.0 -R beyond10x/substrate`). Its tag-push release run
+[`45169990519`](https://github.com/beyond10x/substrate/actions/runs/45169990519) was refused in
+its preflight and published nothing; the recovery dispatch
+[`45170446961`](https://github.com/beyond10x/substrate/actions/runs/45170446961) published it.
+Release `0.25.0` is at commit `ca9cdc4`, tag-push release run
+[`45116015427`](https://github.com/beyond10x/substrate/actions/runs/45116015427), and release
+`0.24.0` at commit `85da2e2`, tag-push release run
 [`45025006989`](https://github.com/beyond10x/substrate/actions/runs/45025006989).
 Release `0.26.0` advertises `substrate-wire/0.27.0` (`ADVERTISED_CONTRACT_BUNDLE` in
-`crates/substrate-wire/src/lib.rs`). `cargo xtask check-docs` holds these lines, and
+`crates/substrate-wire/src/lib.rs` at that tag). `cargo xtask check-docs` holds these lines, and
 the two below that name the latest tag and release, to the workspace version. The rows below were
 not observed again for `0.26.0`: each keeps the date and the release it states.
 
@@ -93,17 +94,25 @@ The observed development EKS nodes expose no KVM device or microVM RuntimeClass,
 so Firecracker live conformance needs a dedicated KVM-capable node pool and is absent on the
 current nodes.
 
-The latest annotated tag is `0.26.0`, which did not exist when this line was written with the
-release-prepare change: `git cat-file -p 0.26.0` and `gh release view 0.26.0 -R beyond10x/substrate`
-state its commit and the carrier of its lane records. The rest of this paragraph was observed for
-tag `0.25.0` at commit `ca9cdc4`. Its message carries no lane record
-(2026-11-23: `git cat-file -p 0.25.0`). The GitHub release names one carrier for all four records,
+The latest annotated tag is `0.26.0` at commit `d0bd8be`. Its message carries no lane record
+(2026-11-23: `git cat-file -p 0.26.0`). The GitHub release names two carriers
+(2026-11-23: `gh release view 0.26.0 -R beyond10x/substrate`, sections *Confinement lane*,
+*Quota lane*, *Chart lane* and *Namespace lane*): the confinement record, 201 delegated cases, is
+the annotation of the hosted `release-lanes.yml` run
+[`45161004811`](https://github.com/beyond10x/substrate/actions/runs/45161004811), and the quota,
+chart and namespace records (7 cases, 4 scenarios, 8 observations) are workflow inputs of the
+recovery dispatch. Those three lines are the annotations of that same run's first attempt: its
+confinement job failed once and was run again alone, and the release's preflight reads only the
+latest attempt (`story:release-reads-lane-records-across-the-attempts-of-a-run`). That release and
+[CHANGELOG.md](CHANGELOG.md) record its digests.
+
+Tag `0.25.0` at commit `ca9cdc4` carries no lane record either
+(2026-11-23: `git cat-file -p 0.25.0`). Its GitHub release names one carrier for all four records,
 the annotations of the hosted `release-lanes.yml` run
 [`45110787701`](https://github.com/beyond10x/substrate/actions/runs/45110787701)
-(2026-11-23: `gh release view 0.25.0 -R beyond10x/substrate`, sections *Confinement lane*,
-*Quota lane*, *Chart lane* and *Namespace lane*: 189 delegated cases, 7 quota cases, 4 chart
-scenarios and 8 namespace observations). That release and [CHANGELOG.md](CHANGELOG.md)
-record its digests. Tag `0.24.0` at commit `85da2e2` has the same form, with the hosted run
+(2026-11-23: `gh release view 0.25.0 -R beyond10x/substrate`: 189 delegated cases, 7 quota cases,
+4 chart scenarios and 8 namespace observations). Tag `0.24.0` at commit `85da2e2` has the same
+form, with the hosted run
 [`45021659285`](https://github.com/beyond10x/substrate/actions/runs/45021659285).
 
 Tag `0.16.1` is at commit `f2fd606`. Its message carries the four release
@@ -126,7 +135,7 @@ source, keyless-signed the images, the chart and the binaries' `SHA256SUMS` with
 
 | Area | State | Next proof |
 |---|---|---|
-| Source | the standalone public repository `beyond10x/substrate` (`git remote -v`), public under atlas ADR 0003 ([CHANGELOG.md](CHANGELOG.md), 0.2.1); the latest release is `0.26.0` (its commit was not read when this row was written with the release-prepare change); release `0.25.0` is at `ca9cdc4`, 63 commits after `0.24.0` (2026-11-23: `git rev-list --count 0.24.0..0.25.0` → 63); release `0.24.0` is at `85da2e2`, 360 commits after `0.16.1` (2026-11-23: `git rev-list --count 0.16.1..0.24.0` → 360; header); release `0.16.1` is at `f2fd606`; the annotated tag `0.16.0` at `541cf55` is not published (header). `0.16.1` is **177 commits after `0.15.0`** (2026-10-29: `git rev-list --count 0.15.0..0.16.1` → 177). What it ships is listed under 0.16.0 and 0.16.1 in [CHANGELOG.md](CHANGELOG.md): the Kubernetes namespace driver (design 34, ADR 0047) with bundle `0.25.0`, the executor image, the `Namespace-lane:` and `Chart-lane:` release records, the execution profile `substrate-host-exec-v2`, the one-way state store schema 2, ESS 0.76.0, the host probe's socket-path fix and `libz-sys` 1.1.31 | keep the portable-document and credential invariants enforced — `cargo xtask check-links` and `cargo xtask check-secrets` are full-gate steps |
+| Source | the standalone public repository `beyond10x/substrate` (`git remote -v`), public under atlas ADR 0003 ([CHANGELOG.md](CHANGELOG.md), 0.2.1); the latest release is `0.26.0` at `d0bd8be`, 16 commits after `0.25.0` (2026-11-23: `git rev-list --count 0.25.0..0.26.0` → 16); release `0.25.0` is at `ca9cdc4`, 63 commits after `0.24.0` (2026-11-23: `git rev-list --count 0.24.0..0.25.0` → 63); release `0.24.0` is at `85da2e2`, 360 commits after `0.16.1` (2026-11-23: `git rev-list --count 0.16.1..0.24.0` → 360; header); release `0.16.1` is at `f2fd606`; the annotated tag `0.16.0` at `541cf55` is not published (header). `0.16.1` is **177 commits after `0.15.0`** (2026-10-29: `git rev-list --count 0.15.0..0.16.1` → 177). What it ships is listed under 0.16.0 and 0.16.1 in [CHANGELOG.md](CHANGELOG.md): the Kubernetes namespace driver (design 34, ADR 0047) with bundle `0.25.0`, the executor image, the `Namespace-lane:` and `Chart-lane:` release records, the execution profile `substrate-host-exec-v2`, the one-way state store schema 2, ESS 0.76.0, the host probe's socket-path fix and `libz-sys` 1.1.31 | keep the portable-document and credential invariants enforced — `cargo xtask check-links` and `cargo xtask check-secrets` are full-gate steps |
 | CI | [`.github/workflows/gate.yml`](.github/workflows/gate.yml) runs `bash scripts/gate.sh tests` and `bash scripts/gate.sh static` as two parallel jobs on push to `main`, on pull request and on dispatch, and its `Full gate` job succeeds only when both phases did, so that check's status is the gate's own (read 2026-10-29). **Ruleset `main-requires-the-full-gate` (id 23425552, no bypass actors) requires that check on `main` (`gh api repos/beyond10x/substrate/rules/branches/main` → `required_status_checks` beside `creation`, `update`, `deletion`, `non_fast_forward` and the two email patterns); the legacy `GET …/branches/main/protection` still answers 404 `Branch not protected`, because rulesets are not branch protection.** The gate is also enforced at release time: [`.github/workflows/release.yml`](.github/workflows/release.yml) reads `gate.yml`'s own recorded conclusion for the exact commit from the Actions API and refuses to release a tag without a `success`. The first green run is [33275398365](https://github.com/beyond10x/substrate/actions/runs/33275398365). The delegated lane is **absent** there, never reported as passed: a hosted runner has neither bubblewrap nor a delegated cgroup subtree. That lane is a release condition rather than a gate step: `release.yml` refuses a tag with no recorded local run of `bash scripts/delegated-lane.sh` for the tag's own commit, taken from the annotated tag's `Confinement-lane:` trailer or from the `confinement_evidence` dispatch input, and checked against the commit and the `DELEGATED_CASES` the tagged source declares. It records that run; it does not execute the lane | give the delegated lane a runner that has both prerequisites and make it a required check, which would replace the recorded-run condition with an executed one |
 | Release | release [0.24.0](https://github.com/beyond10x/substrate/releases/tag/0.24.0), tag-push run [`45025006989`](https://github.com/beyond10x/substrate/actions/runs/45025006989), publishes daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.24.0`, disposable MCP `ghcr.io/beyond10x/b10x-substrate-mcp:0.24.0`, executor image `ghcr.io/beyond10x/b10x-substrate-executor:0.24.0`, development bundle `ghcr.io/beyond10x/b10x-substrate-wire:0.27.0`, chart `oci://ghcr.io/beyond10x/charts/b10x-substrate` `0.24.0` and two x86_64 Linux binary archives with `SHA256SUMS` and `SHA256SUMS.sigstore.json` (2026-11-23: `gh release view 0.24.0 -R beyond10x/substrate`, body and assets); its four lane records are the annotations of hosted run `45021659285`. The rest of this row was observed for the earlier release [0.16.1](https://github.com/beyond10x/substrate/releases/tag/0.16.1), tag-push run [`40949928365`](https://github.com/beyond10x/substrate/actions/runs/40949928365), which published daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.16.1`, disposable MCP `ghcr.io/beyond10x/b10x-substrate-mcp:0.16.1`, the first executor image `ghcr.io/beyond10x/b10x-substrate-executor:0.16.1`, development bundle `ghcr.io/beyond10x/b10x-substrate-wire:0.25.0`, chart `oci://ghcr.io/beyond10x/charts/b10x-substrate` `0.16.1` and two x86_64 Linux binary archives under a signed `SHA256SUMS`, each keyless-signed and verified before the release is announced; their digests are the GitHub release's and [CHANGELOG.md](CHANGELOG.md)'s, not restated here. The tag records a confinement-lane run of 182 delegated cases, a quota-lane run of 7 cases, a chart-lane run of 4 scenarios and a namespace-lane run of 8 observations, all for `f2fd606` (2026-10-29: `git cat-file -p 0.16.1`); [AGENTS.md](AGENTS.md) § *Releases* lists what `release.yml` refuses. The previous release, [0.15.0](https://github.com/beyond10x/substrate/releases/tag/0.15.0), was published by the protected-`main` recovery dispatch [`40813559560`](https://github.com/beyond10x/substrate/actions/runs/40813559560) under the identity `release.yml@refs/heads/main` and published no executor image. The bundle remains development, not stable | retain write-once tags, anonymous readback and signature verification in every later release |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free ([ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md)) | ADR 0001's dependency half is now a gate step (`cargo xtask check-packages`); give ADRs 0002–0006 the same treatment in dependency and conformance tests |
