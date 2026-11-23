@@ -269,9 +269,9 @@ stays with its ordinal. Delete the claims yourself to destroy the ledgers.
 `--driver kubernetes` serves workspaces as objects in one namespace. It is a development profile,
 first released in 0.16.1.
 
-What it does not do yet:
+What it serves, and on which condition:
 
-- **Exec is served only on observed confinement.** From 0.18.0 the probe publishes the confinement
+- **Exec is served from 0.18.0, only on observed confinement.** The probe publishes the confinement
   families, `confinement.whole-tree-kill` and `confinement.no-egress` from what it observed. An
   exec start is admitted only when all six facts of design 34 § 6.4 are present. Otherwise it is
   refused `exec.sandbox-unavailable`. The four Linux confinement facts are never published.
@@ -282,8 +282,11 @@ What it does not do yet:
   the default-deny policy still reached the API server, and another probe timed out all three
   attempts. The lane has not yet observed a plugin that denies locally. Inferred, not verified:
   kind's plugin may enforce NetworkPolicy only after a Pod's first moments.
-- **Shared clean-room conformance follows in the next release.** The namespace lane reports that
-  step absent until `story:remote-clean-room-conformance` lands.
+- **Shared clean-room conformance is served from 0.17.0.** `b10x-substrate-conformance` certifies
+  a deployed endpoint from outside it, and the namespace lane runs it as its step 4. See
+  [remote conformance](./remote-conformance.md).
+- **Sessions are not served.** A raw-pipe session start is `session.unserved` and a PTY session
+  start `session.pty-unserved` (501).
 
 ```bash
 substrate-daemon --driver kubernetes --kubernetes-config driver.json \
@@ -381,6 +384,12 @@ Pod is deleted.
 - Keep fleet scheduling, membership, rich grants, product quotas, and billing outside the daemon.
 - Keep continuous session bytes off an ordinary governance or invocation proxy.
 - Scope resources and operation IDs to the authenticated subject.
+- Upgrade a daemon and its SDK clients together when a release moves the contract bundle. While
+  the contract is in development, an SDK client accepts only the bundle name and digest it was
+  built with ([Rust SDK](./rust-sdk.md)). Against any other daemon the SDK returns
+  `SdkError::ContractMismatch`, and the command line exits 1 with
+  `unavailable (contract_mismatch)`. The [status page](../status.md) names the bundle the current
+  release advertises. The [release notes](../releases.md) say when a release moves it.
 
 ## Deployment review
 

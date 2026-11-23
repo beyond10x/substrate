@@ -38,6 +38,8 @@ Treat every capability as deployment-specific and verify it through `GET /v1/mac
 | process events | one WebSocket stream of a host process's lifecycle and log lines |
 | operational listener | opt-in `--ops-listen`: `/livez`, `/readyz` and OpenMetrics `/metrics` |
 | Kubernetes serving | a signed Helm chart running one node-bound daemon per node |
+| Kubernetes namespace driver | `--driver kubernetes`, a development profile: empty workspaces from 0.16.1, and from 0.18.0 an exec where the probe proved six confinement facts |
+| remote conformance | from 0.17.0, `b10x-substrate-conformance` certifies a deployed endpoint from outside it. See [remote conformance](./guides/remote-conformance.md) |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
 | distribution | Apache-2.0 source plus keyless-signed 0.24.0 daemon, MCP and executor images, chart and binaries, and the signed 0.27.0 development bundle |
 
@@ -62,8 +64,8 @@ The Kubernetes namespace driver's limits are in the
 - workloads, images, volumes, and endpoints
 - a Docker driver behind the daemon; the `oci` and `pod` confinement adapters run in the host
   crate, not behind the daemon
-- confined exec through the Kubernetes namespace driver, and that driver's shared clean-room
-  conformance
+- sessions through the Kubernetes namespace driver: a raw-pipe start is `session.unserved` and a
+  PTY start `session.pty-unserved`
 - cross-machine scheduling
 - stable signed contract-bundle publication
 

@@ -69,6 +69,7 @@ fn input_root() -> tempfile::TempDir {
     for relative in [
         "Cargo.toml",
         "CHANGELOG.md",
+        "STATUS.md",
         "crates/substrate-wire/src/lib.rs",
         "crates/substrate-host/src/confinement/facts.rs",
         "website/docs",
@@ -176,6 +177,45 @@ fn a_missing_input_is_named_by_its_path() {
     assert!(
         !check.status.success() && stderr.contains(BUNDLES),
         "check-docs does not name the missing {BUNDLES}\n{}",
+        shown(&check)
+    );
+}
+
+/// `STATUS.md` named 0.16.1 as the latest release while the workspace stood at 0.24.0, and no
+/// check read it. `check-docs` now holds its statements of the latest release to the workspace
+/// version: a status file that names another release is refused with the file, the line, what
+/// it reads and what to write.
+#[test]
+fn a_status_file_that_names_another_release_is_refused_with_its_line() {
+    let root = input_root();
+    check_docs_passes(root.path());
+    let path = root.path().join("STATUS.md");
+    let text = fs::read_to_string(&path).unwrap();
+    let form = "The latest annotated tag is `";
+    let number = text
+        .lines()
+        .position(|line| line.starts_with(form))
+        .expect("STATUS.md names the latest annotated tag at the start of a line")
+        + 1;
+    let stale: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.starts_with(form) {
+                format!("{form}0.0.1` at commit `0000000`.")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    fs::write(&path, stale.join("\n") + "\n").unwrap();
+    let check = xtask(root.path(), &["check-docs"]);
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(
+        !check.status.success()
+            && stderr.contains(&format!(
+                "STATUS.md:{number}: reads \"The latest annotated tag is `0.0.1`\", write \"The latest annotated tag is `"
+            )),
+        "check-docs admits a STATUS.md whose latest tag is another release\n{}",
         shown(&check)
     );
 }

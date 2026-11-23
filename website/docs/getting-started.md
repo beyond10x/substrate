@@ -81,6 +81,7 @@ mkdir "$root/shell"
 echo $$ > "$root/shell/cgroup.procs"
 echo "+cpu +memory +pids" > "$root/cgroup.subtree_control"
 export SUBSTRATE_CONFINE_CGROUP_ROOT="$root"
+mkdir -p job
 b10x-substrate confine run --dir job -- /bin/sh -c 'echo hello > /workspace/out.txt'
 ```
 

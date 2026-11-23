@@ -13,6 +13,9 @@ fails when the two differ. Earlier releases are in the
 The newest release is 0.24.0, published on 22 November 2026. The
 [status page](./status.md#newest-release) summarizes it.
 
+A release that moves the contract bundle needs its SDK clients upgraded with the daemon. See the
+[deployment rules](./guides/deployment.md#rules-that-do-not-change-by-posture).
+
 <!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->
 
 ## 0.24.0 (2026-11-22)

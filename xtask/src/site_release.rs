@@ -1,4 +1,4 @@
-//! UXF-009: what the public pages say is current, held to its source.
+//! UXF-009: what the public pages and `STATUS.md` say is current, held to its source.
 //!
 //! A page names the current release, its publication date, the advertised wire bundle or the
 //! newest bundle directory only in one of the sentence forms of `FORMS`. `check-docs` fills each
@@ -21,13 +21,26 @@ const FACTS: &str = "crates/substrate-host/src/confinement/facts.rs";
 const SOURCE: &str = "https://github.com/beyond10x/substrate/";
 /// The page whose list of facts is `FACT_ORDER`, and the words that open the list.
 const FACT_PAGE: &str = "guides/confinement-profiles";
+/// The repository status file. It is no site page, and its statements of the latest release are
+/// held like the site's (a review of release 0.24.0 found it naming 0.16.1 as latest).
+const STATUS_FILE: &str = "STATUS.md";
 const FACT_LIST: &str = "what the adapter proved, in this order: ";
 
-/// Every sentence form that states what is current: the page that must hold it, and its text on
-/// one line of that page's Markdown. `{release}` is the workspace version, `{published}` its
-/// changelog date as `22 November 2026`, `{advertised}` the advertised bundle's version and
-/// `{newest}` the newest bundle directory. A form is read on its own page.
+/// Every sentence form that states what is current: the page that must hold it (or `STATUS.md`),
+/// and its text on one line of that file's Markdown. `{release}` is the workspace version,
+/// `{published}` its changelog date as `22 November 2026`, `{advertised}` the advertised bundle's
+/// version and `{newest}` the newest bundle directory. A form is read in its own file.
 const FORMS: &[(&str, &str)] = &[
+    (
+        STATUS_FILE,
+        "Release [{release}](https://github.com/beyond10x/substrate/releases/tag/{release}), published on {published},",
+    ),
+    (
+        STATUS_FILE,
+        "Release `{release}` advertises `substrate-wire/{advertised}`",
+    ),
+    (STATUS_FILE, "The latest annotated tag is `{release}`"),
+    (STATUS_FILE, "the latest release is `{release}`"),
     ("getting-started", "version={release}"),
     (
         "getting-started",
@@ -75,6 +88,14 @@ const FORMS: &[(&str, &str)] = &[
 /// The forms read on every page. The present tense of "advertises" belongs to the current
 /// release, so the same sentence about an earlier release fails wherever it stands.
 const EVERYWHERE: &[&str] = &["Release `{release}` advertises `substrate-wire/{advertised}`"];
+/// The file a form's owner names: `STATUS.md` itself, or a site page's Markdown.
+fn file(owner: &str) -> String {
+    if owner == STATUS_FILE {
+        owner.to_owned()
+    } else {
+        format!("website/docs/{owner}.md")
+    }
+}
 
 /// What the repository says is current.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,7 +247,7 @@ fn stale_statements(current: &Current, pages: &[(&str, &str)]) -> Vec<String> {
     let mut held = vec![false; FORMS.len()];
     for (page, source) in pages {
         for (number, line) in source.lines().enumerate() {
-            let at = format!("website/docs/{page}.md:{}", number + 1);
+            let at = format!("{}:{}", file(page), number + 1);
             for (index, (owner, form)) in FORMS.iter().enumerate() {
                 let read = owner == page || EVERYWHERE.contains(form);
                 let Some(found) = shaped(line, form).filter(|_| read) else {
@@ -253,7 +274,8 @@ fn stale_statements(current: &Current, pages: &[(&str, &str)]) -> Vec<String> {
     for ((page, form), held) in FORMS.iter().zip(held) {
         if !held {
             failures.push(format!(
-                "website/docs/{page}.md: no line reads \"{}\"",
+                "{}: no line reads \"{}\"",
+                file(page),
                 filled(form, current)
             ));
         }
@@ -285,7 +307,7 @@ fn listed_facts(source: &str) -> Option<(usize, Vec<String>)> {
 }
 /// The page's fact list is `facts`, in order.
 fn fact_list(facts: &[String], source: &str) -> Vec<String> {
-    let file = format!("website/docs/{FACT_PAGE}.md");
+    let file = file(FACT_PAGE);
     match listed_facts(source) {
         None => vec![format!("{file}: no fact list after \"{FACT_LIST}\"")],
         Some((_, listed)) if listed == facts => Vec::new(),
@@ -421,7 +443,7 @@ pub(crate) fn check(root: &Path) -> Result<Vec<String>> {
     let current = current(root)?;
     let mut sources = Vec::new();
     for (page, _, _) in PAGES {
-        let source = read_public(root, &format!("website/docs/{page}.md"))?;
+        let source = read_public(root, &file(page))?;
         // The generated tail of the release notes is the changelog's text, which is history.
         let authored = source
             .split_once(RELEASES_MARKER)
@@ -429,6 +451,7 @@ pub(crate) fn check(root: &Path) -> Result<Vec<String>> {
             .to_owned();
         sources.push((*page, authored));
     }
+    sources.push((STATUS_FILE, read_public(root, STATUS_FILE)?));
     let pages: Vec<(&str, &str)> = sources.iter().map(|(p, s)| (*p, s.as_str())).collect();
     let mut failures = stale_statements(&current, &pages);
     let facts = fact_order(&read_public(root, FACTS)?)?;
@@ -542,6 +565,49 @@ mod tests {
         assert_eq!(
             failures[0],
             "website/docs/releases.md: no line reads \"The newest release is 0.24.0, published on 22 November 2026.\""
+        );
+    }
+    /// `STATUS.md` is held like a site page: a line that calls another release the latest is
+    /// refused with the file and its line, a history sentence passes, and a status file that
+    /// lost its release line fails.
+    #[test]
+    fn a_status_file_naming_another_release_is_refused_with_file_and_line() {
+        let now = current();
+        let status = |text: &str| {
+            let mut written = pages(&now);
+            written.retain(|(owner, _)| *owner != STATUS_FILE);
+            written.push((STATUS_FILE, text.to_owned()));
+            stale(&now, &written)
+        };
+        let held = "# Repository status\n\nRelease [0.24.0](https://github.com/beyond10x/substrate/releases/tag/0.24.0), published on 22 November 2026,\nis the latest. Release `0.24.0` advertises `substrate-wire/0.27.0`.\nRelease `0.16.1` was published on 29 October 2026.\n\nThe latest annotated tag is `0.24.0` at `85da2e2`.\n| Source | the latest release is `0.24.0` |\n";
+        assert!(status(held).is_empty(), "{:#?}", status(held));
+        let earlier = held
+            .replace("[0.24.0]", "[0.16.1]")
+            .replace("tag/0.24.0", "tag/0.16.1")
+            .replace("22 November 2026,", "29 October 2026,")
+            .replace(
+                "the latest release is `0.24.0`",
+                "the latest release is `0.16.1`",
+            );
+        let failures = status(&earlier);
+        assert_eq!(
+            failures[..2],
+            [
+                "STATUS.md:3: reads \"Release [0.16.1](https://github.com/beyond10x/substrate/releases/tag/0.16.1), published on 29 October 2026,\", write \"Release [0.24.0](https://github.com/beyond10x/substrate/releases/tag/0.24.0), published on 22 November 2026,\"",
+                "STATUS.md:8: reads \"the latest release is `0.16.1`\", write \"the latest release is `0.24.0`\"",
+            ],
+            "{failures:#?}"
+        );
+        assert_eq!(
+            failures.len(),
+            3,
+            "two lines and the sources: {failures:#?}"
+        );
+        let lost = status("# Repository status\n\n`0.16.1` is the latest release (2026-10-29).\n");
+        assert_eq!(lost.len(), 5, "four forms and the sources: {lost:#?}");
+        assert_eq!(
+            lost[1],
+            "STATUS.md: no line reads \"Release `0.24.0` advertises `substrate-wire/0.27.0`\""
         );
     }
     /// A source link pinned to a tag is pinned to the current one; `main` and a release page of an

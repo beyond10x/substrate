@@ -179,7 +179,7 @@
       },
       "reading_load.median": {
         "tolerance": 0,
-        "value": 26.5
+        "value": 20.0
       }
     },
     "page:security": {

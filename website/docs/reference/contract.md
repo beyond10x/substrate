@@ -209,9 +209,10 @@ is `workspace.adopt-unserved`. The host daemon's answers are unchanged: it still
 `driver: host`, does not publish the new fact and raises none of the new codes.
 
 The [Kubernetes namespace driver](../guides/deployment.md#kubernetes-namespace-driver) reports
-`driver: kubernetes` and answers every adopt `workspace.adopt-unserved`. Its probe proves neither
-the four Linux confinement facts nor `confinement.no-egress`, so it refuses every exec start
-`exec.sandbox-unavailable`, and the two exec codes are not reached yet.
+`driver: kubernetes` and answers every adopt `workspace.adopt-unserved`. In releases 0.16.1 and 0.17.0
+its probe proved neither the four Linux confinement facts nor `confinement.no-egress`. It refused
+every exec start `exec.sandbox-unavailable`, and the two exec codes were not reached. From 0.18.0 it
+admits an exec on the confinement its probe observed.
 
 ### `0.24.0`
 
