@@ -8167,7 +8167,11 @@ impl LaneCases {
             ("portable", self.portable, PORTABLE_CASES)
         };
         assert_eq!(passed, expected, "{lane} lane case inventory: {part}");
-        println!("runtime clean-room: {part} passed ({lane} lane): {passed} of {inventory} cases");
+        // The declared count, which the assertion above just held the run to: the line prints
+        // a constant of this file, never a value a check returned.
+        println!(
+            "runtime clean-room: {part} passed ({lane} lane): {expected} of {inventory} cases"
+        );
     }
 }
 
