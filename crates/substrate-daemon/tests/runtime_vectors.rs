@@ -15,6 +15,11 @@
 //! no-egress, pids/memory, timeout, truncation, whole-tree cancellation, egress-aperture and
 //! sealed-secret-slot cases. When the variable is unset the delegated cases are *absent*: they are
 //! not run and are not counted.
+//!
+//! A lane spans five test functions, so that none outlasts the test budget: the journey, the two
+//! exec-retention cases (delegated only), the adopted workspace and writable Git roots. Each starts
+//! a daemon of its own and asserts its own count (`LaneCases`); the counts sum to `PORTABLE_CASES`
+//! and `DELEGATED_CASES`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -1307,16 +1312,14 @@ async fn check_confined_execs(
     snapshot: &str,
     cgroup_root: &Path,
 ) -> usize {
-    let mut passed = check_confined_isolation(
+    check_confined_isolation(
         daemon,
         workspace,
         snapshot,
         cgroup_root,
         WorkspaceOrigin::Created,
     )
-    .await;
-    passed += check_exec_retention(daemon, workspace, snapshot).await;
-    passed
+    .await
 }
 
 /// The confinement floor of one confined exec: output, environment shaping, working directory,
@@ -1682,10 +1685,10 @@ async fn check_confined_isolation(
     passed
 }
 
-/// Exec-record retention: waited and abandoned execs past the retained bound. A property of the
-/// daemon's exec table, not of the workspace an exec runs in, so it runs once.
-async fn check_exec_retention(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
-    let mut passed = 0;
+/// Exec-record retention: waited execs past the retained bound, each one served. A property of the
+/// daemon's exec table, not of the workspace an exec runs in, so it runs once, on a daemon of its
+/// own ([`runtime_clean_room_serves_waited_execs_past_the_retained_bound`]).
+async fn check_waited_exec_retention(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
     for index in 0..129 {
         let (status, completed) = daemon
             .call(
@@ -1700,8 +1703,14 @@ async fn check_exec_retention(daemon: &Daemon, workspace: &str, snapshot: &str) 
             .await;
         assert_eq!(status, 200, "{index} {completed}");
     }
-    passed += 1;
+    1
+}
 
+/// Exec-record retention: abandoned execs past the retained bound, each one accepted, and a waited
+/// exec served after them. On a daemon of its own
+/// ([`runtime_clean_room_serves_abandoned_execs_past_the_retained_bound`]): neither count depends
+/// on the other, and together they are the longest group of the delegated lane.
+async fn check_abandoned_exec_retention(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
     for index in 0..129 {
         let (status, abandoned) = daemon
             .call(
@@ -1732,8 +1741,7 @@ async fn check_exec_retention(daemon: &Daemon, workspace: &str, snapshot: &str) 
         )
         .await;
     assert_eq!(status, 200, "{after_abandon}");
-    passed += 1;
-    passed
+    1
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3837,8 +3845,6 @@ async fn check_http_journey(
     )
     .await;
     passed += 1;
-
-    passed += check_adopted_workspace(daemon, &snapshot, cgroup_root).await;
     passed
 }
 
@@ -6929,7 +6935,7 @@ async fn create_empty_workspace(daemon: &Daemon, operation: &str, request_id: &s
     text(&created["result"]["id"])
 }
 
-/// Writable Git roots (ADR 0038 kind 2), against a second daemon that declares a Git source.
+/// Writable Git roots (ADR 0038 kind 2), against a daemon of their own that declares a Git source.
 ///
 /// Both lanes: the daemon serves `workspace.git` and materializes a Git workspace from the HTTPS
 /// fixture. Portable: no confinement proves the bind, so `exec.writable-roots.git` is absent and a
@@ -8090,6 +8096,183 @@ async fn check_root_page_host_entries(daemon: &Daemon, workspace: &str) -> usize
 const PORTABLE_CASES: usize = 136;
 const DELEGATED_CASES: usize = 201;
 
+/// The cases one test function of a lane executes.
+///
+/// A lane spans several test functions, each with a daemon of its own, so that none outlasts the
+/// test budget. Each asserts its own count and the counts sum to the lane's inventory above, so a
+/// case still cannot vanish quietly: not from a part, and not between two.
+struct LaneCases {
+    portable: usize,
+    delegated: usize,
+}
+
+/// [`runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket`].
+const JOURNEY_CASES: LaneCases = LaneCases {
+    portable: 127,
+    delegated: 174,
+};
+/// [`runtime_clean_room_serves_waited_execs_past_the_retained_bound`]. An exec runs only confined,
+/// so the portable lane has neither exec-retention case.
+const WAITED_EXEC_CASES: LaneCases = LaneCases {
+    portable: 0,
+    delegated: 1,
+};
+/// [`runtime_clean_room_serves_abandoned_execs_past_the_retained_bound`].
+const ABANDONED_EXEC_CASES: LaneCases = LaneCases {
+    portable: 0,
+    delegated: 1,
+};
+/// [`runtime_clean_room_adopts_an_operators_directory`].
+const ADOPTED_WORKSPACE_CASES: LaneCases = LaneCases {
+    portable: 6,
+    delegated: 17,
+};
+/// [`runtime_clean_room_drives_a_daemon_that_declares_a_git_source`].
+const GIT_ROOT_CASES: LaneCases = LaneCases {
+    portable: 3,
+    delegated: 8,
+};
+
+// The parts are the whole lane: this file does not compile when their counts and a lane's
+// inventory disagree.
+const _: () = assert!(
+    JOURNEY_CASES.portable
+        + WAITED_EXEC_CASES.portable
+        + ABANDONED_EXEC_CASES.portable
+        + ADOPTED_WORKSPACE_CASES.portable
+        + GIT_ROOT_CASES.portable
+        == PORTABLE_CASES,
+    "the portable counts of the lane's test functions do not sum to PORTABLE_CASES"
+);
+const _: () = assert!(
+    JOURNEY_CASES.delegated
+        + WAITED_EXEC_CASES.delegated
+        + ABANDONED_EXEC_CASES.delegated
+        + ADOPTED_WORKSPACE_CASES.delegated
+        + GIT_ROOT_CASES.delegated
+        == DELEGATED_CASES,
+    "the delegated counts of the lane's test functions do not sum to DELEGATED_CASES"
+);
+
+impl LaneCases {
+    /// Holds one test function to its count and prints the line that says its cases ran.
+    ///
+    /// `scripts/delegated-lane.sh` sums the delegated lines of one run and refuses a run whose sum
+    /// is not the inventory each line names, so a function that was filtered out, or that ran the
+    /// portable lane, cannot leave a delegated run looking complete.
+    fn assert_passed(&self, part: &str, passed: usize, delegated: bool) {
+        let (lane, expected, inventory) = if delegated {
+            ("delegated", self.delegated, DELEGATED_CASES)
+        } else {
+            ("portable", self.portable, PORTABLE_CASES)
+        };
+        assert_eq!(passed, expected, "{lane} lane case inventory: {part}");
+        println!("runtime clean-room: {part} passed ({lane} lane): {passed} of {inventory} cases");
+    }
+}
+
+/// A clean-room directory for one daemon. `mkdtemp(3)` creates 0700; Rust's `TempDir` creates
+/// 0777 & ~umask, which the daemon refuses as durable state.
+fn clean_room(prefix: &str) -> TempDir {
+    let temporary = TempDir::with_prefix(prefix).expect("clean-room directory");
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private clean-room directory");
+    temporary
+}
+
+/// The capability snapshot `daemon` publishes, which every exec start must carry.
+async fn capability_snapshot(daemon: &Daemon, request_id: &str) -> String {
+    let (status, machine) = daemon.call("GET", "/v1/machine", request_id, None).await;
+    assert_eq!(status, 200, "{machine}");
+    text(&machine["result"]["snapshot"])
+}
+
+/// Which exec-retention case a test function runs.
+#[derive(Clone, Copy)]
+enum RetainedExecs {
+    Waited,
+    Abandoned,
+}
+
+/// One exec-retention case, on a daemon that serves nothing else and in a workspace of its own.
+/// Without a delegated root no exec runs, so the part is absent: nothing runs and nothing is
+/// counted or reported passed (invariant 3).
+async fn check_exec_retention_alone(execs: RetainedExecs) {
+    let (part, cases) = match execs {
+        RetainedExecs::Waited => ("waited execs past the retained bound", &WAITED_EXEC_CASES),
+        RetainedExecs::Abandoned => (
+            "abandoned execs past the retained bound",
+            &ABANDONED_EXEC_CASES,
+        ),
+    };
+    let Some(delegated) = DelegatedCgroup::acquire() else {
+        println!("runtime clean-room: {part} absent: {CGROUP_ROOT_VARIABLE} is unset; no case ran");
+        return;
+    };
+    let temporary = clean_room("substrate-retention-");
+    let daemon = Daemon::start(
+        temporary.path(),
+        Some(delegated.path()),
+        &[],
+        &[],
+        &[],
+        false,
+    )
+    .await;
+    let snapshot = capability_snapshot(&daemon, "req_clean_retention_machine").await;
+    let workspace = create_empty_workspace(
+        &daemon,
+        "01JPHASE3RETENTIONWORKSPACE",
+        "req_clean_retention_workspace",
+    )
+    .await;
+    let passed = match execs {
+        RetainedExecs::Waited => check_waited_exec_retention(&daemon, &workspace, &snapshot).await,
+        RetainedExecs::Abandoned => {
+            check_abandoned_exec_retention(&daemon, &workspace, &snapshot).await
+        }
+    };
+    daemon.close().await;
+    cases.assert_passed(part, passed, true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_clean_room_serves_waited_execs_past_the_retained_bound() {
+    check_exec_retention_alone(RetainedExecs::Waited).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_clean_room_serves_abandoned_execs_past_the_retained_bound() {
+    check_exec_retention_alone(RetainedExecs::Abandoned).await;
+}
+
+/// `workspace.adopt` (ADR 0035), in both lanes, on a daemon of its own: the adopted directory's
+/// cases name nothing the journey's daemon declares, and the delegated lane runs every isolation
+/// case in it a second time.
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_clean_room_adopts_an_operators_directory() {
+    let delegated = DelegatedCgroup::acquire();
+    let cgroup_root = delegated.as_ref().map(DelegatedCgroup::path);
+    let temporary = clean_room("substrate-adopted-");
+    let daemon = Daemon::start(temporary.path(), cgroup_root, &[], &[], &[], false).await;
+    let snapshot = capability_snapshot(&daemon, "req_clean_adopt_machine").await;
+    let passed = check_adopted_workspace(&daemon, &snapshot, cgroup_root).await;
+    daemon.close().await;
+    ADOPTED_WORKSPACE_CASES.assert_passed("the adopted workspace", passed, delegated.is_some());
+}
+
+/// Writable Git roots (ADR 0038 kind 2), in both lanes: [`check_git_roots`] starts the daemon that
+/// declares a Git source, which the journey's daemon deliberately does not (its Git roots are
+/// unserved).
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_clean_room_drives_a_daemon_that_declares_a_git_source() {
+    let delegated = DelegatedCgroup::acquire();
+    let passed = check_git_roots(delegated.as_ref().map(DelegatedCgroup::path)).await;
+    GIT_ROOT_CASES.assert_passed("writable Git roots", passed, delegated.is_some());
+}
+
+/// The journey: startup and dual-daemon refusals and every case that shares the one daemon and
+/// the one workspace. The lane's other parts are the four test functions above.
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     let delegated = DelegatedCgroup::acquire();
@@ -8158,18 +8341,10 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     inside_server.abort();
     outside_server.abort();
     firehose_server.abort();
-    // A second daemon, after the first has stopped: writable Git roots need a declared Git source,
-    // which the journey's daemon deliberately does not have (its Git roots are unserved).
-    let passed = passed + check_git_roots(delegated.as_ref().map(DelegatedCgroup::path)).await;
-    let (lane, expected) = if delegated.is_some() {
-        ("delegated", DELEGATED_CASES)
-    } else {
-        ("portable", PORTABLE_CASES)
-    };
-    assert_eq!(passed, expected, "{lane} lane case inventory");
-    println!(
-        "runtime clean-room: the complete HTTP inventory, startup refusal, \
-         and dual-daemon refusal passed ({lane} lane)"
+    JOURNEY_CASES.assert_passed(
+        "the HTTP journey, startup refusal, and dual-daemon refusal",
+        passed,
+        delegated.is_some(),
     );
 }
 
