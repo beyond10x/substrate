@@ -23,6 +23,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `workspace.path-escape`, which a client reads as "no root page". In the Rust SDK
   `Workspace::read_directory` and `Workspace::read_directory_with_omissions` take `"."`, and
   `substrate_wire::validate_directory_address` is the rule.
+
 ### Fixed
 
 Four fixes of the v2 changes of one file (design 01, § 3.1, *The v2 changes of one file*). No
