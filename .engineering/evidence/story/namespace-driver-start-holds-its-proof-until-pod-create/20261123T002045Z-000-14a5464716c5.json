@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-23T00:20:45Z",
+  "actor": "agent:substrate",
+  "artifact": "story:namespace-driver-start-holds-its-proof-until-pod-create",
+  "kind": "story",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:namespace-proof-security-1",
+    "review": "review-result:namespace-proof-security-1",
+    "outcome": "fixed"
+  }
+}
