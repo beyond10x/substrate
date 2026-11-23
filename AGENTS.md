@@ -1121,6 +1121,12 @@ before its stylesheet, and `website/static/styles.css` sets every colour in thre
 (dark), `:root[data-theme=light]` and the same declarations under `prefers-color-scheme: light`
 (UXF-013). A colour literal in any other rule fails, and so does text under 4.5:1 on its surface.
 
+A change to what `check-docs` or `docs-provenance` reads runs
+`cargo nextest run -p xtask --test docs_site_adversary` before it is pushed: that target runs both
+verbs on copied inputs and a hand-built site, and the `--bin xtask` tests do not. A rule that reads
+a new file adds it to `input_root` there (PR 264, 2026-11-23: 4 cases red on the forge after a
+green `--bin xtask` run).
+
 Site changes follow the UI iteration loop in `website/ux/`
 (`xtask/src/site_ux.rs`):
 

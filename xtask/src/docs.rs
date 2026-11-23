@@ -248,24 +248,30 @@ fn render(page: &str, source: &str, ids: &mut BTreeSet<String>) -> Result<Render
     }
     Ok(rendered)
 }
+/// A public input, by its path below the repository root. Every failure names that path: an I/O
+/// error alone reads `No such file or directory`, which says nothing about which input is missing.
 pub(crate) fn read_public(root: &Path, relative: &str) -> Result<String> {
+    let reading = || format!("reading the public input {relative}");
     let mut path = root.to_path_buf();
     for component in Path::new(relative).components() {
         ensure!(
             matches!(component, Component::Normal(_)),
-            "invalid public input"
+            "invalid public input: {relative}"
         );
         path.push(component);
         ensure!(
-            !fs::symlink_metadata(&path)?.file_type().is_symlink(),
+            !fs::symlink_metadata(&path)
+                .with_context(reading)?
+                .file_type()
+                .is_symlink(),
             "public input is a symlink: {relative}"
         );
     }
     ensure!(
-        fs::metadata(&path)?.is_file(),
+        fs::metadata(&path).with_context(reading)?.is_file(),
         "public input is not a regular file: {relative}"
     );
-    Ok(fs::read_to_string(path)?)
+    fs::read_to_string(path).with_context(reading)
 }
 /// The newest released section of a Keep a Changelog file, as Markdown whose headings name the
 /// version, so the sections of one page never share a heading ID, and whose repository-relative
@@ -373,7 +379,7 @@ pub(crate) fn rendered(root: &Path) -> Result<BTreeMap<&'static str, Rendered>> 
 /// one that `PAGES` does not list would be an undeclared page.
 fn docs_files(root: &Path) -> Result<BTreeSet<String>> {
     fn walk(dir: &Path, prefix: &str, out: &mut BTreeSet<String>) -> Result<()> {
-        for entry in fs::read_dir(dir)? {
+        for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let kind = entry.file_type()?;

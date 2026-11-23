@@ -57,14 +57,23 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// Where the released bundles live. `check-docs` reads only the names of its directories.
+const BUNDLES: &str = "contracts/substrate-wire";
+
 /// A root holding the public inputs `check-docs` reads, copied from this checkout, and no Git.
+/// The manifest is the checkout's: it declares `[workspace]`, which makes the copy the root, and
+/// `[workspace.package] version`, the release the pages are held to (`xtask/src/site_release.rs`).
+/// A rule that reads a new file adds it here, or every control below fails naming that file.
 fn input_root() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
     for relative in [
+        "Cargo.toml",
         "CHANGELOG.md",
+        "crates/substrate-wire/src/lib.rs",
+        "crates/substrate-host/src/confinement/facts.rs",
         "website/docs",
         "website/sidebars.ts",
+        "website/src/css/custom.css",
         "website/static/index.html",
         "website/static/styles.css",
         "website/ux",
@@ -74,6 +83,12 @@ fn input_root() -> tempfile::TempDir {
         "xtask/src",
     ] {
         copy_tree(&repo().join(relative), &dir.path().join(relative));
+    }
+    for entry in fs::read_dir(repo().join(BUNDLES)).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            fs::create_dir_all(dir.path().join(BUNDLES).join(entry.file_name())).unwrap();
+        }
     }
     dir
 }
@@ -129,6 +144,39 @@ fn check_docs_passes(root: &Path) {
         control.status.success(),
         "control: the copied inputs must pass check-docs\n{}",
         shown(&control)
+    );
+}
+
+/// A missing input is named. The forge run of 2026-11-23 failed three controls of this target with
+/// `xtask: No such file or directory (os error 2)` and no path, because two new rules read files
+/// the copy did not hold. One file of each new rule and the bundle directory are removed in turn,
+/// and `check-docs` names it.
+#[test]
+fn a_missing_input_is_named_by_its_path() {
+    // One copy: each file is removed, checked for, and put back before the next.
+    let root = input_root();
+    for relative in [
+        "website/src/css/custom.css",
+        "crates/substrate-wire/src/lib.rs",
+    ] {
+        let saved = fs::read(root.path().join(relative)).unwrap();
+        fs::remove_file(root.path().join(relative)).unwrap();
+        let check = xtask(root.path(), &["check-docs"]);
+        let stderr = String::from_utf8_lossy(&check.stderr);
+        assert!(
+            !check.status.success() && stderr.contains(relative),
+            "check-docs does not name the missing {relative}\n{}",
+            shown(&check)
+        );
+        fs::write(root.path().join(relative), saved).unwrap();
+    }
+    fs::remove_dir_all(root.path().join(BUNDLES)).unwrap();
+    let check = xtask(root.path(), &["check-docs"]);
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(
+        !check.status.success() && stderr.contains(BUNDLES),
+        "check-docs does not name the missing {BUNDLES}\n{}",
+        shown(&check)
     );
 }
 
@@ -248,9 +296,40 @@ fn ids(page: &str) -> &'static [&'static str] {
     }
 }
 
-/// One built docs page holding every check `docs-provenance` makes: the page list names each
-/// group and marks this page, the narrow-screen toggle and the wide-screen container are there,
-/// the content sits in `#main`, the H1 has its ID, and every table is framed.
+/// The committed start page's theme script, whole (`website/static/index.html`, UXF-013).
+fn start_theme_script() -> String {
+    let html = fs::read_to_string(repo().join("website/static/index.html")).unwrap();
+    let start = html.find("<script>").expect("the start page has a script");
+    let end = start
+        + html[start..]
+            .find("</script>")
+            .expect("the script is closed")
+        + "</script>".len();
+    html[start..end].to_owned()
+}
+
+/// The `localStorage` key that script reads the stored theme under.
+fn theme_key() -> String {
+    let script = start_theme_script();
+    let read = "localStorage.getItem(\"";
+    let rest = &script[script
+        .find(read)
+        .expect("the script reads the stored theme")
+        + read.len()..];
+    rest.split_once('"').expect("a quoted key").0.to_owned()
+}
+
+/// A docs page's theme script as Docusaurus writes it, reduced to the read of the stored theme.
+fn docs_theme_script(key: &str) -> String {
+    format!(
+        "<script>!function(){{try{{return window.localStorage.getItem(\"{key}\")}}catch(t){{}}}}()</script>"
+    )
+}
+
+/// One built docs page holding every check `docs-provenance` makes: the page reads the stored
+/// theme under the start page's key, the page list names each group and marks this page, the
+/// narrow-screen toggle and the wide-screen container are there, the content sits in `#main`, the
+/// H1 has its ID, and every table is framed.
 fn docs_page(page: &str) -> String {
     let groups: String = GROUPS
         .iter()
@@ -267,8 +346,9 @@ fn docs_page(page: &str) -> String {
     } else {
         ""
     };
+    let theme = docs_theme_script(&theme_key());
     format!(
-        "<!doctype html><html><body><nav class=navbar><button class=\"navbar__toggle clean-btn\" type=button></button></nav><div id=main><aside class=theme-doc-sidebar-container>{groups}<a class=\"menu__link menu__link--active\" aria-current=page href={}>here</a></aside><article><h1 id=page-title>T</h1>{headings}<div class=b10x-table-wrap role=region tabindex=0 aria-label=\"{label} table\"><table><tr><td>x</td></tr></table></div>{links}</article></div></body></html>",
+        "<!doctype html><html><head>{theme}</head><body><nav class=navbar><button class=\"navbar__toggle clean-btn\" type=button></button></nav><div id=main><aside class=theme-doc-sidebar-container>{groups}<a class=\"menu__link menu__link--active\" aria-current=page href={}>here</a></aside><article><h1 id=page-title>T</h1>{headings}<div class=b10x-table-wrap role=region tabindex=0 aria-label=\"{label} table\"><table><tr><td>x</td></tr></table></div>{links}</article></div></body></html>",
         href(page)
     )
 }
@@ -291,7 +371,10 @@ fn built_site() -> (tempfile::TempDir, PathBuf, PathBuf) {
     fs::create_dir_all(site.join("docs")).unwrap();
     fs::write(
         site.join("index.html"),
-        "<!doctype html><html><body><main id=main><a href=/substrate/docs>docs</a><a href=/substrate/docs/concepts/adapters>a</a><a href=/substrate/docs/reference/contracts>c</a><a href=/substrate/docs/releases>r</a></main></body></html>",
+        format!(
+            "<!doctype html><html><head>{}</head><body><main id=main><a href=/substrate/docs>docs</a><a href=/substrate/docs/concepts/adapters>a</a><a href=/substrate/docs/reference/contracts>c</a><a href=/substrate/docs/releases>r</a></main></body></html>",
+            start_theme_script()
+        ),
     )
     .unwrap();
     for page in PAGES {
@@ -333,6 +416,45 @@ fn the_hand_built_site_is_accepted_and_inventories_exactly_the_published_routes(
     let output = provenance(&root, &site);
     assert!(output.status.success(), "{}", shown(&output));
     assert_eq!(inventory_paths(&site).len(), 22);
+}
+
+/// UXF-013: the start page follows the theme the reader chose on the docs pages only while both
+/// read it under one `localStorage` key. Docusaurus derives the docs pages' key from the site's
+/// `url` and `baseUrl`, so a changed address moves it and the static start page keeps the old one.
+/// `docs-provenance` refuses that site and names the key and the page; a start page that reads no
+/// stored theme is refused too.
+#[test]
+fn a_site_whose_docs_pages_read_the_theme_under_another_key_is_refused() {
+    let (_dir, root, site) = built_site();
+    let key = theme_key();
+    let path = site.join(file("guides/cli"));
+    let html = fs::read_to_string(&path).unwrap();
+    let moved = html.replace(&docs_theme_script(&key), &docs_theme_script("theme-a1b"));
+    assert_ne!(moved, html, "the mutation changes the page");
+    fs::write(&path, moved).unwrap();
+    let output = provenance(&root, &site);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success()
+            && stderr.contains(&format!(
+                "/substrate/: the start page reads the theme under {key:?}, /substrate/docs/guides/cli/ reads it under another key"
+            )),
+        "docs-provenance bound a site whose docs pages read the stored theme under another key\n{}",
+        shown(&output)
+    );
+
+    let (_dir, root, site) = built_site();
+    let start = site.join("index.html");
+    let html = fs::read_to_string(&start).unwrap();
+    fs::write(&start, html.replace(&start_theme_script(), "")).unwrap();
+    let output = provenance(&root, &site);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success()
+            && stderr.contains("/substrate/: the start page reads no stored theme"),
+        "docs-provenance bound a site whose start page reads no stored theme\n{}",
+        shown(&output)
+    );
 }
 
 /// The former build wrote exactly the start page and `PAGES`, and its test held the inventory to

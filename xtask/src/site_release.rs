@@ -356,10 +356,12 @@ fn advertised(wire: &str) -> Result<String> {
 /// The newest bundle directory, by version.
 fn newest_bundle(root: &Path) -> Result<String> {
     let mut versions = Vec::new();
-    for entry in std::fs::read_dir(root.join(BUNDLES)).with_context(|| BUNDLES.to_owned())? {
-        let entry = entry?;
+    let listing = || format!("listing the bundle directories of {BUNDLES}");
+    for entry in std::fs::read_dir(root.join(BUNDLES)).with_context(listing)? {
+        let entry = entry.with_context(listing)?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !entry.file_type()?.is_dir() || version_len(&name) != Some(name.len()) {
+        let kind = entry.file_type().with_context(listing)?;
+        if !kind.is_dir() || version_len(&name) != Some(name.len()) {
             continue;
         }
         let key: Vec<u64> = name.split('.').filter_map(|n| n.parse().ok()).collect();
