@@ -9,7 +9,7 @@ Substrate has a tagged, keyless-signed daemon image and a public, keyless-signed
 development contract bundle. Distribution is proven; the bundle remains a development contract
 because stability is a separate compatibility decision.
 
-Release [0.24.0](https://github.com/beyond10x/substrate/releases/tag/0.24.0), published on 22 November 2026,
+Release [0.25.0](https://github.com/beyond10x/substrate/releases/tag/0.25.0), published on 23 November 2026,
 ships the daemon, disposable MCP and executor images, the Helm chart and the
 signed `substrate-wire/0.27.0` development bundle. [Release notes](./releases.md) lists what changed.
 
@@ -41,19 +41,22 @@ Treat every capability as deployment-specific and verify it through `GET /v1/mac
 | Kubernetes namespace driver | `--driver kubernetes`, a development profile: empty workspaces from 0.16.1, and from 0.18.0 an exec where the probe proved six confinement facts |
 | remote conformance | from 0.17.0, `b10x-substrate-conformance` certifies a deployed endpoint from outside it. See [remote conformance](./guides/remote-conformance.md) |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
-| distribution | Apache-2.0 source plus keyless-signed 0.24.0 daemon, MCP and executor images, chart and binaries, and the signed 0.27.0 development bundle |
+| distribution | Apache-2.0 source plus keyless-signed 0.25.0 daemon, MCP and executor images, chart and binaries, and the signed 0.27.0 development bundle |
 
 ## Newest release
 
-Release 0.24.0 adds:
+Release 0.25.0 adds:
 
 | Area | State |
 |---|---|
-| executable deny-list | `exec_denied_paths` beside `exec_subpaths`, proved by `linux`, `systemd` around it and `macos` |
-| deny-list refusals | two at 422: `confinement.exec-denied-paths-without-subpaths` and `confinement.exec-denied-paths-exceeded` |
-| host crate API | breaking: `FACT_ORDER` is `[Fact; 14]` |
-| Git change-set observation | compares the worktree with the baseline commit's tree |
-| security | three fixes: the host driver and the `linux` adapter refuse the `ioctl` requests that exchange file blocks (ADR 0050), the daemon's private paths are refused as read-only sources, and the Git change-set observation returns no content from outside the workspace |
+| Git observations | read from a store the driver keeps |
+| upgrade | a Git workspace of an earlier release answers `workspace.git-baseline-missing` on both observations until it is created again |
+| Git create | new refusals before checkout: an existing store, a store over the byte limit, nesting deeper than 1,024, more paths than the inode limit |
+| v2 file changes | written only when the result fits the ledger |
+| v2 text bounds | over-long text is `request.schema-invalid` (422) before dispatch |
+| Rust SDK and CLI | `.workdir(..)` on both builders, `Client::destroy_workspace`, an identifier is one path segment, and a repeated `workspace destroy` prints the stored result |
+| ESS pin | 0.97.4 |
+| security | four fixes: the Git observations open nothing beneath the workspace's `.git/objects`, a stored outcome is replayed only after the grant is compared (ADR 0017), a v2 file change is written only when its result fits the ledger, and the namespace driver holds an exec to its proof until the Pod is created |
 
 The Kubernetes namespace driver's limits are in the
 [deployment guide](./guides/deployment.md#kubernetes-namespace-driver).
@@ -83,7 +86,7 @@ in a broader architecture do not imply served endpoints.
   Identity round trip on a reused keep-alive connection (at most 8 idle, closed after 30 s idle or
   any error), so a completed revocation applies to the next request.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Release `0.24.0` advertises `substrate-wire/0.27.0` and the SHA-256 of its inner
+- Release `0.25.0` advertises `substrate-wire/0.27.0` and the SHA-256 of its inner
   `bundle.json` as one claim. The outer OCI package has its own digest. Bundle `0.15.0`
   deliberately replaced `/v1/pipe-sessions` with `/v1/sessions` and serves no compatibility alias.
 - Git materialization needs a configured source and transient Connector authority. The conditional

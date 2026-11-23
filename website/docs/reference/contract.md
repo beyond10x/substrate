@@ -75,7 +75,7 @@ means the limit only, so raising the limit helps. With the header, at least one 
 omitted whatever the limit. The Rust SDK's `Workspace::tree_with_omissions` and
 `Workspace::read_directory_with_omissions` return the count beside the listing.
 
-Release `0.24.0` advertises `substrate-wire/0.27.0` in `x-b10x-contract` and its inner
+Release `0.25.0` advertises `substrate-wire/0.27.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest, because it identifies the distribution package and not
 the inner contract manifest.
@@ -84,7 +84,7 @@ the inner contract manifest.
 `/v1/sessions` in bundle `0.15.0`, and no `/v1/pipe-sessions` compatibility alias is served.
 
 Frozen compatibility declarations and route/schema details are in the
-[0.27.0 bundle](https://github.com/beyond10x/substrate/tree/0.24.0/contracts/substrate-wire/0.27.0).
+[0.27.0 bundle](https://github.com/beyond10x/substrate/tree/0.25.0/contracts/substrate-wire/0.27.0).
 See [system model and derivation](../concepts/model.md) for which artifacts are generated and
 [status](../status.md) for release maturity.
 

@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-11-23
+
 ### Added
 
 - The Rust SDK's command and session builders take `.workdir(..)`, the directory the program
@@ -83,12 +85,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Security
 
+Four fixes for defects of earlier releases, each found by a review. Each entry states the rule
+that holds from this release on, the releases it concerns and what it leaves open.
+
 - **Both Git observations read the baseline from a store the driver keeps, and open nothing
   beneath the workspace's `.git/objects`** (design 21, § *The baseline store*;
   `story:daemon-holds-the-baseline-objects-of-a-git-workspace`). What that directory holds, and
   what a program running in the workspace does to it during an observation, changes neither
   the answer of the change-set observation and of the baseline-file observation nor whether
   there is one. No route, schema or refusal code changes.
+  - **Affected:** every earlier release that serves the two Git observation routes, `0.24.0`
+    included.
   - The store is `.substrate-git-baselines/.objects/<root name>/` in the directory that holds
     all workspaces, beside the commit-id file `.substrate-git-baselines/<root name>`. It is
     one pack and its index and holds the baseline commit, every tree it reaches and every
@@ -127,8 +134,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     removes anything in `.substrate-git-baselines`, at start or at destroy. A Git workspace
     destroyed by such a driver leaves its commit-id file and its store until a start with a
     Git source configured removes them.
-
-### Security
+  - **Not covered:** how much work and memory a Git create spends on a source before one of
+    its limits refuses it (`story:git-create-work-and-memory-follow-its-limits`, a draft).
 
 - **A stored operation outcome is returned to a mutation request only after the recorded grant
   is compared, in every transaction in which such a request can find the row**
@@ -139,20 +146,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   missing or invalid context, is never replaced by another request's stored outcome. Reads of an
   operation (`GET /v1/ops/{op}`, the event stream) are as before and need no context. The wire
   and the bundle are unchanged.
+  - **Affected:** every earlier release that verifies a delegated context, `0.24.0` included,
+    in a hosted deployment.
 
-- A v2 file replacement, edit or patch is written only when its result fits what the operation
-  ledger reserved for it. The daemon decides that before it dispatches the change to any driver,
-  and holds the driver's answer to the reserved bytes of JSON, escaping counted, and to the
-  `maxLength` the result schema publishes, by cutting the diff and marking it `truncated`.
-- A replacement that is refused creates no directory: the parents it asks for are created
-  directly before the write, after its text bounds, its size and its precondition are decided.
-- The server itself refuses an `old_text`, a `new_text` or a patch `text` over its published
-  `maxLength`, and a replacement `content.data` outside the two lengths its schema publishes, as
-  `request.schema-invalid` before dispatch. No wire schema, route or refusal code changes, and
-  the request the daemon sends an executor is unchanged.
+- **A v2 file replacement, edit or patch is written only when its result fits what the
+  operation ledger reserved for it.** The daemon decides that before it dispatches the change to
+  any driver, and holds the driver's answer to the reserved bytes of JSON, escaping counted, and
+  to the `maxLength` the result schema publishes, by cutting the diff and marking it
+  `truncated`.
+  - **Affected:** every earlier release that serves the v2 file replacement, edit and patch
+    routes, `0.24.0` included.
+  - A replacement creates the parent directories it asks for directly before the write. A
+    replacement refused for its text bounds, its digest, its content, its size or its
+    precondition creates no directory.
+  - The server itself refuses an `old_text`, a `new_text` or a patch `text` over its published
+    `maxLength`, and a replacement `content.data` outside the two lengths its schema publishes,
+    as `request.schema-invalid` (422) before dispatch. No wire schema, route or refusal code
+    changes, and the request the daemon sends an executor is unchanged.
+  - **Not covered:** a replacement whose write fails after its parent directories were created
+    (a file name the file system refuses, a quota, a failed rename) leaves those directories
+    (`story:failed-file-replacement-removes-the-directories-it-created`, a draft). The success
+    results of an exec start, an exec signal and a host-process start are not yet decided
+    against the reserve before their side effect
+    (`story:every-success-result-fits-the-ledger-before-its-side-effect`, a draft).
 
-- An exec on the Kubernetes namespace driver is held to what it was admitted for until the
-  request that creates its Pod is sent (design 34 § 6.3). After every wait the start can sit
+- **An exec on the Kubernetes namespace driver is held to what it was admitted for until the
+  request that creates its Pod is sent** (design 34 § 6.3). After every wait the start can sit
   in, the driver computes its capability snapshot again and creates the Pod only when that
   snapshot is a valid proof of every fact the start requires, on the node the workspace's keeper
   runs on, and under the binding, the policy set and the Lease of the admission. A proof the
@@ -160,11 +179,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   start is `exec.capability-stale` (422) before dispatch, recorded as refused, and no Pod is
   created. Daemon admission of an exec start takes the facts and the digest from one capability
   snapshot and still refuses a start that names any snapshot but the current one.
-- A proof of the namespace driver is valid for a span measured on the driver's monotonic clock
-  from the probe that made it, and the next probe is due on that clock. The wall clock states
-  `probed_at` and `valid_until` in the snapshot and can only end a proof early, when it passes
-  `valid_until`: it never keeps a proof valid. No wire schema, capability fact or refusal code
-  changes.
+  - **Affected:** every earlier release whose namespace driver starts an exec, `0.24.0`
+    included.
+  - A proof of the namespace driver is valid for a span measured on the driver's monotonic
+    clock from the probe that made it, and the next probe is due on that clock. The wall clock
+    states `probed_at` and `valid_until` in the snapshot and can only end a proof early, when
+    it passes `valid_until`: it never keeps a proof valid. No wire schema, capability fact or
+    refusal code changes.
 
 ## [0.24.0] — 2026-11-22
 
