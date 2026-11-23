@@ -2692,16 +2692,44 @@ const CHART_SOURCE: &str = "deploy/helm/substrate/Chart.yaml";
 /// A routing `gh` stub: `gh api <path> --jq F` applies `F` with `jq -r` to `$STUB_JOBS` for a
 /// jobs path, `$STUB_ANNOTATIONS` for an annotations path and `$STUB_JSON` otherwise, and logs
 /// each path to `$GH_LOG`. `sleep` fails, so a step that would wait ends at once.
+///
+/// As the REST API does, a jobs path lists the jobs of the latest attempt only (the greatest
+/// `run_attempt` in `$STUB_JOBS`, 1 where a job states none) unless it carries `filter=all`. With
+/// `$STUB_ANNOTATIONS_DIR` set, an annotations path of check run `<id>` answers that directory's
+/// `<id>.json`, and `[]` for a check run without a file.
 fn routing_stub_tools() -> tempfile::TempDir {
     let tools = api_stub_tools();
     let gh = tools.path().join("gh");
-    fs::write(
-        &gh,
-        "#!/bin/bash\nfilter=.\npath=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --jq) filter=$2; shift 2 ;;\n    api|--paginate) shift ;;\n    *) path=$1; shift ;;\n  esac\ndone\nprintf '%s\\n' \"$path\" >> \"$GH_LOG\"\ncase \"$path\" in\n  */jobs*) json=$STUB_JOBS ;;\n  */annotations*) json=$STUB_ANNOTATIONS ;;\n  *) json=$STUB_JSON ;;\nesac\nprintf '%s' \"$json\" | jq -r \"$filter\"\n",
-    )
-    .expect("routing gh stub");
+    fs::write(&gh, ROUTING_GH_STUB).expect("routing gh stub");
     tools
 }
+
+const ROUTING_GH_STUB: &str = r#"#!/bin/bash
+filter=.
+path=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --jq) filter=$2; shift 2 ;;
+    api|--paginate) shift ;;
+    *) path=$1; shift ;;
+  esac
+done
+printf '%s\n' "$path" >> "$GH_LOG"
+case "$path" in
+  */jobs*filter=all*) json=$STUB_JOBS ;;
+  */jobs*)
+    json=$(printf '%s' "$STUB_JOBS" | jq -c '((.jobs // []) | map(.run_attempt // 1) | max) as $latest | .jobs = [(.jobs // [])[] | select((.run_attempt // 1) == $latest)]') ;;
+  */annotations*)
+    if [ -n "${STUB_ANNOTATIONS_DIR:-}" ]; then
+      check_run=${path%/annotations*}
+      json=$(cat "${STUB_ANNOTATIONS_DIR}/${check_run##*/}.json" 2>/dev/null || echo '[]')
+    else
+      json=$STUB_ANNOTATIONS
+    fi ;;
+  *) json=$STUB_JSON ;;
+esac
+printf '%s' "$json" | jq -r "$filter"
+"#;
 
 /// Chart-lane runs of the tagged commit, each a `push` to `main` of this repository, as
 /// `(status, conclusion)`.
@@ -3885,14 +3913,47 @@ fn the_hosted_record_is_refused_as_a_trailer_is() {
     }
 }
 
-/// Runs the hosted step offline against the routing `gh` stub. Returns success, log, output and
-/// the API paths it read.
+/// Runs the hosted step offline against the routing `gh` stub, whose run has one attempt of one
+/// successful job carrying `annotations`. Returns success, log, output and the API paths it read.
 fn hosted_lanes(
     with_workflow: bool,
     message: &str,
     inputs: &[(&str, &str)],
     runs: &str,
     annotations: &str,
+) -> (bool, String, String, String) {
+    hosted_lanes_of(
+        with_workflow,
+        message,
+        inputs,
+        runs,
+        &lane_jobs(&[(41, 1, "success")]),
+        &[(41, annotations)],
+    )
+}
+
+/// The jobs of a run as the REST API lists them, each `(check run, attempt, conclusion)`.
+fn lane_jobs(jobs: &[(u32, u32, &str)]) -> String {
+    let jobs: Vec<String> = jobs
+        .iter()
+        .map(|(check_run, attempt, conclusion)| {
+            format!(
+                "{{\"id\":{check_run},\"run_attempt\":{attempt},\"conclusion\":\"{conclusion}\",\"name\":\"lane {check_run}\",\"check_run_url\":\"https://api.github.com/repos/example/substrate/check-runs/{check_run}\"}}"
+            )
+        })
+        .collect();
+    format!("{{\"jobs\":[{}]}}", jobs.join(","))
+}
+
+/// As [`hosted_lanes`], with the run's `jobs` over every attempt and the annotations of each
+/// check run that has any.
+fn hosted_lanes_of(
+    with_workflow: bool,
+    message: &str,
+    inputs: &[(&str, &str)],
+    runs: &str,
+    jobs: &str,
+    annotations: &[(u32, &str)],
 ) -> (bool, String, String, String) {
     let files: &[(&str, &str)] = if with_workflow {
         &[(LANES_SOURCE, "name: Release lanes\n")]
@@ -3904,15 +3965,22 @@ fn hosted_lanes(
     let gh_log = tools.path().join("gh.log");
     fs::write(&gh_log, "").expect("gh log");
     let gh_log_path = gh_log.display().to_string();
+    let annotations_directory = tools.path().join("annotations");
+    fs::create_dir(&annotations_directory).expect("annotations directory");
+    for (check_run, notes) in annotations {
+        fs::write(
+            annotations_directory.join(format!("{check_run}.json")),
+            notes,
+        )
+        .expect("annotations of a check run");
+    }
+    let annotations_path = annotations_directory.display().to_string();
     let mut env = vec![
         ("SOURCE_SHA", source.sha.as_str()),
         ("TAG", TAG),
         ("STUB_JSON", runs),
-        (
-            "STUB_JOBS",
-            "{\"jobs\":[{\"id\":41,\"check_run_url\":\"https://api.github.com/repos/example/substrate/check-runs/41\"}]}",
-        ),
-        ("STUB_ANNOTATIONS", annotations),
+        ("STUB_JOBS", jobs),
+        ("STUB_ANNOTATIONS_DIR", annotations_path.as_str()),
         ("GH_LOG", gh_log_path.as_str()),
         ("LANES_WORKFLOW", "release-lanes.yml"),
         ("GITHUB_REPOSITORY", "example/substrate"),
@@ -3976,7 +4044,7 @@ fn the_hosted_step_reads_each_lane_record_from_the_successful_main_run() {
         "{paths}"
     );
     assert!(
-        paths.contains("repos/example/substrate/actions/runs/1/jobs?per_page=100\n"),
+        paths.contains("repos/example/substrate/actions/runs/1/jobs?filter=all&per_page=100\n"),
         "{paths}"
     );
     assert!(position(&format!("- name: {HOSTED_LANES_STEP}\n")) < position(CONFINEMENT_STEP));
@@ -4063,6 +4131,189 @@ fn the_hosted_step_refuses_failed_runs_two_records_of_a_lane_and_pull_request_ru
             "a pull_request run (fork: {fork}) was taken as the hosted lanes of the tagged commit: {log}{output}"
         );
     }
+}
+
+// A run repaired with "re-run failed jobs" has two attempts. The jobs that succeeded in the first
+// are carried into the second with new check runs that hold no annotation, so a lane's record is
+// on the check run of the attempt in which its job ran and succeeded.
+
+/// The jobs of a run whose confinement job (check run 11) failed in attempt 1 and succeeded when
+/// re-run alone (21); the quota, chart and namespace jobs succeeded in attempt 1 (12, 13, 14) and
+/// were carried into attempt 2 (22, 23, 24).
+fn repaired_run_jobs() -> String {
+    lane_jobs(&[
+        (11, 1, "failure"),
+        (12, 1, "success"),
+        (13, 1, "success"),
+        (14, 1, "success"),
+        (21, 2, "success"),
+        (22, 2, "success"),
+        (23, 2, "success"),
+        (24, 2, "success"),
+    ])
+}
+
+fn lane_note(title: &str, message: &str) -> String {
+    lane_annotations(&[("notice", title, message)])
+}
+
+#[test]
+fn the_hosted_step_reads_each_lane_record_from_the_attempt_in_which_its_job_succeeded() {
+    let confinement = lane_note("Confinement-lane", "c 189 second");
+    let quota = lane_note("Quota-lane", "q 7 first");
+    let chart = lane_note("Chart-lane", "h 4 first");
+    let namespace = lane_note("Namespace-lane", "n 8 first");
+    // A job that annotated and then failed recorded nothing.
+    let failed = lane_note("Confinement-lane", "c 189 failed");
+    for failed_job_annotated in [false, true] {
+        let mut annotations = vec![
+            (12, quota.as_str()),
+            (13, chart.as_str()),
+            (14, namespace.as_str()),
+            (21, confinement.as_str()),
+        ];
+        if failed_job_annotated {
+            annotations.push((11, failed.as_str()));
+        }
+        let (success, log, output, paths) = hosted_lanes_of(
+            true,
+            "release",
+            &[],
+            &main_runs(&[("completed", "success")]),
+            &repaired_run_jobs(),
+            &annotations,
+        );
+        assert!(
+            success,
+            "failed job annotated: {failed_job_annotated}: {log}"
+        );
+        assert_eq!(
+            output,
+            "run-url=https://example.invalid/runs/0\nconfinement=c 189 second\nquota=q 7 first\nchart=h 4 first\nnamespace=n 8 first\n",
+            "failed job annotated: {failed_job_annotated}: {log}"
+        );
+        assert!(
+            paths.contains("repos/example/substrate/actions/runs/0/jobs?filter=all&per_page=100\n"),
+            "{paths}"
+        );
+        assert!(
+            !paths.contains("check-runs/11/"),
+            "the annotations of a job that did not succeed were read: {paths}"
+        );
+    }
+}
+
+#[test]
+fn the_newest_attempt_that_records_a_lane_on_a_successful_job_is_the_one_taken() {
+    // Every lane is recorded in attempt 1; the quota job ran again in attempt 2 and recorded
+    // again. The jobs are listed newest attempt last and then first: the order decides nothing.
+    let attempts = [
+        (12, 1, "success"),
+        (13, 1, "success"),
+        (22, 2, "success"),
+        (23, 2, "success"),
+    ];
+    let reversed: Vec<_> = attempts.iter().rev().copied().collect();
+    let first = lane_annotations(&[
+        ("notice", "Confinement-lane", "c 189 first"),
+        ("notice", "Quota-lane", "q 7 first"),
+    ]);
+    let others = lane_annotations(&[
+        ("notice", "Chart-lane", "h 4 first"),
+        ("notice", "Namespace-lane", "n 8 first"),
+    ]);
+    let second = lane_note("Quota-lane", "q 7 second");
+    for jobs in [&attempts[..], &reversed[..]] {
+        let (success, log, output, _) = hosted_lanes_of(
+            true,
+            "release",
+            &[],
+            &main_runs(&[("completed", "success")]),
+            &lane_jobs(jobs),
+            &[
+                (12, first.as_str()),
+                (13, others.as_str()),
+                (22, second.as_str()),
+            ],
+        );
+        assert!(success, "{log}");
+        assert_eq!(
+            output,
+            "run-url=https://example.invalid/runs/0\nconfinement=c 189 first\nquota=q 7 second\nchart=h 4 first\nnamespace=n 8 first\n",
+            "{log}"
+        );
+    }
+}
+
+#[test]
+fn two_records_of_a_lane_in_one_attempt_are_refused_whichever_attempt_holds_them() {
+    let quota = lane_note("Quota-lane", "q 7 t");
+    let again = lane_note("Quota-lane", "q 7 u");
+    for (annotations, attempt) in [
+        // Two successful jobs of the newest attempt each record the lane.
+        (vec![(22, quota.as_str()), (23, again.as_str())], 2),
+        // The older attempt records it twice and the newer one once.
+        (
+            vec![
+                (12, quota.as_str()),
+                (13, again.as_str()),
+                (22, quota.as_str()),
+            ],
+            1,
+        ),
+    ] {
+        let (success, log, output, _) = hosted_lanes_of(
+            true,
+            "release",
+            &[],
+            &main_runs(&[("completed", "success")]),
+            &repaired_run_jobs(),
+            &annotations,
+        );
+        assert!(!success, "{log}");
+        assert!(
+            log.contains(&format!(
+                "refused: attempt {attempt} of https://example.invalid/runs/0 records 2 Quota-lane annotations; a release records exactly one."
+            )),
+            "{log}"
+        );
+        assert!(!output.contains("quota="), "{output}");
+    }
+
+    // One record in each of two attempts is not two records: the newest is taken.
+    let (success, log, output, _) = hosted_lanes_of(
+        true,
+        "release",
+        &[],
+        &main_runs(&[("completed", "success")]),
+        &repaired_run_jobs(),
+        &[(12, quota.as_str()), (22, again.as_str())],
+    );
+    assert!(success, "{log}");
+    assert!(output.contains("quota=q 7 u\n"), "{output}");
+}
+
+#[test]
+fn a_lane_recorded_only_by_a_job_that_did_not_succeed_has_no_hosted_record() {
+    let (success, log, output, _) = hosted_lanes_of(
+        true,
+        "release",
+        &[],
+        &main_runs(&[("completed", "success")]),
+        &repaired_run_jobs(),
+        &[
+            (11, lane_note("Confinement-lane", "c 189 failed").as_str()),
+            (12, lane_note("Quota-lane", "q 7 first").as_str()),
+        ],
+    );
+    assert!(success, "{log}");
+    assert_eq!(
+        output,
+        "run-url=https://example.invalid/runs/0\nconfinement=\nquota=q 7 first\nchart=\nnamespace=\n",
+        "{log}"
+    );
+    assert!(log.contains("Confinement-lane from"), "{log}");
+    assert!(log.contains(": none"), "{log}");
 }
 
 #[test]

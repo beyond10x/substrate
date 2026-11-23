@@ -1060,18 +1060,22 @@ commit* waits for that workflow's own recorded `success` for the exact tagged co
 `push` to `main` or a `workflow_dispatch` of this repository, and hands each annotation to its
 record step, which applies every refusal above to it. Per lane, a recovery input comes first, then
 the tag's trailer, then the hosted annotation; when the tag or the dispatch records all four, no run
-is read, and a tagged source without the workflow has only those carriers. A failed hosted run, or
-two annotations of one lane, is refused. No self-hosted runner is involved (Timo, 2026-11-19).
+is read, and a tagged source without the workflow has only those carriers. The step reads the jobs
+of every attempt of that run and takes each lane's record from the newest attempt in which a job
+that concluded `success` annotated it; an annotation of a job that did not succeed is not a record.
+A failed hosted run, or two annotations of one lane in one attempt, is refused. No self-hosted
+runner is involved (Timo, 2026-11-19).
 
-**A `release-lanes.yml` run of a commit that will be tagged is never repaired with "re-run failed
-jobs".** The preflight lists the jobs of the run's latest attempt, and the jobs a partial rerun
-carries over have new check runs without annotations: the run turns green and three of its four
-records are gone. When one lane fails on that commit, dispatch `release-lanes.yml` on `main` again
-(`workflow_dispatch`, a whole new run), or re-run all jobs. Release 0.26.0, 2026-11-23: the
-confinement lane failed once at `d0bd8be`, its job alone was run again, and the tag-push release
-run was refused "no recorded quota lane run"; the release was published by a recovery dispatch
-with the three records of the first attempt as inputs
-(`story:release-reads-lane-records-across-the-attempts-of-a-run` removes the trap).
+**A failed lane job of `release-lanes.yml` may be run again alone.** Release 0.26.0, 2026-11-23:
+the confinement lane failed once at `d0bd8be`, its job alone was run again, and the tag-push
+release run was refused "no recorded quota lane run", because the preflight of that tag's source
+read the latest attempt only and a carried-over job has a new check run without its annotation.
+The release was published by a recovery dispatch with the three records of the first attempt as
+inputs. From the release after 0.26.0 the preflight reads every attempt (above). A tag whose
+source is 0.26.0 or older still needs a whole new run (`workflow_dispatch` on `main`, or re-run all
+jobs). The chart-lane step reads the `chart-lane absent` notices of `chart-lane.yml`'s latest
+attempt in the old way: after a partial rerun there the release notes print fewer absent
+scenarios than ran absent, and nothing is refused.
 
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
