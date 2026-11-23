@@ -132,13 +132,14 @@ fn git(directory: &Path, args: &[&str]) -> String {
 
 /// What the base commit of every throwaway repository tracks beside the list: one file per kind
 /// of path the cases change, rename or delete.
-const TRACKED: [(&str, &str); 12] = [
+const TRACKED: [(&str, &str); 13] = [
     (
         ".engineering/planning/story/first.md",
         "---\nstatus: open\n---\n\n# First\n",
     ),
     ("docs/design/01-example.md", "# Example design\n\nA body.\n"),
     ("adr/9999-example.md", "# Example decision\n"),
+    ("ROADMAP.md", "# Roadmap\n"),
     ("STATUS.md", "# Status\n"),
     ("README.md", "# Readme\n"),
     ("CHANGELOG.md", "# Changelog\n"),
@@ -303,7 +304,7 @@ fn classify_in(root: &Path, event: &str, base: &str, head: &str, env: &[(&str, &
     }
 }
 
-/// The story's first acceptance case: planning files, a design document, an ADR and a status page,
+/// The story's first acceptance case: planning files, a design document, an ADR and the roadmap,
 /// changed and added, and nothing else.
 #[test]
 fn a_pull_request_that_changes_only_listed_paths_is_planning_only() {
@@ -325,7 +326,7 @@ fn a_pull_request_that_changes_only_listed_paths_is_planning_only() {
         pr.write("docs/design/02 spaced name.md", "# Spaced\n");
         pr.write("docs/design/03-überblick.md", "# Overview\n");
         pr.write("adr/9999-example.md", "# Example decision, amended\n");
-        pr.write("STATUS.md", "# Status\n\nObserved.\n");
+        pr.write("ROADMAP.md", "# Roadmap\n\nObserved.\n");
     });
     answer.expect("planning-only", "only listed paths");
     for path in [
@@ -334,10 +335,28 @@ fn a_pull_request_that_changes_only_listed_paths_is_planning_only() {
         ".engineering/evidence/story/second/record.json",
         "docs/design/01-example.md",
         "adr/9999-example.md",
-        "STATUS.md",
+        "ROADMAP.md",
     ] {
         assert_eq!(answer.class_of(path), "planning-only", "{path}");
     }
+}
+
+/// `STATUS.md` left the list when `cargo xtask check-docs` began to hold its release lines to the
+/// workspace version (`xtask/src/site_release.rs`). A pull request that changes only it can turn
+/// that check red, so it runs the gate; beside a listed path it is still the one code path.
+#[test]
+fn a_pull_request_that_changes_only_the_status_file_is_code() {
+    let checkout = Checkout::new();
+    let alone = checkout.answer_for(|pr| pr.write("STATUS.md", "# Status\n\nObserved.\n"));
+    alone.expect("code", "only STATUS.md");
+    assert_eq!(alone.class_of("STATUS.md"), "code");
+    let beside = checkout.answer_for(|pr| {
+        pr.write("STATUS.md", "# Status\n\nObserved again.\n");
+        pr.write("ROADMAP.md", "# Roadmap\n\nObserved.\n");
+    });
+    beside.expect("code", "STATUS.md beside a listed path");
+    assert_eq!(beside.class_of("STATUS.md"), "code");
+    assert_eq!(beside.class_of("ROADMAP.md"), "planning-only");
 }
 
 /// The story's second acceptance case: the same pull request with one `.rs` file added.
@@ -421,7 +440,7 @@ fn a_deleted_code_file_is_code() {
     let checkout = Checkout::new();
     let answer = checkout.answer_for(|pr| {
         pr.git(&["rm", "--quiet", "crates/example/src/old.rs"]);
-        pr.write("STATUS.md", "# Status\n\nObserved.\n");
+        pr.write("ROADMAP.md", "# Roadmap\n\nObserved.\n");
     });
     answer.expect("code", "a deleted code file");
     assert_eq!(answer.class_of("crates/example/src/old.rs"), "code");
@@ -467,6 +486,7 @@ fn every_path_outside_the_list_is_code() {
         LIST,
         "README.md",
         "AGENTS.md",
+        "STATUS.md",
         "crates/example/README.md",
         "crates/example/docs/notes.md",
         "vendor/example-1.0.0/src/docs/routing.md",
@@ -509,7 +529,6 @@ fn every_listed_path_is_planning_only() {
         "adr/9999-example.md",
         "adr/README.md",
         "architecture/overview.md",
-        "STATUS.md",
         "ROADMAP.md",
         "SECURITY.md",
         "glossary.md",
@@ -586,7 +605,7 @@ fn a_push_and_a_dispatch_never_skip() {
 #[test]
 fn a_base_or_head_the_checkout_does_not_hold_is_code() {
     let checkout = Checkout::new();
-    let (base, head) = checkout.pull_request(|pr| pr.write("STATUS.md", "# Status\n\nMore.\n"));
+    let (base, head) = checkout.pull_request(|pr| pr.write("ROADMAP.md", "# Roadmap\n\nMore.\n"));
     checkout
         .classify("pull_request", &base, &head)
         .expect("planning-only", "both commits present");
@@ -615,8 +634,8 @@ fn commits_without_a_merge_base_are_code() {
     let base = checkout.git(&["rev-parse", "main"]);
     checkout.git(&["checkout", "--quiet", "--orphan", "unrelated"]);
     checkout.git(&["rm", "--quiet", "-r", "--cached", "."]);
-    checkout.write("STATUS.md", "# Status of another history\n");
-    checkout.git(&["add", "STATUS.md"]);
+    checkout.write("ROADMAP.md", "# Roadmap of another history\n");
+    checkout.git(&["add", "ROADMAP.md"]);
     checkout.git(&["commit", "--quiet", "-m", "unrelated"]);
     let head = checkout.git(&["rev-parse", "HEAD"]);
     checkout
@@ -630,7 +649,7 @@ fn commits_without_a_merge_base_are_code() {
 fn a_shallow_checkout_is_code() {
     let checkout = Checkout::new();
     checkout.commit("a second commit, so the history is longer than the clone");
-    let (base, head) = checkout.pull_request(|pr| pr.write("STATUS.md", "# Status\n\nMore.\n"));
+    let (base, head) = checkout.pull_request(|pr| pr.write("ROADMAP.md", "# Roadmap\n\nMore.\n"));
     checkout.git(&["branch", "pull", &head]);
     checkout
         .classify("pull_request", &base, &head)
@@ -664,43 +683,43 @@ fn a_missing_or_malformed_list_is_code() {
             "a list that only excludes paths",
         ),
         (
-            Some("include STATUS.md\nallow docs/*\n"),
+            Some("include ROADMAP.md\nallow docs/*\n"),
             "an unknown directive",
         ),
         (
-            Some("include STATUS.md\nSTATUS.md\n"),
+            Some("include ROADMAP.md\nROADMAP.md\n"),
             "a pattern without a directive",
         ),
         (
-            Some("include STATUS.md\ninclude docs/?.md\n"),
+            Some("include ROADMAP.md\ninclude docs/?.md\n"),
             "a `?` wildcard",
         ),
         (
-            Some("include STATUS.md\ninclude docs/[a-z]*.md\n"),
+            Some("include ROADMAP.md\ninclude docs/[a-z]*.md\n"),
             "a bracket expression",
         ),
         (
-            Some("include STATUS.md\ninclude @(docs|adr)/*\n"),
+            Some("include ROADMAP.md\ninclude @(docs|adr)/*\n"),
             "an extended pattern",
         ),
         (
-            Some("include STATUS.md\ninclude docs/ *.md\n"),
+            Some("include ROADMAP.md\ninclude docs/ *.md\n"),
             "a pattern with a space",
         ),
-        (Some("include STATUS.md\ninclude \n"), "an empty pattern"),
+        (Some("include ROADMAP.md\ninclude \n"), "an empty pattern"),
         (
-            Some("include STATUS.md\r\ninclude docs/*.md\r\n"),
+            Some("include ROADMAP.md\r\ninclude docs/*.md\r\n"),
             "carriage returns",
         ),
     ] {
         let checkout = Checkout::with_list(list);
         checkout
-            .answer_for(|pr| pr.write("STATUS.md", "# Status\n\nMore.\n"))
+            .answer_for(|pr| pr.write("ROADMAP.md", "# Roadmap\n\nMore.\n"))
             .expect("code", case);
     }
-    let checkout = Checkout::with_list(Some("# a list\n\ninclude STATUS.md\nexclude docs/*\n"));
+    let checkout = Checkout::with_list(Some("# a list\n\ninclude ROADMAP.md\nexclude docs/*\n"));
     checkout
-        .answer_for(|pr| pr.write("STATUS.md", "# Status\n\nMore.\n"))
+        .answer_for(|pr| pr.write("ROADMAP.md", "# Roadmap\n\nMore.\n"))
         .expect("planning-only", "a well-formed list that names the path");
 }
 
@@ -726,7 +745,7 @@ fn a_pull_request_cannot_list_its_own_paths() {
 #[test]
 fn commits_main_gained_since_the_branch_point_are_not_the_pull_requests_change() {
     let checkout = Checkout::new();
-    let (_, planning) = checkout.pull_request(|pr| pr.write("STATUS.md", "# Status\n\nMore.\n"));
+    let (_, planning) = checkout.pull_request(|pr| pr.write("ROADMAP.md", "# Roadmap\n\nMore.\n"));
     let (_, code) = checkout.pull_request(|pr| {
         pr.write("crates/example/src/added.rs", "pub const ADDED: u8 = 2;\n");
     });
@@ -778,8 +797,8 @@ fn the_answer_does_not_depend_on_the_runners_git_configuration() {
     // A submodule pointer and a mode change, each beside a listed path, with no file content
     // changed outside the list.
     checkout.git(&["checkout", "--quiet", "--detach", "main"]);
-    checkout.write("STATUS.md", "# Status\n\nMore.\n");
-    checkout.git(&["add", "STATUS.md"]);
+    checkout.write("ROADMAP.md", "# Roadmap\n\nMore.\n");
+    checkout.git(&["add", "ROADMAP.md"]);
     checkout.git(&[
         "update-index",
         "--add",
@@ -789,8 +808,8 @@ fn the_answer_does_not_depend_on_the_runners_git_configuration() {
     checkout.git(&["commit", "--quiet", "-m", "a submodule pointer"]);
     let pointer = checkout.git(&["rev-parse", "HEAD"]);
     checkout.git(&["reset", "--quiet", "--hard", "main"]);
-    checkout.write("STATUS.md", "# Status\n\nMore.\n");
-    checkout.git(&["add", "STATUS.md"]);
+    checkout.write("ROADMAP.md", "# Roadmap\n\nMore.\n");
+    checkout.git(&["add", "ROADMAP.md"]);
     checkout.git(&["update-index", "--chmod=+x", "crates/example/src/lib.rs"]);
     checkout.git(&["commit", "--quiet", "-m", "a mode change"]);
     let mode = checkout.git(&["rev-parse", "HEAD"]);
@@ -806,7 +825,7 @@ fn the_answer_does_not_depend_on_the_runners_git_configuration() {
 #[test]
 fn a_diff_that_cannot_be_computed_is_code() {
     let checkout = Checkout::new();
-    let (base, head) = checkout.pull_request(|pr| pr.write("STATUS.md", "# Status\n\nMore.\n"));
+    let (base, head) = checkout.pull_request(|pr| pr.write("ROADMAP.md", "# Roadmap\n\nMore.\n"));
     checkout
         .classify("pull_request", &base, &head)
         .expect("planning-only", "the real git");

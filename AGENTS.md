@@ -763,9 +763,10 @@ disagree. Read the gate's own exit status, never a pipeline's (`gate.sh 2>&1 | t
 **A planning-only pull request passes `Full gate` without a build or a test.**
 [`.github/planning-only-paths`](.github/planning-only-paths) is the one path list: everything under
 `.engineering/`, the Markdown under `adr/`, `architecture/` and `docs/`, and `ROADMAP.md`,
-`SECURITY.md`, `STATUS.md` and `glossary.md`, except three documents a test reads by name (ADR 0047
+`SECURITY.md` and `glossary.md`, except three documents a test reads by name (ADR 0047
 and designs 04 and 08). Every other path is code, Markdown included: `website/` is the built site,
-`CHANGELOG.md` is compared with its release page, `contracts/` and `xtask/bundle-source/` are
+`CHANGELOG.md` is compared with its release page, `STATUS.md` holds the release lines
+`cargo xtask check-docs` compares with the workspace version, `contracts/` and `xtask/bundle-source/` are
 released bundle bytes and their sources, `README.md`, `AGENTS.md` and the crate READMEs are read by
 tests or compiled as doctests, and `spec/`, `deploy/` and `vendor/` are sources. The first job of
 `gate.yml` and of `macos.yml` calls
@@ -1123,11 +1124,21 @@ before its stylesheet, and `website/static/styles.css` sets every colour in thre
 (dark), `:root[data-theme=light]` and the same declarations under `prefers-color-scheme: light`
 (UXF-013). A colour literal in any other rule fails, and so does text under 4.5:1 on its surface.
 
-A change to what `check-docs` or `docs-provenance` reads runs
-`cargo nextest run -p xtask --test docs_site_adversary` before it is pushed: that target runs both
-verbs on copied inputs and a hand-built site, and the `--bin xtask` tests do not. A rule that reads
-a new file adds it to `input_root` there (PR 264, 2026-11-23: 4 cases red on the forge after a
-green `--bin xtask` run).
+A change under `xtask/src/` runs every test target of the `xtask` package but three before it is
+pushed:
+
+```console
+SLOT_TIMEOUT=30m cargo nextest run -p xtask --release --locked -E 'not (binary(executor_tree_rule_adversary_u4_pass1) | binary(host_no_default_graph_security_review_u1) | binary(kubernetes_client_fake_fence_adversary))'
+```
+
+The three left out start `cargo` and ran into the 60 s bound in the shared pool on 2026-11-23. The
+run is in the release profile, as the gate's is: in the debug profile the bundle targets reach
+the 60 s bound, and that day the run was cancelled at 120 s with 81 of 712 tests run. The
+`--bin xtask` tests alone are not enough. `docs_site_adversary` runs `check-docs` and
+`docs-provenance` on copied inputs and a hand-built site: a rule that reads a new file adds it to
+`input_root` there. `planning_only_classification` refuses a Markdown file that Rust source names
+while `.github/planning-only-paths` lists it: a rule that reads one takes it off that list. PR 264
+went red on the forge three times, each time for a target the local run had skipped.
 
 Site changes follow the UI iteration loop in `website/ux/`
 (`xtask/src/site_ux.rs`):
