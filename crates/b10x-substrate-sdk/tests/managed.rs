@@ -510,6 +510,154 @@ async fn managed_listings_answer_the_omitted_entry_count() {
     managed.shutdown().await.expect("managed shutdown");
 }
 
+/// ADR 0052 through the SDK: `read_directory` and `read_directory_with_omissions` take `.`, the
+/// workspace's root, and follow its cursor to the end; every other file call refuses `.` itself,
+/// with `SdkError::Protocol`, before any request.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One root, listed and then addressed by every other file call.
+async fn managed_root_is_the_directory_dot_paged_by_its_cursor() {
+    let data = unix_socket::tempdir("owned/substrate.sock");
+    let root = data.path().join("owned");
+    let mut managed = ManagedDaemon::builder()
+        .data_dir(&root)
+        .deployment("sdk_root")
+        .external_binary(daemon_binary())
+        .startup_timeout(readiness::DAEMON_READINESS)
+        .start()
+        .await
+        .expect("managed daemon starts");
+    let workspace = managed
+        .client()
+        .workspace()
+        .empty()
+        .create()
+        .await
+        .expect("workspace create");
+    for name in ["a.txt", "b.txt", "c.txt", "e.txt"] {
+        workspace
+            .write_file(name, b"x")
+            .await
+            .expect("a file in the root");
+    }
+    workspace
+        .replace_file(
+            "d/inner.txt",
+            b"inner",
+            ExpectedFileState::Absent,
+            true,
+            None,
+        )
+        .await
+        .expect("a file beneath a directory of the root");
+    let fifo = root.join("workspaces").join(workspace.id()).join("a-fifo");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o644))
+        .unwrap_or_else(|error| panic!("mkfifo {}: {error}", fifo.display()));
+
+    // Five listed children at two a page: three pages, complete, in name order, each once, and
+    // the FIFO counted on every page.
+    let mut names = Vec::new();
+    let mut pages = 0;
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = workspace
+            .read_directory_with_omissions(".", cursor.as_deref(), 2)
+            .await
+            .expect("a page of the root");
+        assert_eq!(page.listing.path, ".", "the root page names its path");
+        assert_eq!(page.omitted_entries, 1, "the FIFO is counted on every page");
+        names.extend(page.listing.items.into_iter().map(|item| item.name));
+        pages += 1;
+        let Some(next) = page.listing.next_cursor else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    assert_eq!(pages, 3);
+    assert_eq!(names, ["a.txt", "b.txt", "c.txt", "d", "e.txt"]);
+    let whole = workspace
+        .read_directory(".", None, 32)
+        .await
+        .expect("the root in one page");
+    assert_eq!(whole.items.len(), 5);
+    assert_eq!(whole.next_cursor, None);
+
+    // `.` is the whole path of a directory read, or the SDK refuses the path.
+    for dotted in ["d/.", "./d", ".."] {
+        let listed = workspace.read_directory(dotted, None, 2).await;
+        assert!(
+            matches!(listed, Err(SdkError::Protocol(_))),
+            "{dotted}: {listed:?}"
+        );
+    }
+
+    // Every other file call refuses `.` before it sends anything.
+    let digest = "0".repeat(64);
+    let refusals = [
+        ("read_file", workspace.read_file(".", 0, 16).await.map(drop)),
+        (
+            "write_file",
+            workspace.write_file(".", b"x").await.map(drop),
+        ),
+        ("delete_file", workspace.delete_file(".").await.map(drop)),
+        (
+            "read_file_v2",
+            workspace.read_file_v2(".", 0, 16).await.map(drop),
+        ),
+        (
+            "read_git_file",
+            workspace.read_git_file(".", 16).await.map(drop),
+        ),
+        (
+            "replace_file",
+            workspace
+                .replace_file(".", b"x", ExpectedFileState::Absent, true, None)
+                .await
+                .map(drop),
+        ),
+        (
+            "edit_file",
+            workspace
+                .edit_file(
+                    ".",
+                    FileEditInput {
+                        expected_sha256: digest.clone(),
+                        old_text: "old".to_owned(),
+                        new_text: "new".to_owned(),
+                        match_policy: TextMatchPolicy::Exact,
+                    },
+                    None,
+                )
+                .await
+                .map(drop),
+        ),
+        (
+            "patch_file",
+            workspace
+                .patch_file(
+                    ".",
+                    FilePatchInput {
+                        expected_sha256: digest,
+                        edits: vec![LinePatchEdit::InsertBefore {
+                            line: 1,
+                            text: "new\n".to_owned(),
+                        }],
+                    },
+                    None,
+                )
+                .await
+                .map(drop),
+        ),
+    ];
+    for (call, result) in refusals {
+        assert!(
+            matches!(result, Err(SdkError::Protocol(_))),
+            "{call}: {result:?}"
+        );
+    }
+
+    managed.shutdown().await.expect("managed shutdown");
+}
+
 #[cfg(feature = "linked-daemon")]
 #[tokio::test]
 async fn linked_mode_reexecutes_a_separate_process() {

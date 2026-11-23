@@ -4876,6 +4876,26 @@ pub fn validate_relative_path(value: &str) -> Result<(), WireValidationError> {
     Ok(())
 }
 
+/// The path that names a workspace's own root directory on the v1 directory page (ADR 0052).
+pub const WORKSPACE_ROOT_DIRECTORY: &str = ".";
+
+/// Validates the path of a v1 directory page: every path [`validate_relative_path`] admits, and
+/// exactly [`WORKSPACE_ROOT_DIRECTORY`] beside them, which lists the workspace's root (ADR 0052).
+///
+/// `.` is admitted as the whole path only: a `.` or `..` component of a longer path is still
+/// refused, and so is the empty path. No other file address admits it. A read in file mode, a
+/// write, a delete and every v2 file route are held to [`validate_relative_path`].
+///
+/// # Errors
+///
+/// The errors of [`validate_relative_path`].
+pub fn validate_directory_address(value: &str) -> Result<(), WireValidationError> {
+    if value == WORKSPACE_ROOT_DIRECTORY {
+        return Ok(());
+    }
+    validate_relative_path(value)
+}
+
 /// Computes the canonical identity of an execution-capsule manifest.
 ///
 /// The hash covers a domain tag, entrypoint, and each already path-sorted file's path, role,
@@ -6259,6 +6279,40 @@ mod tests {
             assert!(validate_relative_path(invalid).is_err(), "{invalid}");
         }
         assert!(validate_relative_path(&["a"; 65].join("/")).is_err());
+    }
+
+    #[test]
+    fn a_directory_address_admits_exactly_the_root_dot_beside_every_relative_path() {
+        // ADR 0052: `.` is the workspace's root on the directory page, and on no other address.
+        assert!(super::validate_directory_address(super::WORKSPACE_ROOT_DIRECTORY).is_ok());
+        assert_eq!(super::WORKSPACE_ROOT_DIRECTORY, ".");
+        assert_eq!(
+            validate_relative_path("."),
+            Err(WireValidationError::InvalidPath),
+            "the rule of every other file address still refuses `.`"
+        );
+        for path in ["src", "src/main.rs", ".hidden", "a.b", "..."] {
+            assert_eq!(
+                super::validate_directory_address(path),
+                validate_relative_path(path),
+                "{path}"
+            );
+            assert!(super::validate_directory_address(path).is_ok(), "{path}");
+        }
+        // `.` is the whole path or the path is refused, and the empty path stays refused.
+        for invalid in [
+            "", "..", "./a", "a/.", "./.", "a/..", "/", "/.", "./", ".\0", "a//b", "a\\b",
+        ] {
+            assert_eq!(
+                super::validate_directory_address(invalid),
+                Err(WireValidationError::InvalidPath),
+                "{invalid:?}"
+            );
+        }
+        assert_eq!(
+            super::validate_directory_address(&["a"; 65].join("/")),
+            Err(WireValidationError::InvalidPathDepth)
+        );
     }
 
     #[test]

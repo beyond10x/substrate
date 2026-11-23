@@ -75,6 +75,12 @@ means the limit only, so raising the limit helps. With the header, at least one 
 omitted whatever the limit. The Rust SDK's `Workspace::tree_with_omissions` and
 `Workspace::read_directory_with_omissions` return the count beside the listing.
 
+The workspace root is the path `.` on the v1 directory page (ADR 0052):
+`GET /v1/workspaces/{workspace_id}/files/.?mode=directory` pages the root's immediate children
+like any other directory. Send the segment as written: a client that removes dot segments reaches
+`/files/` and gets 404. Every other file route refuses `.` with `workspace.path-escape`. A daemon
+that predates the root page answers that code too, and a client may then fall back to the tree.
+
 Release `0.25.0` advertises `substrate-wire/0.27.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest, because it identifies the distribution package and not

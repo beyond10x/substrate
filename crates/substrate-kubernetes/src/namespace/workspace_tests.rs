@@ -686,6 +686,53 @@ async fn every_served_file_route_is_one_executor_call_in_the_keeper() {
     }
 }
 
+/// ADR 0052: the root page is the same read forwarded to the keeper with the path `.`, so the
+/// volume's immediate children come back in pages, and `.` stays refused in file mode and on a
+/// write by the guarded code in the keeper.
+#[tokio::test]
+async fn the_root_directory_page_is_the_same_read_forwarded_to_the_keeper() {
+    let s = setup();
+    s.created().await;
+    let pvc = pvc_name();
+    let d = &s.driver;
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        Driver::write_workspace_file(d, WORKSPACE, &pvc, name, b"x")
+            .await
+            .expect("written");
+    }
+
+    let mut names = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let query: FileReadQuery = serde_json::from_value(json!({
+            "mode": "directory", "limit_items": 1, "cursor": cursor,
+        }))
+        .expect("a directory query");
+        let listed = Driver::read_workspace_path(d, WORKSPACE, &pvc, ".", &query)
+            .await
+            .expect("a page of the root");
+        let FileReadResult::Directory(page) = listed.value else {
+            panic!("a directory reads as a page");
+        };
+        assert_eq!(page.path, ".", "the root page names its path");
+        names.extend(page.items.into_iter().map(|item| item.name));
+        let Some(next) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    assert_eq!(names, ["a.txt", "b.txt", "c.txt"], "one child a page");
+
+    let file_mode = Driver::read_workspace_path(d, WORKSPACE, &pvc, ".", &file_query())
+        .await
+        .expect_err("`.` is not a file");
+    assert_eq!(file_mode.code, "workspace.path-escape");
+    let write = Driver::write_workspace_file(d, WORKSPACE, &pvc, ".", b"x")
+        .await
+        .expect_err("`.` is not written");
+    assert_eq!(write.code, "workspace.path-escape");
+}
+
 /// Holds the next `fs` answer past a short client bound, after the executor acted.
 fn stall_next(s: &mut Setup) {
     s.driver.api.timeout = Duration::from_secs(1);

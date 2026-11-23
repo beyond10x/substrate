@@ -469,5 +469,137 @@ fn a_check_that_cannot_make_its_scratch_directory_proves_nothing() {
     assert!(names(root).is_empty());
 }
 
+/// ADR 0052: the keeper's workspace is its root, so a `Read` of `.` in directory mode pages the
+/// volume's immediate children, and every other request still refuses `.` by name.
+#[test]
+#[allow(clippy::too_many_lines)] // One root, listed and then addressed by every other request.
+fn the_root_is_read_as_the_directory_dot_and_refused_by_every_other_request() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path();
+    if !openat2_served(root) {
+        eprintln!(
+            "openat2 is unavailable on this kernel; the guarded operations are not exercised"
+        );
+        return;
+    }
+    for name in ["a.txt", "b.txt", "c.txt", "e.txt"] {
+        std::fs::write(root.join(name), b"x").expect("root file");
+    }
+    std::fs::create_dir(root.join("d")).expect("dir");
+    std::fs::write(root.join("d/inner.txt"), b"inner").expect("inner");
+    let fifo = std::ffi::CString::new(root.join("pipe").to_str().expect("utf-8")).expect("c");
+    // SAFETY: the path is a valid NUL-terminated string inside the temporary root.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+    // Five listed children at two a page: three pages, complete, in name order, each once, and
+    // the FIFO counted on every page.
+    let mut names = Vec::new();
+    let mut pages = 0;
+    let mut cursor = None;
+    loop {
+        let (listing, omitted) = ok::<FileReadResult>(call(
+            root,
+            &Request::Read {
+                workspace: WORKSPACE.to_owned(),
+                path: ".".to_owned(),
+                query: FileReadQuery {
+                    mode: FileMode::Directory,
+                    offset: None,
+                    limit_bytes: None,
+                    cursor,
+                    limit_items: Some(2),
+                },
+            },
+            b"",
+        ));
+        let FileReadResult::Directory(page) = listing else {
+            panic!("a directory read answers a page");
+        };
+        assert_eq!(page.path, ".", "the root page names its path");
+        assert_eq!(omitted, 1, "the FIFO is counted on every page");
+        names.extend(page.items.into_iter().map(|item| item.name));
+        pages += 1;
+        let Some(next) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    assert_eq!(pages, 3);
+    assert_eq!(names, ["a.txt", "b.txt", "c.txt", "d", "e.txt"]);
+
+    let workspace = || WORKSPACE.to_owned();
+    let path = || ".".to_owned();
+    let digest = "0".repeat(64);
+    let refused = [
+        Request::Read {
+            workspace: workspace(),
+            path: path(),
+            query: file_query(16),
+        },
+        Request::ReadV2 {
+            workspace: workspace(),
+            path: path(),
+            query: file_query(16),
+        },
+        Request::Write {
+            workspace: workspace(),
+            path: path(),
+        },
+        Request::Delete {
+            workspace: workspace(),
+            path: path(),
+        },
+        Request::Stat {
+            workspace: workspace(),
+            path: path(),
+        },
+        Request::ReplaceV2 {
+            workspace: workspace(),
+            path: path(),
+            input: FileReplaceInput {
+                content: Base64Content {
+                    encoding: Base64Encoding::Base64,
+                    data: "eA==".to_owned(),
+                },
+                expected: ExpectedFileState::Absent,
+                create_parents: true,
+            },
+        },
+        Request::EditV2 {
+            workspace: workspace(),
+            path: path(),
+            input: FileEditInput {
+                expected_sha256: digest.clone(),
+                old_text: "old".to_owned(),
+                new_text: "new".to_owned(),
+                match_policy: TextMatchPolicy::Exact,
+            },
+        },
+        Request::PatchV2 {
+            workspace: workspace(),
+            path: path(),
+            input: FilePatchInput {
+                expected_sha256: digest,
+                edits: vec![LinePatchEdit::InsertBefore {
+                    line: 1,
+                    text: "new\n".to_owned(),
+                }],
+            },
+        },
+    ];
+    for request in &refused {
+        let content: &[u8] = if matches!(request, Request::Write { .. }) {
+            b"x"
+        } else {
+            b""
+        };
+        assert_eq!(
+            error_code(call(root, request, content)),
+            "workspace.path-escape",
+            "{request:?}"
+        );
+    }
+}
+
 #[path = "fs_ops/result_bound_review.rs"]
 mod result_bound_review;

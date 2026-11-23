@@ -921,6 +921,10 @@ impl Workspace {
         })
     }
 
+    /// One page of a directory's immediate children, in name order; `cursor` is the page
+    /// before's `next_cursor`. The path `"."` is the workspace's root (ADR 0052). It is admitted
+    /// here and by [`Workspace::read_directory_with_omissions`] only: every other file call
+    /// refuses it. A daemon older than the root page refuses it `workspace.path-escape`.
     pub async fn read_directory(
         &self,
         path: impl AsRef<str>,
@@ -945,7 +949,7 @@ impl Workspace {
                 "directory limit is outside its contract bound".to_owned(),
             ));
         }
-        substrate_wire::validate_relative_path(path.as_ref())
+        substrate_wire::validate_directory_address(path.as_ref())
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let query = serde_urlencoded::to_string(substrate_wire::FileReadQuery {
             mode: substrate_wire::FileMode::Directory,

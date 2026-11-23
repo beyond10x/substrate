@@ -13,7 +13,8 @@ use substrate_wire::{
     DirectoryKind, DirectoryPage, ExpectedFileState, FileAbsence, FileEditInput, FileKind,
     FileMode, FileMutationResult, FileObservation, FilePatchInput, FileReadQuery, FileReadResult,
     FileReplaceInput, FileSlice, LinePatchEdit, MAX_FILE_DIFF_TEXT_CHARS, TextMatchPolicy,
-    UnifiedDiff, WorkspaceTree, WorkspaceTreeEntry, WorkspaceTreeQuery, validate_relative_path,
+    UnifiedDiff, WorkspaceTree, WorkspaceTreeEntry, WorkspaceTreeQuery, validate_directory_address,
+    validate_relative_path,
 };
 use ulid::Ulid;
 
@@ -195,6 +196,11 @@ impl GuardedFilesystem {
         Ok(())
     }
 
+    /// Reads a slice of a file, or one page of a directory's immediate children.
+    ///
+    /// In directory mode the path `.` is the workspace's own directory (ADR 0052). In file mode,
+    /// as in every other call of this type, `.` is refused like any path that is not a plain
+    /// relative one.
     pub fn read(
         &self,
         workspace_id: &str,
@@ -202,7 +208,7 @@ impl GuardedFilesystem {
         path: &str,
         query: &FileReadQuery,
     ) -> Result<Listed<FileReadResult>, DriverError> {
-        validate_api_path(path)?;
+        validate_read_path(path, query.mode)?;
         query.validate_shape().map_err(|_| {
             DriverError::refused(
                 "request.schema-invalid",
@@ -268,6 +274,8 @@ impl GuardedFilesystem {
                         "limit",
                     ));
                 }
+                // `.`, the one path the directory rule admits beside the relative ones, resolves
+                // beneath the workspace to the workspace's own directory (ADR 0052).
                 let fd = openat2(
                     workspace.as_raw_fd(),
                     path,
@@ -990,6 +998,23 @@ fn walk_tree(
 
 fn validate_api_path(path: &str) -> Result<(), DriverError> {
     validate_relative_path(path).map_err(|_| path_escape())?;
+    hide_git_control_data(path)
+}
+
+/// The path rule of [`GuardedFilesystem::read`]. A file read is held to [`validate_api_path`]. A
+/// directory page admits `.` beside those paths, the workspace's own directory (ADR 0052). No
+/// other call uses this rule, so no other call admits `.`.
+fn validate_read_path(path: &str, mode: FileMode) -> Result<(), DriverError> {
+    match mode {
+        FileMode::File => validate_api_path(path),
+        FileMode::Directory => {
+            validate_directory_address(path).map_err(|_| path_escape())?;
+            hide_git_control_data(path)
+        }
+    }
+}
+
+fn hide_git_control_data(path: &str) -> Result<(), DriverError> {
     if path.split('/').any(|component| component == ".git") {
         return Err(DriverError::not_found());
     }
@@ -2225,6 +2250,214 @@ mod tests {
             .expect("tree at its limit");
         assert!(listed.value.truncated, "the limit is truncation");
         assert_eq!(listed.omitted_entries, 3);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One root, listed and then addressed by every other call.
+    fn the_root_is_the_directory_dot_on_the_directory_page_and_on_no_other_call() {
+        // ADR 0052: `.` in directory mode opens the workspace's own directory and pages its
+        // immediate children under ADR 0043's rules; every other call still refuses `.`.
+        use substrate_wire::{
+            Base64Content, Base64Encoding, DirectoryEntryKind, ExpectedFileState, FileEditInput,
+            FilePatchInput, FileReplaceInput, TextMatchPolicy,
+        };
+
+        let directory = tempdir().expect("tempdir");
+        let outside = tempdir().expect("outside");
+        std::fs::write(outside.path().join("beyond.txt"), b"outside").expect("outside file");
+        let filesystem =
+            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
+        if !filesystem.openat2_available() {
+            return;
+        }
+        filesystem.create_workspace("ws_root").expect("workspace");
+        let root = directory.path().join("ws_root");
+        let list = |path: &str, cursor: Option<String>, limit_items: u32| {
+            filesystem
+                .read(
+                    "ws_root",
+                    "ws_root",
+                    path,
+                    &FileReadQuery {
+                        mode: FileMode::Directory,
+                        offset: None,
+                        limit_bytes: None,
+                        cursor,
+                        limit_items: Some(limit_items),
+                    },
+                )
+                .map(|listed| {
+                    let super::FileReadResult::Directory(page) = listed.value else {
+                        panic!("directory mode answers a directory page");
+                    };
+                    (page, listed.omitted_entries)
+                })
+        };
+
+        let (empty, omitted) = list(".", None, 2).expect("the page of an empty root");
+        assert_eq!(empty.path, ".", "the root page names its path");
+        assert!(empty.items.is_empty() && empty.next_cursor.is_none());
+        assert_eq!(omitted, 0);
+
+        for name in ["a.txt", "b.txt", "c.txt", "e.txt"] {
+            std::fs::write(root.join(name), b"x").expect("root file");
+        }
+        std::fs::create_dir(root.join("d")).expect("root directory");
+        std::fs::write(root.join("d/inner.txt"), b"inner").expect("file beneath it");
+        std::fs::create_dir(root.join(".git")).expect("git directory");
+        std::fs::write(root.join(".git/config"), b"control data").expect("git config");
+        let fifo = CString::new(root.join("a-fifo").into_os_string().into_vec()).expect("path");
+        // SAFETY: `fifo` is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
+        symlink(outside.path(), root.join("z-link")).expect("symlink");
+
+        // Six listed children at two a page: three pages, complete, in name order, each once.
+        let mut listed = Vec::new();
+        let mut cursors = Vec::new();
+        let mut cursor = None;
+        loop {
+            let (page, omitted) = list(".", cursor, 2).expect("a page of the root");
+            assert_eq!(page.path, ".");
+            assert_eq!(
+                omitted, 1,
+                "the FIFO is counted on every page and `.git` on none"
+            );
+            listed.extend(page.items.into_iter().map(|item| (item.name, item.kind)));
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            cursors.push(next.clone());
+            cursor = Some(next);
+        }
+        assert_eq!(cursors.len(), 2, "three pages");
+        let names: Vec<(&str, DirectoryEntryKind)> = listed
+            .iter()
+            .map(|(name, kind)| (name.as_str(), *kind))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("a.txt", DirectoryEntryKind::File),
+                ("b.txt", DirectoryEntryKind::File),
+                ("c.txt", DirectoryEntryKind::File),
+                ("d", DirectoryEntryKind::Directory),
+                ("e.txt", DirectoryEntryKind::File),
+                ("z-link", DirectoryEntryKind::Symlink),
+            ],
+            "immediate children only: the link is a link and nothing beneath `d` or it is listed"
+        );
+
+        // A cursor past the end: the last one given, after the root shrank beneath it.
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::remove_file(root.join(name)).expect("remove a root file");
+        }
+        assert_eq!(
+            list(".", cursors.pop(), 2)
+                .expect_err("a cursor past the end")
+                .code,
+            "workspace.cursor-invalid"
+        );
+
+        // `.` is the whole path or the path is refused.
+        for dotted in ["d/.", "./d", "./.", ".."] {
+            assert_eq!(
+                list(dotted, None, 2).expect_err(dotted).code,
+                "workspace.path-escape",
+                "{dotted}"
+            );
+        }
+
+        // Every other call refuses `.`, and none of them changes the root.
+        let file_query = FileReadQuery {
+            mode: FileMode::File,
+            offset: Some(0),
+            limit_bytes: Some(16),
+            cursor: None,
+            limit_items: None,
+        };
+        let digest = "0".repeat(64);
+        let refusals = [
+            (
+                "read in file mode",
+                filesystem
+                    .read("ws_root", "ws_root", ".", &file_query)
+                    .map(drop),
+            ),
+            (
+                "digested read",
+                filesystem
+                    .read_digested("ws_root", "ws_root", ".", &file_query)
+                    .map(drop),
+            ),
+            (
+                "write",
+                filesystem
+                    .write_atomic("ws_root", "ws_root", ".", b"x")
+                    .map(drop),
+            ),
+            (
+                "delete",
+                filesystem.delete_file("ws_root", "ws_root", ".").map(drop),
+            ),
+            (
+                "replace",
+                filesystem
+                    .replace_cas(
+                        "ws_root",
+                        "ws_root",
+                        ".",
+                        &FileReplaceInput {
+                            content: Base64Content {
+                                encoding: Base64Encoding::Base64,
+                                data: "eA==".to_owned(),
+                            },
+                            expected: ExpectedFileState::Absent,
+                            create_parents: true,
+                        },
+                    )
+                    .map(drop),
+            ),
+            (
+                "edit",
+                filesystem
+                    .edit_cas(
+                        "ws_root",
+                        "ws_root",
+                        ".",
+                        &FileEditInput {
+                            expected_sha256: digest.clone(),
+                            old_text: "old".to_owned(),
+                            new_text: "new".to_owned(),
+                            match_policy: TextMatchPolicy::Exact,
+                        },
+                    )
+                    .map(drop),
+            ),
+            (
+                "patch",
+                filesystem
+                    .patch_cas(
+                        "ws_root",
+                        "ws_root",
+                        ".",
+                        &FilePatchInput {
+                            expected_sha256: digest,
+                            edits: vec![insert_before(1, "new\n")],
+                        },
+                    )
+                    .map(drop),
+            ),
+        ];
+        for (call, result) in refusals {
+            assert_eq!(
+                result.expect_err(call).code,
+                "workspace.path-escape",
+                "{call}"
+            );
+        }
+        let (after, _) = list(".", None, 10).expect("the root afterwards");
+        let after: Vec<&str> = after.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(after, ["d", "e.txt", "z-link"]);
     }
 
     /// Runs `operation` on its own thread and answers whether it returned within a bound. A

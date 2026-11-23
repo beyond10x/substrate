@@ -441,7 +441,7 @@ a list, and the six lexical writable-root refusals (422) of ADR 0038 with
 `exec.writable-roots-host-unserved` and `exec.writable-roots-git-unserved` (501), which both lanes
 answer for a host root the daemon did not declare and for every Git root, and the portable lane
 also for the one host root the runner declares, which it cannot prove without confinement — across
-124 cases, and its delegated lane 189, whose four writable-root cases bind that declared root and
+136 cases, and its delegated lane 201, whose four writable-root cases bind that declared root and
 check the host side: the write lands, its parent and sibling do not change, a working directory
 beneath the mount runs there, and the declared path swapped for a symlink is
 `exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and nine roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 8}` (bundle `0.27.0`), eight roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a ninth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a
@@ -454,6 +454,14 @@ one before dispatch, each recorded as refused. Both lanes also hold four omitted
 FIFO beside a file is named by the `x-b10x-omitted-entries` header, count 1, on the v1 directory
 page and on the v2 tree both under its limit and when the limit truncates it, and once the FIFO is gone
 neither listing carries the header and the tree is not truncated.
+Both lanes also hold twelve root-page cases (ADR 0052): the path `.` on the v1 directory page
+lists an empty root as one empty page; seven children at three a page come back complete, in name
+order and each once, without the file beneath a directory; `.` is refused
+`workspace.path-escape` (422) in file mode, on a write, on a delete, on every v2 file route and as
+a component (`a/.`, `./a`, `..`), each mutation recorded as refused; a cursor past the end is
+`workspace.cursor-invalid` (422); and, with entries the runner makes on the host, a root of 2,001
+files is complete at 1,000 a page, a FIFO is counted on every page, a symbolic link is listed as a
+link and its own page is refused, and `.git` is neither listed nor counted.
 Both lanes also hold design 30's `sandbox.requires` cases (bundle `0.26.0`): the machine
 publishes the families and properties the `linux` adapter proved and never an adapter name
 (portable: `workspace` and `audit`; delegated: every family but `network-ingress`, with
@@ -650,9 +658,11 @@ case on a case-insensitive volume is not verified.
 **The runner has a third lane, the namespace lane.** It runs only when
 `SUBSTRATE_VECTORS_KUBERNETES_CONFIG` names a namespace driver's kubeconfig. It starts the shipped
 daemon with `--driver kubernetes` on its Unix socket, as deployment `dep_namespace_vectors`, and
-runs `NAMESPACE_CASES` (56) once. These are selected by the facts a kind cluster publishes: a
+runs `NAMESPACE_CASES` (64) once. These are selected by the facts a kind cluster publishes: a
 probed snapshot with `confinement.no-egress` absent, the workspace and file routes, the promoted
-route inventory, `exec.sandbox-unavailable` (501) for an exec, and a destroy that reaches 404.
+route inventory, the eight root-page cases the wire alone sets up (ADR 0052; a FIFO, a symbolic
+link and `.git` at the root are absent, because no route of this lane makes one),
+`exec.sandbox-unavailable` (501) for an exec, and a destroy that reaches 404.
 Unset, the lane prints that it is absent and that no case ran, and is **never reported as
 passed**. Only `cargo xtask namespace-lane observe` sets the variable, as its step 5
 ([`xtask/src/namespace_lane_run.rs`](xtask/src/namespace_lane_run.rs)). Beside it, that verb runs
