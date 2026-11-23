@@ -1230,10 +1230,21 @@ workstation-authored change, including release preparation.
 requires the check `common / Security and privacy` with the strict policy: a branch behind `main`
 is `BEHIND`, and the merge call answers 405 "Required status check … is expected" although every
 check of the head is green. So every merge to `main` puts each other open pull request one forge
-round back. Merge `main` into the branch as the bot (`scripts/as-bot.sh merge --no-ff origin/main`),
-or for a branch without conflicts `PUT /repos/beyond10x/substrate/pulls/<n>/update-branch`, and
-merge after that head's checks. Two branches that both add entries under `## [Unreleased]` of
+round back. Merge `main` into the branch as the bot (`scripts/as-bot.sh merge --no-ff origin/main`)
+and merge after that head's checks. Two branches that both add entries under `## [Unreleased]` of
 `CHANGELOG.md` conflict there; keep both sides.
+
+**Never bring a branch up to date with `PUT …/pulls/<n>/update-branch`.** The forge commits that
+merge as GitHub, not as the bot, and `b10x-gates` then refuses every bot push of a branch that
+holds the commit outside `main`: "merge is not on the authenticated published default branch"
+(2026-11-23: `2754b62a7` on `story/replay-grant` stopped the push of release 0.25.0's
+integration branch, which was built again from the bot's own head before it).
+
+**Several finished pull requests reach `main` through one integration branch**, `release/<version>`
+when a release follows: each branch merged by the bot at its own head, the release-prepare commit
+on top, one pull request and one forge round. The runs of the replaced pull requests are cancelled
+when the integration branch is pushed (2026-11-23: 15 queued runs, with the organization's hosted
+queue at 45).
 
 **One exception, and it is narrower rather than looser: CI releases use `GITHUB_TOKEN` for registry
 and GitHub-release API writes.** `.github/workflows/release.yml` uses the run's own token for both

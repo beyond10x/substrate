@@ -96,6 +96,67 @@ Semantics:
   This surface is for inspection and small edits, not bulk transfer (§10).
 - Workspaces are disposable and may carry a lease (§5).
 
+#### The v2 changes of one file
+
+ADR 0018 declares three changes of one file under `/v2`, each a compare-and-set on the file's
+digest: a replacement (`workspace.file.replace-v2`,
+`PUT /v2/workspaces/{id}/files/{path}`), an exact text edit (`workspace.file.edit-v2`,
+`POST /v2/workspaces/{id}/file-edits/{path}`) and a line patch (`workspace.file.patch-v2`,
+`POST /v2/workspaces/{id}/file-patches/{path}`). Their schemas are the bundle's. The rules
+below say what the schemas cannot.
+
+**A line patch changes only the lines it names.** A line no edit names keeps its bytes, its
+line ending included: LF stays LF and CRLF stays CRLF within one file, and a carriage return
+that is not part of a line ending is text. A line an edit writes ends as the line the edit
+names ends: `line` of an insert, `start_line` of a replaced range. The line breaks inside an
+edit's `text` only separate its lines, whether LF or CRLF, and a break at its end adds no line.
+A file ends without a line ending after the patch exactly when it did before; when the named
+line is such a last line, a written line ends as the line above it ends, or with LF in a file
+of one line, and so does that last line once a line follows it. No line ending is written for
+a line that is gone: a file whose every line is deleted is empty.
+
+**A text edit replaces `old_text` only where the file holds it at exactly one offset.** Every
+offset at which `old_text` starts counts, also one inside another occurrence: `ana` starts at
+offsets 1 and 3 of `banana`, and the edit is refused `workspace.edit-ambiguous` with the file
+unchanged. Under `line_whitespace_normalized` the exact occurrences are counted first, by the
+same rule; with none, every range of whole lines that matches after normalization counts,
+overlapping ranges too. The exact count stops at two and is linear in the file.
+
+**The `diff.text` of a result is a unified diff that Git applies.** A text that is not empty,
+not `truncated` and not `binary` applies with `git apply` to the file as it was before the
+change and gives the file as it is after, for a path Git admits in a working tree. Git refuses
+some paths by its own path rule, whatever the patch: a component it reads as its `.git`
+directory, such as `.GIT`, `git~1`, or `.git` followed by dots, spaces or a colon. The file
+routes change such a file; its diff has the same form, `git apply` refuses it by name
+(`invalid path`), and the same hunk applies under any name Git admits. It is one hunk: the lines from the first to the last
+changed line, with at most three unchanged lines on either side, under a header that names
+both line ranges (`@@ -3,7 +3,8 @@`). Every line of the text ends with LF. A last line of the
+file without a line ending is followed by `\ No newline at end of file`. The former file is
+`a/<path>` and the new one `b/<path>`; a file the change creates has `/dev/null` as its former
+file. A path that holds a space is followed by a tab, and one that holds a quote or a control
+character is written in double quotes with C escapes, as Git writes and reads them. A change
+without a changed line has no hunk and an empty text: the same bytes written again, or an
+empty file created, which a unified diff of this form cannot say. The text is cut to 200
+lines, to the `maxLength` its schema publishes and to the bytes the operation ledger reserves
+for a result; a cut text is marked `truncated` and is not claimed to apply.
+
+**A replacement that does not write its file leaves the workspace as it was.** A replacement
+refused for its text bounds, its digest, its content, its size or its precondition creates no
+directory. One whose write fails after `create_parents` made directories (a name the file
+system refuses, a quota, a failed write, sync or rename of the temporary file) removes the
+directories this request created, deepest first. A directory that existed before the request
+stays, and so does one that holds an entry this request did not create. That removal does not
+refuse another writer's request: a replacement with `create_parents` whose write finds the
+file's directory absent runs once more from its precondition, so it reads the file and
+verifies the expected state again, creates the parents again and writes again. The bound is
+one retry; a second write that fails is the answer (`resource.not-found` when a parent is
+absent again), and the directories the retry created are removed like the first ones. A
+request without `create_parents` is written once and creates no directory. The daemon holds a
+lock per workspace across the driver call of a file change, so two changes of one workspace
+do not reach a driver at the same time through it; a parent is removed between creation and
+write by a writer the lock does not cover, a program running in the workspace or a caller of
+the driver that is not the daemon.
+
 ### 3.2 Exec — bounded runs, background spawns, interactive sessions
 
 | Operation | Method & path | risk | idempotency | effects |
