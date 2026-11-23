@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The Rust SDK's command and session builders take `.workdir(..)`, the directory the program
+  starts in (design 26). The SDK applies the wire's lexical rule before any request and answers
+  `SdkError::Protocol`. A host without the `exec.workdir` fact refuses the start with
+  `exec.workdir-unserved`.
+
 ### Changed
 
 - The ESS pin is 0.97.4, from 0.86.0 (the six `ess-inputs.yaml` under `spec/`, and `ESS_VERSION`

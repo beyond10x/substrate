@@ -859,3 +859,209 @@ async fn delegated_writable_root_is_written_by_an_exec_and_a_session_and_read_on
     eprintln!("sdk writable root delegated: executed");
     daemon.stop().await;
 }
+
+/// Design 26 § 1, portable lane: a host that proved no working directory publishes no
+/// `exec.workdir` fact, and an exec that names one is the daemon's `exec.workdir-unserved` (501),
+/// recorded under its operation id, never a run started somewhere else. A session start keeps the
+/// refusal its route answers first. A path the wire's lexical rule refuses is refused by the SDK,
+/// so the daemon never records the operation.
+#[tokio::test]
+async fn a_working_directory_is_unserved_by_name_without_the_fact() {
+    let data = unix_socket::tempdir("workdir/substrate.sock");
+    let root = data.path().join("workdir");
+    let mut managed = ManagedDaemon::builder()
+        .data_dir(&root)
+        .deployment("sdk_workdir_unserved")
+        .external_binary(daemon_binary())
+        .startup_timeout(readiness::DAEMON_READINESS)
+        .start()
+        .await
+        .expect("managed daemon starts");
+    assert!(
+        managed.client().machine().facts.exec_workdir.is_none(),
+        "without confinement no probe proves a working directory"
+    );
+    let workspace = managed
+        .client()
+        .workspace()
+        .empty()
+        .create()
+        .await
+        .expect("workspace create");
+
+    let operation_id = ulid::Ulid::generate().to_string();
+    let Err(SdkError::Refusal(refusal)) = workspace
+        .command("/usr/bin/true")
+        .policy(writable_policy())
+        .workdir("/workspace")
+        .operation_id(&operation_id)
+        .start()
+        .await
+    else {
+        panic!("a working directory the host has not proved is refused by the daemon")
+    };
+    assert_eq!(refusal.class, RefusalClass::Unserved);
+    assert_eq!(refusal.code, "exec.workdir-unserved");
+    assert_eq!(refusal.address.as_deref(), Some("workdir"));
+    assert_eq!(refusal.operation_id.as_deref(), Some(operation_id.as_str()));
+
+    let Err(SdkError::Refusal(refusal)) = workspace
+        .pipe_session("/usr/bin/true")
+        .policy(writable_policy())
+        .lease(Duration::from_secs(20))
+        .input_limit_bytes(1024)
+        .frame_limit_bytes(1024)
+        .queued_frames(4)
+        .workdir("/workspace")
+        .start()
+        .await
+    else {
+        panic!("a session start keeps the daemon's named refusal")
+    };
+    // Without confinement the session route refuses before it reads the working directory; the
+    // delegated case starts a session in one.
+    assert_eq!(refusal.code, "session.confinement-unavailable");
+
+    let operation_id = ulid::Ulid::generate().to_string();
+    let Err(SdkError::Protocol(message)) = workspace
+        .command("/usr/bin/true")
+        .policy(writable_policy())
+        .workdir("/tmp")
+        .operation_id(&operation_id)
+        .start()
+        .await
+    else {
+        panic!("a working directory outside every mount is refused by the SDK")
+    };
+    assert!(message.contains("working directory"), "{message}");
+    let Err(SdkError::Refusal(refusal)) = managed.client().operation(&operation_id).await else {
+        panic!("the lexically refused start never reached the daemon")
+    };
+    assert_eq!(refusal.code, "resource.not-found");
+    managed.shutdown().await.expect("managed shutdown");
+}
+
+/// Design 26 § 1, delegated lane: an exec started with a working directory beneath the workspace
+/// prints it and its applied record names it, a pipe session started in it runs there, and an
+/// absent directory is `exec.workdir-missing` before anything runs.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One confined journey: exec, session, and the refusal beside them.
+async fn delegated_working_directory_is_where_an_exec_and_a_session_start() {
+    const WORKDIR: &str = "/workspace/workdir-probe/sub";
+    let Some(cgroup_root) = std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT") else {
+        eprintln!("delegated SDK workdir lane absent: SUBSTRATE_VECTORS_CGROUP_ROOT is not set");
+        return;
+    };
+    let data = unix_socket::tempdir("delegated-workdir/substrate.sock");
+    let root = data.path().join("delegated-workdir");
+    let mut managed = ManagedDaemon::builder()
+        .data_dir(&root)
+        .deployment("sdk_workdir_delegated")
+        .external_binary(daemon_binary())
+        .startup_timeout(readiness::DAEMON_READINESS)
+        .cgroup_root(&cgroup_root)
+        .start()
+        .await
+        .expect("delegated managed daemon starts");
+    assert_eq!(
+        managed.client().machine().facts.exec_workdir,
+        Some(true),
+        "a delegated host proves and publishes the working directory"
+    );
+    let workspace = managed
+        .client()
+        .workspace()
+        .empty()
+        .create()
+        .await
+        .expect("workspace create");
+    let prepared = workspace
+        .command("/bin/sh")
+        .args(["-c", "mkdir -p workdir-probe/sub"])
+        .policy(writable_policy())
+        .run()
+        .await
+        .expect("the directory is made by a run in /workspace");
+    assert_eq!(
+        prepared.exec.exit.as_ref().and_then(|exit| exit.code),
+        Some(0),
+        "{:?}",
+        prepared.exec
+    );
+
+    let output = workspace
+        .command("/bin/sh")
+        .args(["-c", "pwd -P"])
+        .policy(writable_policy())
+        .workdir(WORKDIR)
+        .run()
+        .await
+        .expect("exec with a working directory runs");
+    assert_eq!(
+        output.exec.exit.as_ref().and_then(|exit| exit.code),
+        Some(0),
+        "{:?}",
+        output.exec
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{WORKDIR}\n"),
+        "the program starts in the requested directory"
+    );
+    assert_eq!(
+        output
+            .exec
+            .applied
+            .as_ref()
+            .and_then(|applied| applied.workdir.as_deref()),
+        Some(WORKDIR),
+        "the applied record names the directory"
+    );
+
+    let session = workspace
+        .pipe_session("/bin/sh")
+        // It waits for its line, so it is still running when the attachment opens.
+        .args([
+            "-c",
+            "read line; test \"$(pwd -P)\" = /workspace/workdir-probe/sub",
+        ])
+        .policy(writable_policy())
+        .lease(Duration::from_secs(20))
+        .input_limit_bytes(1024)
+        .frame_limit_bytes(1024)
+        .queued_frames(4)
+        .workdir(WORKDIR)
+        .start()
+        .await
+        .expect("session with a working directory starts");
+    let mut channel = session.attach().await.expect("session attachment");
+    channel.write(b"go\n").await.expect("session input");
+    let exit = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(frame) = channel.next_frame().await.expect("session frame") {
+            if let PipeFrame::Exit { exit, .. } = frame {
+                return exit;
+            }
+        }
+        None
+    })
+    .await
+    .expect("session ends");
+    assert_eq!(
+        exit.and_then(|exit| exit.code),
+        Some(0),
+        "the session's program ran in the requested directory"
+    );
+
+    let Err(SdkError::Refusal(refusal)) = workspace
+        .command("/bin/true")
+        .policy(writable_policy())
+        .workdir("/workspace/workdir-probe/absent")
+        .start()
+        .await
+    else {
+        panic!("an absent working directory is refused by the daemon")
+    };
+    assert_eq!(refusal.code, "exec.workdir-missing");
+    eprintln!("sdk workdir delegated: executed");
+    managed.shutdown().await.expect("managed shutdown");
+}

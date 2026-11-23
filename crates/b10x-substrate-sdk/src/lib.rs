@@ -810,6 +810,7 @@ impl Workspace {
             read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,
+            workdir: None,
             policy: None,
             lease_ttl: None,
             operation_id: None,
@@ -833,6 +834,7 @@ impl Workspace {
             read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,
+            workdir: None,
             policy: None,
             lease_ttl: None,
             input_limit_bytes: None,
@@ -1263,6 +1265,7 @@ pub struct CommandBuilder {
     read_only_files: Vec<ReadOnlyFile>,
     secret_slots: Vec<SecretSlotRequest>,
     capsule: Option<ExecutionCapsuleInput>,
+    workdir: Option<String>,
     policy: Option<ExecutionPolicy>,
     lease_ttl: Option<Duration>,
     operation_id: Option<String>,
@@ -1285,6 +1288,7 @@ pub struct PipeSessionBuilder {
     read_only_files: Vec<ReadOnlyFile>,
     secret_slots: Vec<SecretSlotRequest>,
     capsule: Option<ExecutionCapsuleInput>,
+    workdir: Option<String>,
     policy: Option<ExecutionPolicy>,
     lease_ttl: Option<Duration>,
     input_limit_bytes: Option<u64>,
@@ -1400,6 +1404,19 @@ impl PipeSessionBuilder {
         self
     }
 
+    /// Selects the directory the program starts in (design 26 § 1), replacing any earlier
+    /// selection. Without one it starts in `/workspace`.
+    ///
+    /// The path is absolute and lexically normal, at most [`substrate_wire::MAX_WORKDIR_BYTES`]
+    /// bytes, and at or beneath `/workspace` or another mount this start places. Any other path
+    /// is refused with [`SdkError::Protocol`] before anything is sent. A host that publishes no
+    /// `exec.workdir` fact answers `exec.workdir-unserved`, and a directory that is absent, or
+    /// reached through a symlink, `exec.workdir-missing`.
+    pub fn workdir(mut self, path: impl Into<String>) -> Self {
+        self.workdir = Some(path.into());
+        self
+    }
+
     pub fn policy(mut self, policy: ExecutionPolicy) -> Self {
         self.policy = Some(policy);
         self
@@ -1499,8 +1516,9 @@ impl PipeSessionBuilder {
             secret_slots: self.secret_slots,
             capsule: self.capsule,
             lease_ttl_ms: Some(required_duration_millis(lease_ttl)?),
-            workdir: None,
+            workdir: self.workdir,
         };
+        validate_workdir(&exec)?;
         let input = substrate_wire::PipeSessionStartInput {
             capture: self.capture,
             exec,
@@ -1902,6 +1920,19 @@ impl CommandBuilder {
         self
     }
 
+    /// Selects the directory the program starts in (design 26 § 1), replacing any earlier
+    /// selection. Without one it starts in `/workspace`.
+    ///
+    /// The path is absolute and lexically normal, at most [`substrate_wire::MAX_WORKDIR_BYTES`]
+    /// bytes, and at or beneath `/workspace` or another mount this start places. Any other path
+    /// is refused with [`SdkError::Protocol`] before anything is sent. A host that publishes no
+    /// `exec.workdir` fact answers `exec.workdir-unserved`, and a directory that is absent, or
+    /// reached through a symlink, `exec.workdir-missing`.
+    pub fn workdir(mut self, path: impl Into<String>) -> Self {
+        self.workdir = Some(path.into());
+        self
+    }
+
     pub fn policy(mut self, policy: ExecutionPolicy) -> Self {
         self.policy = Some(policy);
         self
@@ -1977,8 +2008,9 @@ impl CommandBuilder {
             secret_slots: self.secret_slots,
             capsule: self.capsule,
             lease_ttl_ms: duration_millis(self.lease_ttl)?,
-            workdir: None,
+            workdir: self.workdir,
         };
+        validate_workdir(&input)?;
         let (_, observed): (_, substrate_wire::Exec) = self
             .workspace
             .client
@@ -2245,6 +2277,15 @@ fn validate_writable_root_bound(roots: &[WritableRoot]) -> Result<(), SdkError> 
         ));
     }
     Ok(())
+}
+
+/// Refuses a working directory the wire's lexical rule refuses (design 26 § 1) before a request is
+/// sent, with [`substrate_wire::validate_workdir`]: a path that is not absolute and normal within
+/// its bound, or one outside every mount this start places. Whether the host serves a working
+/// directory and whether the directory exists are the daemon's answers, `exec.workdir-unserved`
+/// and `exec.workdir-missing`.
+fn validate_workdir(input: &substrate_wire::ExecStartInput) -> Result<(), SdkError> {
+    substrate_wire::validate_workdir(input).map_err(|error| SdkError::Protocol(error.to_string()))
 }
 
 /// Writes a builder's aperture selection in the wire's two forms (design 26 § 2): one name as
@@ -3370,5 +3411,192 @@ mod tests {
         };
         assert_eq!(refusal.code, "resource.not-found");
         server.await.expect("fake daemon task");
+    }
+
+    /// Design 26 § 1: `workdir(..)` on the exec and session builders reaches the start request as
+    /// the wire's `workdir` member, a start that names none carries no such member, and the
+    /// daemon's refusal keeps its name. A path the wire's lexical rule refuses is refused with
+    /// that rule's text before any request is sent: the fake daemon's next request after the
+    /// refused builds is the sentinel lookup.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One fake daemon answers the whole journey, in order.
+    async fn a_working_directory_reaches_the_start_request_and_is_checked_before_sending() {
+        const SENTINEL: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB3";
+        let temporary = crate::test_unix_socket::tempdir("daemon.sock");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../contracts/substrate-wire/0.27.0/vectors/http/machine-probe.json"
+        ))
+        .expect("machine vector");
+        let machine = serde_json::to_vec(
+            vector
+                .pointer("/expected/response/body")
+                .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let server = tokio::spawn(async move {
+            answer_one(
+                &listener,
+                "GET /v1/machine HTTP/1.1\r\n",
+                "200 OK",
+                &machine,
+            )
+            .await;
+            let workspace = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_workspace",
+                "operation": "01ARZ3NDEKTSV4RRFFQ69G5FB5",
+                "result": {
+                    "id": "ws_example",
+                    "kind": "workspace",
+                    "labels": {},
+                    "observed_at": "2026-11-08T00:00:00Z",
+                    "state": "ready",
+                    "origin": "created",
+                    "root_name": "ws_example"
+                }
+            }))
+            .expect("workspace response JSON");
+            answer_one(
+                &listener,
+                "POST /v1/workspaces HTTP/1.1\r\n",
+                "201 Created",
+                &workspace,
+            )
+            .await;
+            let unserved = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_unserved",
+                "error": {
+                    "class": "unserved",
+                    "code": "exec.workdir-unserved",
+                    "message": "A working directory is not served by this host.",
+                    "retriable": false,
+                    "address": "workdir"
+                }
+            }))
+            .expect("refusal JSON");
+            let mut inputs = Vec::new();
+            for (head, pointer) in [
+                ("POST /v1/execs HTTP/1.1\r\n", "/input"),
+                ("POST /v1/sessions HTTP/1.1\r\n", "/input/exec"),
+                ("POST /v1/execs HTTP/1.1\r\n", "/input"),
+            ] {
+                let request = answer_one(&listener, head, "501 Not Implemented", &unserved).await;
+                let body: Value = serde_json::from_slice(request_body(&request)).expect("JSON");
+                inputs.push(body.pointer(pointer).expect("exec start input").clone());
+            }
+            let missing = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_sentinel",
+                "error": {
+                    "class": "refused",
+                    "code": "resource.not-found",
+                    "message": "The operation does not exist.",
+                    "retriable": false
+                }
+            }))
+            .expect("missing operation JSON");
+            answer_one(
+                &listener,
+                &format!("GET /v1/ops/{SENTINEL} HTTP/1.1\r\n"),
+                "404 Not Found",
+                &missing,
+            )
+            .await;
+            inputs
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let workspace = client
+            .workspace()
+            .empty()
+            .create()
+            .await
+            .expect("workspace create");
+        let policy = || {
+            ExecutionPolicy::builder()
+                .timeout(Duration::from_secs(5))
+                .cpu_time(Duration::from_secs(1))
+                .memory_bytes(64 * 1024 * 1024)
+                .processes(16)
+                .output_bytes(64 * 1024)
+                .build()
+                .expect("complete execution policy")
+        };
+        let command = || workspace.command("/usr/bin/true").policy(policy());
+        let session = || {
+            workspace
+                .pipe_session("/usr/bin/true")
+                .policy(policy())
+                .lease(Duration::from_secs(5))
+                .input_limit_bytes(1024)
+                .frame_limit_bytes(1024)
+                .queued_frames(4)
+        };
+        let unserved = |result: Result<(), SdkError>| {
+            let Err(SdkError::Refusal(refusal)) = result else {
+                panic!("the fake daemon refuses the start")
+            };
+            assert_eq!(refusal.code, "exec.workdir-unserved");
+            assert_eq!(refusal.class, RefusalClass::Unserved);
+        };
+        unserved(
+            command()
+                .workdir("/workspace/crates/gate")
+                .start()
+                .await
+                .map(drop),
+        );
+        // Beneath a mount this start places itself.
+        unserved(
+            session()
+                .read_only_root(ReadOnlyRoot {
+                    host_path: "/srv/tool".to_owned(),
+                    mount: "/opt/tool".to_owned(),
+                })
+                .workdir("/opt/tool/bin")
+                .start()
+                .await
+                .map(drop),
+        );
+        unserved(command().start().await.map(drop));
+
+        let invalid = substrate_wire::WireValidationError::WorkdirInvalid.to_string();
+        let outside = substrate_wire::WireValidationError::WorkdirOutsideMounts.to_string();
+        for (workdir, expected) in [
+            ("workspace/crates", &invalid),
+            ("/workspace/../etc", &invalid),
+            ("/workspace/", &invalid),
+            ("/tmp", &outside),
+            ("/opt/tool/bin", &outside),
+        ] {
+            let Err(SdkError::Protocol(message)) = command().workdir(workdir).start().await else {
+                panic!("an exec in {workdir:?} is refused by the SDK")
+            };
+            assert_eq!(&message, expected, "{workdir:?}");
+            let Err(SdkError::Protocol(message)) = session().workdir(workdir).start().await else {
+                panic!("a session in {workdir:?} is refused by the SDK")
+            };
+            assert_eq!(&message, expected, "{workdir:?}");
+        }
+
+        let Err(SdkError::Refusal(refusal)) = client.operation(SENTINEL).await else {
+            panic!("the sentinel operation is absent")
+        };
+        assert_eq!(refusal.code, "resource.not-found");
+        let inputs = server.await.expect("fake daemon task");
+        assert_eq!(
+            inputs[0]["workdir"], "/workspace/crates/gate",
+            "{}",
+            inputs[0]
+        );
+        assert_eq!(inputs[1]["workdir"], "/opt/tool/bin", "{}", inputs[1]);
+        assert!(inputs[2].get("workdir").is_none(), "{}", inputs[2]);
     }
 }
