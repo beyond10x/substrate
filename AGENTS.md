@@ -778,6 +778,15 @@ run it, so a run of the touched tests alone stays green: a new test module under
 named the host driver, passed its own 8 cases, and failed the forge's gate on 2026-11-23. A test
 module takes its driver from `src/app/tests.rs` (`host_app`, `minimum_host_driver`).
 
+**A change to `crates/substrate-wire/src/lib.rs` runs the library tests of the crates that read it
+before it is pushed: `cargo test --release --locked --lib -p b10x-substrate-wire
+-p b10x-substrate-daemon -p b10x-substrate-sdk`.** The daemon's
+`app::health::tests::the_refusal_codes_are_the_wire_constants` reads the wire crate's source and
+counts every `pub const NAME: &str` whose value is made of lower-case letters, digits, `.` and `-`
+and holds a `.` as a refusal code. A new constant of that form that is no refusal code is named in
+that test's `not_codes`. On 2026-11-23 `WORKSPACE_ROOT_DIRECTORY` (`"."`) passed the wire crate's
+tests and the daemon's integration targets and failed the forge's gate in that library test.
+
 **A planning-only pull request passes `Full gate` without a build or a test.**
 [`.github/planning-only-paths`](.github/planning-only-paths) is the one path list: everything under
 `.engineering/`, the Markdown under `adr/`, `architecture/` and `docs/`, and `ROADMAP.md`,
