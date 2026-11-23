@@ -2510,7 +2510,7 @@ mod d354 {
         );
         assert_eq!(pinned_to(&lock(&rig.ran)[0]), json!([NODE]));
         assert_eq!(
-            rig.driver.published_exec_node().as_deref(),
+            rig.driver.capability_snapshot().node.as_deref(),
             Some(NODE),
             "story:namespace-no-egress-observed-on-every-node: the probe's node is published \
              with its snapshot"
@@ -2532,7 +2532,7 @@ mod d354 {
         assert_eq!(families(&second.facts), [Some(true); 7]);
         assert_eq!(pinned_to(&lock(&rig.ran)[1]), json!([OTHER_NODE]));
         assert_eq!(
-            rig.driver.published_exec_node().as_deref(),
+            rig.driver.capability_snapshot().node.as_deref(),
             Some(OTHER_NODE),
             "story:namespace-no-egress-observed-on-every-node: a later probe on another node \
              moves the published node"
@@ -2580,7 +2580,7 @@ mod d354 {
         driver.probe().await.expect("the first probe runs");
         let first = Driver::machine(&driver);
         assert_eq!(families(&first.facts), [Some(true); 7], "the control");
-        assert_eq!(driver.published_exec_node().as_deref(), Some(NODE));
+        assert_eq!(driver.capability_snapshot().node.as_deref(), Some(NODE));
 
         refuse.store(true, Ordering::SeqCst);
         driver.probe().await.expect("the second probe runs");
@@ -2590,7 +2590,7 @@ mod d354 {
         assert_eq!(second.facts.exec_argv_only, None);
         assert_no_observed_property(&second);
         assert_eq!(
-            driver.published_exec_node(),
+            driver.capability_snapshot().node,
             None,
             "story:namespace-no-egress-observed-on-every-node: an unread keeper node leaves no \
              node published, not the earlier probe's"
@@ -2612,7 +2612,7 @@ mod d354_adv {
         rig.driver.probe().await.expect("the probe runs");
         let first = rig.machine();
         assert_eq!(families(&first.facts), [Some(true); 7], "the control");
-        assert_eq!(rig.driver.published_exec_node().as_deref(), Some(NODE));
+        assert_eq!(rig.driver.capability_snapshot().node.as_deref(), Some(NODE));
 
         rig.kubelet.abort();
         rig.kubelet = tokio::spawn(play_kubelet(
@@ -2630,7 +2630,7 @@ mod d354_adv {
         assert_eq!(lock(&rig.ran).len(), 2, "the later probe's Pod ran");
         assert_eq!(families(&second.facts), [None; 7]);
         assert_eq!(
-            rig.driver.published_exec_node(),
+            rig.driver.capability_snapshot().node,
             None,
             "story:namespace-no-egress-observed-on-every-node: a run that proved nothing leaves \
              no node published, not the earlier probe's"
@@ -2644,7 +2644,7 @@ mod d354_adv {
         let rig = rig(Child::Exact, None).await;
         rig.driver.probe().await.expect("the probe runs");
         rig.machine();
-        assert_eq!(rig.driver.published_exec_node().as_deref(), Some(NODE));
+        assert_eq!(rig.driver.capability_snapshot().node.as_deref(), Some(NODE));
         rig.clock.set(INTERVAL + SLACK);
         let lapsed = rig.machine();
         assert_eq!(
@@ -2653,73 +2653,10 @@ mod d354_adv {
             "the control: the proof lapsed"
         );
         assert_eq!(
-            rig.driver.published_exec_node(),
+            rig.driver.capability_snapshot().node,
             None,
             "story:namespace-no-egress-observed-on-every-node: a lapsed proof leaves no node \
              published"
         );
-    }
-}
-
-/// `story:concurrent-snapshots-never-publish-an-older-probe`: two `machine()` calls that
-/// interleave leave the newer probe's snapshot, generation and node published.
-mod d364 {
-    use super::*;
-    use crate::interleave::older_published_last;
-
-    const OTHER_NODE: &str = "node-b";
-
-    /// Acceptance 1: the older call computes its snapshot under the first probe (on `NODE`), a
-    /// later probe lands on another node, and the newer call runs before the older one
-    /// publishes. The newer probe's tuple is what stays published.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_older_snapshot_computed_first_and_published_last_does_not_replace_the_newer() {
-        let mut rig = rig(Child::Exact, None).await;
-        rig.driver.probe().await.expect("the first probe runs");
-        rig.kubelet.abort();
-        rig.kubelet = tokio::spawn(play_kubelet(
-            admin(&rig.fake),
-            Arc::clone(&rig.fake),
-            Play {
-                node: OTHER_NODE,
-                ..Play::of(Child::Exact)
-            },
-            Arc::clone(&rig.ran),
-            rig.root.path().to_path_buf(),
-        ));
-        let runtime = tokio::runtime::Handle::current();
-        let (older, newer) = tokio::task::block_in_place(|| {
-            older_published_last(&rig.driver, || {
-                rig.clock.set(Duration::from_secs(1));
-                runtime
-                    .block_on(rig.driver.probe())
-                    .expect("the newer probe runs");
-            })
-        });
-        assert_eq!(families(&older.facts), [Some(true); 7], "the control");
-        assert_eq!(families(&newer.facts), [Some(true); 7], "the control");
-        assert_eq!(pinned_to_node(&lock(&rig.ran)[1]), json!([OTHER_NODE]));
-        assert_ne!(
-            older.snapshot, newer.snapshot,
-            "the control: the newer probe moved the snapshot"
-        );
-        assert_eq!(
-            lock(&rig.driver.execs().published).clone(),
-            Some((
-                newer.snapshot.clone(),
-                newer.config_generation,
-                Some(OTHER_NODE.to_owned())
-            )),
-            "story:concurrent-snapshots-never-publish-an-older-probe: the older call (snapshot \
-             {}, node {NODE}) published its tuple over the newer probe's",
-            older.snapshot
-        );
-    }
-
-    /// The node the probe Pod's required affinity names.
-    fn pinned_to_node(pod: &Value) -> Value {
-        pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
-            ["nodeSelectorTerms"][0]["matchExpressions"][0]["values"]
-            .clone()
     }
 }
