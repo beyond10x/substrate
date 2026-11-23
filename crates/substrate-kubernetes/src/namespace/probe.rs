@@ -27,9 +27,13 @@
 //! `exec.no-egress`, which a namespace cannot state, and every family and property § 6.2 has no
 //! row for. Each stays absent, and admission refuses an exec without what it needs (invariant 3).
 //!
-//! A proof lasts until `valid_until`, the next run plus 60 s, and only under the binding and the
+//! A proof lasts one probe interval plus 60 s from its probe, and only under the binding and the
 //! Lease it was taken under: a failed or late probe, a lost Lease or a new binding leaves the
-//! facts absent, never stale.
+//! facts absent, never stale. It ends when either clock says so (§ 6.3): when that span has
+//! elapsed on the driver's monotonic clock, or when the wall clock reads the `valid_until` the
+//! snapshot states or later. The wall clock can end a proof early and never lengthens it. The
+//! probe schedule is the monotonic clock's alone: a proof the wall clock ended early leaves its
+//! facts absent until the next scheduled probe.
 //!
 //! Every run proof is an observation of one node, the one the probe's keeper was scheduled on.
 //! The driver publishes that node beside the snapshot, never in it, and an exec start whose
@@ -39,7 +43,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -94,8 +98,15 @@ const PROBE_WORKSPACE: &str = "probe";
 pub(crate) struct Probed {
     generation: u64,
     lease_epoch: u64,
+    /// When the probe ended, on the driver's monotonic clock: what the proof's span is measured
+    /// from.
+    since: Instant,
+    /// How long the proof is valid from `since` at most: the probe interval plus
+    /// [`VALIDITY_SLACK`].
+    valid_for: Duration,
+    /// The wall clock's reading at `since`. It states the snapshot's `probed_at` and, with
+    /// `valid_for`, its `valid_until`, at which the proof ends on the wall clock.
     at: DateTime<Utc>,
-    valid_until: DateTime<Utc>,
     workspace: WorkspaceProofs,
     run: RunProofs,
     /// The node the probe's keeper was scheduled on and its Pod ran on, which every proof in
@@ -220,13 +231,25 @@ impl WorkspaceProofs {
     }
 }
 
-/// The last proof and when the next probe is due; `None` is due now. `lease_epoch` moves on
-/// every lost or retaken Lease, which a same-holder retake does not show in `config_generation`.
+/// The last proof and when the next probe is due, on the driver's monotonic clock; `None` is due
+/// now. `lease_epoch` moves on every lost or retaken Lease, which a same-holder retake does not
+/// show in `config_generation`.
 #[derive(Debug, Default)]
 pub(crate) struct ProbeState {
     proved: Option<Probed>,
-    next_at: Option<DateTime<Utc>>,
+    next_at: Option<Instant>,
     lease_epoch: u64,
+}
+
+/// The snapshot as the driver computes it at one moment, with what it stands on beside its wire
+/// form.
+pub(crate) struct Computed {
+    /// What the driver would state now.
+    pub(crate) snapshot: CapabilitySnapshot,
+    /// The node the proof behind it observed (§ 6.4), when a valid proof observed one.
+    pub(crate) node: Option<String>,
+    /// The Lease epoch it was computed under: it moves with every lost or retaken Lease.
+    pub(crate) lease_epoch: u64,
 }
 
 /// What one run observed, and the node its run proofs hold on.
@@ -253,23 +276,46 @@ impl Observation {
     }
 }
 
+/// What a test's proof leaves unproved ([`NamespaceDriver::prove_on_without`]).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unproved {
+    /// `confinement.no-egress`.
+    NoEgress,
+    /// `confinement.whole-tree-kill`.
+    WholeTreeKill,
+    /// The seven families of § 6.2 row 3.
+    Families,
+}
+
 #[cfg(test)]
 impl NamespaceDriver {
     /// Records what a probe that proved every fact on `node` records, at the clock's now, under
     /// the current binding and Lease: for exec cases whose fake plays no probe.
     pub(crate) fn prove_on(&self, node: &str) {
+        self.record_proof(node, None);
+    }
+
+    /// As [`NamespaceDriver::prove_on`], but for a probe whose run did not prove `unproved`:
+    /// every other fact is proved on `node`.
+    pub(crate) fn prove_on_without(&self, node: &str, unproved: Unproved) {
+        self.record_proof(node, Some(unproved));
+    }
+
+    fn record_proof(&self, node: &str, unproved: Option<Unproved>) {
         let generation = self
             .binding()
             .expect("the driver is open")
             .config_generation();
-        let now = self.clock.wall();
+        let now = self.clock.now();
         let interval = Duration::from_secs(self.config.probe_interval_seconds);
         let mut state = lock(&self.probe);
         state.proved = Some(Probed {
             generation,
             lease_epoch: state.lease_epoch,
-            at: now,
-            valid_until: now + interval + VALIDITY_SLACK,
+            since: now,
+            valid_for: interval + VALIDITY_SLACK,
+            at: self.clock.wall(),
             workspace: WorkspaceProofs {
                 openat2_beneath: true,
                 guarded_io: true,
@@ -277,10 +323,10 @@ impl NamespaceDriver {
             },
             run: RunProofs {
                 argv_only: true,
-                families: true,
+                families: unproved != Some(Unproved::Families),
                 observed: ObservedProofs {
-                    whole_tree_kill: true,
-                    no_egress: true,
+                    whole_tree_kill: unproved != Some(Unproved::WholeTreeKill),
+                    no_egress: unproved != Some(Unproved::NoEgress),
                 },
             },
             node: Some(node.to_owned()),
@@ -337,7 +383,7 @@ impl NamespaceDriver {
             .await
             .map(|observation| observation.under(&binding.policies.egress_allowing));
         self.remove_probe_objects(&nonce, &sent).await;
-        let now = self.clock.wall();
+        let now = self.clock.now();
         let interval = Duration::from_secs(self.config.probe_interval_seconds);
         let mut state = lock(&self.probe);
         if state.lease_epoch != lease_epoch {
@@ -351,8 +397,9 @@ impl NamespaceDriver {
                 state.proved = Some(Probed {
                     generation,
                     lease_epoch,
-                    at: now,
-                    valid_until: now + interval + VALIDITY_SLACK,
+                    since: now,
+                    valid_for: interval + VALIDITY_SLACK,
+                    at: self.clock.wall(),
                     workspace: observation.workspace,
                     run: observation.run,
                     node: observation.node,
@@ -382,7 +429,7 @@ impl NamespaceDriver {
             proved.generation != binding.config_generation()
                 || proved.lease_epoch != state.lease_epoch
         });
-        superseded || state.next_at.is_none_or(|at| self.clock.wall() >= at)
+        superseded || state.next_at.is_none_or(|at| self.clock.now() >= at)
     }
 
     /// Forgets the last proof and moves the Lease epoch: the Lease was lost or retaken, so steps
@@ -453,10 +500,11 @@ impl NamespaceDriver {
 
     /// The snapshot (§ 6.3): the daemon's own facts always; the declared bounds while the driver
     /// is open, which takes a probe under the current binding that passed the handshake, and
-    /// holds the Lease; each proved fact only under that binding and Lease, and before its
-    /// `valid_until`. Beside it, from the same proof, the node that proof observed (§ 6.4),
-    /// which is neither in the digest nor in the snapshot.
-    pub(crate) fn capability_snapshot(&self) -> (CapabilitySnapshot, Option<String>) {
+    /// holds the Lease; each proved fact only under that binding and Lease, and while the proof
+    /// is younger than its span on the monotonic clock and the wall clock reads before its
+    /// `valid_until`. Beside it, from the same proof, the node that proof observed (§ 6.4), which
+    /// is neither in the digest nor in the snapshot, and the Lease epoch it was computed under.
+    pub(crate) fn capability_snapshot(&self) -> Computed {
         use sha2::Digest as _;
         let binding = self.binding();
         let config_generation = binding
@@ -465,16 +513,23 @@ impl NamespaceDriver {
         let held = binding.is_some() && self.lease_held();
         // Open is all seven steps of § 6.1: the binding, the Lease, and a probe under this
         // binding that passed the executor handshake. Only then are the declared bounds served.
-        let opened = {
+        let (opened, lease_epoch) = {
             let state = lock(&self.probe);
-            state.proved.clone().filter(|proved| {
+            let opened = state.proved.clone().filter(|proved| {
                 held && proved.generation == config_generation
                     && proved.lease_epoch == state.lease_epoch
-            })
+            });
+            (opened, state.lease_epoch)
         };
         let serving = opened.is_some();
-        let now = self.clock.wall();
-        let proved = opened.filter(|proved| now < proved.valid_until);
+        // A proof ends when either clock says so (§ 6.3). Its span is read on the monotonic
+        // clock, which setting the wall clock does not lengthen. The wall clock ends it at the
+        // `valid_until` the snapshot states, so no snapshot states one that has passed beside
+        // its facts; the next probe keeps its monotonic schedule (`probe_due`).
+        let age = |proved: &Probed| self.clock.now().saturating_duration_since(proved.since);
+        let wall = self.clock.wall();
+        let proved = opened
+            .filter(|proved| age(proved) < proved.valid_for && wall < proved.at + proved.valid_for);
         let workspace = proved
             .as_ref()
             .map_or_else(WorkspaceProofs::default, |proved| proved.workspace);
@@ -516,7 +571,7 @@ impl NamespaceDriver {
             confinement_no_egress: run.observed.no_egress.then_some(true),
             ..CapabilityFacts::default()
         };
-        let valid_until = proved.as_ref().map(|proved| proved.valid_until);
+        let valid_until = proved.as_ref().map(|proved| proved.at + proved.valid_for);
         let driver_version = env!("CARGO_PKG_VERSION");
         let material = serde_json::to_vec(&serde_json::json!({
             "driver": HostDriverKind::Kubernetes,
@@ -532,11 +587,15 @@ impl NamespaceDriver {
             driver: HostDriverKind::Kubernetes,
             driver_version: driver_version.to_owned(),
             config_generation,
-            probed_at: proved.map_or(now, |proved| proved.at),
+            probed_at: proved.map_or(wall, |proved| proved.at),
             valid_until,
             facts,
         };
-        (snapshot, node)
+        Computed {
+            snapshot,
+            node,
+            lease_epoch,
+        }
     }
 
     async fn probe_with(
