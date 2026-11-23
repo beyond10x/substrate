@@ -56,3 +56,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0048](0048-the-wire-states-what-a-confinement-adapter-proves-never-its-name.md) | The wire states what a confinement adapter proves, never its name | accepted |
 | [0049](0049-the-base-view-carries-etc-alternatives-and-tmp-takes-an-operator-size.md) | The base view carries `/etc/alternatives`, and `/tmp` takes an operator size | accepted |
 | [0050](0050-the-floor-refuses-the-ioctl-requests-that-exchange-file-blocks.md) | The floor refuses the `ioctl` requests that exchange file blocks | accepted |
+| [0052](0052-the-workspace-root-is-the-directory-dot-on-the-v1-directory-page.md) | The workspace root is the directory `.` on the v1 directory page | accepted |

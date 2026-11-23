@@ -7,7 +7,7 @@ title: The root of a workspace is listed in pages of its immediate children
 summary: The directory reader needs a non-empty path, so a client lists the root through the recursive tree, which truncates at 1,000 entries
 tags:
 - defect
-revision: 1
+revision: 2
 ---
 # Story: the root of a workspace is listed in pages of its immediate children
 
@@ -27,9 +27,12 @@ source, not run).
 
 ## Design
 
-This is a contract change (invariant 8): a design note comes before code. It decides how the
-root is addressed on the directory route, whether the published path schema admits it, and
-whether that needs a successor bundle.
+## Design
+
+[ADR 0052](../../../adr/0052-the-workspace-root-is-the-directory-dot-on-the-v1-directory-page.md),
+accepted on 2026-11-23: the root is the path `.` on the v1 directory page, admitted there and
+nowhere else, inside the schemas bundle `0.27.0` publishes, so no successor bundle. The ADR
+lists what the implementation owes and the runtime vectors that are this story's acceptance.
 
 ## Acceptance
 
