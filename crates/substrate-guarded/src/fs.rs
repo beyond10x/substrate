@@ -3208,6 +3208,21 @@ mod tests {
         assert!(!directory.path().join("ws_hostile").exists());
     }
 
+    /// The deepest nesting the recursive destroy before batches accepted: it refused a
+    /// directory more than 64 levels below the workspace root (`MAX_PATH_DEPTH`, then its bound).
+    const FORMER_DESTROY_DEPTH_CAP: usize = 64;
+
+    // Cleanup has no total depth ceiling and no item ceiling. Every incomplete batch processes
+    // at least 1 and at most `DESTROY_BATCH_ITEMS` (4,096) entries, and repeated batches empty
+    // the tree.
+    //
+    // Deep tree: 65 nested directories, one more than `FORMER_DESTROY_DEPTH_CAP` (64). A batch
+    // removes one level of a chain and syncs two directories for it, so every further level
+    // costs two syncs and proves nothing a level past the cap does not.
+    //
+    // Wide tree: 4,097 direct entries, one more than `DESTROY_BATCH_ITEMS` (4,096), so one
+    // batch cannot hold them. The recursive destroy's total of 100,000 entries
+    // (`MAX_DESTROY_ITEMS`) is above this tree: what it passes is the batch bound.
     #[test]
     fn destroy_batches_progress_beyond_former_depth_and_item_caps() {
         let directory = tempdir().expect("tempdir");
@@ -3229,7 +3244,7 @@ mod tests {
             0,
         )
         .expect("root duplicate");
-        for _ in 0..1_100 {
+        for _ in 0..=FORMER_DESTROY_DEPTH_CAP {
             // SAFETY: parent is live and child_name is a fixed NUL-terminated relative name.
             assert_eq!(
                 unsafe { libc::mkdirat(parent.as_raw_fd(), child_name.as_ptr(), 0o700) },
