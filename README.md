@@ -32,7 +32,7 @@ development wire contract stable.
 | direction | what |
 |---|---|
 | confines | [harness](https://github.com/beyond10x/harness) — over the daemon socket, directly or through the Rust SDK |
-| may govern | [connectors](https://github.com/beyond10x/connectors) — as a first-party provider, and later to isolate an attested connector artifact |
+| is governed by, intended | [connectors](https://github.com/beyond10x/connectors): Connectors owns the provider declaration and the grants that admit Substrate operations. Substrate owns daemon enrollment and execution. The integration is intended, not delivered (`atlas/architecture/adr/0093-substrate-is-a-connectors-provider.md`). Direct local use of a daemon stays |
 | may execute for | [autodev](https://github.com/beyond10x/autodev) — over its `Executor` port |
 | may adapt | [flux](https://github.com/codewandler/flux) — a remote execution adapter over the substrate API. The dependency never points back into Flux |
 

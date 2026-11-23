@@ -1,3 +1,26 @@
 .menu__link {
   min-height: 24px;
 }
+
+/* UXF-008: a link in article text is underlined. The theme's link colour is under 3:1 against
+   the text, so colour alone does not tell a link from its sentence. A heading's anchor mark and
+   a button keep their own look. */
+.theme-doc-markdown a:not(.hash-link):not(.button) {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+/* UXF-015: code blocks and table headers are 14 px. Each selector outranks the rule of the Docs
+   System that sets the smaller size. The header's tracking and end padding shrink with it, so no
+   table gets wider than before. */
+.theme-doc-markdown .theme-code-block pre[class*='language-'] {
+  font-size: 0.875rem;
+}
+.theme-doc-markdown.markdown table th {
+  padding-inline-end: 0.5rem;
+  font-size: 0.875rem;
+  letter-spacing: 0.02em;
+}
+.theme-doc-markdown.markdown table th code {
+  font-size: 0.875rem;
+}

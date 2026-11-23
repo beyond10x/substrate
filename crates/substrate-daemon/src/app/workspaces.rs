@@ -14,10 +14,11 @@ use substrate_store::{
     WorkspaceObservationWrite, WorkspaceRootHolder, adopt_not_found,
 };
 use substrate_wire::{
-    EmptyInput, ErrorClass, FileEditInput, FilePatchInput, FileReadQuery, FileReplaceInput,
-    FileWriteInput, GitBaselineFileQuery, GitChangesQuery, LeaseRenewInput, MAX_LEASE_TTL_MS,
-    MIN_LEASE_TTL_MS, OMITTED_ENTRIES_HEADER, Success, WorkspaceAdoptInput, WorkspaceCreateInput,
-    WorkspaceKind, WorkspaceOrigin, WorkspaceState, WorkspaceTreeQuery, validate_relative_path,
+    EmptyInput, ErrorClass, FileEditInput, FileMutationResult, FilePatchInput, FileReadQuery,
+    FileReplaceInput, FileWriteInput, GitBaselineFileQuery, GitChangesQuery, LeaseRenewInput,
+    MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, OMITTED_ENTRIES_HEADER, Success, WorkspaceAdoptInput,
+    WorkspaceCreateInput, WorkspaceKind, WorkspaceOrigin, WorkspaceState, WorkspaceTreeQuery,
+    validate_relative_path,
 };
 
 use super::operations::{
@@ -1021,6 +1022,56 @@ async fn workspace_file_mutation_v2(
         )
         .await;
     }
+    // The server holds the `maxLength` the input schema publishes for every text of the request
+    // itself; a client that does not validate is refused here, before dispatch and before any
+    // driver reads or writes.
+    let within_text_bounds = match &mutation.input {
+        V2FileMutation::Replace(input) => input.validate_text_bounds(),
+        V2FileMutation::Edit(input) => input.validate_text_bounds(),
+        V2FileMutation::Patch(input) => input.validate_text_bounds(),
+    };
+    if within_text_bounds.is_err() {
+        let response = schema_invalid(&request_id, Some(&mutation.op), "input");
+        return refuse_before_dispatch_response(
+            &app,
+            &identity,
+            &request_id,
+            operation_kind,
+            method,
+            &address,
+            &mutation,
+            response,
+        )
+        .await;
+    }
+    // A file change is dispatched only when its result can be recorded. `result_json_bytes` is
+    // what the ledger reserves for this operation's terminal result. The widest result this
+    // workspace and path can have without its diff text is known now, so a change whose result
+    // could not fit is refused here, for every driver, before any of them reads or writes. The
+    // diff text is what the completion below cuts.
+    let result_json_bytes = app.store.success_result_json_bytes();
+    let widest = FileMutationResult::widest_json_bytes(&workspace_id, &path);
+    if u64::try_from(widest).unwrap_or(u64::MAX) > result_json_bytes {
+        let error = DriverError {
+            class: DriverErrorClass::Exhausted,
+            code: "workspace.write-limit",
+            message: "The result of this file change exceeds what the operation can record."
+                .to_owned(),
+            address: Some("limit".to_owned()),
+            retriable: false,
+        };
+        return refuse_before_dispatch(
+            &app,
+            &identity,
+            &request_id,
+            operation_kind,
+            method,
+            &address,
+            &mutation,
+            &error,
+        )
+        .await;
+    }
     let scope = app.scope(&identity);
     let _workspace_guard = app.lock_workspace(&scope, &workspace_id).await;
     let root_name = match app.admit_workspace(&scope, &workspace_id).await {
@@ -1087,7 +1138,11 @@ async fn workspace_file_mutation_v2(
         }
     };
     match result {
-        Ok(observation) => {
+        Ok(mut observation) => {
+            // The file is changed. Whatever driver answered, its answer is held here to what the
+            // ledger reserved, by the one cut of a diff, so the completion cannot fail for size
+            // (ADR 0005). A result without its diff text was decided to fit before dispatch.
+            observation.fit_json_bytes(result_json_bytes);
             finish_success(
                 &app,
                 &scope,

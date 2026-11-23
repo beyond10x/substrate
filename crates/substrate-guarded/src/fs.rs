@@ -12,8 +12,8 @@ use substrate_wire::{
     Base64Content, Base64Encoding, DigestedFileSlice, DirectoryEntry, DirectoryEntryKind,
     DirectoryKind, DirectoryPage, ExpectedFileState, FileAbsence, FileEditInput, FileKind,
     FileMode, FileMutationResult, FileObservation, FilePatchInput, FileReadQuery, FileReadResult,
-    FileReplaceInput, FileSlice, LinePatchEdit, TextMatchPolicy, UnifiedDiff, WorkspaceTree,
-    WorkspaceTreeEntry, WorkspaceTreeQuery, validate_relative_path,
+    FileReplaceInput, FileSlice, LinePatchEdit, MAX_FILE_DIFF_TEXT_CHARS, TextMatchPolicy,
+    UnifiedDiff, WorkspaceTree, WorkspaceTreeEntry, WorkspaceTreeQuery, validate_relative_path,
 };
 use ulid::Ulid;
 
@@ -409,6 +409,19 @@ impl GuardedFilesystem {
         })
     }
 
+    /// Replaces the complete file when its current state is the expected one.
+    ///
+    /// **A refused replacement leaves the workspace as it was.** Every refusal this code decides
+    /// itself comes before anything is created: a `content.data` outside the lengths its schema
+    /// publishes (`request.schema-invalid`), a malformed digest, content that is not canonical
+    /// base64, content over the file limit (`workspace.write-limit`), and a current state that
+    /// is not the expected one (`workspace.stale-content`). The parent directories a request
+    /// asks for are created directly before the write, after all of these.
+    ///
+    /// The diff the result carries is held to the length its schema publishes
+    /// ([`bounded_diff`]). Holding the whole result to what a caller can record is the caller's:
+    /// `FileMutationResult::widest_json_bytes` before it dispatches, and
+    /// `FileMutationResult::fit_json_bytes` on the answer.
     pub fn replace_cas(
         &self,
         workspace_id: &str,
@@ -416,14 +429,19 @@ impl GuardedFilesystem {
         path: &str,
         input: &FileReplaceInput,
     ) -> Result<FileMutationResult, DriverError> {
+        input
+            .validate_text_bounds()
+            .map_err(|_| text_outside_published_length("content"))?;
         input.expected.validate().map_err(|_| invalid_digest())?;
         let content = canonical_content(&input.content)?;
-        if input.create_parents {
-            self.create_parent_directories(root_name, path)?;
-        }
+        validate_api_path(path)?;
+        self.refuse_content_over_the_file_limit(&content)?;
         let before = self.current_file(root_name, path)?;
         verify_expected(&input.expected, before.as_deref())?;
         let before_sha256 = before.as_deref().map(sha256);
+        if input.create_parents {
+            self.create_parent_directories(root_name, path)?;
+        }
         let observation = self.write_atomic(workspace_id, root_name, path, &content)?;
         Ok(mutation_result(
             workspace_id,
@@ -435,6 +453,9 @@ impl GuardedFilesystem {
         ))
     }
 
+    /// Replaces one match of `old_text` when the file has the expected digest. An `old_text` or
+    /// `new_text` longer than its schema publishes is `request.schema-invalid` before anything is
+    /// read.
     pub fn edit_cas(
         &self,
         workspace_id: &str,
@@ -442,6 +463,9 @@ impl GuardedFilesystem {
         path: &str,
         input: &FileEditInput,
     ) -> Result<FileMutationResult, DriverError> {
+        input
+            .validate_text_bounds()
+            .map_err(|_| text_outside_published_length("input"))?;
         if !is_sha256(&input.expected_sha256) {
             return Err(invalid_digest());
         }
@@ -469,6 +493,8 @@ impl GuardedFilesystem {
         ))
     }
 
+    /// Applies a line patch when the file has the expected digest. An edit `text` longer than its
+    /// schema publishes is `request.schema-invalid` before anything is read.
     pub fn patch_cas(
         &self,
         workspace_id: &str,
@@ -476,6 +502,9 @@ impl GuardedFilesystem {
         path: &str,
         input: &FilePatchInput,
     ) -> Result<FileMutationResult, DriverError> {
+        input
+            .validate_text_bounds()
+            .map_err(|_| text_outside_published_length("edits"))?;
         if !is_sha256(&input.expected_sha256) {
             return Err(invalid_digest());
         }
@@ -569,6 +598,19 @@ impl GuardedFilesystem {
         Ok(())
     }
 
+    /// The one size refusal of a write. [`GuardedFilesystem::replace_cas`] decides it before it
+    /// creates anything, and [`GuardedFilesystem::write_atomic`] holds it for every caller.
+    fn refuse_content_over_the_file_limit(&self, content: &[u8]) -> Result<(), DriverError> {
+        if u64::try_from(content.len()).expect("usize fits u64") > self.max_file_bytes {
+            return Err(DriverError::exhausted(
+                "workspace.write-limit",
+                "Requested replacement exceeds the probed limit.",
+                "limit",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn write_atomic(
         &self,
         workspace_id: &str,
@@ -577,13 +619,7 @@ impl GuardedFilesystem {
         content: &[u8],
     ) -> Result<FileObservation, DriverError> {
         validate_api_path(path)?;
-        if u64::try_from(content.len()).expect("usize fits u64") > self.max_file_bytes {
-            return Err(DriverError::exhausted(
-                "workspace.write-limit",
-                "Requested replacement exceeds the probed limit.",
-                "limit",
-            ));
-        }
+        self.refuse_content_over_the_file_limit(content)?;
         let workspace = self.workspace_fd(root_name)?;
         let (parent, name) = split_parent(path)?;
         let parent_fd = if parent == "." {
@@ -1202,6 +1238,14 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn text_outside_published_length(address: &str) -> DriverError {
+    DriverError::refused(
+        "request.schema-invalid",
+        "A text of this file change is outside the length its schema admits.",
+        address,
+    )
+}
+
 fn mutation_result(
     workspace_id: &str,
     path: &str,
@@ -1223,6 +1267,9 @@ fn mutation_result(
     }
 }
 
+/// The diff a result carries: at most [`MAX_DIFF_LINES`] lines, then cut between two characters
+/// to at most [`MAX_FILE_DIFF_TEXT_CHARS`] characters, the `maxLength` its schema publishes. A
+/// cut of either kind sets `truncated`.
 fn bounded_diff(path: &str, before: Option<&[u8]>, after: &[u8]) -> UnifiedDiff {
     let before = before.unwrap_or_default();
     let (Ok(before), Ok(after)) = (std::str::from_utf8(before), std::str::from_utf8(after)) else {
@@ -1241,11 +1288,13 @@ fn bounded_diff(path: &str, before: Option<&[u8]>, after: &[u8]) -> UnifiedDiff 
     lines.extend(after.split_inclusive('\n').map(|line| format!("+{line}")));
     let truncated = lines.len() > MAX_DIFF_LINES;
     lines.truncate(MAX_DIFF_LINES);
-    UnifiedDiff {
+    let mut diff = UnifiedDiff {
         text: lines.join("\n"),
         truncated,
         binary: false,
-    }
+    };
+    diff.cut_text(usize::MAX, MAX_FILE_DIFF_TEXT_CHARS);
+    diff
 }
 
 fn apply_text_edit(source: &str, input: &FileEditInput) -> Result<String, DriverError> {
@@ -2659,3 +2708,6 @@ mod tests {
 
 #[cfg(test)]
 mod line_patch_order_tests;
+
+#[cfg(test)]
+mod result_budget_tests;

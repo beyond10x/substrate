@@ -239,6 +239,111 @@ async fn cli_workspace_lifecycle() {
     }
 }
 
+/// A retried command replays the stored outcome (`website/docs/concepts/operations.md`, *Retry
+/// identity*): `workspace destroy` with the same `--operation-id` exits 0 and prints the same
+/// result both times, though the first run removed the workspace. A renewal, which leaves its
+/// workspace, replays as well. Another operation id is a new attempt and names the absence.
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_retried_destroy_replays_the_stored_outcome() {
+    const RENEW: &str = "01JCLRETRYRENEW00000000000";
+    const DESTROY: &str = "01JCLRETRYDESTROY000000000";
+    const SECOND_ATTEMPT: &str = "01JCLRETRYDESTROYAGAIN0000";
+    let fixture = fixture().await;
+    let socket = Some(fixture.socket.as_path());
+    let created = ok_result(
+        &cli(
+            socket,
+            &[
+                "--output",
+                "json",
+                "workspace",
+                "create",
+                "--lease-ttl-ms",
+                "60000",
+            ],
+        )
+        .await,
+    );
+    let id = created["workspace"]
+        .as_str()
+        .expect("workspace id")
+        .to_owned();
+
+    let renew = [
+        "--output",
+        "json",
+        "workspace",
+        "renew",
+        &id,
+        "--ttl-ms",
+        "120000",
+        "--operation-id",
+        RENEW,
+    ];
+    let first = ok_result(&cli(socket, &renew).await);
+    let second = ok_result(&cli(socket, &renew).await);
+    assert_eq!(second, first, "a retried renewal prints the stored result");
+
+    let destroy = [
+        "--output",
+        "json",
+        "workspace",
+        "destroy",
+        &id,
+        "--operation-id",
+        DESTROY,
+    ];
+    let first = cli(socket, &destroy).await;
+    let result = ok_result(&first);
+    assert_eq!(result["workspace"], id.as_str());
+    assert_eq!(result["observation"]["absent"], true);
+
+    let second = cli(socket, &destroy).await;
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "the retried destroy replays its stored outcome; stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&first.stdout),
+        "the retried destroy prints the same result"
+    );
+    assert!(second.stderr.is_empty());
+
+    let human = cli(
+        socket,
+        &["workspace", "destroy", &id, "--operation-id", DESTROY],
+    )
+    .await;
+    assert_eq!(human.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&human.stdout),
+        format!("workspace {id} absent\n")
+    );
+
+    let again = cli(
+        socket,
+        &[
+            "--output",
+            "json",
+            "workspace",
+            "destroy",
+            &id,
+            "--operation-id",
+            SECOND_ATTEMPT,
+        ],
+    )
+    .await;
+    assert_ne!(again.status.code(), Some(0), "a new attempt is refused");
+    assert!(again.stdout.is_empty());
+    assert_eq!(
+        stderr_json(&again)["error"]["data"]["code"],
+        "resource.not-found"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_exec_runs_and_reports_exit() {
     let fixture = fixture().await;
@@ -338,3 +443,7 @@ async fn cli_socket_is_required() {
         "{text}"
     );
 }
+
+/// Adversary pass on the SDK and CLI review of 0.24.0 (`tests/adversary_review_0_24/mod.rs`).
+#[path = "adversary_review_0_24/mod.rs"]
+mod adversary_review_0_24;

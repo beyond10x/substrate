@@ -174,10 +174,10 @@ fn with_kubernetes_pod_is_refused_for_its_cluster_configuration_not_the_feature(
     assert!(!detail.contains(KUBERNETES_ABSENT), "{error}");
 }
 
-/// A materialization baseline an earlier build with `git` wrote goes when its workspace is
-/// forgotten, in a build with or without `git`, so a later build with `git` never reads a
-/// same-named workspace as materialized from Git. The workspace directory exists, so the open's
-/// reconciliation of a build with `git` keeps the baseline and only the forget can remove it.
+/// The commit-id file and the store an earlier build with `git` wrote for a workspace go when
+/// the workspace is forgotten, in a build with or without `git`, so a later build with `git`
+/// never reads a same-named workspace as materialized from Git. The workspace directory exists,
+/// so the open keeps both and only the forget can remove them.
 #[tokio::test]
 async fn forgetting_a_workspace_removes_the_baseline_an_earlier_git_build_wrote() {
     let directory = tempfile::tempdir().expect("test-owned workspace root");
@@ -191,10 +191,11 @@ async fn forgetting_a_workspace_removes_the_baseline_an_earlier_git_build_wrote(
     std::fs::create_dir(config.workspace_root.join("ws_old")).expect("operator directory");
     let baseline = baselines.join("ws_old");
     std::fs::write(&baseline, "0123456789012345678901234567890123456789\n").expect("baseline");
+    let store = plant_store(&baselines, "ws_old");
     let driver = HostDriver::open(config).expect("a host with a Git source opens");
     assert!(
-        baseline.exists(),
-        "the open keeps a baseline whose workspace directory exists"
+        baseline.exists() && store.join("pack/pack-0.pack").is_file(),
+        "the open keeps the baseline of a workspace directory that exists"
     );
     driver
         .forget_workspace("ws_old", "ws_old")
@@ -205,8 +206,120 @@ async fn forgetting_a_workspace_removes_the_baseline_an_earlier_git_build_wrote(
         "forgetting the workspace removes its baseline in every build"
     );
     assert!(
+        !store.exists(),
+        "forgetting the workspace removes its store in every build"
+    );
+    assert!(
         directory.path().join("workspaces/ws_old").is_dir(),
         "forgetting never touches the operator's directory"
+    );
+    driver.shutdown().await.expect("host shutdown");
+}
+
+/// A store as an earlier build with `git` wrote it for `root_name`: a directory with a pack.
+fn plant_store(baselines: &std::path::Path, root_name: &str) -> PathBuf {
+    let store = baselines.join(".objects").join(root_name);
+    std::fs::create_dir_all(store.join("pack")).expect("store");
+    std::fs::write(store.join("pack/pack-0.pack"), root_name).expect("pack");
+    store
+}
+
+/// The names in `directory`, sorted.
+fn names(directory: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .expect("directory")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// A driver with a Git source configured that destroys a workspace removes its commit-id file
+/// and its store, in a build with or without `git`, and nothing of another workspace.
+#[tokio::test]
+async fn destroying_a_workspace_removes_its_commit_id_file_and_its_store() {
+    let (directory, driver) = git_host();
+    let baselines = directory.path().join("workspaces/.substrate-git-baselines");
+    let input = WorkspaceCreateInput {
+        source: WorkspaceSource::Empty(substrate_wire::EmptySource::Empty),
+        labels: BTreeMap::new(),
+        storage: None,
+        lease_ttl_ms: None,
+    };
+    assert!(
+        matches!(
+            driver.create_workspace("ws_new", "ws_new", &input).await,
+            DispatchOutcome::Observed(_)
+        ),
+        "an empty workspace is created"
+    );
+    for name in ["ws_new", "ws_other"] {
+        std::fs::write(baselines.join(name), name).expect("commit-id file");
+        plant_store(&baselines, name);
+    }
+
+    let mut absent = false;
+    for _ in 0..100 {
+        absent = matches!(
+            driver
+                .destroy_workspace("ws_new", "ws_new")
+                .await
+                .expect("destroy"),
+            substrate_host::WorkspaceDestroyProgress::Absent(_)
+        );
+        if absent {
+            break;
+        }
+    }
+    assert!(absent, "the destroy finished");
+    assert_eq!(names(&baselines), [".objects", "ws_other"]);
+    assert_eq!(names(&baselines.join(".objects")), ["ws_other"]);
+    assert!(
+        baselines
+            .join(".objects/ws_other/pack/pack-0.pack")
+            .is_file()
+    );
+    driver.shutdown().await.expect("host shutdown");
+}
+
+/// At start, a driver with a Git source configured, in a build with or without `git`, removes
+/// every entry of the baseline root that is neither the commit-id file nor the store of a
+/// workspace directory that exists, a staging directory an interrupted write left among them,
+/// and nothing of a workspace that exists.
+#[tokio::test]
+async fn the_open_removes_baseline_entries_of_no_existing_workspace_and_keeps_the_others() {
+    let directory = tempfile::tempdir().expect("test-owned workspace root");
+    let mut config = HostConfig::minimum(directory.path().join("workspaces"));
+    config.bubblewrap = directory.path().join("no-sandbox-binary");
+    config.git_sources.push(
+        GitSourceBinding::new("connector", "https://127.0.0.1:1/", None).expect("Git source"),
+    );
+    let baselines = config.workspace_root.join(".substrate-git-baselines");
+    std::fs::create_dir_all(&baselines).expect("baseline root");
+    std::fs::create_dir(config.workspace_root.join("ws_live")).expect("workspace directory");
+    for name in ["ws_live", "ws_gone"] {
+        std::fs::write(baselines.join(name), name).expect("commit-id file");
+        plant_store(&baselines, name);
+    }
+    std::fs::create_dir_all(baselines.join(".store-left/pack")).expect("staging directory");
+    std::fs::write(baselines.join(".store-left/pack/pack-0.pack"), b"left").expect("pack");
+
+    let driver = HostDriver::open(config).expect("a host with a Git source opens");
+    assert_eq!(names(&baselines), [".objects", "ws_live"]);
+    assert_eq!(names(&baselines.join(".objects")), ["ws_live"]);
+    assert_eq!(
+        std::fs::read(baselines.join("ws_live")).expect("commit-id file"),
+        b"ws_live"
+    );
+    assert_eq!(
+        std::fs::read(baselines.join(".objects/ws_live/pack/pack-0.pack")).expect("pack"),
+        b"ws_live"
     );
     driver.shutdown().await.expect("host shutdown");
 }

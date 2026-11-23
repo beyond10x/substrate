@@ -351,6 +351,14 @@ async fn empty_git_destroy_does_not_remove_a_foreign_baseline() {
         b"another owner's metadata",
     )
     .expect("foreign baseline");
+    // A directory of the same root name beneath `.objects` is as foreign as the file beside it.
+    let foreign_store = fixture.baselines().join(".objects/ws_empty");
+    fs::create_dir_all(&foreign_store).expect("foreign directory of the same root name");
+    fs::write(
+        foreign_store.join("sentinel"),
+        b"another owner's bytes\0\xff\n",
+    )
+    .expect("foreign sentinel");
     let before = snapshot(&fixture.baselines());
     let mut watch = AccessWatch::new(&fixture.baselines());
     let progress = driver

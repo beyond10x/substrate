@@ -42,6 +42,8 @@ mod repo;
 mod report;
 mod secrets;
 mod site_drift;
+mod site_release;
+mod site_style;
 mod site_ux;
 mod slowest_tests;
 mod toolchain;

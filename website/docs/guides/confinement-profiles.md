@@ -41,7 +41,7 @@ what each adapter enforces, declares and refuses.
 - `facts`: what the adapter proved, in this order: `declared_insecure`, `paths_are_host_paths`,
   `whole_tree_kill`, `local_permitted`, `ipc_socket_allowlist`, `ipc_signals_contained`,
   `sealed_paths`, `exec_subpaths`, `exec_denied_paths`, `private_tmpdir`, `host_network`,
-  `image_digest_pinned`.
+  `image_digest_pinned`, `stdin_pipe`, `output_live`.
   `proves(&fact)` asks for one.
 
 `declared_insecure` and `paths_are_host_paths` change how you write the profile and the command:

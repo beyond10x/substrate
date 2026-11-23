@@ -179,7 +179,7 @@
       },
       "reading_load.median": {
         "tolerance": 0,
-        "value": 31.0
+        "value": 20.0
       }
     },
     "page:security": {
@@ -199,7 +199,7 @@
       },
       "reading_load.median": {
         "tolerance": 0,
-        "value": 8.5
+        "value": 8.0
       }
     },
     "page:use-cases": {

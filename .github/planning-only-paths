@@ -12,16 +12,16 @@
 #
 # The list names the trees that hold planning and prose. Every other path is code, Markdown
 # included: `website/` is the built site, `CHANGELOG.md` is compared with the site's release
-# page, `contracts/` and `xtask/bundle-source/` are released bundle bytes and their sources,
-# `README.md`, `AGENTS.md` and the crate READMEs are read by tests or compiled as doctests, and
-# `spec/`, `deploy/` and `vendor/` are sources.
+# page, `STATUS.md` holds the release lines `cargo xtask check-docs` compares with the workspace
+# version (`xtask/src/site_release.rs`), `contracts/` and `xtask/bundle-source/` are released
+# bundle bytes and their sources, `README.md`, `AGENTS.md` and the crate READMEs are read by tests
+# or compiled as doctests, and `spec/`, `deploy/` and `vendor/` are sources.
 include .engineering/*
 include adr/*.md
 include architecture/*.md
 include docs/*.md
 include ROADMAP.md
 include SECURITY.md
-include STATUS.md
 include glossary.md
 
 # Documents in those trees that a test reads by name. A change to one can fail that test, so it

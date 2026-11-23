@@ -185,7 +185,12 @@ pub(crate) fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
     }
 }
 
-fn pipe_session(id: &str, exec_id: &str, workspace: &str, lease: &NewLease) -> PipeSession {
+pub(crate) fn pipe_session(
+    id: &str,
+    exec_id: &str,
+    workspace: &str,
+    lease: &NewLease,
+) -> PipeSession {
     PipeSession {
         capture: substrate_wire::CaptureMode::Recorded,
         id: id.to_owned(),
@@ -211,7 +216,7 @@ fn seed_exec(store: &Store, scope: &Scope, resource: &StoredExec) {
     upsert_exec(&store.connection.lock(), scope, resource).expect("seed exec membership");
 }
 
-fn lease_at(subject: &str, id: &str, ttl_ms: u64) -> (NewOperation, NewLease) {
+pub(crate) fn lease_at(subject: &str, id: &str, ttl_ms: u64) -> (NewOperation, NewLease) {
     let operation = operation_named(
         subject,
         &format!("lease-authority-{id}"),
@@ -965,6 +970,91 @@ fn terminal_update_cannot_exceed_reserved_headroom_and_rolls_back() {
         )
         .expect("usage after rollback");
     assert_eq!(after, before);
+}
+
+/// `success_result_json_bytes` is exact against the row accounting: a success result of that
+/// many bytes of JSON, completed at the longest `terminal_at` for the resource the acceptance
+/// named, is recorded and replays, and one byte more is the headroom error with the row still
+/// accepted. A result held to the figure is never refused its completion for size.
+#[test]
+fn a_success_result_at_the_stated_budget_completes_and_one_byte_more_does_not() {
+    let config = StoreConfig {
+        operation_max_row_bytes: 8 * 1024,
+        operation_terminal_headroom_bytes: 4 * 1024,
+        ..StoreConfig::default()
+    };
+    let budget = usize::try_from(config.success_result_json_bytes()).expect("u64 fits usize");
+    assert_eq!(
+        config.success_result_json_bytes(),
+        4 * 1024 - 35 - 8 - 28,
+        "the headroom less terminal_at, the status charge and the outcome envelope"
+    );
+    assert_eq!(
+        serde_json::to_string(&OperationOutcome::Success {
+            result: serde_json::Value::String(String::new())
+        })
+        .expect("outcome JSON")
+        .len(),
+        28 + 2,
+        "the envelope around a result"
+    );
+    let terminal_at = "2026-11-23T12:34:56.123456789+00:00";
+    assert_eq!(terminal_at.len(), 35);
+    for (operation, result_bytes, fits) in [
+        ("01JLEDGERBUDGETEXACT001", budget, true),
+        ("01JLEDGERBUDGETOVER0001", budget + 1, false),
+    ] {
+        let store = Store::open_with_config(":memory:", config).expect("open store");
+        assert_eq!(
+            store.success_result_json_bytes(),
+            config.success_result_json_bytes()
+        );
+        let accepted = operation_named(
+            "local:1000",
+            operation,
+            "workspace.file.edit-v2",
+            "ws_budget",
+            &"d".repeat(64),
+        );
+        assert_eq!(
+            store.reserve(&accepted).expect("accept"),
+            Reservation::Accepted
+        );
+        // A JSON string of `result_bytes` bytes: two quotes around plain characters.
+        let result = "x".repeat(result_bytes - 2);
+        let completed = store.complete_success(
+            &accepted.scope,
+            &accepted.operation,
+            terminal_at,
+            200,
+            Some("ws_budget"),
+            &result,
+        );
+        let record = store
+            .operation(&accepted.scope, &accepted.operation)
+            .expect("operation")
+            .expect("ledger row");
+        if fits {
+            completed.expect("a result at the budget is recorded");
+            assert_eq!(record.state, OperationState::Terminal);
+            assert_eq!(
+                record.outcome,
+                Some(OperationOutcome::Success {
+                    result: serde_json::Value::String(result)
+                })
+            );
+            assert!(matches!(
+                store.reserve(&accepted).expect("replay"),
+                Reservation::Replay(_)
+            ));
+        } else {
+            assert!(matches!(
+                completed,
+                Err(StoreError::OperationTerminalHeadroom(_))
+            ));
+            assert_eq!(record.state, OperationState::Accepted);
+        }
+    }
 }
 
 #[test]
@@ -5155,3 +5245,6 @@ fn schema_version_restores_the_ledger_busy_timeout() {
         "the probe left its short busy timeout behind"
     );
 }
+
+#[path = "operations/review_replay_grant_cases.rs"]
+mod review_replay_grant_cases;

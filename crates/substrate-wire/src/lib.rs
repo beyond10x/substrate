@@ -19,6 +19,23 @@ pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.27.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
     "b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
+/// Most characters of `old_text` and `new_text` in a v2 file edit and of `text` in a line-patch
+/// edit: the `maxLength` their input schemas publish, which JSON Schema counts in characters, not
+/// bytes. The server refuses a longer text `request.schema-invalid` before dispatch
+/// ([`FileEditInput::validate_text_bounds`], [`FilePatchInput::validate_text_bounds`]).
+pub const MAX_FILE_TEXT_CHARS: usize = 1_048_576;
+/// Most characters of `content.data` in a v2 file replacement: the canonical base64 of a file of
+/// exactly [`MAX_FILE_BYTES`], which ends `==`. It is the second form of the published
+/// `canonical-base64-file`, admitted at this length only and only with that ending. The server
+/// refuses anything else over [`MAX_FILE_CONTENT_BASE64_CHARS_BELOW_FILE_LIMIT`]
+/// `request.schema-invalid` before dispatch ([`FileReplaceInput::validate_text_bounds`]).
+pub const MAX_FILE_CONTENT_BASE64_CHARS: usize = 1_398_104;
+/// Most characters of `content.data` for a file smaller than [`MAX_FILE_BYTES`]: the `maxLength`
+/// of the first form of the published `canonical-base64-file`.
+pub const MAX_FILE_CONTENT_BASE64_CHARS_BELOW_FILE_LIMIT: usize = 1_398_100;
+/// Most characters of `diff.text` in the result of a v2 file change: the `maxLength` the result
+/// schema publishes. A longer diff is cut to it and marked `truncated`.
+pub const MAX_FILE_DIFF_TEXT_CHARS: usize = 2_097_152;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
 pub const MAX_PATH_DEPTH: usize = 64;
@@ -1216,6 +1233,37 @@ pub struct FileReplaceInput {
     pub create_parents: bool,
 }
 
+impl FileReplaceInput {
+    /// Checks `content.data` against the two lengths its schema publishes: at most
+    /// [`MAX_FILE_CONTENT_BASE64_CHARS_BELOW_FILE_LIMIT`] characters, or exactly
+    /// [`MAX_FILE_CONTENT_BASE64_CHARS`] ending `==`, which is a file of exactly
+    /// [`MAX_FILE_BYTES`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::FileTextBounds`] for data of any other length or ending.
+    pub fn validate_text_bounds(&self) -> Result<(), WireValidationError> {
+        // The lengths are compared in bytes. Canonical base64 is ASCII, where a byte is a
+        // character; data in any other alphabet is longer in bytes than in characters, so none
+        // over the published length passes here, and the published pattern refuses all of it.
+        let data = &self.content.data;
+        if data.len() <= MAX_FILE_CONTENT_BASE64_CHARS_BELOW_FILE_LIMIT
+            || (data.len() == MAX_FILE_CONTENT_BASE64_CHARS && data.ends_with("=="))
+        {
+            Ok(())
+        } else {
+            Err(WireValidationError::FileTextBounds)
+        }
+    }
+}
+
+/// Whether `text` is within [`MAX_FILE_TEXT_CHARS`], counted in characters as JSON Schema's
+/// `maxLength` counts them.
+fn within_file_text_bound(text: &str) -> bool {
+    // A character is at least one byte, so a text within the bound in bytes needs no count.
+    text.len() <= MAX_FILE_TEXT_CHARS || text.chars().count() <= MAX_FILE_TEXT_CHARS
+}
+
 /// Matching policy for one textual replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1232,6 +1280,22 @@ pub struct FileEditInput {
     pub old_text: String,
     pub new_text: String,
     pub match_policy: TextMatchPolicy,
+}
+
+impl FileEditInput {
+    /// Checks `old_text` and `new_text` against the length their schema publishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::FileTextBounds`] when either holds more than
+    /// [`MAX_FILE_TEXT_CHARS`] characters.
+    pub fn validate_text_bounds(&self) -> Result<(), WireValidationError> {
+        if within_file_text_bound(&self.old_text) && within_file_text_bound(&self.new_text) {
+            Ok(())
+        } else {
+            Err(WireValidationError::FileTextBounds)
+        }
+    }
 }
 
 /// One line-based patch edit, addressed against the original file.
@@ -1265,6 +1329,28 @@ pub struct FilePatchInput {
     pub edits: Vec<LinePatchEdit>,
 }
 
+impl FilePatchInput {
+    /// Checks the `text` of every edit against the length its schema publishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::FileTextBounds`] when one holds more than
+    /// [`MAX_FILE_TEXT_CHARS`] characters.
+    pub fn validate_text_bounds(&self) -> Result<(), WireValidationError> {
+        let within = self.edits.iter().all(|edit| match edit {
+            LinePatchEdit::InsertBefore { text, .. }
+            | LinePatchEdit::InsertAfter { text, .. }
+            | LinePatchEdit::ReplaceRange { text, .. } => within_file_text_bound(text),
+            LinePatchEdit::DeleteRange { .. } => true,
+        });
+        if within {
+            Ok(())
+        } else {
+            Err(WireValidationError::FileTextBounds)
+        }
+    }
+}
+
 /// Directory creation request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1291,6 +1377,50 @@ pub struct UnifiedDiff {
     pub binary: bool,
 }
 
+impl UnifiedDiff {
+    /// Cuts `text` to its longest prefix that ends between two characters, occupies at most
+    /// `json_bytes` bytes inside a JSON string, every escape counted, and holds at most
+    /// `max_chars` characters. Sets `truncated` when anything was dropped, and changes nothing
+    /// otherwise.
+    ///
+    /// This is the one cut of a diff: the code that builds a diff holds it to
+    /// [`MAX_FILE_DIFF_TEXT_CHARS`] with it, and [`FileMutationResult::fit_json_bytes`] holds a
+    /// result to what its caller can record with it.
+    pub fn cut_text(&mut self, json_bytes: usize, max_chars: usize) {
+        let fitting = json_text_prefix(&self.text, json_bytes, max_chars);
+        if fitting < self.text.len() {
+            self.text.truncate(fitting);
+            self.truncated = true;
+        }
+    }
+}
+
+/// The bytes one character of a string occupies in compact JSON as this crate's serializer
+/// writes it: two for a quote, a backslash and the five short escapes, six for any other control
+/// character (`\u00XX`), and the character's own UTF-8 bytes otherwise, outside the basic plane
+/// too. `the_json_cost_counted_for_every_character_is_what_the_result_serializer_writes` holds
+/// this to the serializer.
+const fn json_char_bytes(character: char) -> usize {
+    match character {
+        '"' | '\\' | '\u{8}' | '\t' | '\n' | '\u{c}' | '\r' => 2,
+        '\u{0}'..='\u{1f}' => 6,
+        _ => character.len_utf8(),
+    }
+}
+
+/// The length in bytes of the longest prefix of `text` that ends between two characters, costs at
+/// most `json_bytes` bytes inside a JSON string and holds at most `max_chars` characters.
+fn json_text_prefix(text: &str, json_bytes: usize, max_chars: usize) -> usize {
+    let mut cost = 0_usize;
+    for (count, (offset, character)) in text.char_indices().enumerate() {
+        cost = cost.saturating_add(json_char_bytes(character));
+        if count >= max_chars || cost > json_bytes {
+            return offset;
+        }
+    }
+    text.len()
+}
+
 /// Result of one guarded file mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1304,6 +1434,80 @@ pub struct FileMutationResult {
     pub atomic_replacement: bool,
     pub diff: UnifiedDiff,
     pub observed_at: DateTime<Utc>,
+}
+
+impl FileMutationResult {
+    /// The bytes the result of a change to `path` in `workspace` occupies as compact JSON when
+    /// its diff text is empty and every other member is as wide as it can be: a size of twenty
+    /// digits, both digests present, `false` where a boolean may be either, and an observation
+    /// time with nanoseconds. No result for this workspace and path is wider apart from its diff
+    /// text, and the figure depends on nothing the file holds.
+    ///
+    /// A caller that can record at most some number of bytes for a result decides with this,
+    /// before it dispatches the change to any driver, whether a result can fit at all; when one
+    /// can, [`FileMutationResult::fit_json_bytes`] makes the driver's answer fit.
+    #[must_use]
+    pub fn widest_json_bytes(workspace: &str, path: &str) -> usize {
+        Self {
+            kind: FileKind::File,
+            workspace: workspace.to_owned(),
+            path: path.to_owned(),
+            size: u64::MAX,
+            before_sha256: Some("0".repeat(64)),
+            after_sha256: "0".repeat(64),
+            atomic_replacement: false,
+            diff: UnifiedDiff {
+                text: String::new(),
+                truncated: false,
+                binary: false,
+            },
+            observed_at: DateTime::from_timestamp_nanos(999_999_999),
+        }
+        .json_bytes()
+    }
+
+    /// Holds this result to `result_json_bytes` bytes of compact JSON, and its diff text to
+    /// [`MAX_FILE_DIFF_TEXT_CHARS`], the length its schema publishes: the diff text is cut
+    /// ([`UnifiedDiff::cut_text`]) and marked `truncated` when the result is over either, and
+    /// nothing changes when it is within both.
+    ///
+    /// Only the diff text is cut. The result then fits whenever the bound admits
+    /// [`FileMutationResult::widest_json_bytes`] of its workspace and path, which is what the
+    /// caller decided before the change was dispatched.
+    pub fn fit_json_bytes(&mut self, result_json_bytes: u64) {
+        let bound = usize::try_from(result_json_bytes).unwrap_or(usize::MAX);
+        let text_json_bytes = self
+            .diff
+            .text
+            .chars()
+            .map(json_char_bytes)
+            .fold(0_usize, usize::saturating_add);
+        // What the result occupies apart from its diff text. A cut never widens it: it sets
+        // `truncated`, and `true` is no longer than `false`.
+        let fixed = self.json_bytes().saturating_sub(text_json_bytes);
+        self.diff
+            .cut_text(bound.saturating_sub(fixed), MAX_FILE_DIFF_TEXT_CHARS);
+    }
+
+    /// The bytes this result occupies as compact JSON, every escape counted: what the operation
+    /// ledger records for it and what the daemon answers. Should serialization ever fail, the
+    /// answer is `usize::MAX`, which fits no bound.
+    #[must_use]
+    pub fn json_bytes(&self) -> usize {
+        struct Count(usize);
+        impl std::io::Write for Count {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self.0.saturating_add(bytes.len());
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut count = Count(0);
+        serde_json::to_writer(&mut count, self).map_or(usize::MAX, |()| count.0)
+    }
 }
 
 /// V2 file read slice with a digest of the complete file.
@@ -4622,6 +4826,8 @@ pub enum WireValidationError {
     ConfinementRequiresEmpty,
     #[error("a confinement requirement names one family or property twice")]
     ConfinementRequiresDuplicate,
+    #[error("a file change carries a text longer than its schema admits")]
+    FileTextBounds,
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -7057,6 +7263,9 @@ mod namespace_driver_tests;
 
 #[cfg(test)]
 mod confinement_facts_tests;
+
+#[cfg(test)]
+mod file_text_bound_tests;
 
 #[cfg(test)]
 mod adoption_tests {
