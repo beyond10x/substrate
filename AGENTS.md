@@ -1060,8 +1060,11 @@ commit* waits for that workflow's own recorded `success` for the exact tagged co
 `push` to `main` or a `workflow_dispatch` of this repository, and hands each annotation to its
 record step, which applies every refusal above to it. Per lane, a recovery input comes first, then
 the tag's trailer, then the hosted annotation; when the tag or the dispatch records all four, no run
-is read, and a tagged source without the workflow has only those carriers. A failed hosted run, or
-two annotations of one lane, is refused. No self-hosted runner is involved (Timo, 2026-11-19).
+is read, and a tagged source without the workflow has only those carriers. The step reads the jobs
+of every attempt of that run and takes each lane's record from the newest attempt in which a job
+that concluded `success` annotated it; an annotation of a job that did not succeed is not a record.
+A failed hosted run, or two annotations of one lane in one attempt, is refused. No self-hosted
+runner is involved (Timo, 2026-11-19).
 
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own

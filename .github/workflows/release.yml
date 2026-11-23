@@ -500,28 +500,41 @@ jobs:
 
           success_url=${success%%$'\t'*}
           run_id=${success##*$'\t'}
+          # `filter=all` lists the jobs of every attempt of the run; without it the listing is the
+          # latest attempt only. A job carried over by "re-run failed jobs" has a new check run in
+          # the later attempt, without the annotation its own run recorded, so a lane's record is
+          # on the check run of the attempt in which its job ran. A job that did not conclude
+          # `success` records nothing, whatever it annotated before it failed. Each record line
+          # is `attempt<TAB>title<TAB>message`.
           records=""
-          check_runs=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
-            --jq '(.jobs // [])[] | .check_run_url // empty')
-          while IFS= read -r check_run; do
+          jobs=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?filter=all&per_page=100" \
+            --jq '(.jobs // [])[] | select(.conclusion == "success" and .check_run_url != null) | [(.run_attempt // 1), .check_run_url] | @tsv')
+          while IFS=$'\t' read -r attempt check_run; do
             [ -n "$check_run" ] || continue
             notes=$(gh api --paginate "${check_run#"$api_root"}/annotations?per_page=100" \
-              --jq '.[] | select(.annotation_level == "notice" and (.title | test("^(Confinement|Quota|Chart|Namespace)-lane$"))) | [.title, (.message | gsub("[\r\n\t]"; "\\n"))] | @tsv')
+              --jq '.[] | select(.annotation_level == "notice" and (.title | test("^(Confinement|Quota|Chart|Namespace)-lane$"))) | [.title, (.message | gsub("[\r\n\t]"; "\\n"))] | @tsv' \
+              | awk -v a="$attempt" '{ print a "\t" $0 }')
             records="${records}${notes:+${notes}$'\n'}"
-          done <<< "$check_runs"
+          done <<< "$jobs"
 
           echo "${LANES_WORKFLOW} green for ${SOURCE_SHA}: ${success_url}"
           echo "run-url=${success_url}" >> "$GITHUB_OUTPUT"
           for lane in Confinement:confinement Quota:quota Chart:chart Namespace:namespace; do
             trailer="${lane%%:*}-lane"
             key="${lane#*:}"
-            count=$(printf '%s' "$records" | awk -F'\t' -v t="$trailer" '$1 == t { c++ } END { print c + 0 }')
-            if [ "$count" -gt 1 ]; then
-              echo "refused: ${success_url} records ${count} ${trailer} annotations; a release records exactly one." >&2
+            # One attempt records a lane at most once, in whichever attempt that is.
+            duplicated=$(printf '%s' "$records" \
+              | awk -F'\t' -v t="$trailer" '$2 == t { c[$1]++ } END { for (a in c) if (c[a] > 1) print a "\t" c[a] }' \
+              | sort -n | tail -n 1)
+            if [ -n "$duplicated" ]; then
+              echo "refused: attempt ${duplicated%%$'\t'*} of ${success_url} records ${duplicated##*$'\t'} ${trailer} annotations; a release records exactly one." >&2
               exit 1
             fi
-            value=$(printf '%s' "$records" | awk -F'\t' -v t="$trailer" '$1 == t { print $2 }')
-            echo "${trailer} from ${success_url}: ${value:-none}"
+            # The record of the newest attempt that has one.
+            newest=$(printf '%s' "$records" \
+              | awk -F'\t' -v t="$trailer" '$2 == t && $1 + 0 > n { n = $1 + 0; v = $3 } END { if (n) print n "\t" v }')
+            value=${newest#*$'\t'}
+            echo "${trailer} from ${success_url}${newest:+ attempt ${newest%%$'\t'*}}: ${value:-none}"
             echo "${key}=${value}" >> "$GITHUB_OUTPUT"
           done
 

@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- The release workflow reads the hosted lane records from every attempt of the
+  `release-lanes.yml` run and takes each lane's record from the newest attempt in which a job
+  that concluded `success` annotated it. Before, it read the latest attempt only, so a run
+  repaired by re-running one failed lane job was refused for the lanes whose records are on the
+  first attempt's check runs.
+
 ## [0.26.0] — 2026-11-23
 
 ### Added
