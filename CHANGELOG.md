@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A signal to an exec or a session of the host driver whose run has ended, and whose cgroup the
+  driver has removed, answers with the run's terminal observation and records no delivered
+  signal and no cancellation for a step that reached no process. A cgroup that is there and takes
+  no kill still fails the signal `exec.cgroup-write-failed`. Held by three unit cases of
+  `crates/substrate-host/src/process.rs` on a paused clock.
 - The release workflow reads the hosted lane records from every attempt of the
   `release-lanes.yml` run and takes each lane's record from the newest attempt in which a job
   that concluded `success` annotated it. Before, it read the latest attempt only, so a run
