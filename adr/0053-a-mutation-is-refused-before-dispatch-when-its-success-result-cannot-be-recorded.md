@@ -142,9 +142,9 @@ what it means for a result type that has no member to cut.
    | `applied.cgroup` | 512 characters | driver, from the cgroup root | at the driver's open |
    | applied aperture `destination`, `listen`, `name` | 64, 21, 64 | configuration | where an aperture is declared |
    | applied writable root `host_path` | `host-absolute-path`, 4,000 | configuration or the Git checkout | where a root is declared or materialized |
-   | `usage` unavailable `code`, `message` | 128, 2,048 | driver | at the daemon's driver port |
-   | `refusal.message` | 512 | driver | at the daemon's driver port |
-   | `refusal.code` | none in `0.27.0`; 128 from `0.28.0` | driver | at the daemon's driver port |
+   | `usage` unavailable `code`, `message` | 128, 2,048 | driver | at completion, by `members_within_bounds`: the record is stored whole and the row ends `operation.result-unrecorded` (decision 8) |
+   | `refusal.message` | 512 | driver | at completion, by `members_within_bounds`, as for `usage` |
+   | `refusal.code` | none in `0.27.0`; 128 from `0.28.0` | driver | at completion, by `members_within_bounds`, as for `usage` |
    | process `exit.signal` | 32 | supervisor | at the daemon's driver port |
    | `lease.actor`, `lease.principal` | 256 each | identity | at admission |
 
@@ -168,7 +168,16 @@ what it means for a result type that has no member to cut.
      because of it;
    - the widest such outcome is 379 bytes, so it always fits; the store test
      `the_unrecorded_error_is_the_named_error_and_its_widest_outcome_is_379_bytes` holds that
-     figure as an equality.
+     figure as an equality. A store does not open with a terminal headroom under what a row
+     needs to end with it, the longest `terminal_at`, the status charge and that outcome
+     (`StoreConfig::minimum_terminal_headroom_bytes`, 422 bytes), and names the refusal
+     `OperationTerminalHeadroomBelowUnrecorded`;
+   - the row writes the operation's `operation.failed` and the resource's own events exactly as
+     the recorded completion of the same path writes them (`append_completion_events` in
+     `crates/substrate-store/src/result_bound.rs`), so a reader that follows the resource's
+     events reads the same events whether the result was recorded or not. A session has no
+     event of its own: its recorded completion writes `operation.terminal`, and its unrecorded
+     one writes `operation.failed` alone.
 
    This is the honesty rule (invariant 3): the client is told by name that the effect happened
    and that the ledger does not hold the result. No member is shortened, no result is
@@ -304,8 +313,8 @@ so no client changes until it moves its pin. For a client of a daemon that adver
   decision 6, and a test module beside `file_text_bound_tests.rs`.
 - `crates/substrate-store`: the test that holds the default reserve to the constant.
 - `crates/substrate-daemon`: the decision of decision 3 on the five decided kinds, the measure
-  of decision 8 in every completion function, and the checks of decision 7 at the driver port
-  and at admission.
+  of decision 8 in every completion function, and the checks of decision 7 at completion, at
+  the driver port and at admission, each where its row names.
 - `crates/substrate-host`: the fact in the probe, and the bounds of decision 7 where the
   configuration is read.
 - `xtask`: `xtask/bundle-source/0.28.0/`, the rendered `contracts/substrate-wire/0.28.0/`,

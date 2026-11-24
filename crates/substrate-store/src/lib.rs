@@ -51,6 +51,7 @@ pub use process_events::{ProcessStreamEvent, ProcessStreamEvents};
 pub use recovery::{RecoveryExec, RecoveryWorkspace};
 pub use result_bound::{
     RESULT_UNRECORDED_MESSAGE, RESULT_UNRECORDED_STATUS, members_within_bounds, result_unrecorded,
+    widest_unrecorded_outcome_json_bytes,
 };
 pub use sessions::{
     NewSessionAuthority, SessionAttachmentClaim, SessionAuthorityLookup, SessionAuthorityMint,
@@ -199,6 +200,13 @@ pub enum StoreError {
     InvalidEventRetention,
     #[error("operation ledger configuration values must be nonzero and internally consistent")]
     InvalidStoreConfig,
+    /// ADR 0053 decision 8: a store whose terminal headroom cannot hold a row that ends with
+    /// `operation.result-unrecorded` does not open, since such a row could stay accepted.
+    #[error(
+        "operation terminal headroom of {configured} bytes is below the {required} bytes a row \
+         needs to end with operation.result-unrecorded"
+    )]
+    OperationTerminalHeadroomBelowUnrecorded { configured: u64, required: u64 },
     #[error("operation ledger capacity is exhausted: {0:?}")]
     OperationCapacity(OperationCapacity),
     #[error("configured operation ledger capacity is below durable occupancy: {0:?}")]

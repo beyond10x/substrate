@@ -9,17 +9,23 @@
 //! its outcome from [`terminal_success`], and the daemon answers with
 //! [`Store::records_success_result`], so the row and the answer follow one rule.
 
+use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
 use substrate_wire::{
-    ErrorClass, ErrorDetail, MAX_APERTURE_DESTINATION_CHARS, MAX_APERTURE_LISTEN_CHARS,
+    ErrorClass, ErrorDetail, Event, MAX_APERTURE_DESTINATION_CHARS, MAX_APERTURE_LISTEN_CHARS,
     MAX_APERTURE_NAME_CHARS, MAX_APPLIED_CGROUP_CHARS, MAX_EXEC_REFUSAL_CODE_CHARS,
     MAX_EXEC_REFUSAL_MESSAGE_CHARS, MAX_EXEC_USAGE_CODE_CHARS, MAX_EXEC_USAGE_MESSAGE_CHARS,
-    MAX_LEASE_ACTOR_CHARS, MAX_LEASE_PRINCIPAL_CHARS, MAX_PROCESS_EXIT_SIGNAL_CHARS,
-    MAX_READ_ONLY_FILE_PATH_BYTES, OPERATION_RESULT_UNRECORDED, OperationOutcome,
+    MAX_LEASE_ACTOR_CHARS, MAX_LEASE_PRINCIPAL_CHARS, MAX_OPERATION_ID_CHARS,
+    MAX_PROCESS_EXIT_SIGNAL_CHARS, MAX_READ_ONLY_FILE_PATH_BYTES, OPERATION_RESULT_UNRECORDED,
+    OperationOutcome,
 };
 
-use crate::{Store, StoreConfig};
+use crate::events::{append_event, published_transition};
+use crate::{
+    OPERATION_RESPONSE_STATUS_BYTES, OPERATION_TERMINAL_AT_MAX_BYTES, Scope, Store, StoreConfig,
+    StoreError,
+};
 
 /// The status a row ends with when its result is not recorded (ADR 0053 decision 8).
 pub const RESULT_UNRECORDED_STATUS: u16 = 500;
@@ -42,7 +48,32 @@ pub fn result_unrecorded(operation: &str) -> ErrorDetail {
     }
 }
 
+/// The bytes of the widest outcome a row ends with when its result is not recorded: the error
+/// [`result_unrecorded`] of an operation id of [`MAX_OPERATION_ID_CHARS`] characters, each one
+/// byte of JSON (`validate_operation_id` admits ASCII letters, digits, `_` and `-`).
+#[must_use]
+pub fn widest_unrecorded_outcome_json_bytes() -> u64 {
+    let outcome = OperationOutcome::Error {
+        error: result_unrecorded(&"0".repeat(MAX_OPERATION_ID_CHARS)),
+    };
+    serde_json::to_value(&outcome).map_or(u64::MAX, |value| {
+        u64::try_from(json_bytes(&value)).unwrap_or(u64::MAX)
+    })
+}
+
 impl StoreConfig {
+    /// The least [`StoreConfig::operation_terminal_headroom_bytes`] a store opens with: what the
+    /// row accounting adds to a row that ends with the widest unrecorded outcome, its longest
+    /// `terminal_at` ([`OPERATION_TERMINAL_AT_MAX_BYTES`]), the status charge and
+    /// [`widest_unrecorded_outcome_json_bytes`]. Under it a completion over the reserve could
+    /// not end its row, and the row would stay accepted (ADR 0053 decisions 1 and 8).
+    #[must_use]
+    pub fn minimum_terminal_headroom_bytes() -> u64 {
+        OPERATION_TERMINAL_AT_MAX_BYTES
+            .saturating_add(OPERATION_RESPONSE_STATUS_BYTES)
+            .saturating_add(widest_unrecorded_outcome_json_bytes())
+    }
+
     /// Whether a success result is recorded as it is: its compact JSON is at most
     /// [`StoreConfig::success_result_json_bytes`] bytes and every member another party sets is
     /// within its wire bound ([`members_within_bounds`]).
@@ -83,6 +114,75 @@ pub(crate) fn terminal_success(
             RESULT_UNRECORDED_STATUS,
         )
     }
+}
+
+/// One event the completion of a path writes when its result is recorded: the resource it
+/// names, the resource's kind, its transition and what it carries.
+pub(crate) struct CompletionEvent<'a> {
+    pub(crate) resource: &'a str,
+    pub(crate) resource_kind: &'a str,
+    pub(crate) transition: &'a str,
+    pub(crate) observation: Option<Value>,
+}
+
+/// Appends the events of a completion whose row ends with `outcome`, as [`terminal_success`]
+/// returned it, or as the caller's error. `recorded` are the events the path writes when its
+/// result is recorded, in order. A success writes them as they are. An error writes the
+/// operation's `operation.failed`, which carries the operation's record and so the error, and
+/// then each of `recorded` that is the resource's own event, exactly as given: the resource is
+/// stored whole and its run goes on, so a reader that follows the resource's events reads the
+/// same events whether the result was recorded or not (ADR 0053 decision 8). An event that
+/// [`published_transition`] publishes as an operation event is the operation's, and
+/// `operation.failed` stands in its place.
+#[allow(clippy::too_many_arguments)] // One completion's events, inside its caller's transaction.
+pub(crate) fn append_completion_events(
+    connection: &Connection,
+    retention: u64,
+    scope: &Scope,
+    operation: &str,
+    terminal_at: &str,
+    (actor, principal): (&str, Option<&str>),
+    outcome: &OperationOutcome,
+    recorded: Vec<CompletionEvent<'_>>,
+) -> Result<Vec<Event>, StoreError> {
+    let failed = matches!(outcome, OperationOutcome::Error { .. });
+    let mut events = Vec::with_capacity(recorded.len() + 1);
+    if failed {
+        events.push(append_event(
+            connection,
+            retention,
+            scope,
+            operation,
+            "operation",
+            "operation.failed",
+            terminal_at,
+            actor,
+            principal,
+            operation,
+            None,
+        )?);
+    }
+    for event in recorded {
+        if failed
+            && published_transition(event.resource_kind, event.transition).starts_with("operation.")
+        {
+            continue;
+        }
+        events.push(append_event(
+            connection,
+            retention,
+            scope,
+            event.resource,
+            event.resource_kind,
+            event.transition,
+            terminal_at,
+            actor,
+            principal,
+            operation,
+            event.observation,
+        )?);
+    }
+    Ok(events)
 }
 
 /// The bytes of `value` as compact JSON, every escape counted.

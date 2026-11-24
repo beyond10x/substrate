@@ -1,9 +1,9 @@
 use crate::backend::{BackendObjectKind, settle_unbound_backend_objects};
-use crate::events::{append_event, commit_effect};
+use crate::events::{append_event, commit_effect, completion_effects};
 use crate::execs::mark_exec_unknown;
 use crate::execs::upsert_exec;
 use crate::leases::upsert_lease;
-use crate::result_bound::terminal_success;
+use crate::result_bound::{CompletionEvent, append_completion_events, terminal_success};
 use crate::workspaces::upsert_workspace;
 use crate::{NewLease, Scope, Store, StoreConfig, StoreError, StoredExec, to_i64, to_u64};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
@@ -376,12 +376,12 @@ impl Store {
         lease: Option<(&str, &str, &NewLease)>,
     ) -> Result<(), StoreError> {
         let recorded;
-        let (outcome, status) = match outcome {
+        let (outcome, status, recorded_result) = match outcome {
             OperationOutcome::Success { result } => {
                 recorded = terminal_success(self.config, operation, result.clone(), status);
-                (&recorded.0, recorded.1)
+                (&recorded.0, recorded.1, Some(result))
             }
-            OperationOutcome::Error { .. } => (outcome, status),
+            OperationOutcome::Error { .. } => (outcome, status, None),
         };
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -416,26 +416,30 @@ impl Store {
         }
         let (actor, principal, operation_kind) =
             operation_identity_full(&transaction, scope, operation)?;
-        let transition = terminal_transition(&operation_kind, outcome);
-        let event = append_event(
+        // The success's event, written whether or not its result was recorded; an error the
+        // caller completes with has none.
+        let recorded = match recorded_result {
+            Some(result) => vec![CompletionEvent {
+                resource: resource_id.unwrap_or(operation),
+                resource_kind: operation_resource_kind(&operation_kind),
+                transition: success_transition(&operation_kind),
+                observation: Some(result.clone()),
+            }],
+            None => Vec::new(),
+        };
+        let events = append_completion_events(
             &transaction,
             self.event_retention,
             scope,
-            resource_id.unwrap_or(operation),
-            operation_resource_kind(&operation_kind),
-            transition,
-            terminal_at,
-            &actor,
-            principal.as_deref(),
             operation,
-            Some(match outcome {
-                OperationOutcome::Success { result } => result.clone(),
-                OperationOutcome::Error { .. } => serde_json::to_value(outcome)?,
-            }),
+            terminal_at,
+            (&actor, principal.as_deref()),
+            outcome,
+            recorded,
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok(())
     }
 
@@ -844,13 +848,8 @@ pub(crate) fn operation_resource_kind(operation_kind: &str) -> &str {
     }
 }
 
-pub(crate) fn terminal_transition(
-    operation_kind: &str,
-    outcome: &OperationOutcome,
-) -> &'static str {
-    if matches!(outcome, OperationOutcome::Error { .. }) {
-        return "operation.failed";
-    }
+/// The transition of the event a success of `operation_kind` writes, carrying its result.
+pub(crate) fn success_transition(operation_kind: &str) -> &'static str {
     match operation_kind {
         "workspace.create" | "workspace.adopt" => "workspace.created",
         "workspace.file.write" => "workspace.file-written",

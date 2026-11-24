@@ -596,6 +596,13 @@ fn validate_store_config(config: StoreConfig) -> Result<(), StoreError> {
     {
         return Err(StoreError::InvalidStoreConfig);
     }
+    let required = StoreConfig::minimum_terminal_headroom_bytes();
+    if config.operation_terminal_headroom_bytes < required {
+        return Err(StoreError::OperationTerminalHeadroomBelowUnrecorded {
+            configured: config.operation_terminal_headroom_bytes,
+            required,
+        });
+    }
     Ok(())
 }
 

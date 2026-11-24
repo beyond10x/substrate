@@ -1,4 +1,4 @@
-use crate::events::{append_event, commit_effect};
+use crate::events::{append_event, commit_effect, completion_effects};
 use crate::execs::{
     exec_recorded_absent, git_roots_admissible, is_terminal_exec_state, load_exec,
     mark_exec_unknown, record_exec_git_roots, upsert_exec, workspace_admissible,
@@ -10,7 +10,7 @@ use crate::operations::{
     operation_identity_full, refresh_nonterminal_operation_accounting,
     resource_partition_at_capacity,
 };
-use crate::result_bound::terminal_success;
+use crate::result_bound::{CompletionEvent, append_completion_events, terminal_success};
 use crate::{
     LeaseClock, NewLease, NewOperation, OperationCapacity, Reservation, ResourceCapacity, Scope,
     Store, StoreError, StoredAnswer, StoredExec,
@@ -438,25 +438,25 @@ impl Store {
             "DELETE FROM sessions WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
             params![new.scope.deployment, new.scope.subject, id],
         )?;
-        let retired = append_event(
+        let mut events = vec![accepted];
+        events.extend(append_completion_events(
             &transaction,
             self.event_retention,
             &new.scope,
-            id,
-            "session",
-            "session.retired",
-            &observed_at.to_rfc3339(),
-            &new.actor,
-            new.principal.as_deref(),
             &new.operation,
-            Some(serde_json::to_value(&absence)?),
-        )?;
+            &observed_at.to_rfc3339(),
+            (&new.actor, new.principal.as_deref()),
+            &outcome,
+            vec![CompletionEvent {
+                resource: id,
+                resource_kind: "session",
+                transition: "session.retired",
+                observation: Some(serde_json::to_value(&absence)?),
+            }],
+        )?);
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[
-            commit_effect(&new.scope, &accepted),
-            commit_effect(&new.scope, &retired),
-        ]);
+        self.report_committed(&completion_effects(&new.scope, &events));
         Ok(SessionRetireReservation::Retired(absence))
     }
 
@@ -537,22 +537,24 @@ impl Store {
         }
         finalize_operation_accounting(&transaction, self.config, scope, operation)?;
         let (actor, principal, _) = operation_identity_full(&transaction, scope, operation)?;
-        let event = append_event(
+        let events = append_completion_events(
             &transaction,
             self.event_retention,
             scope,
-            &session.id,
-            "session",
-            session_transition(session.state),
-            terminal_at,
-            &actor,
-            principal.as_deref(),
             operation,
-            Some(serde_json::to_value(&session)?),
+            terminal_at,
+            (&actor, principal.as_deref()),
+            &outcome,
+            vec![CompletionEvent {
+                resource: &session.id,
+                resource_kind: "session",
+                transition: session_transition(session.state),
+                observation: Some(serde_json::to_value(&session)?),
+            }],
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok((session, exec))
     }
 
@@ -605,22 +607,24 @@ impl Store {
         }
         finalize_operation_accounting(&transaction, self.config, scope, operation)?;
         let (actor, principal) = operation_identity(&transaction, scope, operation)?;
-        let event = append_event(
+        let events = append_completion_events(
             &transaction,
             self.event_retention,
             scope,
-            session_id,
-            "session",
-            session_transition(session.state),
-            terminal_at,
-            &actor,
-            principal.as_deref(),
             operation,
-            Some(serde_json::to_value(&session)?),
+            terminal_at,
+            (&actor, principal.as_deref()),
+            &outcome,
+            vec![CompletionEvent {
+                resource: session_id,
+                resource_kind: "session",
+                transition: session_transition(session.state),
+                observation: Some(serde_json::to_value(&session)?),
+            }],
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok(session)
     }
 

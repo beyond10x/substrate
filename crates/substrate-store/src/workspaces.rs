@@ -1,12 +1,12 @@
 use crate::backend::insert_backend_objects;
-use crate::events::{append_event, commit_effect};
+use crate::events::{append_event, commit_effect, completion_effects};
 use crate::leases::{freeze_workspace_lease_if_due, upsert_lease};
 use crate::operations::{
     existing_reservation, finalize_operation_accounting, insert_accepted_operation,
     insert_refused_operation, insert_unbound_refusal, operation_identity,
     resource_partition_at_capacity,
 };
-use crate::result_bound::terminal_success;
+use crate::result_bound::{CompletionEvent, append_completion_events, terminal_success};
 use crate::{
     BackendObjectKind, BackendReservation, LeaseClock, NewLease, NewOperation, OperationCapacity,
     Reservation, ResourceCapacity, Scope, Store, StoreError, StoredAnswer, to_i64,
@@ -326,25 +326,25 @@ impl Store {
         finalize_operation_accounting(&transaction, self.config, &new.scope, &new.operation)?;
         upsert_workspace(&transaction, &new.scope, root_name, &resource)?;
         let (actor, principal) = operation_identity(&transaction, &new.scope, &new.operation)?;
-        let created = append_event(
+        let mut events = vec![accepted];
+        events.extend(append_completion_events(
             &transaction,
             self.event_retention,
             &new.scope,
-            &resource.id,
-            "workspace",
-            "workspace.created",
-            terminal_at,
-            &actor,
-            principal.as_deref(),
             &new.operation,
-            Some(result),
-        )?;
+            terminal_at,
+            (&actor, principal.as_deref()),
+            &outcome,
+            vec![CompletionEvent {
+                resource: &resource.id,
+                resource_kind: "workspace",
+                transition: "workspace.created",
+                observation: Some(result),
+            }],
+        )?);
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[
-            commit_effect(&new.scope, &accepted),
-            commit_effect(&new.scope, &created),
-        ]);
+        self.report_committed(&completion_effects(&new.scope, &events));
         Ok(WorkspaceAdoptReservation::Adopted(resource))
     }
 
@@ -522,22 +522,24 @@ impl Store {
             &serde_json::to_value(result)?,
         )?;
         let operation_row = operation_identity(&transaction, scope, operation)?;
-        let event = append_event(
+        let events = append_completion_events(
             &transaction,
             self.event_retention,
             scope,
-            workspace_id,
-            "workspace",
-            "workspace.destroyed",
-            terminal_at,
-            &operation_row.0,
-            operation_row.1.as_deref(),
             operation,
-            Some(serde_json::to_value(result)?),
+            terminal_at,
+            (&operation_row.0, operation_row.1.as_deref()),
+            &outcome,
+            vec![CompletionEvent {
+                resource: workspace_id,
+                resource_kind: "workspace",
+                transition: "workspace.destroyed",
+                observation: Some(serde_json::to_value(result)?),
+            }],
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok(())
     }
 

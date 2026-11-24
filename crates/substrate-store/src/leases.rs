@@ -1,7 +1,7 @@
-use crate::events::{append_event, commit_effect};
+use crate::events::{append_event, commit_effect, completion_effects};
 use crate::execs::{is_terminal_exec_state, load_exec, upsert_exec};
 use crate::operations::{finalize_operation_accounting, operation_identity};
-use crate::result_bound::terminal_success;
+use crate::result_bound::{CompletionEvent, append_completion_events, terminal_success};
 use crate::sessions::{
     load_session, project_session_from_exec, session_transition, upsert_session,
 };
@@ -118,7 +118,7 @@ impl Store {
         resource.lease = Some(lease.observation());
         upsert_workspace(&transaction, scope, &root_name, &resource)?;
         upsert_lease(&transaction, scope, "workspace", id, lease, operation)?;
-        let event = complete_lease_operation(
+        let events = complete_lease_operation(
             &transaction,
             self.event_retention,
             self.config,
@@ -133,7 +133,7 @@ impl Store {
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok(resource)
     }
 
@@ -180,7 +180,7 @@ impl Store {
             ],
         )?;
         upsert_lease(&transaction, scope, "exec", id, lease, operation)?;
-        let event = complete_lease_operation(
+        let events = complete_lease_operation(
             &transaction,
             self.event_retention,
             self.config,
@@ -195,7 +195,7 @@ impl Store {
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok(resource)
     }
 
@@ -226,7 +226,7 @@ impl Store {
         upsert_exec(&transaction, scope, &exec)?;
         upsert_session(&transaction, scope, &session)?;
         upsert_lease(&transaction, scope, "exec", &session.exec, lease, operation)?;
-        let event = complete_lease_operation(
+        let events = complete_lease_operation(
             &transaction,
             self.event_retention,
             self.config,
@@ -241,7 +241,7 @@ impl Store {
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok(session)
     }
 
@@ -1152,7 +1152,7 @@ fn complete_lease_operation<T: Serialize>(
     resource_kind: &str,
     transition: &str,
     resource: &T,
-) -> Result<Event, StoreError> {
+) -> Result<Vec<Event>, StoreError> {
     let (outcome, status) =
         terminal_success(config, operation, serde_json::to_value(resource)?, status);
     let changed = connection.execute(
@@ -1175,17 +1175,19 @@ fn complete_lease_operation<T: Serialize>(
     }
     finalize_operation_accounting(connection, config, scope, operation)?;
     let (actor, principal) = operation_identity(connection, scope, operation)?;
-    append_event(
+    append_completion_events(
         connection,
         retention,
         scope,
-        resource_id,
-        resource_kind,
-        transition,
-        terminal_at,
-        &actor,
-        principal.as_deref(),
         operation,
-        Some(serde_json::to_value(resource)?),
+        terminal_at,
+        (&actor, principal.as_deref()),
+        &outcome,
+        vec![CompletionEvent {
+            resource: resource_id,
+            resource_kind,
+            transition,
+            observation: Some(serde_json::to_value(resource)?),
+        }],
     )
 }

@@ -906,6 +906,11 @@ fn global_byte_and_max_row_boundaries_are_enforced() {
     );
 }
 
+/// A terminal update that needs more than the headroom its row was charged is rolled back: the
+/// row stays as it was and the usage does not move. A success result is held to the reserve and
+/// a row over it ends with `operation.result-unrecorded`, which the least headroom a store opens
+/// with holds; an error the caller completes with is not held to it, so an error past the
+/// headroom is the update this protects against.
 #[test]
 fn terminal_update_cannot_exceed_reserved_headroom_and_rolls_back() {
     let config = StoreConfig {
@@ -914,7 +919,7 @@ fn terminal_update_cannot_exceed_reserved_headroom_and_rolls_back() {
         operation_subject_max_bytes: 16 * 1024,
         operation_global_max_bytes: 32 * 1024,
         operation_max_row_bytes: 4 * 1024,
-        operation_terminal_headroom_bytes: 32,
+        operation_terminal_headroom_bytes: StoreConfig::minimum_terminal_headroom_bytes(),
         ..StoreConfig::default()
     };
     let store = Store::open_with_config(":memory:", config).expect("open store");
@@ -939,13 +944,20 @@ fn terminal_update_cannot_exceed_reserved_headroom_and_rolls_back() {
             |row| row.get(0),
         )
         .expect("usage before terminal");
-    let oversized = "x".repeat(1_024);
+    let oversized = ErrorDetail {
+        class: ErrorClass::Failed,
+        code: "workspace.create-failed".to_owned(),
+        message: "x".repeat(1_024),
+        retriable: false,
+        address: None,
+        operation: Some(accepted.operation.clone()),
+    };
     assert!(matches!(
-        store.complete_success(
+        store.complete_error(
             &accepted.scope,
             &accepted.operation,
             "2026-08-13T12:00:01Z",
-            200,
+            500,
             Some("ws_headroom"),
             &oversized,
         ),
@@ -1101,6 +1113,90 @@ fn the_unrecorded_error_is_the_named_error_and_its_widest_outcome_is_379_bytes()
     assert_eq!(
         serde_json::to_string(&outcome).expect("outcome JSON").len(),
         379
+    );
+    assert_eq!(crate::widest_unrecorded_outcome_json_bytes(), 379);
+}
+
+/// The least terminal headroom a store opens with is what a row needs to end with the widest
+/// `operation.result-unrecorded` outcome: the longest `terminal_at`, the status charge and that
+/// outcome, 35 + 8 + 379 bytes. At it a completion over the reserve ends its row with the error.
+#[test]
+fn a_store_at_the_least_terminal_headroom_ends_an_over_reserve_completion_with_the_error() {
+    let headroom = StoreConfig::minimum_terminal_headroom_bytes();
+    assert_eq!(headroom, 35 + 8 + 379);
+    let store = Store::open_with_config(
+        ":memory:",
+        StoreConfig {
+            operation_terminal_headroom_bytes: headroom,
+            ..StoreConfig::default()
+        },
+    )
+    .expect("a store at the least headroom opens");
+    let operation = "0".repeat(substrate_wire::MAX_OPERATION_ID_CHARS);
+    let accepted = operation_named(
+        "local:1000",
+        &operation,
+        "workspace.lease.renew",
+        "ws_least",
+        &"e".repeat(64),
+    );
+    assert_eq!(
+        store.reserve(&accepted).expect("accept"),
+        Reservation::Accepted
+    );
+    let reserve = usize::try_from(store.success_result_json_bytes()).expect("usize");
+    store
+        .complete_success(
+            &accepted.scope,
+            &accepted.operation,
+            "2026-11-24T12:34:56.123456789+00:00",
+            200,
+            Some("ws_least"),
+            &"x".repeat(reserve - 1),
+        )
+        .expect("a completion over the reserve ends its row");
+    let record = store
+        .operation(&accepted.scope, &accepted.operation)
+        .expect("operation")
+        .expect("ledger row");
+    assert_eq!(record.state, OperationState::Terminal);
+    assert_eq!(
+        record.outcome,
+        Some(OperationOutcome::Error {
+            error: crate::result_unrecorded(&operation),
+        })
+    );
+}
+
+/// A terminal headroom one byte under the least is refused when the store opens, by name, and
+/// the refusal states both figures.
+#[test]
+fn a_store_refuses_a_terminal_headroom_under_the_least_by_name() {
+    let required = StoreConfig::minimum_terminal_headroom_bytes();
+    let refused = Store::open_with_config(
+        ":memory:",
+        StoreConfig {
+            operation_terminal_headroom_bytes: required - 1,
+            ..StoreConfig::default()
+        },
+    );
+    let Err(error) = refused else {
+        panic!("a store under the least headroom opened");
+    };
+    assert!(
+        matches!(
+            error,
+            StoreError::OperationTerminalHeadroomBelowUnrecorded { configured, required: named }
+                if configured == required - 1 && named == required
+        ),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(&(required - 1).to_string())
+            && message.contains(&required.to_string())
+            && message.contains("operation.result-unrecorded"),
+        "{message}"
     );
 }
 
@@ -5507,3 +5603,9 @@ fn schema_version_restores_the_ledger_busy_timeout() {
 
 #[path = "operations/review_replay_grant_cases.rs"]
 mod review_replay_grant_cases;
+
+#[path = "result_bound_adversary_cases.rs"]
+mod result_bound_adversary_cases;
+
+#[path = "result_bound_event_cases.rs"]
+mod result_bound_event_cases;

@@ -66,6 +66,14 @@ mod adversary_pass1;
 #[path = "processes/result_bound.rs"]
 mod result_bound;
 
+/// ADR 0053: adversary cases on the result bound at the shipped reserve.
+#[path = "processes/result_bound_adversary.rs"]
+mod result_bound_adversary;
+
+/// Security review of ADR 0053 unit 2 on the host-process routes, at the shipped reserve.
+#[path = "processes/result_bound_security_review.rs"]
+mod result_bound_security_review;
+
 /// A wall clock the cases move forward; everything else is the system authority's.
 #[derive(Default)]
 struct MovableAuthority {
