@@ -651,12 +651,22 @@ mod imp {
     }
 
     /// The limit that ended an exec: the one its refusal code names, except a stall the driver
-    /// flagged after it saw the child's exit, which ended nothing (design 36 D5) and whose
-    /// refusal stays on the record.
+    /// flagged after the child exited on its own, which ended nothing and whose refusal stays on
+    /// the record (design 36 D5). Such an exec names what ended it, in D4's order: the aperture
+    /// ceiling the driver reached, then memory where the OOM count is above zero; else none.
     fn ended_limit(code: Option<&str>, end: Option<crate::EndOfRun>) -> Option<RunLimit> {
-        limit_named_by(code).filter(|limit| {
-            *limit != RunLimit::OutputStall || !end.is_some_and(|end| end.output_stall_after_exit)
-        })
+        match (limit_named_by(code), end) {
+            (Some(RunLimit::OutputStall), Some(end)) if end.output_stall_after_exit => {
+                if end.egress_ceiling_reached {
+                    Some(RunLimit::EgressBytes)
+                } else if end.memory_oom_kills.is_some_and(|kills| kills > 0) {
+                    Some(RunLimit::Memory)
+                } else {
+                    None
+                }
+            }
+            (limit, _) => limit,
+        }
     }
 
     /// The limit the host driver named on an ended exec, by its refusal code (design 36 D6). The
@@ -919,24 +929,65 @@ mod imp {
             }
         }
 
+        /// The end the driver read: the OOM count, the stall's mark and the ceiling.
+        fn end(after_exit: bool, oom_kills: u64, egress: bool) -> crate::EndOfRun {
+            crate::EndOfRun {
+                memory_oom_kills: Some(oom_kills),
+                output_stall_after_exit: after_exit,
+                egress_ceiling_reached: egress,
+            }
+        }
+
+        const STALL: Option<&str> = Some(substrate_wire::SESSION_OUTPUT_BACKPRESSURE);
+
         /// Design 36 D5: the stall the driver records as `session.output-backpressure` names
-        /// `OutputStall` only where it came before the driver saw the child's exit; any other
-        /// limit is named whatever the stall's mark says.
+        /// `OutputStall` where it came before the child's exit, also beside an OOM kill (D4), and
+        /// names no limit where it came after the program's own exit. A stall after the exit
+        /// always leaves that code on the record, so no other code comes with the mark.
         #[test]
         fn a_stall_after_the_childs_exit_names_no_limit_and_one_before_names_the_stall() {
-            let end = |output_stall_after_exit| {
-                Some(crate::EndOfRun {
-                    memory_oom_kills: Some(0),
-                    output_stall_after_exit,
-                })
-            };
-            let stall = Some(substrate_wire::SESSION_OUTPUT_BACKPRESSURE);
-            assert_eq!(ended_limit(stall, end(false)), Some(RunLimit::OutputStall));
-            assert_eq!(ended_limit(stall, None), Some(RunLimit::OutputStall));
-            assert_eq!(ended_limit(stall, end(true)), None);
             assert_eq!(
-                ended_limit(Some("exec.timeout"), end(true)),
-                Some(RunLimit::WallTime)
+                ended_limit(STALL, Some(end(false, 0, false))),
+                Some(RunLimit::OutputStall)
+            );
+            assert_eq!(ended_limit(STALL, None), Some(RunLimit::OutputStall));
+            assert_eq!(ended_limit(STALL, Some(end(true, 0, false))), None);
+            assert_eq!(
+                ended_limit(STALL, Some(end(false, 1, false))),
+                Some(RunLimit::OutputStall)
+            );
+        }
+
+        /// Design 36 D1, D4, D5: an exec the OOM kill ended, whose unread output then stalled
+        /// after its exit. The driver's record carries `session.output-backpressure`
+        /// (`record_pipe_backpressure` replaces any refusal, and `record_resource_bound` then
+        /// writes none), its end the OOM count and the stall's mark. The stall ended nothing; the
+        /// OOM kill ended the run, so `Memory` is named.
+        #[test]
+        fn an_exec_the_oom_kill_ended_whose_output_stalled_after_its_exit_names_memory() {
+            assert_eq!(
+                ended_limit(STALL, Some(end(true, 1, false))),
+                Some(RunLimit::Memory),
+                "an exec the OOM kill ended, whose output stalled after its exit, names no memory \
+                 limit"
+            );
+        }
+
+        /// Design 36 D4, D5: an exec an aperture's byte ceiling ended, whose unread output then
+        /// stalled after its exit, names `EgressBytes`; with an OOM kill as well, egress bytes
+        /// come first. The record carries `session.output-backpressure` in both.
+        #[test]
+        fn an_exec_the_aperture_ceiling_ended_whose_output_stalled_after_its_exit_names_egress_bytes()
+         {
+            assert_eq!(
+                ended_limit(STALL, Some(end(true, 0, true))),
+                Some(RunLimit::EgressBytes),
+                "an exec the aperture ceiling ended names no egress limit"
+            );
+            assert_eq!(
+                ended_limit(STALL, Some(end(true, 1, true))),
+                Some(RunLimit::EgressBytes),
+                "egress bytes are not named before memory"
             );
         }
 

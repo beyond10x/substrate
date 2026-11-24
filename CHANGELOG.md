@@ -16,7 +16,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   output stall, egress bytes, memory, CPU time, wall time is named. No adapter derives a limit
   from an exit code or a signal alone: `linux` maps the driver's refusal code, `systemd` its own
   CPU and deadline watch and the run cgroup's OOM count, `oci` the container's OOM flag beside a
-  signal (a status of 129 to 192 is read as one), its deadline and its stall, `pod` the
+  signal (a status of 129 to 192 is read as one, and, beside the flag, any status outside 0 to
+  128, 193 and above or negative, as `SIGKILL`), its deadline and its stall, `pod` the
   container's `OOMKilled` beside a signal or an exit code over 128 and its deadline, and `local`
   and `macos` their stall only. Held by unit cases of each adapter's mapping and by lane cases
   that end a run on each bound (`ESS confinement linux limit …`, `ESS confinement systemd …
@@ -25,14 +26,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   - `systemd` around `local` records a CPU or deadline limit, and kills, only while the run's
     leader has not exited and the embedder has not killed the run, so a run whose leader exited
     first names no limit, also when a bound passes while the adapter still drains the run's tree.
-  - `output_stall` is named only where the stall came before the leader's exit (`local`, `macos`,
-    `systemd`, `oci`) or before the host driver saw the child's exit (`linux`). A program that
+  - `output_stall` is named only where the stall ended the run: on `local`, `macos` and
+    `systemd`, where it came before the leader's exit and before the embedder's `KILL`; on `oci`,
+    where it came before the runtime client returned and its kill was asked before the
+    embedder's `signal(Kill)`; on `linux`, where it came before the child
+    exited on its own, whether or not the host driver had taken the exit yet. A program that
     exits on its own and whose unread output then stalls names no limit; `output_stalled` and
     `OutputEvent::Stalled` still report the stall, and the driver's record still carries
     `session.output-backpressure`. The driver marks such a stall in
-    `EndOfRun::output_stall_after_exit`.
-  - Held by unit cases on a cgroup of files and a held runtime thread, and by
-    `a_local_run_that_exits_0_before_its_unread_output_stalls_names_no_limit`.
+    `EndOfRun::output_stall_after_exit`, and a `linux` exec so marked names the limit that ended
+    it, egress bytes before memory, or none where it ended by itself: the aperture ceiling from
+    the new `EndOfRun::egress_ceiling_reached`, memory from the OOM count, which the driver reads
+    from the cgroup by itself, also where the run's other counters could not be read.
+  - Held by unit cases on a cgroup of files, a held runtime thread, a stand-in pid and a child
+    left unreaped, and by `a_local_run_that_exits_0_before_its_unread_output_stalls_names_no_limit`.
 - `RunObservation.memory_oom_kills` is reported by `linux` and `systemd`: the run cgroup's OOM
   kill count, read before the cgroup is removed, and absent when it cannot be read. The host
   driver's `ExecObservation` carries it in the new `end_of_run` member (`EndOfRun`), read for

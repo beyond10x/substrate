@@ -46,7 +46,11 @@ pub struct EndOfRun {
     /// `memory.events` `oom_kill`. `None` where the counter could not be read: absent, never
     /// zero (invariant 3).
     pub memory_oom_kills: Option<u64>,
-    /// The live output queue stalled after the driver saw the child's exit: the record still
+    /// The live output queue stalled after the child had exited on its own: the record still
     /// carries `session.output-backpressure`, and the stall ended nothing (design 36 D5).
     pub output_stall_after_exit: bool,
+    /// The driver recorded `exec.aperture-byte-limit` for the exec: an egress aperture's byte
+    /// ceiling was reached. Read where a stall after the exit replaced that refusal on the record
+    /// (design 36 D4, D5).
+    pub egress_ceiling_reached: bool,
 }

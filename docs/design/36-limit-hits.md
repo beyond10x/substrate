@@ -123,9 +123,18 @@ story's "memory, CPU, timeout" is the tail of this order.
 run's pipes themselves name `OutputStall` from `LiveOutput::ended_run`. A stall is named only where
 it came before the leader's exit: a program that exits on its own and whose unread output then
 stalls names no limit, while `output_stalled` and `OutputEvent::Stalled` still report the stall.
-On `linux` the driver marks a backpressure it flagged after it saw the child's exit
-(`EndOfRun::output_stall_after_exit`); such an exec names no limit, and its record keeps
-`session.output-backpressure`.
+Nor does a stall whose kill comes after the embedder's `KILL` (`local`, `macos`, `systemd` around
+`local`, `oci`): that run names no limit (D1).
+On `linux` the driver marks a backpressure it flagged after the child had exited on its own,
+whether or not its supervision had taken the exit yet: asked under the lock its reap holds, so it
+never asks about a reaped pid (`EndOfRun::output_stall_after_exit`). A backpressure flagged after
+the supervision began to end the run by a bound of its own is not marked, and D4 names the stall.
+Such an exec names the limit that ended it, or none when it ended by itself: in D4's order, the
+aperture ceiling where the driver reached it (`EndOfRun::egress_ceiling_reached`), then memory
+where the OOM count is above zero. Its record keeps `session.output-backpressure`. The OOM count
+names `Memory` there also where the run's other counters could not be read: the driver reads it
+from the cgroup by itself (`Cgroup::end_of_run` falls back to the `oom_kill` counter), so it is a
+measurement the driver has, and the record carries no `exec.metrics-unavailable` to rank (D6).
 
 Reason. Both end a run by the adapter's own hand: the driver kills the cgroup. Left absent, such a
 run would read as killed by signal 9 with no cause, which is the case this design exists to
@@ -155,7 +164,8 @@ reading, its relay's counters and the cgroup's OOM count. The adapter repeats no
 function is total over strings, so a code a later driver adds is `None` until a variant exists
 for it, never a guess. The driver names `exec.metrics-unavailable` before a memory, CPU or
 wall-time bound; on such an exec a bound that was also reached is not named, and the state is
-`Unknown`.
+`Unknown`. That rule is about the code on the record: an exec whose stall is marked after its
+exit carries `session.output-backpressure` instead, and names the limit D5 reads from its end.
 
 ### Per adapter
 
@@ -164,10 +174,10 @@ wall-time bound; on such an exec a bound that was also reached is not named, and
 
 | adapter | `Memory` | `CpuTime` | `WallTime` | `EgressBytes` | `OutputStall` |
 |---|---|---|---|---|---|
-| `linux` | the driver's `exec.memory-limit`: `memory.events` `oom_kill` above zero in the exec's cgroup | the driver's `exec.cpu-limit`: its supervision read `cpu.stat` at or above the budget, at a tick or when its timer fired, and killed the cgroup | the driver's `exec.timeout`: its own timer fired before the child's exit and below the CPU budget | the driver's `exec.aperture-byte-limit`: its relay's counters | the driver's `session.output-backpressure`: its live queue flag, unless flagged after the child's exit (D5) |
+| `linux` | the driver's `exec.memory-limit`: `memory.events` `oom_kill` above zero in the exec's cgroup; under a stall after the exit, the end's OOM count above zero (D5) | the driver's `exec.cpu-limit`: its supervision read `cpu.stat` at or above the budget, at a tick or when its timer fired, and killed the cgroup | the driver's `exec.timeout`: its own timer fired before the child's exit and below the CPU budget | the driver's `exec.aperture-byte-limit`: its relay's counters; under a stall after the exit, `EndOfRun::egress_ceiling_reached` (D5) | the driver's `session.output-backpressure`: its live queue flag, unless flagged after the child exited on its own (D5) |
 | `systemd` around `linux` | `linux`'s, relabelled | `linux`'s | `linux`'s | `linux`'s | `linux`'s |
 | `systemd` around `local` | `memory.events` `oom_kill` above zero in the run's cgroup, read by the run's end task before the cgroup is removed | its watch task records that the CPU check fired, before it kills, while the leader has not exited and the embedder has not stopped it | its watch task records that the deadline fired, on the same terms | absent: it starts no aperture | `LiveOutput::ended_run` |
-| `oci` | the runtime's state has `OOMKilled` true and the run's exit, as the adapter reads it, is a signal: a signal the runtime reports, or an exit status of 129 to 192 | absent: `--cpus` is a rate, and no cumulative budget ends a run | its monitor's own deadline fired before the runtime client returned, before it kills the container | absent | `LiveOutput::ended_run`: the stall came before the runtime client returned |
+| `oci` | the runtime's state has `OOMKilled` true and the run's exit, as the adapter reads it, is a signal: an exit status of 129 to 192, read as signal status − 128, or, beside `OOMKilled`, any status outside 0 to 128 (193 and above, or negative), read as `SIGKILL` | absent: `--cpus` is a rate, and no cumulative budget ends a run | its monitor's own deadline fired before the runtime client returned, before it kills the container | absent | `LiveOutput::ended_run`: the stall came before the runtime client returned |
 | `pod` | the container's `terminated.reason` is `OOMKilled` and its exit is a signal or a code above 128, whoever stopped the run | absent: a rate | the Pod's `status.reason` is `DeadlineExceeded`, or the monitor's own stop past the deadline was the one that ended it | absent | absent: no live output (design 32 D10) |
 | `local` | absent: no `limits` family | absent | absent | absent | `LiveOutput::ended_run` |
 | `macos` | absent: no `limits` family | absent | absent | absent | `LiveOutput::ended_run` |
@@ -196,9 +206,13 @@ Notes on the rows.
 - `oci`: the adapter sets no group kill, and whether the runtime's flag means the whole container
   ended is not read here (§ 12). So the flag alone is not taken as the end of the run: the run's
   main process must have ended by a signal as well. The adapter reads an exit status of 129 to
-  192 as a signal, so a main process that itself exits with such a status after a child's OOM
-  kill names `Memory`; one that exits with 128 or less names none. Where the runtime client's
-  return and the deadline are ready at once, the monitor takes the return.
+  192 as a signal, and, beside `OOMKilled`, any status outside 0 to 128 (193 to 255, or a
+  negative one) as `SIGKILL`, so a main process that itself exits with such a status after a
+  child's OOM kill names `Memory`; one that exits with 0 to 128 names none. Where the runtime client's
+  return and the deadline are ready at once, the monitor takes the return. A stall's kill asked
+  after the embedder's `signal(Kill)` set its flag, before that call reached the runtime, names
+  no stall; one asked before names the stall. No lock orders the two runtime-client calls, so
+  which reaches the container first is the runtime's.
 - `pod`: the same rule, with the exit the container status reports: the flag beside a signal or
   an exit code over 128 names `Memory`, whoever stopped the run, so a main process that itself
   exits with a code over 128 after a child's OOM kill names it too. The monitor's stop past the
@@ -494,6 +508,11 @@ use single-variant patterns. The consumers outside this repository were not read
 `crates/substrate-host/tests/confinement-public-items.txt` is regenerated in each story's change,
 and each story's `CHANGELOG.md` entry names the break.
 
+The host driver's `EndOfRun` (D9) is public and `#[non_exhaustive]`, so a field it gains breaks
+no consumer outside this crate. Story 1 gives it two public fields beside `memory_oom_kills`:
+`output_stall_after_exit` and `egress_ceiling_reached` (D5). Nothing in `src/confinement/` names
+`EndOfRun` or `ExecObservation`, so neither is in that list, and it does not change for them.
+
 ## 8. How it is proved
 
 Budgets: no test runs longer than 60 s, the gate's test step ends within 120 s, a job in the
@@ -666,7 +685,8 @@ this tree:
 - That the kubelet writes `status.reason` `DeadlineExceeded` on a Pod it ended for
   `activeDeadlineSeconds`, and how long after the deadline.
 - That a container runtime and the kubelet report a main process killed by signal 9 as exit code
-  137. `oci.rs` maps 129 to 192 to a signal; the `pod` rule of D7 takes a code above 128.
+  137. `oci.rs` maps 129 to 192 to a signal, and, beside `OOMKilled`, any other status outside 0
+  to 128 to signal 9; the `pod` rule of D7 takes a code above 128.
 - That a task dropped by a runtime shutdown runs the destructors of what it owns on the thread
   that drops the runtime, and that a started `spawn_blocking` closure runs to its end.
 - That the digest in the header of a generated projection covers comments of the YAML (D25).

@@ -66,14 +66,19 @@ pub(crate) fn not_live() -> ConfinementError {
 
 /// The [`Kill`] of an adapter whose run is the process group its leader `pid` leads: `KILL` to
 /// the group under `reaped`, the lock that keeps the leader unreaped, as its `signal(Kill)`
-/// sends it.
-pub(crate) fn group_kill(pid: i32, reaped: Arc<parking_lot::Mutex<bool>>) -> Kill {
+/// sends it ([`group_signal`]). It answers that the stall ended the run only where the leader
+/// had not exited and the embedder's `KILL` had not come first (`stopped`, design 36 D1).
+pub(crate) fn group_kill(
+    pid: i32,
+    reaped: Arc<parking_lot::Mutex<bool>>,
+    stopped: Arc<AtomicBool>,
+) -> Kill {
     Box::new(move || {
         let reaped = reaped.lock();
         if *reaped {
             return false;
         }
-        let running = !exited_unreaped(pid);
+        let running = !stopped.load(Ordering::Acquire) && !exited_unreaped(pid);
         // SAFETY: `kill` with a negative pid signals one process group; no memory is
         // involved. The leader is unreaped while the lock says so, so the id is this run's.
         unsafe {
@@ -81,6 +86,40 @@ pub(crate) fn group_kill(pid: i32, reaped: Arc<parking_lot::Mutex<bool>>) -> Kil
         }
         running
     })
+}
+
+/// The embedder's `signal` to a run that is the process group its leader `pid` leads (`local`,
+/// `macos`). Sent under `reaped`, held across `kill`: the run's task cannot reap the leader
+/// meanwhile, so the group id cannot have been reused by another process; once the leader is
+/// reaped nothing is sent. A `KILL` is recorded in `stopped` before it is sent, under the lock
+/// the stall's kill decides under ([`group_kill`]), so a stall's kill after it answers that it
+/// ended nothing. `adapter` names the adapter in a failure.
+pub(crate) fn group_signal(
+    pid: i32,
+    reaped: &parking_lot::Mutex<bool>,
+    stopped: &AtomicBool,
+    signal: substrate_wire::Signal,
+    adapter: &str,
+) -> Result<(), ConfinementError> {
+    let reaped = reaped.lock();
+    if *reaped {
+        return Ok(());
+    }
+    if signal == substrate_wire::Signal::Kill {
+        stopped.store(true, Ordering::Release);
+    }
+    // SAFETY: `kill` with a negative pid signals one process group; no memory is involved.
+    if unsafe { libc::kill(-pid, signal.number()) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(DriverError::failed(
+                "exec.signal-failed",
+                format!("{adapter} signal: {error}"),
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Whether the child `pid`, which its owner has not reaped, has exited: `waitid` with `WNOHANG`
@@ -219,8 +258,9 @@ struct Reader {
 }
 
 /// How an adapter ends a run whose delivery stalled, as its `signal(Kill)` does. It answers
-/// whether the run's leader had not exited yet when it was called: only then did the stall end
-/// the run (design 36 D5).
+/// whether the run's leader had not exited yet when it was called, and, on `local`, `macos`,
+/// `systemd` and `oci`, whether the embedder's `KILL` had not come first: only then did the stall end the
+/// run (design 36 D1, D5).
 pub(crate) type Kill = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// One run's live queue under the shared drain.
@@ -556,6 +596,32 @@ mod tests {
         assert_eq!(
             observer.join().expect("joined"),
             Some(super::super::RunLimit::OutputStall)
+        );
+    }
+
+    // Design 36 D1, D5, on `local` and `macos`: a stall's kill that takes the leader's lock after
+    // the embedder's `KILL` answers that it ended nothing, so the run names no `OutputStall`.
+    // The stall closed the queue; the embedder's `KILL` then ran in full (`signal`: its `close`
+    // finds the queue closed, then `group_signal`); then the stall's kill takes the lock. The
+    // stand-in pid names no process, so `exited_unreaped` answers `false`, as it does for a
+    // leader whose `SIGKILL` the kernel has not acted on yet.
+    #[test]
+    fn a_stalls_group_kill_after_the_embedders_kill_answers_that_it_ended_nothing() {
+        let reaped = Arc::new(parking_lot::Mutex::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let kill = group_kill(i32::MAX, Arc::clone(&reaped), Arc::clone(&stopped));
+        group_signal(
+            i32::MAX,
+            &reaped,
+            &stopped,
+            substrate_wire::Signal::Kill,
+            "local",
+        )
+        .expect("no such group is no failure");
+        assert!(
+            !kill(),
+            "a stall's kill after the embedder's `KILL` answers that it ended the run, so the \
+             run names `OutputStall`"
         );
     }
 

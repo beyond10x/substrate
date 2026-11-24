@@ -1006,10 +1006,13 @@ mod imp {
         }
 
         /// The stall's end ([`live::Kill`]): the tree and the leader's group, as `stop` ends
-        /// them. Answers whether the leader had not exited, so the stall ended the run.
+        /// them. Answers whether the leader had neither exited nor been stopped by the embedder,
+        /// decided under the lock `stop` records under, so the stall ended the run (D1, D5).
         fn end_stalled(&self, cgroup: &Path) -> bool {
             let exited = self.exited.lock();
-            let running = !*exited && !live::exited_unreaped(self.pid);
+            let running = !*exited
+                && !self.stopped.load(Ordering::Acquire)
+                && !live::exited_unreaped(self.pid);
             let _ = kill_tree(cgroup);
             if !*exited {
                 kill_group(self.pid);
@@ -1818,6 +1821,24 @@ mod imp {
                 EndRead::of(None, Some(0), *imposed.lock()).limit,
                 None,
                 "a run the embedder ended names a limit"
+            );
+        }
+
+        /// Rule (D1, D5): a stall's kill that takes the leader's lock after the embedder's `KILL`
+        /// answers that it ended nothing, so the run names no `OutputStall`. The stall closed the
+        /// queue; the embedder's `KILL` then ran in full (`signal`: its `close` finds the queue
+        /// closed, then `Leader::stop`); then the stall's kill takes the lock. The stand-in pid
+        /// names no child, so `exited_unreaped` answers `false`, as it does for a leader whose
+        /// `SIGKILL` the kernel has not acted on yet.
+        #[test]
+        fn a_stalls_kill_after_the_embedders_kill_answers_that_it_ended_nothing() {
+            let cgroup = cgroup_at(0);
+            let leader = Leader::new(i32::MAX);
+            leader.stop(cgroup.path()).expect("cgroup.kill written");
+            assert!(
+                !leader.end_stalled(cgroup.path()),
+                "a stall's kill after the embedder stopped the run answers that it ended the run, \
+                 so the run names `OutputStall`"
             );
         }
 

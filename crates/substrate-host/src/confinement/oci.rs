@@ -733,6 +733,32 @@ struct OciRun {
     stdin: Option<Arc<StdinWriter>>,
     /// The run's live output, when its profile asked for it (design 32).
     live: Option<Arc<LiveOutput>>,
+    /// Set by the embedder's `signal(Kill)` before its runtime-client call (design 36 D1).
+    stopped: Arc<AtomicBool>,
+}
+
+/// The stall's end ([`live::Kill`]): `KILL` to the container, retried, as `signal(Kill)` sends
+/// it. It answers that the stall ended the run only where the runtime client had not returned
+/// (`client_ended`) and the embedder's `signal(Kill)` had not set `stopped` (design 36 D1, D5).
+///
+/// No lock orders the two runtime-client calls, so the flag decides one order only: an
+/// embedder's `KILL` that set `stopped` before the stall's kill was asked ended the run, and the
+/// stall names nothing. Where the stall's kill was asked first, the stall is named, as on the
+/// adapters whose stall acted first, and which client call reaches the container first is left
+/// to the runtime.
+fn stall_kill(
+    program: PathBuf,
+    id: RunId,
+    client_ended: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+) -> live::Kill {
+    Box::new(move || {
+        let ended_run = !client_ended.load(Ordering::Acquire) && !stopped.load(Ordering::Acquire);
+        let program = program.clone();
+        let id = id.clone();
+        tokio::spawn(async move { kill_retried(&program, &id).await });
+        ended_run
+    })
 }
 
 /// A container's state as the runtime's `container inspect` reports it.
@@ -780,9 +806,10 @@ impl ContainerState {
 /// The limit that ended an `oci` run (design 36 D7), in D4's order: the stall of its live output,
 /// where it came before the runtime client returned; memory, where the runtime's state holds
 /// `OOMKilled` and the run's main process ended by a signal, as [`ContainerState::exit`] reads it:
-/// an exit status of 129 to 192 is read as a signal, so a main process that itself exits with such
-/// a status after a child's OOM kill names `Memory`, and one that exits with 128 or less names
-/// none; the monitor's own deadline. `--cpus` is a rate and ends no run, and no aperture exists,
+/// an exit status of 129 to 192 is read as signal status − 128, and, beside `OOMKilled`, any
+/// status outside 0 to 128 (193 to 255, or a negative one) as `SIGKILL`, so a main process that
+/// itself exits with such a status after a child's OOM kill names `Memory`, and one that exits
+/// with 0 to 128 names none; the monitor's own deadline. `--cpus` is a rate and ends no run, and no aperture exists,
 /// so neither CPU time nor egress bytes is named. A signal alone names nothing.
 fn oci_limit(stalled: bool, deadline: bool, state: Option<&ContainerState>) -> Option<RunLimit> {
     let memory = state.is_some_and(|state| {
@@ -1254,18 +1281,16 @@ impl OciAdapter {
         // Set by the monitor once the runtime client returned, which it does when the container's
         // main process exited: a stall after that did not end the run (design 36 D5).
         let client_ended = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
         // A stall ends the run as `signal(Kill)` does: `KILL` to the container, retried.
         let (live, [stdout_feed, stderr_feed]) =
             live::open(admitted.profile().output_delivery, || {
-                let program = program.clone();
-                let id = id.clone();
-                let client_ended = Arc::clone(&client_ended);
-                Box::new(move || {
-                    let program = program.clone();
-                    let id = id.clone();
-                    tokio::spawn(async move { kill_retried(&program, &id).await });
-                    !client_ended.load(Ordering::Acquire)
-                })
+                stall_kill(
+                    program.clone(),
+                    id.clone(),
+                    Arc::clone(&client_ended),
+                    Arc::clone(&stopped),
+                )
             });
         let readers = [
             child.stdout.take().map(|stream| {
@@ -1305,6 +1330,7 @@ impl OciAdapter {
             captured,
             stdin: writer,
             live,
+            stopped,
         }));
         admitted.audit_start(&id, &command.argv[0]);
         Ok(id)
@@ -1673,10 +1699,13 @@ impl ConfinementAdapter for OciAdapter {
     /// delivery first; `Int` and `Term` close nothing (design 32 § 3).
     async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
         let run = self.run(run)?;
-        if signal == Signal::Kill
-            && let Some(live) = &run.live
-        {
-            live.close();
+        if signal == Signal::Kill {
+            if let Some(live) = &run.live {
+                live.close();
+            }
+            // Before the runtime-client call: a stall's kill asked from here on ended nothing
+            // (`stall_kill`, design 36 D1).
+            run.stopped.store(true, Ordering::Release);
         }
         let deadline = Instant::now() + SIGNAL_RETRY;
         loop {
@@ -2047,6 +2076,28 @@ mod tests {
                 "stalled {stalled}, deadline {deadline}, {state:?}"
             );
         }
+    }
+
+    /// Design 36 D1, D5: a stall's kill asked after the embedder's `signal(Kill)` set `stopped`
+    /// answers that it ended nothing, so the run names no `OutputStall`, while the runtime
+    /// client has not returned. The runtime is a stand-in that answers every call with success.
+    #[tokio::test]
+    async fn a_stalls_kill_after_the_embedders_kill_answers_that_it_ended_nothing() {
+        let client_ended = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let kill = stall_kill(
+            PathBuf::from("/bin/true"),
+            RunId::new("oci-stall".to_owned()),
+            Arc::clone(&client_ended),
+            Arc::clone(&stopped),
+        );
+        // What `signal(Kill)` does before its runtime-client call.
+        stopped.store(true, Ordering::Release);
+        assert!(
+            !kill(),
+            "a stall's kill after the embedder's `KILL` answers that it ended the run, so the \
+             run names `OutputStall`"
+        );
     }
 
     // A8: a read-only or scoped workspace is refused by name through the pure profile check,

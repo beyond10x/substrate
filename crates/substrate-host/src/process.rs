@@ -205,10 +205,16 @@ struct Execution {
     cancellation_requested: AtomicBool,
     delivered_signal: Mutex<Option<Signal>>,
     pipe_backpressure: AtomicBool,
-    /// Set once `wait_for_child` saw the child's exit, whatever ended it.
+    /// Set once `wait_for_child` reaped the child, whatever ended it, in the poll that reaped it
+    /// and under `unreaped_child`'s lock.
     child_exited: AtomicBool,
-    /// Set with `pipe_backpressure` where `child_exited` was already set: the stall came after
-    /// the child's exit and ended nothing (design 36 D5).
+    /// The child's pid while `wait_for_child` has neither reaped it nor begun to end it by a
+    /// bound of its own. Its lock is held across each poll that may reap the child, so a stall
+    /// that finds a pid here asks about this run's child and no other process (design 36 D5).
+    unreaped_child: Mutex<Option<i32>>,
+    /// Set with `pipe_backpressure` where the child had already exited on its own when the stall
+    /// was flagged, reaped (`child_exited`) or not (`unreaped_child`): the stall came after the
+    /// program's exit and ended nothing (design 36 D5).
     backpressure_after_exit: AtomicBool,
     pipe: Option<PipeState>,
     started_at: Instant,
@@ -648,6 +654,7 @@ impl Execution {
             delivered_signal: Mutex::new(None),
             pipe_backpressure: AtomicBool::new(false),
             child_exited: AtomicBool::new(false),
+            unreaped_child: Mutex::new(None),
             backpressure_after_exit: AtomicBool::new(false),
             pipe,
             started_at,
@@ -3535,8 +3542,6 @@ async fn run_child(
         &output_bound,
     )
     .await;
-    // A stall the drains flag from now on came after the child's exit (design 36 D5).
-    execution.child_exited.store(true, Ordering::Release);
     // A drain that did not finish read nothing to its end: its total is unknown.
     let lost = |retention| {
         let mut lost = RetentionBuffer::new(retention, 0);
@@ -3613,6 +3618,11 @@ async fn run_child(
         });
     }
     record_aperture(&mut observation, applied_apertures, aperture_exhausted);
+    // Kept beside the record: a stall after the exit replaces the refusal below, and the
+    // ceiling is still the limit that ended the run (design 36 D4, D5).
+    if let Some(end_of_run) = observation.end_of_run.as_mut() {
+        end_of_run.egress_ceiling_reached = aperture_exhausted;
+    }
     record_pipe_backpressure(&mut observation, &execution);
     record_terminal_output_bound(&mut observation, output_exhausted);
     // Read for every exec, because the client's measurement set decides what is *published*,
@@ -3869,6 +3879,9 @@ async fn wait_for_child(
     let mut cpu_measurement_failed = false;
     let mut aperture_exhausted = false;
     let mut output_exhausted = false;
+    // From here until the reap or a bound's kill, a stall asks whether the child exited on its
+    // own (design 36 D5).
+    *execution.unreaped_child.lock() = child.id().and_then(|pid| i32::try_from(pid).ok());
     let timeout_sleep = tokio::time::sleep(timeout);
     tokio::pin!(timeout_sleep);
     let mut cpu_poll = tokio::time::interval(Duration::from_millis(1));
@@ -3878,7 +3891,7 @@ async fn wait_for_child(
             // In this order: a child that exited is never recorded ended by a bound that became
             // due beside its exit (design 36 D7).
             biased;
-            result = child.wait() => break result,
+            result = reap(child, execution) => break result,
             () = &mut timeout_sleep => {
                 // D4's order: a run past both its CPU budget and its deadline is CPU-exhausted.
                 if cgroup
@@ -3889,24 +3902,24 @@ async fn wait_for_child(
                 } else {
                     timed_out = true;
                 }
-                let _ = cgroup.kill_all();
+                end_by_bound(cgroup, execution);
                 close_live_output(execution).await;
-                break child.wait().await;
+                break reap(child, execution).await;
             }
             _ = cpu_poll.tick() => {
                 if execution.pipe_backpressure.load(Ordering::Acquire) {
-                    let _ = cgroup.kill_all();
+                    end_by_bound(cgroup, execution);
                     close_live_output(execution).await;
-                    break child.wait().await;
+                    break reap(child, execution).await;
                 }
                 // The ceiling before the CPU budget, on the same tick: a run that spends its
                 // budget waiting on an aperture it has already exhausted hit the ceiling, and the
                 // refusal has to say so (ADR 0014).
                 if apertures.is_some_and(crate::egress::InstalledApertures::ceiling_exceeded) {
                     aperture_exhausted = true;
-                    let _ = cgroup.kill_all();
+                    end_by_bound(cgroup, execution);
                     close_live_output(execution).await;
-                    break child.wait().await;
+                    break reap(child, execution).await;
                 }
                 // Reaching the output bound *ends* a pty session; it does not truncate it. Design
                 // 05 gave the pty no `truncated` frame to deliver the statement on, and a terminal
@@ -3914,23 +3927,23 @@ async fn wait_for_child(
                 // silently stopped would be unrecoverable. The client declared this bound.
                 if output_bound.load(Ordering::Acquire) {
                     output_exhausted = true;
-                    let _ = cgroup.kill_all();
+                    end_by_bound(cgroup, execution);
                     close_live_output(execution).await;
-                    break child.wait().await;
+                    break reap(child, execution).await;
                 }
                 match cgroup.cpu_usage_micros() {
                     Ok(usage) if usage >= cpu_budget_micros => {
                         cpu_exhausted = true;
-                        let _ = cgroup.kill_all();
+                        end_by_bound(cgroup, execution);
                         close_live_output(execution).await;
-                        break child.wait().await;
+                        break reap(child, execution).await;
                     }
                     Ok(_) => {}
                     Err(_) => {
                         cpu_measurement_failed = true;
-                        let _ = cgroup.kill_all();
+                        end_by_bound(cgroup, execution);
                         close_live_output(execution).await;
-                        break child.wait().await;
+                        break reap(child, execution).await;
                     }
                 }
             }
@@ -4287,7 +4300,7 @@ async fn forward_frame(
                 if !e.pipe_backpressure.swap(true, Ordering::AcqRel) {
                     crate::OUTPUT_STALL_TERMINATIONS.fetch_add(1, Ordering::Relaxed);
                     e.backpressure_after_exit
-                        .store(e.child_exited.load(Ordering::Acquire), Ordering::Release);
+                        .store(exited_on_its_own(e), Ordering::Release);
                 }
                 e.cancellation_requested.store(true, Ordering::Release);
             }
@@ -4300,6 +4313,40 @@ async fn forward_frame(
             false
         }
     }
+}
+
+/// Whether the child had exited on its own when a stall was flagged: `wait_for_child` reaped it,
+/// or it is a zombie the supervision has not polled yet. Asked under `unreaped_child`'s lock,
+/// which the reap holds, so the pid asked about is this run's unreaped child. A child the
+/// supervision began to end by a bound of its own is not asked about (design 36 D5).
+fn exited_on_its_own(execution: &Execution) -> bool {
+    let unreaped = execution.unreaped_child.lock();
+    execution.child_exited.load(Ordering::Acquire)
+        || (*unreaped).is_some_and(crate::confinement::live::exited_unreaped)
+}
+
+/// Reaps the child: marks it exited, and forgets its pid, in the poll that reaped it and under
+/// `unreaped_child`'s lock, so `exited_on_its_own` never asks about a reaped pid.
+async fn reap(child: &mut Child, execution: &Execution) -> io::Result<ExitStatus> {
+    let wait = child.wait();
+    tokio::pin!(wait);
+    std::future::poll_fn(|context| {
+        let mut unreaped = execution.unreaped_child.lock();
+        let polled = wait.as_mut().poll(context);
+        if polled.is_ready() {
+            *unreaped = None;
+            execution.child_exited.store(true, Ordering::Release);
+        }
+        polled
+    })
+    .await
+}
+
+/// Ends the run by a bound of the supervision: from here a stall is not asked whether the child
+/// exited on its own, since the supervision's kill is what ends it, and the cgroup is killed.
+fn end_by_bound(cgroup: &Cgroup, execution: &Execution) {
+    *execution.unreaped_child.lock() = None;
+    let _ = cgroup.kill_all();
 }
 
 async fn wait_terminal(execution: &Execution, limit: Duration) -> Result<(), DriverError> {
@@ -4653,6 +4700,7 @@ impl Cgroup {
         EndOfRun {
             memory_oom_kills,
             output_stall_after_exit: false,
+            egress_ceiling_reached: false,
         }
     }
 
@@ -10515,6 +10563,146 @@ mod limit_tests {
                 (true, false),
                 "a run past both its CPU budget and its deadline is recorded CPU-exhausted: \
                  {cpu_exhausted}, timed out: {timed_out}"
+            );
+        });
+    }
+
+    /// Flags a stall of `execution`'s live output: a chunk waits out the stall deadline on a
+    /// queue whose one slot is taken and which nobody reads.
+    async fn flag_stall(execution: &std::sync::Arc<Execution>) {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .try_send(crate::PipeFrame {
+                stream: crate::PipeStream::Stdout,
+                bytes: b"a".to_vec(),
+            })
+            .expect("the one slot");
+        let forwarded = super::forward_frame(
+            &sender,
+            crate::PipeStream::Stdout,
+            b"b",
+            Some(execution),
+            false,
+        )
+        .await;
+        assert!(!forwarded, "the full queue stalls");
+        assert!(
+            execution
+                .pipe_backpressure
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime")
+    }
+
+    fn cgroup_of_files(directory: &tempfile::TempDir) -> Cgroup {
+        std::fs::write(directory.path().join("cpu.stat"), "usage_usec 0\n").expect("cpu.stat");
+        Cgroup {
+            path: directory.path().to_path_buf(),
+            name: "substrate-ex_limit".to_owned(),
+        }
+    }
+
+    /// Rule (design 36 D5): a stall after the program's own exit is marked after the exit, also
+    /// where the supervision has not been polled since the exit, so `linux` names no limit for
+    /// it. `cat` exits 0 when the case closes its input; only then does a chunk wait out the
+    /// stall deadline, while the supervision is not polled; then the supervision takes the exit.
+    #[test]
+    fn a_stall_after_the_programs_own_exit_is_marked_after_the_exit_before_the_supervision_sees_it()
+    {
+        paused_runtime().block_on(async {
+            let directory = tempfile::tempdir().expect("cgroup directory");
+            let cgroup = cgroup_of_files(&directory);
+            let execution =
+                std::sync::Arc::new(Execution::new(observation(), None, Instant::now(), None));
+            let output_bound = AtomicBool::new(false);
+            let (mut child, stdin) = cat();
+            let pid = child.id().expect("pid");
+            let supervision = wait_for_child(
+                &mut child,
+                &cgroup,
+                &execution,
+                Duration::from_hours(1),
+                u64::MAX,
+                None,
+                &output_bound,
+            );
+            tokio::pin!(supervision);
+            assert!(pending(supervision.as_mut()).await, "cat reads its input");
+            drop(stdin);
+            await_exit(pid);
+            flag_stall(&execution).await;
+            let (status, timed_out, cpu_exhausted, failed, aperture, output) = supervision.await;
+            assert_eq!(
+                (
+                    status.expect("waited").code(),
+                    timed_out,
+                    cpu_exhausted,
+                    failed,
+                    aperture,
+                    output
+                ),
+                (Some(0), false, false, false, false, false),
+                "the program ended on its own and no bound ended it"
+            );
+            assert!(
+                execution
+                    .backpressure_after_exit
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "a stall of output left behind by a program that had exited 0 on its own is \
+                 marked as before the exit, so `linux` names `OutputStall` for it"
+            );
+        });
+    }
+
+    /// Rule (design 36 D4, D5): a stall flagged after the supervision began to end the run by a
+    /// bound of its own is not marked after the exit, whatever the child is by then: the record
+    /// keeps the stall, which D4 names first. The deadline passes and the supervision kills (a
+    /// cgroup of files, which kills nothing); `cat` then exits when the case closes its input,
+    /// and only then does a chunk wait out the stall deadline.
+    #[test]
+    fn a_stall_after_the_supervisions_own_kill_is_not_marked_after_the_exit() {
+        paused_runtime().block_on(async {
+            let directory = tempfile::tempdir().expect("cgroup directory");
+            let cgroup = cgroup_of_files(&directory);
+            let execution =
+                std::sync::Arc::new(Execution::new(observation(), None, Instant::now(), None));
+            let output_bound = AtomicBool::new(false);
+            let (mut child, stdin) = cat();
+            let pid = child.id().expect("pid");
+            let supervision = wait_for_child(
+                &mut child,
+                &cgroup,
+                &execution,
+                TIMEOUT,
+                u64::MAX,
+                None,
+                &output_bound,
+            );
+            tokio::pin!(supervision);
+            assert!(pending(supervision.as_mut()).await, "cat reads its input");
+            tokio::time::advance(TIMEOUT * 2).await;
+            assert!(
+                pending(supervision.as_mut()).await,
+                "the deadline's kill reaches no process; cat still reads its input"
+            );
+            drop(stdin);
+            await_exit(pid);
+            flag_stall(&execution).await;
+            let (status, timed_out, ..) = supervision.await;
+            assert_eq!((status.expect("waited").code(), timed_out), (Some(0), true));
+            assert!(
+                !execution
+                    .backpressure_after_exit
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "a stall after the supervision's own kill is marked after the exit, so the \
+                 bound that ended the run is lost from the record and the limit"
             );
         });
     }
