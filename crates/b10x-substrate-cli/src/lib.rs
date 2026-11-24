@@ -418,20 +418,22 @@ async fn run(socket: PathBuf, command: Command) -> Result<Answer, Failure> {
             Ok(session_answer(session.observation()))
         }
         Command::Session(SessionCommand::Signal(args)) => {
-            let mut session = client.get_pipe_session(&args.session).await?;
             let signal = match args.signal {
                 SignalName::Int => Signal::Interrupt,
                 SignalName::Term => Signal::Terminate,
                 SignalName::Kill => Signal::Kill,
             };
-            let observation = session
-                .signal_with_operation_id(
+            // No read before the signal: a retry under the same operation id must reach the
+            // daemon, which replays the stored outcome of a session that was retired since.
+            let session = client
+                .signal_pipe_session(
+                    &args.session,
                     signal,
                     Duration::from_millis(args.grace_ms),
                     args.operation_id,
                 )
                 .await?;
-            Ok(session_answer(observation))
+            Ok(session_answer(session.observation()))
         }
         Command::Operation(OperationCommand::Show { operation }) => {
             let record = client.operation(&operation).await?;
@@ -538,11 +540,12 @@ async fn workspace(client: &Client, command: WorkspaceCommand) -> Result<Answer,
             ttl_ms,
             operation_id,
         } => {
-            let mut workspace = client.get_workspace(&workspace).await?;
-            let observation = workspace
-                .renew_lease_with_operation_id(Duration::from_millis(ttl_ms), operation_id)
+            // No read before the renewal: a retry under the same operation id must reach the
+            // daemon, which replays the stored outcome of a workspace that was destroyed since.
+            let workspace = client
+                .renew_workspace_lease(&workspace, Duration::from_millis(ttl_ms), operation_id)
                 .await?;
-            Ok(workspace_answer(observation))
+            Ok(workspace_answer(workspace.observation()))
         }
         WorkspaceCommand::Destroy {
             workspace,
@@ -575,10 +578,15 @@ async fn exec_run(client: &Client, args: ExecRunArgs) -> Result<Answer, Failure>
             SdkError::Refusal(refusal) => Failure::Refused(refusal),
             error => Failure::Usage(error.to_string()),
         })?;
-    let workspace = client.get_workspace(&args.workspace).await?;
     let mut words = args.argv.into_iter();
     let program = words.next().unwrap_or_default();
-    let mut command = workspace.command(program).args(words).policy(policy);
+    // No read before the start: a retry under the same operation id must reach the daemon,
+    // which replays the stored exec of a workspace that was destroyed since. Its output is
+    // read from the exec's record, which outlives the workspace.
+    let mut command = client
+        .command_in_workspace(args.workspace, program)
+        .args(words)
+        .policy(policy);
     if let Some(operation_id) = args.operation_id {
         command = command.operation_id(operation_id);
     }
