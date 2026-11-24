@@ -2336,26 +2336,33 @@ impl ProcessRuntime {
             .cgroup_root
             .as_deref()
             .ok_or_else(sandbox_unavailable)?;
-        let cgroup = Cgroup::existing(cgroup_root, &cgroup_name)?;
-        match input.signal {
-            Signal::Kill => {
-                cgroup.kill_all()?;
-                execution
-                    .cancellation_requested
-                    .store(true, Ordering::Release);
-                *execution.delivered_signal.lock() = Some(Signal::Kill);
-            }
-            signal => {
-                let leader = execution.observation.lock().leader_pid;
-                cgroup.signal_all(signal, leader)?;
-                *execution.delivered_signal.lock() = Some(signal);
-                let grace = Duration::from_millis(input.grace_ms);
-                if wait_terminal(&execution, grace).await.is_err() {
-                    cgroup.kill_all()?;
-                    execution
-                        .cancellation_requested
-                        .store(true, Ordering::Release);
-                    *execution.delivered_signal.lock() = Some(Signal::Kill);
+        // A run's cgroup is removed only once it is proved empty, a moment before its record turns
+        // terminal. A signal in that moment has no process left to reach: it records no delivery
+        // and answers with the observation the record turns to, like a signal after the end.
+        if let Some(cgroup) = Cgroup::existing_or_removed(cgroup_root, &cgroup_name)? {
+            match input.signal {
+                Signal::Kill => {
+                    if cgroup.reached(cgroup.kill_all())? {
+                        execution
+                            .cancellation_requested
+                            .store(true, Ordering::Release);
+                        *execution.delivered_signal.lock() = Some(Signal::Kill);
+                    }
+                }
+                signal => {
+                    let leader = execution.observation.lock().leader_pid;
+                    if cgroup.reached(cgroup.signal_all(signal, leader))? {
+                        *execution.delivered_signal.lock() = Some(signal);
+                        let grace = Duration::from_millis(input.grace_ms);
+                        if wait_terminal(&execution, grace).await.is_err()
+                            && cgroup.reached(cgroup.kill_all())?
+                        {
+                            execution
+                                .cancellation_requested
+                                .store(true, Ordering::Release);
+                            *execution.delivered_signal.lock() = Some(Signal::Kill);
+                        }
+                    }
                 }
             }
         }
@@ -4484,6 +4491,14 @@ impl Cgroup {
     }
 
     fn existing(root: &Path, name: &str) -> Result<Self, DriverError> {
+        Self::existing_or_removed(root, name)?.ok_or_else(DriverError::not_found)
+    }
+
+    /// [`Self::existing`], or `None` where the cgroup's directory is gone.
+    ///
+    /// A directory that is there without its `cgroup.procs` is not a removed cgroup: it stays
+    /// the error `existing` answers.
+    fn existing_or_removed(root: &Path, name: &str) -> Result<Option<Self>, DriverError> {
         if !name.starts_with("substrate-ex_")
             || !name
                 .bytes()
@@ -4495,14 +4510,39 @@ impl Cgroup {
                 "cgroup",
             ));
         }
-        let path = root.join(name);
-        if !path.join("cgroup.procs").is_file() {
-            return Err(DriverError::not_found());
-        }
-        Ok(Self {
-            path,
+        let cgroup = Self {
+            path: root.join(name),
             name: name.to_owned(),
-        })
+        };
+        if cgroup.procs().is_file() {
+            Ok(Some(cgroup))
+        } else if cgroup.removed() {
+            Ok(None)
+        } else {
+            Err(DriverError::not_found())
+        }
+    }
+
+    /// Whether this cgroup's directory is gone.
+    ///
+    /// The kernel removes no cgroup that holds a process, and the driver removes a run's only
+    /// through [`Self::prove_empty_and_remove`]: a removed cgroup has no process left in it.
+    fn removed(&self) -> bool {
+        matches!(
+            std::fs::symlink_metadata(&self.path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+
+    /// Whether a signal or a kill reached this cgroup: `false` where the write or the read
+    /// failed because the cgroup is removed, and the failure itself in every other case, a
+    /// kernel without `cgroup.kill` among them.
+    fn reached(&self, delivery: Result<(), DriverError>) -> Result<bool, DriverError> {
+        match delivery {
+            Ok(()) => Ok(true),
+            Err(_) if self.removed() => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// A handle on a cgroup another resource family created and named itself.
@@ -7084,6 +7124,160 @@ mod tests {
             crate::DriverErrorClass::NotFound,
             "and the exec is forgotten"
         );
+    }
+
+    /// A tracked, running exec whose record names the cgroup `substrate-<id>`, and a runtime
+    /// whose cgroup root is a plain directory.
+    fn running_exec(root: &std::path::Path, id: &str) -> (ProcessRuntime, PathBuf, Arc<Execution>) {
+        let mut config = HostConfig::minimum(root.join("workspaces"));
+        let cgroup_root = root.join("cgroups");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        config.cgroup_root = Some(cgroup_root.clone());
+        let runtime = ProcessRuntime::new(config, unproven_capability()).expect("runtime");
+        let mut observation = running_observation(id);
+        observation.cgroup = Some(format!("substrate-{id}"));
+        let execution = Arc::new(Execution::new(observation, None, Instant::now(), None));
+        runtime
+            .executions
+            .lock()
+            .insert(id.to_owned(), Arc::clone(&execution));
+        (
+            runtime,
+            cgroup_root.join(format!("substrate-{id}")),
+            execution,
+        )
+    }
+
+    /// The last step of a run's end: its record turns terminal and its waiters are woken.
+    fn end_exited(execution: &Execution) {
+        let mut observation = execution.observation.lock();
+        observation.resource.state = ExecState::Exited;
+        observation.output_complete = true;
+        drop(observation);
+        execution.notify.notify_waiters();
+    }
+
+    /// Portable, on a paused clock. A run's cgroup is removed a moment before its record turns
+    /// terminal. A signal in that moment reaches no process: it records no delivery and no
+    /// cancellation, and answers with the observation the record turns to.
+    #[tokio::test(start_paused = true)]
+    async fn a_signal_to_a_run_whose_cgroup_is_removed_answers_with_the_runs_end() {
+        for signal in [substrate_wire::Signal::Term, substrate_wire::Signal::Kill] {
+            let root = tempfile::tempdir().unwrap();
+            let (runtime, _group, execution) = running_exec(root.path(), "ex_ended");
+            let ending = Arc::clone(&execution);
+            let end = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                end_exited(&ending);
+            });
+
+            let answered = runtime
+                .signal(
+                    "ex_ended",
+                    &substrate_wire::ExecSignalInput {
+                        signal,
+                        grace_ms: 0,
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{signal:?}: {} {}", error.code, error.message));
+
+            assert_eq!(answered.resource.state, ExecState::Exited, "{signal:?}");
+            assert_eq!(*execution.delivered_signal.lock(), None, "{signal:?}");
+            assert!(
+                !execution
+                    .cancellation_requested
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "{signal:?}: nothing was cancelled"
+            );
+            end.await.expect("the end ran");
+        }
+    }
+
+    /// Portable, on a paused clock. The cgroup is there for the signal and removed within the
+    /// grace: the kill that follows the grace reaches no process, records no cancellation, and
+    /// the signal answers with the run's end.
+    #[tokio::test(start_paused = true)]
+    async fn a_kill_after_the_grace_to_a_removed_cgroup_answers_with_the_runs_end() {
+        let root = tempfile::tempdir().unwrap();
+        let (runtime, group, execution) = running_exec(root.path(), "ex_trapped");
+        std::fs::create_dir(&group).expect("group");
+        std::fs::write(group.join("cgroup.procs"), b"").expect("cgroup.procs");
+        let ending = Arc::clone(&execution);
+        let end = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            std::fs::remove_dir_all(&group).expect("the group is removed");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            end_exited(&ending);
+        });
+
+        let answered = runtime
+            .signal(
+                "ex_trapped",
+                &substrate_wire::ExecSignalInput {
+                    signal: substrate_wire::Signal::Term,
+                    grace_ms: 100,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{} {}", error.code, error.message));
+
+        assert_eq!(answered.resource.state, ExecState::Exited);
+        assert_eq!(
+            *execution.delivered_signal.lock(),
+            Some(substrate_wire::Signal::Term),
+            "the signal reached the cgroup, the kill did not"
+        );
+        assert!(
+            !execution
+                .cancellation_requested
+                .load(std::sync::atomic::Ordering::Acquire),
+            "nothing was cancelled"
+        );
+        end.await.expect("the end ran");
+    }
+
+    /// Portable. Only a removed cgroup is read as nothing left to reach. A cgroup that is there
+    /// and takes no kill, as on a kernel without `cgroup.kill`, fails the signal by name, at
+    /// once and after the grace, and one without its `cgroup.procs` is answered as before.
+    #[tokio::test(start_paused = true)]
+    async fn a_kill_a_present_cgroup_does_not_take_stays_a_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let (runtime, group, execution) = running_exec(root.path(), "ex_present");
+        std::fs::create_dir(&group).expect("group");
+        std::fs::write(group.join("cgroup.procs"), b"").expect("cgroup.procs");
+        for signal in [substrate_wire::Signal::Kill, substrate_wire::Signal::Term] {
+            let refused = runtime
+                .signal(
+                    "ex_present",
+                    &substrate_wire::ExecSignalInput {
+                        signal,
+                        grace_ms: 0,
+                    },
+                )
+                .await
+                .expect_err("the kill has no file to write");
+            assert_eq!(refused.code, "exec.cgroup-write-failed", "{signal:?}");
+            assert!(
+                !execution
+                    .cancellation_requested
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "{signal:?}: a kill that failed cancelled nothing"
+            );
+        }
+
+        std::fs::remove_file(group.join("cgroup.procs")).expect("cgroup.procs is gone");
+        let absent = runtime
+            .signal(
+                "ex_present",
+                &substrate_wire::ExecSignalInput {
+                    signal: substrate_wire::Signal::Kill,
+                    grace_ms: 0,
+                },
+            )
+            .await
+            .expect_err("a directory without cgroup.procs is no cgroup");
+        assert_eq!(absent.class, crate::DriverErrorClass::NotFound);
     }
 
     /// A live process in `directory`'s cgroup, reaped by its own task so its end is observable.
