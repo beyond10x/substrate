@@ -3,6 +3,7 @@ use crate::events::{append_event, commit_effect};
 use crate::execs::mark_exec_unknown;
 use crate::execs::upsert_exec;
 use crate::leases::upsert_lease;
+use crate::result_bound::terminal_success;
 use crate::workspaces::upsert_workspace;
 use crate::{NewLease, Scope, Store, StoreConfig, StoreError, StoredExec, to_i64, to_u64};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
@@ -374,6 +375,14 @@ impl Store {
         exec: Option<&StoredExec>,
         lease: Option<(&str, &str, &NewLease)>,
     ) -> Result<(), StoreError> {
+        let recorded;
+        let (outcome, status) = match outcome {
+            OperationOutcome::Success { result } => {
+                recorded = terminal_success(self.config, operation, result.clone(), status);
+                (&recorded.0, recorded.1)
+            }
+            OperationOutcome::Error { .. } => (outcome, status),
+        };
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let changed = transaction.execute(

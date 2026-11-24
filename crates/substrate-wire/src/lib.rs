@@ -2898,6 +2898,9 @@ pub const PROCESS_ID_PREFIX: &str = "proc_";
 pub const MAX_PROCESS_ARGV_ITEMS: usize = 256;
 /// Most bytes of all `argv` items together (S1); beyond it, `process.argv-invalid`.
 pub const MAX_PROCESS_ARGV_BYTES: usize = 131_072;
+/// Most bytes of a start's `cwd` (S1), the `maxLength` the process record's `cwd` publishes from
+/// bundle `0.28.0`; beyond it, `process.cwd-invalid`, decided before any file-system call.
+pub const MAX_PROCESS_CWD_BYTES: usize = 4_096;
 /// Most `env` entries a start admits (S1); beyond it, `process.env-invalid`.
 pub const MAX_PROCESS_ENV_ITEMS: usize = 256;
 /// Most bytes of all `env` names and values together (S1); beyond it, `process.env-invalid`.

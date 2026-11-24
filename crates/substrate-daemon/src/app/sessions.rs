@@ -42,8 +42,9 @@ use super::operations::{
     validate_pipe_session_input,
 };
 use super::responses::{
-    failure, not_found, not_found_with_operation, operation_ledger_capacity, outcome_unknown,
-    query_is_empty, request_id, schema_invalid, store_failure, success,
+    completed, failure, not_found, not_found_with_operation, operation_ledger_capacity,
+    outcome_unknown, query_is_empty, request_id, schema_invalid, store_failure, success,
+    within_result_reserve,
 };
 use super::{
     App, Identity, MAINTENANCE_DRIVER_TIMEOUT, PIPE_MAX_FRAME_BYTES, PIPE_MAX_INPUT_BYTES,
@@ -319,7 +320,20 @@ pub(super) async fn pipe_session_start(
         Err(response) => return response,
     };
     let private = app.private_paths_for(&mutation.input.exec).await;
-    if let Err(response) = validate_pipe_session_input(&app, &private, &mutation, &request_id) {
+    // ADR 0053 decisions 1 and 3: after every published refusal of the input, before the
+    // workspace is admitted, a session start is decided by the exec it embeds, whose record its
+    // observations, signals and renewals write, and by the session record itself. The width
+    // needs no state.
+    if let Err(response) = validate_pipe_session_input(&app, &private, &mutation, &request_id)
+        .and_then(|()| {
+            within_result_reserve(
+                &app.store,
+                &request_id,
+                &mutation.op,
+                Exec::widest_json_bytes(&mutation.input.exec).max(PipeSession::widest_json_bytes()),
+            )
+        })
+    {
         return refuse_before_dispatch_response(
             &app,
             &identity,
@@ -611,10 +625,9 @@ pub(super) async fn pipe_session_retire(
         }
         Ok(SessionRetireReservation::Capacity(_)) => operation_ledger_capacity(&request_id),
         Ok(SessionRetireReservation::Refused(answer)) => replay(&request_id, &operation, answer),
-        Ok(SessionRetireReservation::Retired(absence)) => success(
-            StatusCode::OK,
-            Success::mutation(request_id, operation, absence),
-        ),
+        Ok(SessionRetireReservation::Retired(absence)) => {
+            completed(&app.store, StatusCode::OK, &request_id, &operation, absence)
+        }
         Err(error) => store_failure(&request_id, Some(&operation), &error),
     }
 }
@@ -854,9 +867,12 @@ pub(super) async fn pipe_session_lease_renew(
         Ok(resource) => {
             app.driver
                 .set_exec_lease(&session.exec, Some(resource.lease.clone()));
-            success(
+            completed(
+                &app.store,
                 StatusCode::OK,
-                Success::mutation(request_id, operation, resource),
+                &request_id,
+                &operation,
+                resource,
             )
         }
         Err(error) => finish_lease_store_error(&app, &scope, &request_id, &operation, &error).await,

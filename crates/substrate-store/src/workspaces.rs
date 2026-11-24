@@ -6,6 +6,7 @@ use crate::operations::{
     insert_refused_operation, insert_unbound_refusal, operation_identity,
     resource_partition_at_capacity,
 };
+use crate::result_bound::terminal_success;
 use crate::{
     BackendObjectKind, BackendReservation, LeaseClock, NewLease, NewOperation, OperationCapacity,
     Reservation, ResourceCapacity, Scope, Store, StoreError, StoredAnswer, to_i64,
@@ -303,13 +304,11 @@ impl Store {
         resource.lease = None;
         resource.storage = None;
         let result = serde_json::to_value(&resource)?;
-        let outcome = OperationOutcome::Success {
-            result: result.clone(),
-        };
+        let (outcome, status) = terminal_success(self.config, &new.operation, result.clone(), 201);
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
-                 response_status = 201
+                 response_status = ?7
              WHERE deployment = ?1 AND subject = ?2 AND operation = ?3 AND state = 'accepted'",
             params![
                 new.scope.deployment,
@@ -318,6 +317,7 @@ impl Store {
                 terminal_at,
                 resource.id,
                 serde_json::to_string(&outcome)?,
+                i64::from(status),
             ],
         )?;
         if changed != 1 {
@@ -465,9 +465,12 @@ impl Store {
                 return Err(StoreError::NotAccepted(operation.to_owned()));
             }
         }
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(result)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            operation,
+            serde_json::to_value(result)?,
+            status,
+        );
         let state_predicate = if reconciled {
             "state IN ('accepted','unknown') AND operation_kind = 'workspace.destroy'"
         } else {

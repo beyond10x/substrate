@@ -10,6 +10,7 @@ use crate::operations::{
     operation_identity_full, refresh_nonterminal_operation_accounting,
     resource_partition_at_capacity,
 };
+use crate::result_bound::terminal_success;
 use crate::{
     LeaseClock, NewLease, NewOperation, OperationCapacity, Reservation, ResourceCapacity, Scope,
     Store, StoreError, StoredAnswer, StoredExec,
@@ -17,8 +18,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use substrate_wire::{
-    ErrorClass, ErrorDetail, Event, Exec, ExecState, LeaseState, OperationOutcome, PipeSession,
-    SessionAbsence, SessionAttachmentState, SessionKind, SessionState, Workspace,
+    ErrorClass, ErrorDetail, Event, Exec, ExecState, LeaseState, PipeSession, SessionAbsence,
+    SessionAttachmentState, SessionKind, SessionState, Workspace,
 };
 use subtle::ConstantTimeEq as _;
 
@@ -399,13 +400,16 @@ impl Store {
             absent: true,
             observed_at,
         };
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(&absence)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            &new.operation,
+            serde_json::to_value(&absence)?,
+            200,
+        );
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
-                 response_status = 200
+                 response_status = ?7
              WHERE deployment = ?1 AND subject = ?2 AND operation = ?3 AND state = 'accepted'",
             params![
                 new.scope.deployment,
@@ -414,6 +418,7 @@ impl Store {
                 observed_at.to_rfc3339(),
                 id,
                 serde_json::to_string(&outcome)?,
+                i64::from(status),
             ],
         )?;
         if changed != 1 {
@@ -505,9 +510,12 @@ impl Store {
             )?;
             (session.clone(), exec.clone())
         };
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(&session)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            operation,
+            serde_json::to_value(&session)?,
+            status,
+        );
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
@@ -571,9 +579,12 @@ impl Store {
         let _projection = project_session_from_exec(&transaction, scope, &authoritative.resource)?;
         let session = load_session(&transaction, scope, session_id)?
             .ok_or_else(|| StoreError::NotAccepted(operation.to_owned()))?;
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(&session)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            operation,
+            serde_json::to_value(&session)?,
+            status,
+        );
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,

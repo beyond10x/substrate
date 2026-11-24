@@ -6,6 +6,7 @@ use crate::operations::{
     insert_refused_operation, operation_identity, operation_identity_full,
     resource_operation_identity, resource_partition_at_capacity, terminal_transition,
 };
+use crate::result_bound::terminal_success;
 use crate::sessions::{load_session_for_exec, project_session_from_exec, session_transition};
 use crate::{
     BackendObjectKind, BackendReservation, LeaseClock, NewLease, NewOperation, OperationCapacity,
@@ -15,7 +16,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use substrate_wire::{
     ErrorClass, ErrorDetail, Event, Exec, ExecAbsence, ExecKind, ExecState, ExecUsage, LeaseState,
-    OperationOutcome, Workspace, WorkspaceState,
+    Workspace, WorkspaceState,
 };
 
 pub(crate) fn mark_exec_unknown(resource: &mut Exec, observed_at: DateTime<Utc>) {
@@ -323,13 +324,16 @@ impl Store {
             absent: true,
             observed_at,
         };
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(&absence)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            &new.operation,
+            serde_json::to_value(&absence)?,
+            200,
+        );
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
-                 response_status = 200
+                 response_status = ?7
              WHERE deployment = ?1 AND subject = ?2 AND operation = ?3 AND state = 'accepted'",
             params![
                 new.scope.deployment,
@@ -338,6 +342,7 @@ impl Store {
                 observed_at.to_rfc3339(),
                 id,
                 serde_json::to_string(&outcome)?,
+                i64::from(status),
             ],
         )?;
         if changed != 1 {
@@ -448,9 +453,12 @@ impl Store {
             } else {
                 (proposed.clone(), true)
             };
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(&authoritative.resource)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            operation,
+            serde_json::to_value(&authoritative.resource)?,
+            status,
+        );
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,

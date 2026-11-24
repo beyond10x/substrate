@@ -17,6 +17,7 @@ mod leases;
 mod operations;
 mod process_events;
 mod recovery;
+mod result_bound;
 mod schema;
 mod sessions;
 mod snapshots;
@@ -48,6 +49,9 @@ pub use operations::{
 };
 pub use process_events::{ProcessStreamEvent, ProcessStreamEvents};
 pub use recovery::{RecoveryExec, RecoveryWorkspace};
+pub use result_bound::{
+    RESULT_UNRECORDED_MESSAGE, RESULT_UNRECORDED_STATUS, members_within_bounds, result_unrecorded,
+};
 pub use sessions::{
     NewSessionAuthority, SessionAttachmentClaim, SessionAuthorityLookup, SessionAuthorityMint,
     SessionRetireReservation,

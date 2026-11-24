@@ -166,7 +166,9 @@ what it means for a result type that has no member to cut.
      operation id replays the same error;
    - the resource's own record is stored whole, and the run is neither ended nor changed
      because of it;
-   - the widest such outcome is 394 bytes, so it always fits.
+   - the widest such outcome is 379 bytes, so it always fits; the store test
+     `the_unrecorded_error_is_the_named_error_and_its_widest_outcome_is_379_bytes` holds that
+     figure as an equality.
 
    This is the honesty rule (invariant 3): the client is told by name that the effect happened
    and that the ledger does not hold the result. No member is shortened, no result is

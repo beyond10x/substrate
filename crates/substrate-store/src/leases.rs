@@ -1,6 +1,7 @@
 use crate::events::{append_event, commit_effect};
 use crate::execs::{is_terminal_exec_state, load_exec, upsert_exec};
 use crate::operations::{finalize_operation_accounting, operation_identity};
+use crate::result_bound::terminal_success;
 use crate::sessions::{
     load_session, project_session_from_exec, session_transition, upsert_session,
 };
@@ -13,8 +14,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::Serialize;
 use substrate_wire::{
-    ErrorClass, ErrorDetail, Event, Exec, ExecState, LeaseObservation, LeaseState,
-    OperationOutcome, PipeSession, Workspace, WorkspaceOrigin, WorkspaceState,
+    ErrorClass, ErrorDetail, Event, Exec, ExecState, LeaseObservation, LeaseState, PipeSession,
+    Workspace, WorkspaceOrigin, WorkspaceState,
 };
 
 pub(crate) const LEASE_SWEEPER_ACTOR: &str = "lease-sweeper";
@@ -1152,9 +1153,8 @@ fn complete_lease_operation<T: Serialize>(
     transition: &str,
     resource: &T,
 ) -> Result<Event, StoreError> {
-    let outcome = OperationOutcome::Success {
-        result: serde_json::to_value(resource)?,
-    };
+    let (outcome, status) =
+        terminal_success(config, operation, serde_json::to_value(resource)?, status);
     let changed = connection.execute(
         "UPDATE operations
          SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,

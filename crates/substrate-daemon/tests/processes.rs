@@ -62,6 +62,10 @@ mod security_pass1;
 #[path = "processes/adversary_pass1.rs"]
 mod adversary_pass1;
 
+/// ADR 0053: the result bound on the host-process routes.
+#[path = "processes/result_bound.rs"]
+mod result_bound;
+
 /// A wall clock the cases move forward; everything else is the system authority's.
 #[derive(Default)]
 struct MovableAuthority {
@@ -496,6 +500,7 @@ async fn host_process_unknown_profile_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)] // One case per lexical refusal, each its own request.
 async fn host_process_invalid_argv_cwd_env_owner_are_refused() {
     let harness = Harness::portable();
     let cwd = harness.workdir("lexical");
@@ -542,6 +547,31 @@ async fn host_process_invalid_argv_cwd_env_owner_are_refused() {
         ),
         (
             with(base.clone(), "cwd", json!(format!("{}/.", cwd.display()))),
+            "process.cwd-invalid",
+        ),
+        // `MAX_PROCESS_CWD_BYTES` on both sides. One byte over is refused by the lexical rule,
+        // before any file-system call. At the bound the lexical rule admits it and the open
+        // refuses it: Linux opens a path of at most 4,095 bytes (`PATH_MAX` counts the NUL).
+        (
+            with(
+                base.clone(),
+                "cwd",
+                json!(format!(
+                    "/{}",
+                    "a".repeat(substrate_wire::MAX_PROCESS_CWD_BYTES - 1)
+                )),
+            ),
+            "process.cwd-invalid",
+        ),
+        (
+            with(
+                base.clone(),
+                "cwd",
+                json!(format!(
+                    "/{}",
+                    "a".repeat(substrate_wire::MAX_PROCESS_CWD_BYTES)
+                )),
+            ),
             "process.cwd-invalid",
         ),
         (without(base.clone(), "env"), "process.env-invalid"),

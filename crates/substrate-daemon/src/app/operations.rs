@@ -24,9 +24,9 @@ use crate::delegation::{ContextRefusal, VerifiedContext};
 
 use super::private_paths::ResolvedPrivatePaths;
 use super::responses::{
-    conflict, delegated_context_refusal, failure, failure_detail, operation_ledger_capacity,
-    outcome_unknown, query_is_empty, schema_invalid, store_failure, success,
-    workspace_frozen_refusal,
+    completed, conflict, delegated_context_refusal, failure, failure_detail,
+    operation_ledger_capacity, outcome_unknown, query_is_empty, schema_invalid, store_failure,
+    success, workspace_frozen_refusal,
 };
 use super::{
     App, BODY_LIMIT, Identity, PIPE_MAX_FRAME_BYTES, PIPE_MAX_INPUT_BYTES, PIPE_MAX_QUEUED_FRAMES,
@@ -1362,7 +1362,7 @@ pub(super) async fn finish_success<T: Serialize + Sync>(
     {
         return store_failure(request_id, Some(operation), &error);
     }
-    success(status, Success::mutation(request_id, operation, result))
+    completed(&app.store, status, request_id, operation, result)
 }
 
 pub(super) async fn finish_exec(
@@ -1428,10 +1428,7 @@ pub(super) async fn finish_exec_leased(
         }
         Err(error) => return store_failure(request_id, Some(operation), &error),
     };
-    success(
-        status,
-        Success::mutation(request_id, operation, authoritative),
-    )
+    completed(&app.store, status, request_id, operation, authoritative)
 }
 
 pub(super) async fn finish_pipe_session_start(
@@ -1472,9 +1469,12 @@ pub(super) async fn finish_pipe_session_start(
                 // `finish_exec_leased`); the start's stale observation is superseded.
                 app.driver.discard_superseded_exec(&observation.resource.id);
             }
-            success(
+            completed(
+                &app.store,
                 StatusCode::ACCEPTED,
-                Success::mutation(request_id, operation, authoritative),
+                request_id,
+                operation,
+                authoritative,
             )
         }
         Err(error) => store_failure(request_id, Some(operation), &error),
@@ -1505,10 +1505,7 @@ pub(super) async fn finish_pipe_session_observation(
     {
         Ok(session) => {
             app.driver.acknowledge_exec(&observation);
-            success(
-                StatusCode::OK,
-                Success::mutation(request_id, operation, session),
-            )
+            completed(&app.store, StatusCode::OK, request_id, operation, session)
         }
         Err(error) => store_failure(request_id, Some(operation), &error),
     }

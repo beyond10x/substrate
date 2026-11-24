@@ -17,9 +17,7 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Duration, TimeZone as _, Utc};
 use rusqlite::{Connection, OptionalExtension as _, Row, TransactionBehavior, params};
-use substrate_wire::{
-    ErrorClass, ErrorDetail, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, OperationOutcome,
-};
+use substrate_wire::{ErrorClass, ErrorDetail, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS};
 
 use crate::events::{append_event, commit_effect};
 use crate::operations::{
@@ -27,6 +25,7 @@ use crate::operations::{
     insert_refused_operation, operation_identity,
 };
 use crate::process_events::{append_process_event, end_event};
+use crate::result_bound::terminal_success;
 use crate::{
     NewOperation, OperationCapacity, Reservation, Scope, Store, StoreError, StoredAnswer, to_i64,
     to_u64,
@@ -1564,7 +1563,7 @@ fn complete_renewal(
     id: &str,
     result: serde_json::Value,
 ) -> Result<substrate_wire::Event, StoreError> {
-    let outcome = OperationOutcome::Success { result };
+    let (outcome, status) = terminal_success(store.config, operation, result, status);
     let terminal_at = terminal_at.to_rfc3339();
     let changed = connection.execute(
         "UPDATE operations

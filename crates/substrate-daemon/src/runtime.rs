@@ -197,6 +197,21 @@ struct PeerIdentity {
     pid: Option<u32>,
 }
 
+impl PeerIdentity {
+    /// The identity a Unix peer's kernel credentials give. Its actor and principal are what a
+    /// lease records as `lease.actor` and `lease.principal`; made of a `u32` each, they are at
+    /// most 20 and 14 characters, within `MAX_LEASE_ACTOR_CHARS` and
+    /// `MAX_LEASE_PRINCIPAL_CHARS` (ADR 0053 decision 7).
+    fn identity(self) -> Identity {
+        let uid = self.uid;
+        Identity {
+            subject: format!("local:{uid}"),
+            actor: format!("unix-peer:{uid}"),
+            principal: self.pid.map(|pid| format!("pid:{pid}")),
+        }
+    }
+}
+
 trait PeerCredentialSource {
     fn peer_identity(&self) -> io::Result<PeerIdentity>;
 }
@@ -821,11 +836,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
                     permit,
                 } = accepted;
                 let uid = peer.uid;
-                let identity = Identity {
-                    subject: format!("local:{uid}"),
-                    actor: format!("unix-peer:{uid}"),
-                    principal: peer.pid.map(|pid| format!("pid:{pid}")),
-                };
+                let identity = peer.identity();
                 let service = router(Arc::clone(&app))
                     .layer(Extension(identity))
                     .layer(middleware::from_fn_with_state(
@@ -927,6 +938,7 @@ fn check_host_declarations(config: &DaemonConfig) -> anyhow::Result<HostDeclarat
     // Resolved once, here, and pinned for the process's lifetime: the sandbox gets no resolver, so
     // a name that only resolves later resolves nowhere at all (ADR 0013).
     let egress_apertures = resolve_egress_apertures(&config.egress_apertures)?;
+    check_git_root_host_paths(&config.workspaces)?;
     check_writable_roots(
         &config.writable_roots,
         &config.workspaces,
@@ -1206,6 +1218,30 @@ pub(crate) fn resolved_prefix(path: &Path) -> anyhow::Result<PathBuf> {
 /// # Errors
 ///
 /// Returns the first rule broken, prefixed `config.writable-root-invalid`.
+/// The longest workspace root, in bytes, under which every Git root's applied `host_path` is
+/// within its wire bound (ADR 0053 decision 7). A Git root's `host_path` is the workspace root
+/// joined with the workspace's root name: the root's bytes, one `/`, and at most
+/// `MAX_ROOT_NAME_BYTES` (255) bytes of name. So the root may hold
+/// `MAX_READ_ONLY_FILE_PATH_BYTES - 1 - MAX_ROOT_NAME_BYTES` = 4,000 - 1 - 255 = 3,744 bytes.
+const MAX_GIT_ROOT_WORKSPACE_ROOT_BYTES: usize =
+    substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES - 1 - substrate_wire::MAX_ROOT_NAME_BYTES;
+
+/// Refuses a workspace root under which a Git root's `host_path` could exceed
+/// `MAX_READ_ONLY_FILE_PATH_BYTES`, by name, before anything is opened. The host driver's
+/// `pin_git` holds the same bound at the open.
+fn check_git_root_host_paths(workspaces: &Path) -> anyhow::Result<()> {
+    let bytes = workspaces.as_os_str().len();
+    if bytes > MAX_GIT_ROOT_WORKSPACE_ROOT_BYTES {
+        bail!(
+            "config.workspace-root-invalid: the workspace root is {bytes} bytes; a Git root's \
+             host path beneath it would exceed {} bytes, so the root holds at most \
+             {MAX_GIT_ROOT_WORKSPACE_ROOT_BYTES} bytes",
+            substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES
+        );
+    }
+    Ok(())
+}
+
 fn check_writable_roots(
     declared: &[WritableRootConfig],
     workspaces: &Path,
@@ -1231,6 +1267,14 @@ fn check_writable_roots(
         // path with no exact string form can never be recorded as bound.
         if path.to_str().is_none() {
             return Err(refuse("does not name a UTF-8 path"));
+        }
+        // ADR 0053 decision 7: the applied record states the path whole, so a path longer than
+        // its wire bound could never be recorded and is refused here, never shortened.
+        if path.as_os_str().len() > substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES {
+            return Err(refuse(&format!(
+                "names a path longer than {} bytes",
+                substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES
+            )));
         }
         if !path.is_absolute() {
             return Err(refuse("does not name an absolute path"));
@@ -2216,6 +2260,62 @@ mod tests {
             "{refused}"
         );
     }
+
+    /// ADR 0053 decision 7: what an aperture's declaration puts in the applied record is within
+    /// its wire bound where the aperture is declared. The widest name admitted is
+    /// `MAX_APERTURE_NAME_CHARS` and one more is refused; the destination is the pinned IPv4
+    /// socket address, at most `MAX_APERTURE_LISTEN_CHARS` (21) characters for the widest one,
+    /// within `MAX_APERTURE_DESTINATION_CHARS`. The listen address is a `SocketAddrV4` of the
+    /// same width.
+    #[test]
+    fn a_declared_aperture_puts_no_member_over_its_wire_bound_in_the_applied_record() {
+        let widest_name = format!(
+            "a{}",
+            "b".repeat(substrate_wire::MAX_APERTURE_NAME_CHARS - 1)
+        );
+        let mut widest = aperture(&widest_name, u16::MAX);
+        widest.host = "255.255.255.255".to_owned();
+        let resolved = super::resolve_egress_apertures(&[widest]).expect("declared");
+        assert_eq!(
+            resolved[0].name.chars().count(),
+            substrate_wire::MAX_APERTURE_NAME_CHARS
+        );
+        let destination = resolved[0].pinned.to_string();
+        assert_eq!(destination, "255.255.255.255:65535");
+        assert_eq!(destination.len(), substrate_wire::MAX_APERTURE_LISTEN_CHARS);
+        assert!(destination.len() <= substrate_wire::MAX_APERTURE_DESTINATION_CHARS);
+        let listen = std::net::SocketAddrV4::new(std::net::Ipv4Addr::BROADCAST, u16::MAX);
+        assert_eq!(
+            listen.to_string().len(),
+            substrate_wire::MAX_APERTURE_LISTEN_CHARS
+        );
+        let over = format!("{widest_name}c");
+        assert!(super::resolve_egress_apertures(&[aperture(&over, 9000)]).is_err());
+    }
+
+    /// ADR 0053 decision 7: the identity a lease records is held at admission. A Unix peer's
+    /// actor and principal are made of a `u32` each; a development TCP listener's configured
+    /// actor is admitted at `MAX_LEASE_ACTOR_CHARS` and refused one character over it, so the
+    /// daemon does not start with it.
+    #[test]
+    fn every_admitted_identity_is_within_the_lease_identity_bounds() {
+        let widest = super::PeerIdentity {
+            uid: u32::MAX,
+            pid: Some(u32::MAX),
+        }
+        .identity();
+        assert_eq!(widest.actor, "unix-peer:4294967295");
+        assert!(widest.actor.chars().count() <= substrate_wire::MAX_LEASE_ACTOR_CHARS);
+        let principal = widest.principal.expect("a peer with a pid names it");
+        assert_eq!(principal, "pid:4294967295");
+        assert!(principal.chars().count() <= substrate_wire::MAX_LEASE_PRINCIPAL_CHARS);
+        assert!(super::valid_identity_ref(
+            &"a".repeat(substrate_wire::MAX_LEASE_ACTOR_CHARS)
+        ));
+        assert!(!super::valid_identity_ref(
+            &"a".repeat(substrate_wire::MAX_LEASE_ACTOR_CHARS + 1)
+        ));
+    }
     use std::collections::VecDeque;
     use std::convert::Infallible;
 
@@ -2636,6 +2736,62 @@ mod tests {
             uid,
         )
         .unwrap();
+    }
+
+    /// ADR 0053 decision 7: a declared writable root's path is the applied record's `host_path`,
+    /// bounded at `MAX_READ_ONLY_FILE_PATH_BYTES` (4000). A path at the bound passes the length
+    /// rule and meets the next one; one byte more stops startup naming the root and the bound.
+    #[test]
+    fn a_writable_root_path_over_the_applied_record_bound_stops_startup() {
+        let (_directory, base) = writable_root_tree();
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let segment = format!("/{}", "a".repeat(99));
+        let at_bound = PathBuf::from(segment.repeat(40));
+        let over = PathBuf::from(format!("{}/{}", segment.repeat(39), "a".repeat(100)));
+        assert_eq!(
+            at_bound.as_os_str().len(),
+            substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES
+        );
+        assert_eq!(
+            over.as_os_str().len(),
+            substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES + 1
+        );
+        assert_eq!(
+            writable_root_refusal(&base, &[writable_root("cache", at_bound)], uid),
+            "config.writable-root-invalid: writable root \"cache\" does not exist"
+        );
+        assert_eq!(
+            writable_root_refusal(&base, &[writable_root("cache", over)], uid),
+            "config.writable-root-invalid: writable root \"cache\" names a path longer than 4000 \
+             bytes"
+        );
+    }
+
+    /// ADR 0053 decision 7: a workspace root of 3,744 bytes leaves a Git root's `host_path` at
+    /// most 3,744 + 1 + 255 = 4,000 bytes and is admitted; one byte more stops startup by name.
+    #[test]
+    fn a_workspace_root_under_which_a_git_root_path_could_pass_its_bound_stops_startup() {
+        assert_eq!(super::MAX_GIT_ROOT_WORKSPACE_ROOT_BYTES, 3_744);
+        let segment = format!("/{}", "a".repeat(103));
+        let at_bound = PathBuf::from(segment.repeat(36));
+        assert_eq!(at_bound.as_os_str().len(), 3_744);
+        let widest_git_root = at_bound.join("r".repeat(substrate_wire::MAX_ROOT_NAME_BYTES));
+        assert_eq!(
+            widest_git_root.as_os_str().len(),
+            substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES
+        );
+        super::check_git_root_host_paths(&at_bound).expect("a root at the bound is admitted");
+        let over = PathBuf::from(format!("{}b", segment.repeat(36)));
+        let refusal = super::check_git_root_host_paths(&over)
+            .expect_err("one byte more stops startup")
+            .to_string();
+        assert!(
+            refusal.starts_with(
+                "config.workspace-root-invalid: the workspace root is 3745 bytes; a Git root's \
+                 host path beneath it would exceed 4000 bytes"
+            ),
+            "{refusal}"
+        );
     }
 
     #[test]
