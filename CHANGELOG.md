@@ -51,16 +51,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the reason a `local` profile is declared insecure, the state (`ended`, or `unknown` where the
   end could not be established), the exit, the limit that ended the run and the run cgroup's OOM
   kill count; an absent member is omitted. The record is written once the run's end is published,
-  on the runtime's blocking pool, so a sink may receive it after `wait` returned and a sink that
-  blocks holds neither `wait` nor another run. An end task dropped before it wrote, such as at
-  runtime shutdown, writes `state: unknown` on the dropping thread, and nothing from a thread
-  that is panicking. A profile without a sink starts no task for it. `observe`, `wait` and every
-  other call write no record. Held by six unit cases of the record and of its one-shot value, the
-  `pod` monitor's deadline case, five cases of `ess_confinement_local` (an unobserved run, no
-  second record after `observe` and `wait`, no sink, a sink that blocks on a current-thread
-  runtime, a dropped adapter) and lane cases on `linux`, `systemd` around both inner adapters,
-  `oci`, `pod` and `macos` (`ESS confinement … run ended`, the delegated ones required by name in
-  `scripts/delegated-lane.sh`).
+  on a thread of its own named `substrate-run-ended`, so a sink may receive it after `wait`
+  returned, and a sink that blocks or panics on it delays neither `wait`, nor another run, nor
+  another record, whatever the size of the runtime's blocking pool, on a current-thread runtime
+  and with no runtime. Where the system refuses that thread, the record goes to the runtime's
+  blocking pool, or, with no runtime or where that pool cannot take it, is written on the calling
+  thread with a panicking sink contained; it is not dropped. An end task dropped before it wrote,
+  such as at runtime shutdown, writes `state: unknown` on the dropping thread, and nothing from a
+  thread that is panicking. A profile without a sink starts no task and no thread for it.
+  `observe`, `wait` and every other call write no record. Held by ten unit cases of the record,
+  its one-shot value and its thread, the `pod` monitor's deadline case, nine cases of
+  `ess_confinement_local` (among them a sink that blocks on a one-thread blocking pool, a sink
+  that panics, a runtime dropped while the run runs and the limit the observation names) and
+  lane cases on `linux`, `systemd` around both inner adapters, `oci`, `pod` and `macos`
+  (`ESS confinement … run ended`, the delegated ones required by name in
+  `scripts/delegated-lane.sh`). The `oci` case runs in the gate's test step.
 - `RunObservation.process_limit_hits` and the same member of `run_ended` (design 36, story 2):
   the number of process creations the run's process bound refused, the `max` counter of
   `pids.events` in the run's cgroup. `linux` and `systemd` report it: on an ended run the count

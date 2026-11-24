@@ -449,11 +449,14 @@ impl AuditRecord {
 /// admitted or started (for `private_tmpdir_left`, on the task that ended the run); a sink that
 /// blocks blocks that call.
 ///
-/// `run_ended` is called on the Tokio runtime's blocking pool after the run's end was published,
-/// so it may arrive after `wait` returned, and a sink that blocks on it holds a thread of that
-/// pool, never `wait` (design 36 D20). Where the run's end task is dropped before the run ended,
-/// as when its runtime shuts down, the record is written with `state: unknown` on the thread that
-/// drops the task, and not from a thread that is panicking (D22).
+/// `run_ended` is called on a thread of its own, named `substrate-run-ended`, after the run's end
+/// was published, so it may arrive after `wait` returned, and a sink that blocks or panics on it
+/// holds that thread only, never `wait`, another run or another record (design 36 D20). Where the
+/// system refuses the thread, the call goes to the runtime's blocking pool, or, where no runtime
+/// is current or its pool cannot take it, to the run's end task's own thread. Where the run's end
+/// task is dropped before the run ended, as when its runtime shuts down, the record is written
+/// with `state: unknown` on the thread that drops the task, and not from a thread that is
+/// panicking (D22).
 #[derive(Clone)]
 pub struct AuditSink(Arc<dyn Fn(&AuditRecord) + Send + Sync>);
 
@@ -724,8 +727,9 @@ impl PendingEnd {
     }
 }
 
-/// A built `run_ended` on its way to the sink: written when dropped, so a closure the blocking
-/// pool drops unrun, as at a runtime's shutdown, still writes it on the dropping thread.
+/// A built `run_ended` on its way to the sink: written when dropped, so a job dropped unrun, as
+/// by a runtime's shutdown, still writes it on the dropping thread, and nothing is written from
+/// a thread that is panicking (D22).
 struct EndWrite {
     sink: AuditSink,
     record: AuditRecord,
@@ -739,6 +743,60 @@ impl Drop for EndWrite {
     }
 }
 
+/// The name of the thread that calls a sink with one `run_ended` (D20).
+const RUN_ENDED_THREAD: &str = "substrate-run-ended";
+
+/// A job that writes one `run_ended`, as handed to a thread.
+type EndJob = Box<dyn FnOnce() + Send>;
+
+/// Calls the sink with `write` on a thread of its own, so a sink that blocks or panics shares no
+/// thread with any run's exit detection, `wait` or other record (D20, amended 2026-11-24).
+fn deliver(write: EndWrite) {
+    deliver_with(write, |job| {
+        std::thread::Builder::new()
+            .name(RUN_ENDED_THREAD.to_owned())
+            .spawn(job)
+            .map(drop)
+    });
+}
+
+/// [`deliver`] with the thread's creation passed in. Where the system refuses the thread, the
+/// record is not lost: it goes to the current runtime's blocking pool, and where no runtime is
+/// current, or that pool cannot take it either, it is written on the calling thread, which is
+/// then no worker of a runtime or has no other place left. A sink that panics there is contained.
+fn deliver_with(write: EndWrite, spawn_thread: impl FnOnce(EndJob) -> std::io::Result<()>) {
+    let slot = Arc::new(parking_lot::Mutex::new(Some(write)));
+    let Err(error) = spawn_thread(take_and_write(&slot)) else {
+        return;
+    };
+    tracing::warn!(
+        %error,
+        "the system refused a thread for an audit run_ended record; it is written on the \
+         runtime's blocking pool, or on this thread where that pool cannot take it"
+    );
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let job = take_and_write(&slot);
+        let queued = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(runtime.spawn_blocking(job));
+        }));
+        if queued.is_ok() {
+            return;
+        }
+    }
+    let write = slot.lock().take();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(write)));
+}
+
+/// A job that takes the write out of `slot` and writes it, outside the lock; a job that never
+/// runs leaves it in `slot` for the next place.
+fn take_and_write(slot: &Arc<parking_lot::Mutex<Option<EndWrite>>>) -> EndJob {
+    let slot = Arc::clone(slot);
+    Box::new(move || {
+        let write = slot.lock().take();
+        drop(write);
+    })
+}
+
 impl RunEndRecord {
     /// Whether the profile had no sink, so nothing will be written (D19).
     pub(crate) fn is_inert(&self) -> bool {
@@ -746,22 +804,16 @@ impl RunEndRecord {
     }
 
     /// Writes the run's `run_ended` from `observation`, the adapter's own observation of the
-    /// ended run, on the runtime's blocking pool (D20); on the calling thread where no runtime
-    /// is current.
+    /// ended run, on a thread of its own ([`deliver`], D20), with or without a current runtime.
+    /// Without a sink it starts no thread (D19).
     pub(crate) fn write(mut self, observation: RunObservation) {
         let Some(pending) = self.0.take() else {
             return;
         };
-        let write = EndWrite {
+        deliver(EndWrite {
             record: pending.record(observation),
             sink: pending.sink,
-        };
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn_blocking(move || drop(write));
-            }
-            Err(_) => drop(write),
-        }
+        });
     }
 }
 
@@ -1451,7 +1503,7 @@ mod tests {
     }
 
     /// Design 36 D16, D20: the value writes the record of the observation it is given, once,
-    /// on the blocking pool; consumed by the write, it writes nothing more when it goes.
+    /// on a thread of its own; consumed by the write, it writes nothing more when it goes.
     #[tokio::test]
     async fn the_run_end_value_writes_its_observation_once() {
         let (admitted, records, mut ended) = admitted_local(true);
@@ -1518,11 +1570,11 @@ mod tests {
         assert!(ended_records(&records).is_empty(), "{:?}", records.lock());
     }
 
-    /// Design 36 D19: without a sink the value is inert: written or dropped, nothing is written
-    /// and nothing fails.
+    /// Design 36 D19: without a sink every value `audit_start` makes is inert, and writing or
+    /// dropping one fails nothing.
     #[tokio::test]
-    async fn without_a_sink_the_run_end_value_writes_nothing() {
-        let (admitted, records, _) = admitted_local(false);
+    async fn without_a_sink_the_run_end_value_is_inert() {
+        let (admitted, _, _) = admitted_local(false);
         let run = RunId::new("local-4-1".to_owned());
         let end = admitted.audit_start(&run, "/bin/true");
         assert!(end.is_inert());
@@ -1531,8 +1583,131 @@ mod tests {
             AdapterName::Local,
             RunState::Ended,
         ));
-        drop(admitted.audit_start(&run, "/bin/true"));
-        assert!(records.lock().is_empty(), "{:?}", records.lock());
+        let dropped = admitted.audit_start(&run, "/bin/true");
+        assert!(dropped.is_inert());
+        drop(dropped);
+    }
+
+    /// Design 36 D15: the record of an ended observation carries its exit, its limit and its
+    /// OOM kill count as the observation states them, and a `running` observation is recorded
+    /// `unknown`.
+    #[test]
+    fn the_record_of_an_observation_carries_its_limit_and_its_oom_count() {
+        let (admitted, _, _) = admitted_local(true);
+        let run = RunId::new("local-6-1".to_owned());
+        let end = admitted.audit_start(&run, "/bin/true");
+        let pending = end.0.as_ref().expect("a sink");
+        let mut observation =
+            RunObservation::new(run.clone(), AdapterName::Systemd, RunState::Ended);
+        observation.inner = Some(InnerAdapter::Local);
+        observation.exit = Some(RunExit {
+            code: None,
+            signal: Some(9),
+        });
+        observation.limit = Some(RunLimit::Memory);
+        observation.memory_oom_kills = Some(3);
+        assert_eq!(
+            serde_json::to_value(pending.record(observation.clone())).expect("record"),
+            serde_json::json!({
+                "event": "run_ended", "run": "local-6-1", "profile": admitted.id().as_str(),
+                "adapter": "systemd", "inner": "local", "state": "ended",
+                "exit": {"signal": 9}, "limit": "memory", "memory_oom_kills": 3,
+            })
+        );
+        observation.state = RunState::Running;
+        assert_eq!(
+            serde_json::to_value(pending.record(observation)).expect("record")["state"],
+            "unknown"
+        );
+    }
+
+    /// A sink that reports the name of the thread it was called on.
+    fn naming_sink() -> (AuditSink, std::sync::mpsc::Receiver<Option<String>>) {
+        let (called, calls) = std::sync::mpsc::channel();
+        let called = parking_lot::Mutex::new(called);
+        let sink = AuditSink::new(move |_: &AuditRecord| {
+            let _ = called
+                .lock()
+                .send(std::thread::current().name().map(str::to_owned));
+        });
+        (sink, calls)
+    }
+
+    fn end_write(sink: AuditSink) -> EndWrite {
+        EndWrite {
+            sink,
+            record: AuditRecord::RunEnded {
+                run: RunId::new("local-7-1".to_owned()),
+                profile: ProfileId("p1".to_owned()),
+                adapter: AdapterName::Local,
+                inner: None,
+                declared_insecure: None,
+                state: RunState::Ended,
+                exit: None,
+                limit: None,
+                memory_oom_kills: None,
+                process_limit_hits: None,
+            },
+        }
+    }
+
+    /// Design 36 D20, amended: the sink is called with `run_ended` on a thread of its own, named
+    /// `substrate-run-ended`, on a current-thread runtime and with no runtime at all.
+    #[test]
+    fn a_run_ended_is_written_on_a_thread_of_its_own() {
+        let (sink, calls) = naming_sink();
+        deliver(end_write(sink.clone()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async { deliver(end_write(sink)) });
+        for _ in 0..2 {
+            assert_eq!(
+                calls
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("the sink is called"),
+                Some(RUN_ENDED_THREAD.to_owned())
+            );
+        }
+    }
+
+    /// Design 36 D20, amended: where the system refuses the thread, a current runtime's blocking
+    /// pool writes the record, never the calling thread.
+    #[test]
+    fn a_run_ended_the_system_refuses_a_thread_for_goes_to_the_blocking_pool() {
+        let (sink, calls) = naming_sink();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .thread_name("blocking-pool")
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            deliver_with(end_write(sink), |_| Err(std::io::Error::other("no thread")));
+        });
+        assert_eq!(
+            calls
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the sink is called"),
+            Some("blocking-pool".to_owned())
+        );
+        assert!(calls.try_recv().is_err(), "the record is written once");
+    }
+
+    /// Design 36 D20, amended: where the system refuses the thread and no runtime is current, the
+    /// record is written on the calling thread before the call returns, and a sink that panics
+    /// there does not unwind into the caller.
+    #[test]
+    fn a_run_ended_with_no_thread_and_no_runtime_is_written_by_the_caller() {
+        let (sink, calls) = naming_sink();
+        let caller = std::thread::current().name().map(str::to_owned);
+        deliver_with(end_write(sink), |_| Err(std::io::Error::other("no thread")));
+        assert_eq!(
+            calls.try_recv().expect("written before the call returned"),
+            caller
+        );
+        let panicking = AuditSink::new(|_: &AuditRecord| panic!("the sink panics"));
+        deliver_with(end_write(panicking), |_| {
+            Err(std::io::Error::other("no thread"))
+        });
     }
 
     /// Design 36 D17: an end task whose start failed after it was spawned gets no value, and
