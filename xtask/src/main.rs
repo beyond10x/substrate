@@ -8,7 +8,6 @@
 
 mod adrs;
 mod advisories;
-mod bot_files;
 mod bundle;
 mod chart;
 mod chart_cluster;
@@ -98,9 +97,6 @@ enum Command {
     /// Scan every reachable commit with the checksum-pinned Gitleaks release.
     #[command(name = "check-secrets")]
     Secrets,
-    /// Reject bot configuration or key files with unsafe Unix metadata.
-    #[command(name = "check-bot-files")]
-    BotFiles(bot_files::Args),
     /// Reject a Rust toolchain version that the three pinning files do not agree on.
     #[command(name = "check-toolchain")]
     Toolchain {
@@ -174,7 +170,6 @@ fn dispatch() -> Result<ExitCode> {
         Command::Licenses => Ok(licenses::check(&repo::root()?)?.emit()),
         Command::Packages => Ok(packages::check_with_executor_tree(&repo::root()?)?.emit()),
         Command::Secrets => Ok(secrets::check(&repo::root()?)?.emit()),
-        Command::BotFiles(args) => Ok(bot_files::check(&args).emit()),
         Command::Toolchain { root } => {
             let root = match root {
                 Some(root) => root,

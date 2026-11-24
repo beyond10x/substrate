@@ -1242,17 +1242,18 @@ at `scripts/bot-token.sh:8` — `org="${B10X_BOT_ORG:-beyond10x}"` — **is** th
 lives in (`git remote -v` shows `github.com/beyond10x/substrate`), so the default is right here. Set
 `B10X_BOT_ORG` only to mint against a different org.
 
-**On the operator's workstation, bot writes go through `b10x-gates`, not through these scripts,
-until `story:bot-token-mints-without-cargo` is done.** `scripts/bot-token.sh` checks its two
-credential files with `cargo xtask check-bot-files`, and since 2026-11-24 the workstation's
-build pool sends `cargo xtask` to a build node, where those files are not: the mint fails. A
-commit, a merge and a push are `b10x-gates bot -- <git arguments>`, a `gh` write is
-`b10x-gates --repository beyond10x/substrate --policy <policy file> gh -- <gh arguments>`, and a
-pull-request merge is `b10x-gates … api --method PUT --path /repos/beyond10x/substrate/pulls/<n>/merge`.
-Where this file writes `scripts/as-bot.sh` or `scripts/bot-gh.sh` below, read that form.
-Both scripts end non-zero and run no program where the mint fails or prints no token
-(`xtask/tests/bot_scripts.rs`): `gh` without a `GH_TOKEN` would act under the login of the
-caller's keyring, which no session may publish under.
+**`scripts/bot-token.sh` mints without cargo, so both scripts work where a build runs
+elsewhere.** It checks its two credential files itself, in the shell, before `jq`, `openssl` or
+`curl` starts: each is there, is a regular file and no symbolic link, belongs to the effective
+user and opens for reading; the configuration is not writable by group or other (mask `022`) and
+the key grants group and other nothing (mask `077`). A refusal prints one line per failed file,
+naming neither its path nor a byte of it, and ends the script with status 1. The workstation's
+build pool sends `cargo xtask` to a build node, where the two files are not, so the check must
+not be a cargo verb; there is none. `xtask/tests/bot_scripts.rs` runs the script with a `PATH`
+of stand-ins and system tools that holds no `cargo`, against throwaway files: every refusal, the
+admitted modes, and a mint with no `cargo` at all. Both scripts end non-zero and run no program
+where the mint fails or prints no token (the same file): `gh` without a `GH_TOKEN` would act
+under the login of the caller's keyring, which no session may publish under.
 
 **Bot authentication does not bypass `main`'s ruleset.** A direct `scripts/as-bot.sh push origin
 main` is rejected with `GH006`: the ruleset restricts `creation`, `update`, `deletion` and
