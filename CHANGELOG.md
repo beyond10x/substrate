@@ -288,6 +288,55 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   fixture directory has no `.cargo`. On this tree the check reads the two entries and the one
   cargo configuration, `.cargo/config.toml`, and passes.
 
+### Security
+
+Two fixes for defects of earlier releases, each found by a review. Each entry states the rule
+that holds from this release on, the releases it concerns and what it leaves open. The entries
+under *Added*, *Changed* and *Fixed* above state both in full.
+
+- **Every mutation whose success result the operation ledger stores is decided against the
+  bytes the ledger reserves for a success result before its side effect, and a row that was
+  accepted always ends terminal**
+  ([ADR 0053](adr/0053-a-mutation-is-refused-before-dispatch-when-its-success-result-cannot-be-recorded.md);
+  `story:every-success-result-fits-the-ledger-before-its-side-effect`). A start of an exec, a
+  session or a host process, and a v1 file write or delete, whose widest success result
+  exceeds the reserve is refused `operation.result-limit` (429) before any driver is called:
+  the row is recorded refused and nothing is started or changed on the host. The widest result
+  of every other mutation is under the published bound of 524,217 bytes, or fits because the
+  start decided it: a signal, a stop, a lease renewal, a retire and a destroy are never
+  refused for this cause.
+  - **Affected:** every earlier release that serves an exec start, a session start, a
+    host-process start or the v1 file write or delete, `0.26.0` included.
+  - A completion whose result the ledger cannot record ends its row terminal with the error
+    `operation.result-unrecorded` (500): the row names the resource, the resource's own record
+    is stored whole, nothing is cut and the run is not ended.
+  - The v2 file replacement, edit and patch keep the rule and the code of release `0.25.0`,
+    `workspace.write-limit`. This entry closes the line that release's *Security* section
+    left open for the exec start, the exec signal and the host-process start.
+  - **Not covered:** a member counted at its bound makes the figure larger than the result
+    that is stored, so a request whose real result would have fitted can be refused. A request
+    inside the bound by the count a client computes from the wire crate is never refused for
+    this cause.
+
+- **The work and the memory a Git create spends on what its source sends follow the create's
+  byte limit, the requested storage limit, else 2 GiB** (design 21, § *The baseline store*;
+  `story:git-create-work-and-memory-follow-its-limits`). Five counts are each held to a
+  multiple of that limit, and a create over one of them is refused
+  `workspace.git-storage-limit` with the workspace proved absent. The fetch computes the ids
+  on one thread, so the same pack under the same limit gets the same answer every time. No
+  route, schema or refusal code changes.
+  - **Affected:** every earlier release that creates a workspace from a Git source, `0.26.0`
+    included.
+  - This entry closes the line release `0.25.0`'s *Security* section left open for the work
+    and the memory of a Git create.
+  - **Not covered:** the counts bound what the indexing of a pack holds, and the memory of the
+    process is a measured figure beside them. Six cases hold the growth of the peak resident
+    memory under four times the limit; over the first indexing of a process, for a pack that
+    does not deflate, it grew by 3.98 to 4.18 times the limit, and that figure is printed and
+    not held. The daemon does not set the allocator's threshold for giving freed blocks back,
+    and what is resident beside a full table of entries under the allocator's defaults was
+    not measured (design 21).
+
 ## [0.26.0] — 2026-11-23
 
 ### Added
