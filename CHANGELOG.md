@@ -14,6 +14,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   that concluded `success` annotated it. Before, it read the latest attempt only, so a run
   repaired by re-running one failed lane job was refused for the lanes whose records are on the
   first attempt's check runs.
+- `b10x-substrate workspace renew` and `b10x-substrate session signal`, run again with the same
+  `--operation-id`, exit 0 and print the stored result, also once the workspace was destroyed or
+  the session retired: the daemon replays the stored outcome of the operation. Both commands
+  send the mutation by id through two new SDK calls, `Client::renew_workspace_lease` and
+  `Client::signal_pipe_session`, as `workspace destroy` does since 0.25.0, and read nothing
+  first. A first run that names a workspace or session that does not exist is a refused
+  operation recorded under its operation id.
+- `b10x-substrate exec run`, run again with the same `--operation-id`, prints the same output
+  and exits with the same status, also once its workspace was destroyed. It starts by workspace
+  id through the new SDK call `Client::command_in_workspace` and reads nothing first. The stored
+  outcome of the start holds the exec's observation; the output is read from the exec's record,
+  which outlives the workspace. Once that exec was retired, the retry is refused
+  `resource.not-found`, prints no output and exits non-zero. The replay holds while the daemon
+  publishes the capability snapshot the first run named, which the start's input carries: after
+  a daemon restart the retry is refused `operation.request-conflict` under the same operation
+  id, starts nothing, and `b10x-substrate operation show <id>` prints the stored outcome. A
+  first run that names a workspace that does not exist is a refused operation recorded under
+  its operation id; a `--workspace` word that is not one path segment is refused before
+  anything is sent, as `workspace renew` and `session signal` refuse it.
 - A confined exec or session start on the host driver holds whatever the processes its
   confinement backend forks do during the start, one that ends before the start returns
   included. The forked child joins the exec's cgroup itself before it executes the backend, so

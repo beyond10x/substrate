@@ -1328,6 +1328,16 @@ repeat it. It lifts no rule of this file: a release still goes through § *Relea
 reaches `main` through a pull request with a green `Full gate`. A session of that name anywhere
 but the operator's workstation has no such authority.
 
+**Two kinds of pull request are merged without a question.** The session that works this
+repository merges, as the bot and on green checks, a pull request whose changed paths are all
+planning-only (§ *The gate*), and a pull request that only moves a pin when no contract moves:
+the ESS pin with its `gate.yml` version and digest and the generated headers, or the commit
+`shared-gates.yml` calls. It reports the merge afterwards to the operator's session. Every other
+pull request goes to that session with a recommendation, lettered options and a default. Both
+are standing decisions of the operator's session acting for the operator; the second is of
+2026-11-24: "These pin bumps are routine from now on: when the checks are green and no contract
+moves, merge them yourself and report afterwards."
+
 A story that changes a contract or a capability still owes its ADR or design document **before
 code** (invariant 8); the story body names which. `ROADMAP.md` keeps the phase order and
 `STATUS.md` the observed state; the store holds the work items and their status, and nothing else
