@@ -1028,6 +1028,8 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
         .expect("connection after invalid reload");
     assert_eq!(peer_leaf(&after_invalid), second.certificate_der.as_ref());
 
+    // The daemon waits up to 5 s at SIGTERM for its open TLS connections to end.
+    drop((existing, https, wss, plaintext, after_invalid));
     signal(&child, Signal::SIGTERM);
     let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
         .await
@@ -1150,6 +1152,8 @@ async fn hosted_admission_reuses_one_identity_connection_and_never_an_errored_on
         "a connection was reused after Identity asked to close it"
     );
 
+    // The daemon waits up to 5 s at SIGTERM for its open TLS connections to end.
+    drop(https);
     signal(&child, Signal::SIGTERM);
     let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
         .await
@@ -1304,6 +1308,8 @@ async fn hosted_wss_attachment_authority_is_one_use_and_channel_bound() {
         "{response_text}"
     );
 
+    // The daemon waits up to 5 s at SIGTERM for its open TLS connections to end.
+    drop((mint_connection, source, target, replay));
     signal(&child, Signal::SIGTERM);
     let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
         .await
@@ -1948,6 +1954,8 @@ async fn operational_listener_serves_three_paths_and_leaks_nothing() {
     drop(state);
     assert_eq!(ops_get(ops, "/readyz", "").await.status, 200);
 
+    // The daemon waits up to 5 s at SIGTERM for its open TLS connections to end.
+    drop(https);
     signal(&child, Signal::SIGTERM);
     let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
         .await
