@@ -37,10 +37,12 @@ pub fn check(root: &Path) -> Result<Report> {
 
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; the host driver declares exactly the features git and kubernetes, both default; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature; Cargo.toml patches through [patch.crates-io] alone, with no other patch table and no [replace]; Cargo.lock resolves each of its {} entries, one entry to a name, lists none as unused and holds no second package of their names from any source; the {} cargo configurations beneath the root hold no patch table, no paths key and no source replacement but the one of {SOURCE_REPLACEMENT_EXCEPTION}, a workspace of its own; not read: configuration outside the repository (a file above the root, CARGO_HOME, --config, CARGO_* variables) and files beneath a directory named target or .git",
+            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; the host driver declares exactly the features git and kubernetes, both default; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature; Cargo.toml patches through [patch.crates-io] alone, with no other patch table and no [replace]; Cargo.lock resolves each of its {} entries, one entry to a name, lists none as unused and holds no second package of their names from any source; the {} cargo configurations beneath the root hold only the keys {}, with no alias passing {CONFIGURATION_FLAG}, and the one of {SOURCE_REPLACEMENT_EXCEPTION}, a workspace of its own, only the keys {}; not read: configuration outside the repository (a file above the root, CARGO_HOME, --config on a command line or in a script or workflow, CARGO_* variables) and files beneath a directory named target or .git; not judged: what profile sets, which changes how a package is compiled, not where it comes from",
             packages.len(),
             patches.entries,
-            patches.configurations
+            patches.configurations,
+            ADMITTED_CONFIGURATION_KEYS.join(" and "),
+            ADMITTED_EXCEPTION_KEYS.join(" and ")
         )))
     } else {
         Ok(Report::failed(failures))
@@ -97,10 +99,27 @@ const CRATES_IO_SOURCE_KEYS: [&str; 4] = ["registry", "local-registry", "directo
 /// (`crates/substrate-host/tests/seatbelt_adversary.rs`), which builds offline from its own
 /// `vendor`. The reason is that the directory is a workspace of its own, so cargo takes its
 /// `Cargo.toml` as the workspace of every command run there and its configuration applies to no
-/// build of this workspace. [`a_workspace_of_its_own`] proves that reason on every run: where it
-/// does not hold, the file is refused like any other. The exception covers source replacement
-/// alone; a `patch` table or a `paths` key in that file is refused.
+/// build of this workspace. The check tests that reason on every run ([`a_workspace_of_its_own`]):
+/// where it does not hold, the file is held to [`ADMITTED_CONFIGURATION_KEYS`] like any other.
+/// Where it holds, the file holds only the keys of [`ADMITTED_EXCEPTION_KEYS`].
 const SOURCE_REPLACEMENT_EXCEPTION: &str = "crates/substrate-host/tests/fixtures/cargo-test";
+
+/// The top-level keys a cargo configuration beneath the root may hold, what the root's own
+/// `.cargo/config.toml` holds: `alias`, whose aliases [`check_aliases`] holds, and `profile`,
+/// which changes how a package is compiled, not where it comes from. Every other key is refused
+/// by its name.
+const ADMITTED_CONFIGURATION_KEYS: [&str; 2] = ["alias", "profile"];
+
+/// The top-level keys the configuration of [`SOURCE_REPLACEMENT_EXCEPTION`] may hold while
+/// the exception holds: what that file holds, `net` and `source`.
+const ADMITTED_EXCEPTION_KEYS: [&str; 2] = ["net", "source"];
+
+/// The flag by which a cargo command takes configuration, which an alias may not pass, as
+/// itself or as `--config=<value>`. Cargo takes no abbreviation of it in an alias: an offline
+/// probe with cargo 1.97.1 and the alias `m = "metadata --format-version 1 --conf …"` answered
+/// `error: unexpected argument '--conf' found`, and `--con`, `--c` and `--conf=…` the same;
+/// `--config`, `--config=…`, the array form and `--config` before the subcommand were applied.
+const CONFIGURATION_FLAG: &str = "--config";
 
 /// What a source-replacement refusal says to do.
 const SOURCE_REPLACEMENT_REMEDY: &str =
@@ -161,15 +180,15 @@ struct PatchesRead {
 /// dependent resolves another version, cargo builds that other package and says no more than a
 /// warning.
 ///
-/// The rule is closed: these are refused by name, not modelled. In the root `Cargo.toml` a
-/// `[patch]` table under any other key (an index URL in any spelling, a registry name, a Git
-/// URL) and `[replace]`; in a cargo configuration beneath the root ([`check_configurations`])
-/// a `patch` table, a `paths` key and a source replacement; in the lock file an entry under
-/// `[[patch.unused]]`, a patch no dependent resolves to. Two entries that patch one package
-/// name, a renamed entry counted by the `package` it names, are refused, and so is an entry
-/// with neither a `path` nor a `git` source. Outside the check are configuration outside the
-/// repository (a file above the root, `CARGO_HOME`, `--config`, `CARGO_*` variables) and
-/// files beneath a directory named `target` or `.git`.
+/// Refused by name, not modelled: in the root `Cargo.toml` a `[patch]` table under any other
+/// key (an index URL in any spelling, a registry name, a Git URL) and `[replace]`; in the lock
+/// file an entry under `[[patch.unused]]`, a patch no dependent resolves to. Two entries that
+/// patch one package name, a renamed entry counted by the `package` it names, are refused, and
+/// so is an entry with neither a `path` nor a `git` source. A cargo configuration beneath the
+/// root holds only admitted keys and its aliases pass no configuration
+/// ([`check_configurations`]). Outside the check are configuration outside the repository (a
+/// file above the root, `CARGO_HOME`, `--config` on a command line or in a script or workflow,
+/// `CARGO_*` variables) and files beneath a directory named `target` or `.git`.
 ///
 /// An entry with a `path` has the name and the version of the manifest at that path, and the
 /// lock file writes a package of a path without a `source`: the entry's package is the one of
@@ -333,10 +352,9 @@ fn check_unused_patches(
     }
 }
 
-/// Every cargo configuration file beneath `root`, the root's own included, holds no `patch`
-/// table, no `paths` key and no source replacement ([`source_replacements`]; the one of
-/// [`SOURCE_REPLACEMENT_EXCEPTION`] excepted while [`a_workspace_of_its_own`] holds), and no
-/// `.cargo` directory holds both names of [`CONFIGURATION_NAMES`]. Cargo reads the
+/// Each cargo configuration file the walk finds beneath `root`, the root's own included, holds
+/// only the top-level keys of [`ADMITTED_CONFIGURATION_KEYS`] ([`check_configuration`]), and no `.cargo`
+/// directory holds both names of [`CONFIGURATION_NAMES`], a link included. Cargo reads the
 /// configuration of the directory it runs in and of every directory above it, so a file
 /// beneath the root applies to every command run beneath its directory. `manifest` is the
 /// root's `Cargo.toml`. Returns how many files were read.
@@ -367,41 +385,110 @@ fn check_configurations(
                 .with_context(|| format!("reading {file}"))?;
             let configuration: toml::Value =
                 toml::from_str(&text).with_context(|| format!("parsing {file}"))?;
-            if let Some(patch) = configuration.get("patch") {
-                let entries: Vec<String> = patch
-                    .as_table()
-                    .into_iter()
-                    .flatten()
-                    .map(|(key, table)| entries_of(&format!("patch.{}", key_text(key)), table))
-                    .collect();
-                let entries = if entries.is_empty() {
-                    "no entry".to_owned()
-                } else {
-                    entries.join(", ")
-                };
-                failures.push(format!(
-                    "{file}: patch is a patch table of a cargo configuration ({entries}), and {ONE_PATCH_TABLE}: move its entries to [patch.crates-io] in Cargo.toml"
-                ));
-            }
-            if let Some(paths) = configuration.get("paths") {
-                let listed: Vec<&str> = paths
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(toml::Value::as_str)
-                    .collect();
-                failures.push(format!(
-                    "{file}: paths overrides the packages at [{}], and {ONE_PATCH_TABLE}: move each to [patch.crates-io] in Cargo.toml",
-                    listed.join(", ")
-                ));
-            }
-            let replacements = source_replacements(&file, &configuration);
-            if !replacements.is_empty() && !a_workspace_of_its_own(root, manifest, &file) {
-                failures.extend(replacements);
-            }
+            let excepted = a_workspace_of_its_own(root, manifest, &file);
+            check_configuration(&file, &configuration, excepted, failures);
         }
     }
     Ok(read)
+}
+
+/// The cargo configuration `configuration`, read from `file`, holds only the top-level keys
+/// it is admitted: those of [`ADMITTED_EXCEPTION_KEYS`] where `excepted` (the file of
+/// [`SOURCE_REPLACEMENT_EXCEPTION`] while [`a_workspace_of_its_own`] holds), those of
+/// [`ADMITTED_CONFIGURATION_KEYS`] otherwise. Every other key is refused by its name in one
+/// form; `patch`, `paths` and a `source` that replaces one ([`source_replacements`]) are
+/// refused in forms of their own, which name their entries. The aliases of an admitted
+/// `alias` are held by [`check_aliases`].
+fn check_configuration(
+    file: &str,
+    configuration: &toml::Value,
+    excepted: bool,
+    failures: &mut Vec<String>,
+) {
+    let admitted: &[&str] = if excepted {
+        &ADMITTED_EXCEPTION_KEYS
+    } else {
+        &ADMITTED_CONFIGURATION_KEYS
+    };
+    for (key, value) in configuration.as_table().into_iter().flatten() {
+        if admitted.contains(&key.as_str()) {
+            if key == "alias" {
+                check_aliases(file, value, failures);
+            }
+            continue;
+        }
+        let replacements = if key == "source" {
+            source_replacements(file, configuration)
+        } else {
+            Vec::new()
+        };
+        if key == "patch" {
+            let entries: Vec<String> = value
+                .as_table()
+                .into_iter()
+                .flatten()
+                .map(|(key, table)| entries_of(&format!("patch.{}", key_text(key)), table))
+                .collect();
+            let entries = if entries.is_empty() {
+                "no entry".to_owned()
+            } else {
+                entries.join(", ")
+            };
+            failures.push(format!(
+                "{file}: patch is a patch table of a cargo configuration ({entries}), and {ONE_PATCH_TABLE}: move its entries to [patch.crates-io] in Cargo.toml"
+            ));
+        } else if key == "paths" {
+            let listed: Vec<&str> = value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(toml::Value::as_str)
+                .collect();
+            failures.push(format!(
+                "{file}: paths overrides the packages at [{}], and {ONE_PATCH_TABLE}: move each to [patch.crates-io] in Cargo.toml",
+                listed.join(", ")
+            ));
+        } else if !replacements.is_empty() {
+            failures.extend(replacements);
+        } else {
+            failures.push(format!(
+                "{file}: {} is not a key this workspace admits in a cargo configuration (admitted: {}): remove it",
+                key_text(key),
+                admitted.join(", ")
+            ));
+        }
+    }
+}
+
+/// Every alias of the `alias` table `aliases`, read from `file`, is a string or an array of
+/// strings, and holds no token of [`CONFIGURATION_FLAG`]: the flag itself, whose value is the
+/// next token, or the flag joined to its value by `=`. Cargo applies configuration passed so
+/// to the command the alias runs, before or after the subcommand. Nothing else about an alias
+/// is held: it may take any name, a built-in command's included, and run any command, and what
+/// that command builds is outside this rule but for the configuration it passes.
+fn check_aliases(file: &str, aliases: &toml::Value, failures: &mut Vec<String>) {
+    for (name, value) in aliases.as_table().into_iter().flatten() {
+        let tokens: Option<Vec<&str>> = match value {
+            toml::Value::String(text) => Some(text.split_whitespace().collect()),
+            toml::Value::Array(items) => items.iter().map(toml::Value::as_str).collect(),
+            _ => None,
+        };
+        let Some(tokens) = tokens else {
+            failures.push(format!(
+                "{file}: alias.{} is neither a string nor an array of strings: write it as one",
+                key_text(name)
+            ));
+            continue;
+        };
+        for token in tokens {
+            if token == CONFIGURATION_FLAG || token.starts_with(&format!("{CONFIGURATION_FLAG}=")) {
+                failures.push(format!(
+                    "{file}: alias.{} passes {token} to the command it runs, and configuration passed there is not read by this check: remove it",
+                    key_text(name)
+                ));
+            }
+        }
+    }
 }
 
 /// The refusals of the source replacements of the cargo configuration `configuration`, read
@@ -440,10 +527,13 @@ fn source_replacements(file: &str, configuration: &toml::Value) -> Vec<String> {
 }
 
 /// Whether `file` is the cargo configuration of [`SOURCE_REPLACEMENT_EXCEPTION`] and the reason
-/// for the exception holds: the directory's `Cargo.toml` has a `[workspace]` table, and the
-/// directory is no member of the root workspace `manifest` and lies beneath no member's `src`.
-/// A member written as a glob cannot be compared by path, so the reason does not hold beside
-/// one.
+/// for the exception holds. The check tests on every run that the directory's `Cargo.toml`
+/// has a `[workspace]` table; that the root workspace `manifest` names in `members`,
+/// `default-members` and `exclude` no path the comparison cannot place (one with a `..`
+/// component, an absolute one, a glob); that no member is the directory or lies beneath it;
+/// and that the directory is not a member's `src` and lies beneath none, a root `[package]`
+/// counting as the member at the root. Any other answer refuses the exception rather than
+/// placing the path.
 fn a_workspace_of_its_own(root: &Path, manifest: &toml::Value, file: &str) -> bool {
     let directory = SOURCE_REPLACEMENT_EXCEPTION;
     if file != format!("{directory}/.cargo/config.toml") {
@@ -460,20 +550,33 @@ fn a_workspace_of_its_own(root: &Path, manifest: &toml::Value, file: &str) -> bo
     {
         return false;
     }
-    let mut members: Vec<String> = manifest
-        .get("workspace")
-        .and_then(|workspace| workspace.get("members"))
-        .and_then(toml::Value::as_array)
+    let named = |key: &str| -> Vec<String> {
+        manifest
+            .get("workspace")
+            .and_then(|workspace| workspace.get(key))
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(|path| {
+                path.trim_start_matches("./")
+                    .trim_end_matches('/')
+                    .to_owned()
+            })
+            .collect()
+    };
+    let unplaced = |path: &String| {
+        path.starts_with('/')
+            || path.split('/').any(|component| component == "..")
+            || path.contains(['*', '?', '['])
+    };
+    let mut members = named("members");
+    if ["members", "default-members", "exclude"]
         .into_iter()
-        .flatten()
-        .filter_map(toml::Value::as_str)
-        .map(|member| {
-            member
-                .trim_start_matches("./")
-                .trim_end_matches('/')
-                .to_owned()
-        })
-        .collect();
+        .any(|key| named(key).iter().any(unplaced))
+    {
+        return false;
+    }
     if manifest.get("package").is_some() {
         members.push(String::new());
     }
@@ -483,8 +586,8 @@ fn a_workspace_of_its_own(root: &Path, manifest: &toml::Value, file: &str) -> bo
         } else {
             format!("{member}/src")
         };
-        !member.contains(['*', '?', '['])
-            && directory != member
+        directory != member
+            && !member.starts_with(&format!("{directory}/"))
             && directory != source
             && !directory.starts_with(&format!("{source}/"))
     })
@@ -2653,8 +2756,8 @@ mod tests {
     /// Cargo applies a patch table keyed by the name of a registry the cargo configuration
     /// declares with the URL of the crates.io index to crates.io (shown with `cargo metadata
     /// --offline` on a probe workspace), and one keyed by a Git URL to that repository. Each is
-    /// refused by its key; the cargo configuration that declares the registry holds no patch and
-    /// is not refused.
+    /// refused by its key, whatever declares the registry; a `registries` key in a cargo
+    /// configuration is refused on its own (`a_configuration_key_outside_the_admitted_list_is_refused`).
     #[test]
     fn a_patch_table_under_a_registry_name_or_a_git_url_is_refused() {
         for (key, written) in [
@@ -2673,12 +2776,6 @@ mod tests {
                 text.replace("[patch.crates-io]", &format!("[patch.{key}]")),
             )
             .expect("workspace manifest");
-            std::fs::create_dir_all(directory.path().join(".cargo")).expect("cargo configuration");
-            std::fs::write(
-                directory.path().join(".cargo/config.toml"),
-                "[registries.mirror]\nindex = \"https://github.com/rust-lang/crates.io-index\"\n",
-            )
-            .expect("cargo configuration");
 
             let report = check(directory.path()).expect("package check");
             assert_eq!(
@@ -2739,7 +2836,7 @@ mod tests {
     }
 
     /// Cargo reads `.cargo/config` where a directory holds it and `.cargo/config.toml` both, and
-    /// warns. Both in one directory are refused by name, though neither holds a patch.
+    /// warns. Both in one directory are refused by name, though each holds only admitted keys.
     #[test]
     fn a_cargo_directory_holding_both_configuration_names_is_refused() {
         let directory = tempfile::tempdir().expect("temporary workspace");
@@ -2750,7 +2847,7 @@ mod tests {
         let configuration = directory.path().join("crates/substrate-host/.cargo");
         std::fs::create_dir_all(&configuration).expect("cargo configuration");
         for name in ["config", "config.toml"] {
-            std::fs::write(configuration.join(name), "[net]\noffline = true\n")
+            std::fs::write(configuration.join(name), "[profile.dev]\ndebug = false\n")
                 .expect("cargo configuration");
         }
 
@@ -2761,10 +2858,10 @@ mod tests {
         );
     }
 
-    /// The accepted side of the walk: a cargo configuration that replaces nothing is read and
-    /// accepted, at the root and beneath it, a source that replaces no other included. A
-    /// directory named `target` or `.git` is not entered, so a configuration beneath one is not
-    /// read.
+    /// The accepted side of the walk: a cargo configuration with admitted keys alone, aliases
+    /// that pass no configuration in both forms and a profile, is read and accepted, at the root
+    /// and beneath it. A directory named `target` or `.git` is not entered, so a configuration
+    /// beneath one is not read.
     #[test]
     fn a_configuration_without_a_patch_or_paths_is_accepted_and_target_and_git_are_not_walked() {
         let directory = tempfile::tempdir().expect("temporary workspace");
@@ -2773,10 +2870,13 @@ mod tests {
             "\n[[package]]\nname = \"foo\"\nversion = \"1.2.3\"\n",
         );
         for (configuration, text) in [
-            (".cargo", "[alias]\nxtask = \"run --package xtask --\"\n"),
+            (
+                ".cargo",
+                "[alias]\nxtask = \"run --quiet --package xtask --\"\nb = [\"build\", \"--release\"]\n\n[profile.dev]\ndebug = false\n",
+            ),
             (
                 "crates/substrate-host/.cargo",
-                "[net]\noffline = true\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n",
+                "[profile.release]\nlto = false\n",
             ),
             (
                 "target/release/.cargo",
@@ -2796,7 +2896,7 @@ mod tests {
         assert_eq!(report.failure_text(), "");
         assert!(
             report.summary().ends_with(
-                "Cargo.lock resolves each of its 1 entries, one entry to a name, lists none as unused and holds no second package of their names from any source; the 2 cargo configurations beneath the root hold no patch table, no paths key and no source replacement but the one of crates/substrate-host/tests/fixtures/cargo-test, a workspace of its own; not read: configuration outside the repository (a file above the root, CARGO_HOME, --config, CARGO_* variables) and files beneath a directory named target or .git"
+                "Cargo.lock resolves each of its 1 entries, one entry to a name, lists none as unused and holds no second package of their names from any source; the 2 cargo configurations beneath the root hold only the keys alias and profile, with no alias passing --config, and the one of crates/substrate-host/tests/fixtures/cargo-test, a workspace of its own, only the keys net and source; not read: configuration outside the repository (a file above the root, CARGO_HOME, --config on a command line or in a script or workflow, CARGO_* variables) and files beneath a directory named target or .git; not judged: what profile sets, which changes how a package is compiled, not where it comes from"
             ),
             "{}",
             report.summary()
@@ -3041,6 +3141,333 @@ mod tests {
                 "crates/substrate-host/.cargo/config.toml",
                 "patch.crates-io.foo"
             )
+        );
+    }
+
+    /// The refusal of the top-level key `key` of the cargo configuration `file`, whose admitted
+    /// keys are `admitted`.
+    fn key_refused(file: &str, key: &str, admitted: &str) -> String {
+        format!(
+            "{file}: {key} is not a key this workspace admits in a cargo configuration (admitted: {admitted}): remove it"
+        )
+    }
+
+    /// The refusal of the alias `name` of the cargo configuration `file` that passes `token`.
+    fn alias_refused(file: &str, name: &str, token: &str) -> String {
+        format!(
+            "{file}: alias.{name} passes {token} to the command it runs, and configuration passed there is not read by this check: remove it"
+        )
+    }
+
+    /// A cargo configuration beneath the root holds only the keys `alias` and `profile`.
+    /// `include`, written as an array or as an array of tables with `path`, is refused by its
+    /// key in both forms.
+    #[test]
+    fn an_include_in_either_form_is_refused() {
+        for text in [
+            "include = [\"tools/sources.toml\"]\n",
+            "[[include]]\npath = \"tools/sources.toml\"\n",
+        ] {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            configured(directory.path(), "", text);
+
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(
+                report.failure_text(),
+                key_refused(".cargo/config.toml", "include", "alias, profile"),
+                "{text}"
+            );
+        }
+    }
+
+    /// Every other top-level key is refused by its name, at the root and in a member's
+    /// configuration: here `build`, `env`, `net` and `registries`.
+    #[test]
+    fn a_configuration_key_outside_the_admitted_list_is_refused() {
+        for (directory_name, text, file, key) in [
+            (
+                "",
+                "[build]\nrustflags = [\"-Cdebuginfo=2\"]\n",
+                ".cargo/config.toml",
+                "build",
+            ),
+            ("", "[env]\nX = \"1\"\n", ".cargo/config.toml", "env"),
+            (
+                "crates/substrate-host",
+                "[net]\noffline = true\n",
+                "crates/substrate-host/.cargo/config.toml",
+                "net",
+            ),
+            (
+                "crates/substrate-host",
+                "[registries.mirror]\nindex = \"https://github.com/rust-lang/crates.io-index\"\n",
+                "crates/substrate-host/.cargo/config.toml",
+                "registries",
+            ),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            configured(directory.path(), directory_name, text);
+
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(
+                report.failure_text(),
+                key_refused(file, key, "alias, profile"),
+                "{text}"
+            );
+        }
+    }
+
+    /// An alias passes configuration with `--config <value>` or `--config=<value>`, in its
+    /// string or its array form, before or after the subcommand (shown with `cargo m
+    /// --offline` on a probe workspace for each form: exit 0, `foo` came from the directory the
+    /// passed source replacement names). Each is refused by the alias and the token.
+    #[test]
+    fn an_alias_that_passes_configuration_in_any_form_is_refused() {
+        for (text, name, token) in [
+            ("m = \"metadata --config x.toml\"\n", "m", "--config"),
+            (
+                "m = \"metadata --config=source.v.directory='vendor'\"\n",
+                "m",
+                "--config=source.v.directory='vendor'",
+            ),
+            (
+                "m = [\"metadata\", \"--config=x.toml\"]\n",
+                "m",
+                "--config=x.toml",
+            ),
+            ("m = \"--config x.toml metadata\"\n", "m", "--config"),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            configured(directory.path(), "", &format!("[alias]\n{text}"));
+
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(
+                report.failure_text(),
+                alias_refused(".cargo/config.toml", name, token),
+                "{text}"
+            );
+        }
+    }
+
+    /// An alias whose value is neither a string nor an array of strings is refused: here a
+    /// number, an array holding a number and a table.
+    #[test]
+    fn an_alias_that_is_neither_a_string_nor_an_array_of_strings_is_refused() {
+        for text in ["m = 1\n", "m = [\"build\", 1]\n", "m = { a = \"b\" }\n"] {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            configured(directory.path(), "", &format!("[alias]\n{text}"));
+
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(
+                report.failure_text(),
+                ".cargo/config.toml: alias.m is neither a string nor an array of strings: write it as one",
+                "{text}"
+            );
+        }
+    }
+
+    /// The fixture workspace's configuration holds only `source` and `net`, while the
+    /// exception holds: `include`, `alias` and `build` are refused by the general form, and
+    /// `paths` by its own.
+    #[test]
+    fn the_fixture_configuration_holds_only_source_and_net() {
+        let file = format!("{FIXTURE_WORKSPACE}/.cargo/config.toml");
+        for (text, refused) in [
+            (
+                "include = [\"x.toml\"]\n".to_owned(),
+                key_refused(&file, "include", "net, source"),
+            ),
+            (
+                "[alias]\nb = \"build\"\n".to_owned(),
+                key_refused(&file, "alias", "net, source"),
+            ),
+            (
+                "[build]\njobs = 1\n".to_owned(),
+                key_refused(&file, "build", "net, source"),
+            ),
+            (
+                "paths = [\"vendor/foo\"]\n".to_owned(),
+                format!(
+                    "{file}: paths overrides the packages at [vendor/foo], and only [patch.crates-io] in Cargo.toml carries a patch in this workspace: move each to [patch.crates-io] in Cargo.toml"
+                ),
+            ),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            configured(
+                directory.path(),
+                FIXTURE_WORKSPACE,
+                &format!("{text}\n{REPLACED_BY_A_DIRECTORY}\n[net]\noffline = true\n"),
+            );
+            fixture_manifest(directory.path(), true);
+
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(report.failure_text(), refused, "{text}");
+        }
+    }
+
+    /// The exception is refused rather than placed where the root manifest names a path the
+    /// comparison cannot place: one with `..` in `members`, an absolute one in
+    /// `default-members` and one with `..` in `exclude`. The fixture's source replacement is
+    /// then refused like any other.
+    #[test]
+    fn a_workspace_path_the_exception_cannot_place_voids_it() {
+        let refused = replacement_refused(&format!("{FIXTURE_WORKSPACE}/.cargo/config.toml"));
+        for added in [
+            "members = [\"crates/../crates/substrate-host\", ",
+            "default-members = [\"/srv/elsewhere\"]\nmembers = [",
+            "exclude = [\"../elsewhere\"]\nmembers = [",
+        ] {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            configured(directory.path(), FIXTURE_WORKSPACE, REPLACED_BY_A_DIRECTORY);
+            fixture_manifest(directory.path(), true);
+            let manifest = directory.path().join("Cargo.toml");
+            let text = std::fs::read_to_string(&manifest).expect("workspace manifest");
+            std::fs::write(&manifest, text.replacen("members = [", added, 1))
+                .expect("workspace manifest");
+
+            let report = check(directory.path()).expect("package check");
+            assert!(
+                report.failures().contains(&refused),
+                "{added}: {}",
+                report.failure_text()
+            );
+        }
+    }
+
+    /// Adversary pass 5. Cargo 1.97, the pinned toolchain, reads `include` in a cargo
+    /// configuration on stable and applies the included file's tables, whatever its name and
+    /// wherever it lies (shown with `cargo metadata --offline` on a probe workspace whose
+    /// `.cargo/config.toml` holds `include = ["../tools/sources.toml"]` and that file a source
+    /// replacement: `foo` came from `vendor/foo` under the id of crates.io; with a `patch` table
+    /// in the included file the patch was taken). The check reads `.cargo/config.toml` alone, so
+    /// an `include` key is refused by its file and key, as `paths` is.
+    #[test]
+    fn a_cargo_configuration_that_includes_another_file_is_refused() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        configured(
+            directory.path(),
+            "",
+            "include = [\"../tools/sources.toml\"]\n",
+        );
+        std::fs::create_dir_all(directory.path().join("tools")).expect("included directory");
+        std::fs::write(
+            directory.path().join("tools/sources.toml"),
+            REPLACED_BY_A_DIRECTORY,
+        )
+        .expect("included configuration");
+
+        let report = check(directory.path()).expect("package check");
+        assert!(
+            report
+                .failures()
+                .iter()
+                .any(|failure| failure.starts_with(".cargo/config.toml: include")),
+            "an include of a source replacement passed: {:?}",
+            report.failure_text()
+        );
+    }
+
+    /// Adversary pass 5. An alias in a cargo configuration carries `--config`, and cargo
+    /// applies it to the command the alias runs (shown with `cargo metadata --offline` on a
+    /// probe workspace: an alias `m = "metadata --config tools/sources.toml"`, with that file a
+    /// source replacement, resolved `foo` from `vendor/foo` under the id of crates.io). This
+    /// repository's own `.cargo/config.toml` defines the alias `xtask`, which the gate runs; with
+    /// `--config` naming a file of the tree there, every `cargo xtask` builds crates.io packages
+    /// from that file's source. The check reads no alias, so the alias is refused by its file
+    /// and key.
+    #[test]
+    fn an_alias_that_passes_a_configuration_file_is_refused() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        configured(
+            directory.path(),
+            "",
+            "[alias]\nxtask = \"run --quiet --config tools/sources.toml --package xtask --\"\n",
+        );
+        std::fs::create_dir_all(directory.path().join("tools")).expect("configuration directory");
+        std::fs::write(
+            directory.path().join("tools/sources.toml"),
+            REPLACED_BY_A_DIRECTORY,
+        )
+        .expect("configuration file");
+
+        let report = check(directory.path()).expect("package check");
+        assert!(
+            report
+                .failures()
+                .iter()
+                .any(|failure| failure.starts_with(".cargo/config.toml: alias.xtask")),
+            "an alias passing --config with a source replacement passed: {:?}",
+            report.failure_text()
+        );
+    }
+
+    /// Adversary pass 5. The same with the values inline and under the name of cargo's
+    /// built-in alias `b`, which cargo 1.97 lets a configuration redefine without a warning
+    /// (shown with `cargo b --offline --format-version 1` on a probe workspace whose alias
+    /// `b = ["metadata", "--config", "source.crates-io.replace-with='v'", "--config",
+    /// "source.v.directory='vendor'"]`: exit 0, `foo` came from `vendor/foo` under the id of
+    /// crates.io). No file but `.cargo/config.toml` holds the replacement.
+    #[test]
+    fn an_alias_that_passes_a_source_replacement_inline_is_refused() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        configured(
+            directory.path(),
+            "",
+            "[alias]\nb = [\"build\", \"--config\", \"source.crates-io.replace-with='v'\", \"--config\", \"source.v.directory='vendor'\"]\n",
+        );
+
+        let report = check(directory.path()).expect("package check");
+        assert!(
+            report
+                .failures()
+                .iter()
+                .any(|failure| failure.starts_with(".cargo/config.toml: alias.b")),
+            "an alias passing a source replacement inline passed: {:?}",
+            report.failure_text()
+        );
+    }
+
+    /// Adversary pass 5. The exception's reason is that cargo reads the fixture's configuration
+    /// only in a command run beneath the fixture's directory, which builds the fixture's own
+    /// workspace. A member of the root workspace beneath that directory breaks it: cargo run in
+    /// the member reads the fixture's configuration and builds the root workspace with it (shown
+    /// with `cargo metadata --offline` on a probe workspace, root members `["fx/sub"]`, `fx` a
+    /// workspace of its own with `exclude = ["sub"]` and a source replacement in
+    /// `fx/.cargo/config.toml`: run in `fx/sub`, `workspace_root` was the root and `foo` came
+    /// from `fx/vendor/foo`; run at the root, `foo` was not found). The replacement is then
+    /// refused like any other.
+    #[test]
+    fn a_root_member_beneath_the_fixture_workspace_voids_the_exception() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        configured(directory.path(), FIXTURE_WORKSPACE, REPLACED_BY_A_DIRECTORY);
+        std::fs::write(
+            directory.path().join(FIXTURE_WORKSPACE).join("Cargo.toml"),
+            "[package]\nname = \"seatbelt-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\nexclude = [\"sub\"]\n",
+        )
+        .expect("fixture manifest");
+        let member = directory.path().join(FIXTURE_WORKSPACE).join("sub");
+        std::fs::create_dir_all(&member).expect("member directory");
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"sub\"\nversion = \"0.1.0\"\npublish = false\n\n[dependencies]\nfoo = \"1\"\n",
+        )
+        .expect("member manifest");
+        let manifest = directory.path().join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).expect("workspace manifest");
+        std::fs::write(
+            &manifest,
+            text.replacen(
+                "members = [",
+                &format!("members = [\"{FIXTURE_WORKSPACE}/sub\", "),
+                1,
+            ),
+        )
+        .expect("workspace manifest");
+
+        let report = check(directory.path()).expect("package check");
+        assert_eq!(
+            report.failure_text(),
+            replacement_refused(&format!("{FIXTURE_WORKSPACE}/.cargo/config.toml"))
         );
     }
 }
