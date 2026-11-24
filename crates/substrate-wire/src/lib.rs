@@ -439,6 +439,14 @@ pub const OPERATION_LEDGER_GLOBAL_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// `the_default_reserve_is_the_published_result_bound` in the store's tests holds the store's
 /// default reserve to this number.
 pub const OPERATION_RESULT_MAX_JSON_BYTES: u64 = 524_217;
+/// The refusal of a mutation no success result of which the operation ledger can record (ADR
+/// 0053 decision 1): class `exhausted`, HTTP 429, not retriable, address `result`. It is
+/// answered before the mutation's side effect.
+pub const OPERATION_RESULT_LIMIT: &str = "operation.result-limit";
+/// The error a completed operation ends with when its effect happened and its result is wider
+/// than the ledger records (ADR 0053 decision 8): class `failed`, HTTP 500, not retriable,
+/// address `result`. The resource's own record is stored whole.
+pub const OPERATION_RESULT_UNRECORDED: &str = "operation.result-unrecorded";
 pub const MIN_LEASE_TTL_MS: u64 = 1_000;
 pub const MAX_LEASE_TTL_MS: u64 = 86_400_000;
 pub const LEASE_CLOCK_TOLERANCE_MS: u64 = 30_000;
