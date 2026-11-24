@@ -33,8 +33,14 @@ scope:
   path: crates/substrate-store/src/operations.rs
 - confidence: inferred
   path: crates/substrate-store/src/tests.rs
+- confidence: cited
+  path: crates/substrate-wire/src/adversary_result_width_tests.rs
 - confidence: inferred
   path: crates/substrate-wire/src/lib.rs
+- confidence: cited
+  path: crates/substrate-wire/src/result_width_tests.rs
+- confidence: cited
+  path: crates/substrate-wire/src/result_widths.rs
 - confidence: inferred
   path: scripts/gate.sh
 - confidence: inferred
@@ -43,7 +49,7 @@ scope:
   path: xtask/src/bundle.rs
 - confidence: inferred
   path: xtask/src/bundle/result_bound.rs
-revision: 5
+revision: 7
 ---
 # Story: every success result fits the ledger before its side effect
 
@@ -80,8 +86,8 @@ file changes keep `workspace.write-limit` and `fit_json_bytes`.
 - Decided before dispatch by the refusal: an exec start, a session start (by the exec input it
   embeds), a host-process start, a v1 file write and a v1 file delete.
 - Fits, with its figure held by a test: a workspace create, adopt and lease renewal
-  (`Workspace`, 110,879 bytes); a session signal and lease renewal (`PipeSession`, 3,899 bytes);
-  an exec retire, a session retire and a workspace destroy (an absence, 126 bytes).
+  (`Workspace`, 110,926 bytes); a session signal and lease renewal (`PipeSession`, 3,926 bytes);
+  an exec retire, a session retire and a workspace destroy (an absence, 127, 125 and 122 bytes).
 - Fits by the start's decision: an exec signal and lease renewal; a host-process stop, each
   stop of stop-by-owner, a lease renewal and the daemon's own completions.
 - Successor bundle `0.28.0` publishes the fact, the refusal with one vector per decided kind,
@@ -176,3 +182,42 @@ step, 10 minutes a job in the build pool.
   with the bundle cut and the pair (one release).
 - **Confidence:** medium. The sites are read. Not read: whether each member a driver sets is
   checked against its bound today, and which runtime-vector lane can execute each new vector.
+
+## Unit 1, done: the wire crate's bound, constants and widths
+
+Branch `feat/result-widths-in-the-wire-crate`. `OPERATION_RESULT_MAX_JSON_BYTES`, the member
+bounds and a `widest_json_bytes` per result type are in `crates/substrate-wire/src/result_widths.rs`,
+with the store's default reserve held to the bound. No answer of the daemon changes and nothing
+calls the functions yet. `review-result:result-widths-adversary` records the adversary pass.
+The two codes are not in this unit: `REFUSAL_CODES` in `crates/substrate-daemon/src/app/health.rs`
+is the list of metric series and is held to the wire crate's code constants, so a code arrives
+with the answer that uses it.
+
+## What unit 2 owes beyond the acceptance above
+
+From the adversary pass on unit 1. Each is a rule with the place that holds it.
+
+- **Where the width is asked.** The exec width is asked after `validate_writable_roots` and
+  `validate_aperture_selection`, and the session width after `validate_pipe_session_input` and
+  `admit_start_workspaces`. Before them a list may be longer than its wire bound, and a session's
+  `workspace` and `capability_snapshot` are not yet a minted identifier and the name of a digest.
+- **A bound root's `host_path` is at most `MAX_READ_ONLY_FILE_PATH_BYTES` bytes.** The width
+  counts it at that bound. It is held where a root is declared (`check_writable_roots` in
+  `crates/substrate-daemon/src/runtime.rs`, `validate_writable_roots` in
+  `crates/substrate-host/src/lib.rs`) and where a Git checkout is bound (the open in
+  `crates/substrate-host/src/writable_roots.rs`). A declared path over the bound refuses the
+  daemon's start by name.
+- **A refusal's `code` is at most `MAX_EXEC_REFUSAL_CODE_CHARS` characters**, held at the
+  daemon's driver port, and bundle `0.28.0` publishes the length (ADR 0053 decisions 7 and 11).
+- **Every other member counted at a bound is held at the place ADR 0053 decision 7 names**, with
+  a test per row: a refusal's `message`, a usage's `code` and `message`, `applied.cgroup` (the
+  host side's `cgroup.name()`), an aperture's `destination` and `listen`, `exit.signal`, a
+  lease's `actor` and `principal`, and a created workspace's `root_name`.
+- **What `every_member_of_a_result_type_is_present_in_its_widest_form` does not hold.** It fails
+  for a member a width function leaves out. It does not fail for a new integer member counted as
+  0, a new string member counted at one character, a member added to `AppliedWritableRoot`, or a
+  member of `ExecUsage::Pending` or `ExecUsage::Unavailable` set to `None`. A change that adds
+  such a member adds its count with it; the stored-form cases then hold the figure.
+- **A stored process record holds no `cpu`, `memory` or `listening`.** Every one is
+  `wire_record(record, None, now)`. A change that stores an observed record moves
+  `ProcessRecord::widest_json_bytes` with it.

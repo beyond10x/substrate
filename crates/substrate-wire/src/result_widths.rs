@@ -286,7 +286,11 @@ fn widest_aperture() -> AppliedAperture {
 /// A requested writable root as it is bound: its name or workspace and its mount as sent, and
 /// a host path at the bound of a host absolute path, [`MAX_READ_ONLY_FILE_PATH_BYTES`].
 fn widest_applied_root(root: &WritableRoot) -> AppliedWritableRoot {
-    let host_path = costliest(MAX_READ_ONLY_FILE_PATH_BYTES);
+    applied_root(root, costliest(MAX_READ_ONLY_FILE_PATH_BYTES))
+}
+
+/// A requested writable root as it is bound at `host_path`.
+fn applied_root(root: &WritableRoot, host_path: String) -> AppliedWritableRoot {
     match root {
         WritableRoot::Host(root) => AppliedWritableRoot::Host {
             name: root.host.clone(),
@@ -369,8 +373,12 @@ fn widest_applied(input: &ExecStartInput) -> AppliedConfinement {
 /// The bytes of the applied entries [`widest_applied`] does not build: each aperture the start
 /// selects past [`MAX_EGRESS_APERTURES`] and each writable root past [`MAX_WRITABLE_ROOTS`],
 /// with the comma before it. They are counted one at a time, so the figure of a start with a
-/// list of any length is found without building that many entries at their bounds.
+/// list of any length is found without building that many entries at their bounds: a root past
+/// the bound is written with an empty host path, and the bytes of a host path at its bound are
+/// added as a number, so the work for a root follows the length of its own strings.
 fn beyond_the_list_bounds(input: &ExecStartInput) -> usize {
+    // What a host path at its bound costs between its quotes: six bytes for each character.
+    let host_path = MAX_READ_ONLY_FILE_PATH_BYTES.saturating_mul(6);
     let apertures = selected_apertures(input).saturating_sub(bound(MAX_EGRESS_APERTURES));
     let apertures = if apertures == 0 {
         0
@@ -383,7 +391,11 @@ fn beyond_the_list_bounds(input: &ExecStartInput) -> usize {
         .writable_roots
         .iter()
         .skip(bound(MAX_WRITABLE_ROOTS))
-        .map(|root| json_bytes(&widest_applied_root(root)).saturating_add(1))
+        .map(|root| {
+            json_bytes(&applied_root(root, String::new()))
+                .saturating_add(host_path)
+                .saturating_add(1)
+        })
         .fold(apertures, usize::saturating_add)
 }
 
@@ -509,9 +521,14 @@ pub(crate) fn widest_session() -> Widest<PipeSession> {
 
 impl PipeSession {
     /// The bytes the widest session occupies as compact JSON: every member present and at its
-    /// bound. No member follows a string of the request, so the figure is the same for every
-    /// session, in every state, and is under [`OPERATION_RESULT_MAX_JSON_BYTES`]
+    /// bound. The figure is the same for every session, in every state, and is under
+    /// [`OPERATION_RESULT_MAX_JSON_BYTES`]
     /// (`the_widest_session_result_is_under_the_published_bound`).
+    ///
+    /// Two members of a session are strings of its start: `workspace` and
+    /// `capability_snapshot`. They are counted as a minted identifier and as the name of a
+    /// digest, which is what each is once the start's input is validated and its workspace is
+    /// admitted. A caller compares this figure for a start that passed both.
     ///
     /// [`OPERATION_RESULT_MAX_JSON_BYTES`]: super::OPERATION_RESULT_MAX_JSON_BYTES
     #[must_use]

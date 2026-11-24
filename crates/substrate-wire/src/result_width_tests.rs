@@ -242,6 +242,49 @@ fn the_result_member_bounds_are_the_lengths_bundle_0_27_0_publishes() {
     );
 }
 
+/// Bundle `0.27.0` writes a lease's members out in every resource that holds one, beside the
+/// one definition. Each copy publishes the same two lengths.
+#[test]
+fn every_lease_bundle_0_27_0_publishes_states_the_actor_and_principal_bounds() {
+    fn leases(schema: &Value, found: &mut Vec<Value>) {
+        match schema {
+            Value::Object(members) => {
+                if let Some(properties) = members.get("properties").and_then(Value::as_object)
+                    && properties.contains_key("actor")
+                {
+                    found.push(json!([
+                        properties
+                            .get("actor")
+                            .and_then(|actor| actor.get("maxLength")),
+                        properties
+                            .get("principal")
+                            .and_then(|principal| principal.get("maxLength")),
+                    ]));
+                }
+                for member in members.values() {
+                    leases(member, found);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    leases(item, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    leases(&resource(), &mut found);
+    // The definition, five copies under the exec, six under the session, one under the workspace.
+    assert_eq!(found.len(), 13);
+    for lease in found {
+        assert_eq!(
+            lease,
+            json!([MAX_LEASE_ACTOR_CHARS, MAX_LEASE_PRINCIPAL_CHARS])
+        );
+    }
+}
+
 /// Where bundle `0.27.0` publishes a pattern and no length, the bound is the one this crate
 /// admits or mints.
 #[test]

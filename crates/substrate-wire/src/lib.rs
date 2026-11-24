@@ -7343,6 +7343,9 @@ mod file_text_bound_tests;
 mod result_width_tests;
 
 #[cfg(test)]
+mod adversary_result_width_tests;
+
+#[cfg(test)]
 mod adoption_tests {
     use super::{
         MAX_ROOT_NAME_BYTES, RootName, Workspace, WorkspaceAdoptInput, WorkspaceOrigin,
