@@ -4854,16 +4854,21 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Whether `byte` is admitted in an operation identifier by [`validate_operation_id`]: an ASCII
+/// letter or digit, `_` or `-`. Each is one byte of JSON.
+#[must_use]
+pub const fn is_operation_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
 /// Validates a caller-minted operation identifier.
 ///
 /// # Errors
 ///
 /// Returns [`WireValidationError::InvalidOperationId`] when the identifier is out of bounds.
 pub fn validate_operation_id(value: &str) -> Result<(), WireValidationError> {
-    if (16..=128).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    if (16..=MAX_OPERATION_ID_CHARS).contains(&value.len())
+        && value.bytes().all(is_operation_id_byte)
     {
         Ok(())
     } else {

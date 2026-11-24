@@ -10,8 +10,8 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::json;
 use substrate_wire::{
-    ErrorClass, ErrorDetail, Event, Exec, OperationOutcome, OperationRecord, OperationState,
-    Workspace,
+    ErrorClass, ErrorDetail, Event, Exec, MAX_OPERATION_ID_CHARS, MAX_RESOURCE_ID_CHARS,
+    OperationOutcome, OperationRecord, OperationState, Workspace, is_operation_id_byte,
 };
 
 #[derive(Debug, Clone)]
@@ -678,12 +678,37 @@ pub(crate) fn existing_reservation(
         .map(|existing| existing.answer_to(&new.request_hash, new.grant_ref.as_deref())))
 }
 
+/// The ids of an operation the store accepts are within what its terminal headroom counts (ADR
+/// 0053 decision 8, [`StoreConfig::minimum_terminal_headroom_bytes`]): the operation id is at
+/// most [`MAX_OPERATION_ID_CHARS`] characters, each one the wire's operation-id rule admits
+/// ([`is_operation_id_byte`]), and the resource it names is at most [`MAX_RESOURCE_ID_CHARS`].
+fn accepted_ids_within_bounds(new: &NewOperation) -> Result<(), StoreError> {
+    if new.operation.len() > MAX_OPERATION_ID_CHARS
+        || !new.operation.bytes().all(is_operation_id_byte)
+    {
+        return Err(StoreError::OperationIdInvalid {
+            max: MAX_OPERATION_ID_CHARS,
+        });
+    }
+    if let Some(resource) = &new.resource {
+        let chars = resource.chars().count();
+        if chars > MAX_RESOURCE_ID_CHARS {
+            return Err(StoreError::OperationResourceTooLong {
+                chars,
+                max: MAX_RESOURCE_ID_CHARS,
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn insert_accepted_operation(
     connection: &Connection,
     retention: u64,
     config: StoreConfig,
     new: &NewOperation,
 ) -> Result<Event, StoreError> {
+    accepted_ids_within_bounds(new)?;
     connection.execute(
         "INSERT INTO operations (
             deployment, subject, operation, operation_kind, request_hash, state, accepted_at,

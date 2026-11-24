@@ -13,9 +13,9 @@ use substrate_wire::{
 
 use super::{exec, lease_at, operation_named, scope, seed_leased_workspace, workspace};
 use crate::{
-    HOST_PROCESS_RENEW_KIND, HOST_PROCESS_START_KIND, HostProcessLeaseRequest, HostProcessLimits,
-    HostProcessRenewal, HostProcessStartReservation, NewHostProcess, NewOperation, Reservation,
-    Scope, Store,
+    HOST_PROCESS_RENEW_KIND, HOST_PROCESS_START_KIND, HOST_PROCESS_STOP_KIND, HostProcessEndedBy,
+    HostProcessLeaseRequest, HostProcessLimits, HostProcessRenewal, HostProcessStartReservation,
+    HostProcessStopReservation, NewHostProcess, NewOperation, Reservation, Scope, Store,
 };
 
 /// The sequence number the stream of `scope` has reached.
@@ -303,6 +303,85 @@ fn an_unrecorded_lease_renewal_writes_operation_failed_and_the_resource_events()
     );
 }
 
+/// An instant `seconds` after the processes' base instant.
+fn process_at(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+    "2026-10-17T06:00:00Z"
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .expect("instant")
+        + chrono::Duration::seconds(seconds)
+}
+
+/// An operation of `kind` on process `id`, accepted at the base instant.
+fn process_operation(scope: &Scope, operation: &str, kind: &str, id: &str) -> NewOperation {
+    NewOperation {
+        scope: scope.clone(),
+        operation: operation.to_owned(),
+        operation_kind: kind.to_owned(),
+        request_hash: format!("sha256:{}", "a".repeat(64)),
+        accepted_at: process_at(0).to_rfc3339(),
+        capability_snapshot: None,
+        actor: "local:1000".to_owned(),
+        principal: None,
+        grant_ref: None,
+        platform_principal: None,
+        resource: Some(id.to_owned()),
+    }
+}
+
+/// Starts process `proc_events_<index>` under a TTL lease and returns its id.
+fn start_process(store: &Store, scope: &Scope, index: usize) -> String {
+    let id = format!("proc_events_{index}");
+    let new = NewHostProcess {
+        id: id.clone(),
+        owner_session: "s-events".to_owned(),
+        owner_name: format!("dev-{index}"),
+        reason: "serve the preview".to_owned(),
+        argv: vec!["npm".to_owned(), "run".to_owned(), "dev".to_owned()],
+        cwd: "/srv/app".to_owned(),
+        env_names: vec!["PATH".to_owned()],
+        env_digest: format!("sha256:{}", "b".repeat(64)),
+        lease: HostProcessLeaseRequest::Ttl { ttl_ms: 60_000 },
+        timeout_ms: None,
+        expires_at: None,
+    };
+    let operation = format!("op-events-start-{index}");
+    let started = store
+        .reserve_host_process_start(
+            &process_operation(scope, &operation, HOST_PROCESS_START_KIND, &id),
+            &new,
+            &HostProcessLimits::default(),
+        )
+        .expect("start");
+    assert!(matches!(started, HostProcessStartReservation::Accepted(_)));
+    id
+}
+
+/// Renews process `id` under operation `renew`, recording a result whose exit signal is
+/// `signal_chars` long, and returns the events the renewal wrote.
+fn renew_process(
+    store: &Store,
+    scope: &Scope,
+    renew: &str,
+    id: &str,
+    signal_chars: usize,
+) -> Vec<Event> {
+    reserve(
+        store,
+        &process_operation(scope, renew, HOST_PROCESS_RENEW_KIND, id),
+    );
+    let before = mark(store, scope);
+    let renewal = store
+        .renew_host_process_lease_with(scope, renew, process_at(10), 200, id, 60_000, |record| {
+            Ok(serde_json::json!({
+                "id": record.id,
+                "exit": { "signal": "S".repeat(signal_chars) },
+            }))
+        })
+        .expect("the renewal ends the row");
+    assert!(matches!(renewal, HostProcessRenewal::Renewed(_)));
+    since(store, scope, before)
+}
+
 /// A host-process renewal: a recorded one writes `operation.terminal` and
 /// `process.lease-renewed`; an unrecorded one writes `operation.failed` and the same
 /// `process.lease-renewed`.
@@ -310,25 +389,6 @@ fn an_unrecorded_lease_renewal_writes_operation_failed_and_the_resource_events()
 fn an_unrecorded_process_renewal_writes_operation_failed_and_the_process_events() {
     let store = Store::open(":memory:").expect("open store");
     let scope = scope("local:1000");
-    let at = |seconds: i64| {
-        "2026-10-17T06:00:00Z"
-            .parse::<chrono::DateTime<chrono::Utc>>()
-            .expect("instant")
-            + chrono::Duration::seconds(seconds)
-    };
-    let new_operation = |operation: &str, kind: &str, id: &str| NewOperation {
-        scope: scope.clone(),
-        operation: operation.to_owned(),
-        operation_kind: kind.to_owned(),
-        request_hash: format!("sha256:{}", "a".repeat(64)),
-        accepted_at: at(0).to_rfc3339(),
-        capability_snapshot: None,
-        actor: "local:1000".to_owned(),
-        principal: None,
-        grant_ref: None,
-        platform_principal: None,
-        resource: Some(id.to_owned()),
-    };
     let mut events = Vec::new();
     for (index, signal_chars) in [
         MAX_PROCESS_EXIT_SIGNAL_CHARS,
@@ -337,45 +397,10 @@ fn an_unrecorded_process_renewal_writes_operation_failed_and_the_process_events(
     .into_iter()
     .enumerate()
     {
-        let id = format!("proc_events_{index}");
-        let new = NewHostProcess {
-            id: id.clone(),
-            owner_session: "s-events".to_owned(),
-            owner_name: format!("dev-{index}"),
-            reason: "serve the preview".to_owned(),
-            argv: vec!["npm".to_owned(), "run".to_owned(), "dev".to_owned()],
-            cwd: "/srv/app".to_owned(),
-            env_names: vec!["PATH".to_owned()],
-            env_digest: format!("sha256:{}", "b".repeat(64)),
-            lease: HostProcessLeaseRequest::Ttl { ttl_ms: 60_000 },
-            timeout_ms: None,
-            expires_at: None,
-        };
-        let started = store
-            .reserve_host_process_start(
-                &new_operation(
-                    &format!("op-events-start-{index}"),
-                    HOST_PROCESS_START_KIND,
-                    &id,
-                ),
-                &new,
-                &HostProcessLimits::default(),
-            )
-            .expect("start");
-        assert!(matches!(started, HostProcessStartReservation::Accepted(_)));
+        let id = start_process(&store, &scope, index);
         let renew = format!("op-events-renew-{index}");
-        reserve(&store, &new_operation(&renew, HOST_PROCESS_RENEW_KIND, &id));
-        let before = mark(&store, &scope);
-        let renewal = store
-            .renew_host_process_lease_with(&scope, &renew, at(10), 200, &id, 60_000, |record| {
-                Ok(serde_json::json!({
-                    "id": record.id,
-                    "exit": { "signal": "S".repeat(signal_chars) },
-                }))
-            })
-            .expect("the renewal ends the row");
-        assert!(matches!(renewal, HostProcessRenewal::Renewed(_)));
-        events.push((renew, id, since(&store, &scope, before)));
+        let written = renew_process(&store, &scope, &renew, &id, signal_chars);
+        events.push((renew, id, written));
     }
     let (recorded, unrecorded) = (&events[0], &events[1]);
     assert!(
@@ -395,5 +420,73 @@ fn an_unrecorded_process_renewal_writes_operation_failed_and_the_process_events(
         &unrecorded.0,
         &unrecorded.1,
         &observations,
+    );
+}
+
+/// Each event as (transition, resource kind, resource).
+fn shape(events: &[Event]) -> Vec<(&str, &str, &str)> {
+    events
+        .iter()
+        .map(|event| {
+            (
+                event.transition.as_str(),
+                event.resource_kind.as_str(),
+                event.resource.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// A recorded host-process renewal writes `operation.terminal` for its operation and then
+/// `process.lease-renewed` for the process.
+#[test]
+fn a_recorded_process_renewal_writes_operation_terminal_then_process_lease_renewed() {
+    let store = Store::open(":memory:").expect("open store");
+    let scope = scope("local:1000");
+    let id = start_process(&store, &scope, 0);
+    let events = renew_process(&store, &scope, "op-events-renew-literal", &id, 1);
+    assert_eq!(
+        shape(&events),
+        [
+            ("operation.terminal", "operation", "op-events-renew-literal"),
+            ("process.lease-renewed", "process", id.as_str()),
+        ]
+    );
+}
+
+/// A recorded host-process stop's completion writes `operation.terminal` for its operation
+/// alone; the stop's acceptance writes `operation.accepted` before it.
+#[test]
+fn a_recorded_process_stop_writes_operation_accepted_then_operation_terminal() {
+    let store = Store::open(":memory:").expect("open store");
+    let scope = scope("local:1000");
+    let id = start_process(&store, &scope, 0);
+    let stop = process_operation(
+        &scope,
+        "op-events-stop-literal",
+        HOST_PROCESS_STOP_KIND,
+        &id,
+    );
+    let before = mark(&store, &scope);
+    let reserved = store
+        .reserve_host_process_stop(&stop, &id, HostProcessEndedBy::Stop)
+        .expect("stop");
+    assert!(matches!(reserved, HostProcessStopReservation::Accepted(_)));
+    store
+        .complete_success(
+            &scope,
+            &stop.operation,
+            "2026-10-17T06:00:20Z",
+            200,
+            Some(&id),
+            &id,
+        )
+        .expect("the stop ends the row");
+    assert_eq!(
+        shape(&since(&store, &scope, before)),
+        [
+            ("operation.accepted", "operation", "op-events-stop-literal"),
+            ("operation.terminal", "operation", "op-events-stop-literal"),
+        ]
     );
 }

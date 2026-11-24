@@ -17,8 +17,8 @@ use substrate_wire::{
     MAX_APERTURE_NAME_CHARS, MAX_APPLIED_CGROUP_CHARS, MAX_EXEC_REFUSAL_CODE_CHARS,
     MAX_EXEC_REFUSAL_MESSAGE_CHARS, MAX_EXEC_USAGE_CODE_CHARS, MAX_EXEC_USAGE_MESSAGE_CHARS,
     MAX_LEASE_ACTOR_CHARS, MAX_LEASE_PRINCIPAL_CHARS, MAX_OPERATION_ID_CHARS,
-    MAX_PROCESS_EXIT_SIGNAL_CHARS, MAX_READ_ONLY_FILE_PATH_BYTES, OPERATION_RESULT_UNRECORDED,
-    OperationOutcome,
+    MAX_PROCESS_EXIT_SIGNAL_CHARS, MAX_READ_ONLY_FILE_PATH_BYTES, MAX_RESOURCE_ID_CHARS,
+    OPERATION_RESULT_UNRECORDED, OperationOutcome,
 };
 
 use crate::events::{append_event, published_transition};
@@ -50,7 +50,8 @@ pub fn result_unrecorded(operation: &str) -> ErrorDetail {
 
 /// The bytes of the widest outcome a row ends with when its result is not recorded: the error
 /// [`result_unrecorded`] of an operation id of [`MAX_OPERATION_ID_CHARS`] characters, each one
-/// byte of JSON (`validate_operation_id` admits ASCII letters, digits, `_` and `-`).
+/// byte of JSON. The store accepts no operation whose id is longer or holds another character
+/// (`accepted_ids_within_bounds`, [`substrate_wire::is_operation_id_byte`]).
 #[must_use]
 pub fn widest_unrecorded_outcome_json_bytes() -> u64 {
     let outcome = OperationOutcome::Error {
@@ -63,15 +64,18 @@ pub fn widest_unrecorded_outcome_json_bytes() -> u64 {
 
 impl StoreConfig {
     /// The least [`StoreConfig::operation_terminal_headroom_bytes`] a store opens with: what the
-    /// row accounting adds to a row that ends with the widest unrecorded outcome, its longest
-    /// `terminal_at` ([`OPERATION_TERMINAL_AT_MAX_BYTES`]), the status charge and
-    /// [`widest_unrecorded_outcome_json_bytes`]. Under it a completion over the reserve could
-    /// not end its row, and the row would stay accepted (ADR 0053 decisions 1 and 8).
+    /// row accounting adds to a row that ends with the widest unrecorded outcome: its longest
+    /// `terminal_at` ([`OPERATION_TERMINAL_AT_MAX_BYTES`]), the status charge,
+    /// [`widest_unrecorded_outcome_json_bytes`] and the resource the terminal update names, at
+    /// most [`MAX_RESOURCE_ID_CHARS`] (a row may be accepted without one). 35 + 8 + 379 + 32 =
+    /// 454 bytes. Under it a completion over the reserve could not end its row, and the row
+    /// would stay accepted (ADR 0053 decisions 1 and 8).
     #[must_use]
     pub fn minimum_terminal_headroom_bytes() -> u64 {
         OPERATION_TERMINAL_AT_MAX_BYTES
             .saturating_add(OPERATION_RESPONSE_STATUS_BYTES)
             .saturating_add(widest_unrecorded_outcome_json_bytes())
+            .saturating_add(u64::try_from(MAX_RESOURCE_ID_CHARS).unwrap_or(u64::MAX))
     }
 
     /// Whether a success result is recorded as it is: its compact JSON is at most

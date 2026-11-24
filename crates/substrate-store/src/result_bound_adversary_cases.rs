@@ -6,9 +6,9 @@ use substrate_wire::{OperationOutcome, OperationState};
 use super::operation_named;
 use crate::{Reservation, Store, StoreConfig, StoreError};
 
-/// The bytes a terminal row adds around its outcome: the longest `terminal_at` and the status
-/// charge.
-const AROUND_AN_OUTCOME: u64 = 35 + 8;
+/// The bytes a terminal row adds around its outcome: the longest `terminal_at`, the status
+/// charge and the widest resource the update names.
+const AROUND_AN_OUTCOME: u64 = 35 + 8 + 32;
 /// The widest `operation.result-unrecorded` outcome, for the longest operation id (ADR 0053
 /// decision 8).
 const WIDEST_UNRECORDED_OUTCOME: u64 = 379;

@@ -169,9 +169,15 @@ what it means for a result type that has no member to cut.
    - the widest such outcome is 379 bytes, so it always fits; the store test
      `the_unrecorded_error_is_the_named_error_and_its_widest_outcome_is_379_bytes` holds that
      figure as an equality. A store does not open with a terminal headroom under what a row
-     needs to end with it, the longest `terminal_at`, the status charge and that outcome
-     (`StoreConfig::minimum_terminal_headroom_bytes`, 422 bytes), and names the refusal
-     `OperationTerminalHeadroomBelowUnrecorded`;
+     needs to end with it, the longest `terminal_at`, the status charge, that outcome and the
+     widest resource a terminal update names, `MAX_RESOURCE_ID_CHARS`
+     (`StoreConfig::minimum_terminal_headroom_bytes`, 35 + 8 + 379 + 32 = 454 bytes), and names
+     the refusal `OperationTerminalHeadroomBelowUnrecorded`. The store accepts an operation only
+     with an id of at most `MAX_OPERATION_ID_CHARS` characters the wire's operation-id rule
+     admits (`OperationIdInvalid`) and a resource of at most `MAX_RESOURCE_ID_CHARS`
+     (`OperationResourceTooLong`), the figures that outcome and that resource are counted at. A
+     terminal update that names a longer resource is a caller's value the reserve does not
+     bound: it rolls back and the row stays accepted;
    - the row writes the operation's `operation.failed` and the resource's own events exactly as
      the recorded completion of the same path writes them (`append_completion_events` in
      `crates/substrate-store/src/result_bound.rs`), so a reader that follows the resource's
