@@ -14,7 +14,7 @@ use super::super::store::{self, Unadmitted};
 use super::super::{finish_materialization, write_baseline};
 use super::review5_cases::{chained, stored};
 use super::store_failure_cases::repository_holding;
-use crate::git_baselines::{DEFAULT_BYTE_LIMIT, DEFAULT_LIMIT};
+use crate::git_baselines::{DEFAULT_BYTE_LIMIT, DEFAULT_INODE_LIMIT, DEFAULT_LIMIT};
 
 const BRANCH: &str = "refs/heads/provider-default";
 
@@ -111,6 +111,9 @@ enum Behind {
     Id(u8),
     /// What begins this many bytes before it.
     Bytes(u8),
+    /// What begins this many bytes before it, in an entry that inflates to no bytes: it
+    /// states neither of the two sizes an entry stored behind another begins with.
+    Sizeless(u8),
 }
 
 /// The id a hand-written pack gives the entry `number`.
@@ -134,8 +137,9 @@ fn counted(ids: &[[u8; 20]]) -> [u32; 256] {
 
 /// An object store whose one pack holds `entries` in this order, each an empty object, and
 /// the index of that pack: the entry at place `n` has the id of `n` repeated twenty times.
-/// The index is written here and names every entry at its offset, whatever the entry is
-/// stored behind.
+/// An entry stored behind another inflates to two bytes, the sizes of the empty object it is
+/// stored behind and of the empty object it makes. The index is written here and names every
+/// entry at its offset, whatever the entry is stored behind.
 fn object_store_of(entries: &[Behind]) -> tempfile::TempDir {
     let ids: Vec<[u8; 20]> = (0..entries.len())
         .map(|number| [u8::try_from(number).expect("fewer than 256 entries"); 20])
@@ -158,21 +162,34 @@ fn object_store_with(
     let mut offsets = Vec::new();
     for behind in entries {
         offsets.push(u32::try_from(pack.len()).expect("offset"));
-        match *behind {
+        // The two sizes of an entry stored behind another.
+        let sizes = [0, 0];
+        let inflated: &[u8] = match *behind {
             // A file object (type 3) of no bytes.
-            Behind::Nothing => pack.push(0x30),
-            // Stored behind the object of an id (type 7).
-            Behind::Id(number) => {
-                pack.push(0x70);
-                pack.extend([number; 20]);
+            Behind::Nothing => {
+                pack.push(0x30);
+                &[]
             }
-            // Stored behind what begins some bytes before it (type 6).
+            // Stored behind the object of an id (type 7), in two bytes.
+            Behind::Id(number) => {
+                pack.push(0x72);
+                pack.extend([number; 20]);
+                &sizes
+            }
+            // Stored behind what begins some bytes before it (type 6), in two bytes.
             Behind::Bytes(distance) => {
                 assert!(distance < 0x80, "one byte names the distance");
-                pack.extend([0x60, distance]);
+                pack.extend([0x62, distance]);
+                &sizes
             }
-        }
-        pack.extend(stored(&[]));
+            // The same in no bytes.
+            Behind::Sizeless(distance) => {
+                assert!(distance < 0x80, "one byte names the distance");
+                pack.extend([0x60, distance]);
+                &[]
+            }
+        };
+        pack.extend(stored(inflated));
     }
     pack.extend([0; 20]);
     let mut index = b"\xfftOc".to_vec();
@@ -198,18 +215,20 @@ fn object_store_with(
 /// An entry stored behind an object named by its id is followed to that object wherever the
 /// pack holds it, also behind a later entry, and one named by the bytes between them to the
 /// entry that begins there. Each entry is read once: the first entry's chain gives the second
-/// and the third theirs.
+/// and the third theirs. A whole read of an entry inflates and makes its own bytes and those
+/// of every entry it is stored behind: here two bytes of sizes for each entry stored behind
+/// another, which makes an empty object, and none for the empty object stored as it is.
 #[test]
 fn the_chain_of_an_entry_is_followed_by_id_and_by_distance_wherever_its_base_lies() {
-    // An empty object takes eleven bytes behind its header. The third entry has a header of
-    // one byte, so the fourth begins 12 bytes after it; the fourth has a header of two bytes,
-    // so the fifth begins 13 bytes after that.
+    // An empty object takes eleven bytes behind its header, and the two sizes thirteen. The
+    // third entry has a header of one byte, so the fourth begins 12 bytes after it; the
+    // fourth has a header of two bytes, so the fifth begins 15 bytes after that.
     let objects = object_store_of(&[
         Behind::Id(1),
         Behind::Id(2),
         Behind::Nothing,
         Behind::Bytes(12),
-        Behind::Bytes(13),
+        Behind::Bytes(15),
     ]);
 
     let chains = Chains::read(objects.path()).expect("a pack whose chains end");
@@ -219,6 +238,29 @@ fn the_chain_of_an_entry_is_followed_by_id_and_by_distance_wherever_its_base_lie
         [2, 1, 0, 1, 2]
     );
     assert_eq!(chains.behind(id(9)), 0, "an object no pack holds");
+    assert_eq!(
+        [0, 1, 2, 3, 4].map(|number| chains.whole(id(number))),
+        [4, 2, 0, 2, 4].map(Some)
+    );
+    assert_eq!(chains.whole(id(9)), None, "an object no pack holds");
+}
+
+/// An entry stored behind another begins with two sizes, of the object it is stored behind
+/// and of the object it makes. A pack with such an entry that inflates to no bytes is
+/// refused as one whose objects cannot be read, which a create names
+/// `workspace.git-checkout-failed`; the same pack with the two sizes in that entry is read.
+#[test]
+fn a_pack_with_an_entry_stored_behind_another_that_states_no_sizes_is_refused() {
+    let read = |entries: &[Behind]| {
+        let objects = object_store_of(entries);
+        Chains::read(objects.path()).map(|chains| chains.whole(id(1)))
+    };
+
+    assert_eq!(read(&[Behind::Nothing, Behind::Bytes(12)]), Ok(Some(2)));
+    assert_eq!(
+        read(&[Behind::Nothing, Behind::Sizeless(12)]),
+        Err(Unadmitted::Object)
+    );
 }
 
 /// A pack with an entry stored behind what is no entry of it, or with entries stored behind
@@ -291,14 +333,14 @@ fn an_index_whose_table_counts_its_ids_in_ascending_order_is_read() {
         [0x00, 0x0f, 0x10, 0x3f, 0x40, 0xfe, 0xff].map(|first_byte: usize| table[first_byte]),
         [1, 1, 3, 3, 4, 4, 5]
     );
-    // An empty object takes eleven bytes behind its header: one byte for an entry the pack
-    // stores as it is, two for one stored behind another.
+    // An empty object takes eleven bytes behind its header of one byte, and an entry stored
+    // behind another thirteen behind its header of two.
     let entries = [
         Behind::Nothing,
         Behind::Bytes(12),
-        Behind::Bytes(13),
-        Behind::Bytes(13),
-        Behind::Bytes(13),
+        Behind::Bytes(15),
+        Behind::Bytes(15),
+        Behind::Bytes(15),
     ];
     let objects = object_store_with(&entries, &ids, &table);
 
@@ -355,5 +397,57 @@ fn an_index_whose_table_does_not_count_its_ids_or_whose_ids_do_not_ascend_is_ref
         read(&twice, &counted(&ids)),
         Err(Unadmitted::Object),
         "an id twice"
+    );
+}
+
+/// Whole reads (design 21, § *The baseline store*, *The work and the memory of a create
+/// follow its byte limit*): reading an object whole inflates every entry its pack stores it
+/// behind and makes the object of each. Those bytes, for the commit, each tree and each file
+/// object, once for each place the baseline names the object, are at most 64 times the byte
+/// limit.
+///
+/// The baseline here has sixteen files, each stored behind 1,000 entries: a first object of
+/// eight bytes, then entries of eleven bytes of instructions that each make an object of
+/// eight. One whole read of a file is those 8 bytes and 1,000 times 19. The commit and the
+/// tree are in no pack, so a whole read of each inflates the bytes it states. Under the
+/// smallest byte limit whose 64-fold holds that sum the baseline is served: checked out, and
+/// its store written. Under a limit one byte smaller it is refused
+/// `workspace.git-storage-limit` by both steps, before anything is checked out or written.
+/// Every object here states fewer bytes than either limit, and the files together 128.
+#[test]
+fn the_whole_reads_of_a_baseline_come_to_at_most_64_times_the_byte_limit() {
+    const LINKS: u64 = 999;
+    const FILES: u64 = 16;
+    assert_eq!(store::WHOLE_READ_BYTES_PER_BYTE, 64);
+    let (workspace, commit) = repository_holding(|repository| chained(repository, LINKS, FILES));
+    let repository = Repository::open(workspace.path()).expect("repository");
+    let stated = |id: Oid| {
+        let objects = repository.odb().expect("object store");
+        let (bytes, _) = objects.read_header(id).expect("header");
+        u64::try_from(bytes).expect("bytes")
+    };
+    let tree = repository.find_commit(commit).expect("commit").tree_id();
+    let whole = stated(commit) + stated(tree) + FILES * (8 + (LINKS + 1) * (11 + 8));
+    let limit = |max_bytes: u64| StorageLimit {
+        max_bytes,
+        max_inodes: DEFAULT_INODE_LIMIT,
+    };
+    let least = whole.div_ceil(64);
+    assert!(stated(commit).max(stated(tree)) < least - 1);
+
+    assert_eq!(
+        store::check_baseline(&repository, commit, limit(least))
+            .map(|checked| checked.whole_read_bytes),
+        Ok(whole)
+    );
+    assert_eq!(create(LINKS, FILES, limit(least)), (["served"; 2], 16, 2));
+
+    assert_eq!(
+        store::check_baseline(&repository, commit, limit(least - 1)),
+        Err(Unadmitted::Limit)
+    );
+    assert_eq!(
+        create(LINKS, FILES, limit(least - 1)),
+        (["workspace.git-storage-limit"; 2], 0, 0)
     );
 }

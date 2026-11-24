@@ -25,7 +25,7 @@ scope:
   path: vendor
 - confidence: inferred
   path: xtask/src
-revision: 5
+revision: 7
 ---
 # Story: the work and the memory of a Git create follow its limits
 
@@ -86,6 +86,35 @@ states (peak resident memory; for the table of entries peak address space). Each
 under 5 s. The host crate's existing cases of a create pass against the copy unchanged, and an
 ordinary create of 1,000 files with 50 commits of history passes.
 
+After the release that carries this change: the bounds the copy adds are reported to the
+project that publishes `gix-pack`, with the offer of the patch, on the operator's go (operator
+decision of 2026-11-24, relayed by the operator's session: the report is sent only after the
+change is merged and released). The story is not closed before that report is sent or the
+operator drops it.
+
 ## Where the requirement comes from
 
 `review-result:baseline-store-security-pass-6`. Stakeholder: the operator.
+
+## Done, on the branch `fix/git-create-work-and-memory-limits` (2026-11-24)
+
+Three commits: `3a2504977` (the five counts), `3c91673bb` (one indexing thread, the count of
+what arrives, the memory as a figure) and `a7c306e6a` (two items for each entry, the order of
+one id). Three reviews, each with its cases in the tree:
+`review-result:git-create-limits-security`, `review-result:git-create-limits-adversary` and
+`review-result:git-create-limits-confirming`.
+
+- An entry of the table counts 128, 160 or 288 bytes. At 2 GiB: 16,777,216 entries stored as
+  they are, 13,421,772 in a line, 7,456,540 that each name another id.
+- Host `test(/^git/)`: 173 of 173 in 2.98 s, none over 5 s. The `xtask` package: 726 of 726.
+- Held by cases: each count at its byte; the same answer in eight attempts; 4 times the byte
+  limit for what an indexing keeps beside its table (six cases); the growth for an entry
+  between full tables under 16 MiB and 32 MiB (three cases); the index bytes of entries of one
+  id.
+- Stated in design 21 as measured, with no case: a table of up to 125,000 entries; what an
+  indexing takes once (up to 88 KiB over the count of a table); a pack that fills the table and
+  makes the byte limit wait at once; what is resident under the allocator's defaults.
+- Through the driver, the counts of the objects that wait and of the id pass need project
+  quotas and are proved at the fetch step.
+
+Open after the merge: the release that carries this change, which the acceptance names.

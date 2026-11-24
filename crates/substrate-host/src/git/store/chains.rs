@@ -9,12 +9,21 @@
 //!
 //! The pass first reads the ids of the pack's index once, in their order, and its fan-out
 //! table ([`searched_alike`]): after that the Git library and the pass find the same entry by
-//! an id. It then reads the header of each entry at the offset the index names, and nothing
-//! of the object. It follows an entry's chain only as far as the first entry it already
-//! knows, so it reads each entry once: its work is one step for each entry of the pack, with
-//! one search among the offsets, or in the index for a base named by its id, for each entry
-//! stored behind another. It keeps ten bytes for each entry: its offset and how many entries
-//! it is stored behind.
+//! an id. It then reads the header of each entry at the offset the index names, and of an
+//! entry stored behind another the first bytes, at most [`SIZES_BYTES`] of what it inflates
+//! to: they state the bytes of the object the entry makes. It reads nothing else of an
+//! object. It follows an entry's chain only as far as the first entry it already knows, so it
+//! reads each entry once: its work is one step for each entry of the pack, with one search
+//! among the offsets, or in the index for a base named by its id, for each entry stored
+//! behind another. It keeps eighteen bytes for each entry: its offset, how many entries it is
+//! stored behind, and the bytes a whole read of it inflates and makes.
+//!
+//! **Whole reads** (design 21, § *The baseline store*, *The work and the memory of a create
+//! follow its byte limit*). Reading an object whole inflates every entry the object is stored
+//! behind and makes the object of each. For one entry those are the bytes its header states
+//! it inflates to and, for an entry stored behind another, the bytes of the object it makes.
+//! The pass keeps for each entry the sum of its own and of those of every entry it is stored
+//! behind ([`Chains::whole`]).
 
 use std::os::unix::fs::FileExt as _;
 use std::path::Path;
@@ -37,6 +46,14 @@ const FOLLOWED: u16 = u16::MAX - 1;
 
 /// The first bytes an id can have: an index has one number of its fan-out table for each.
 const FIRST_BYTES: usize = 256;
+
+/// The bytes one size at the start of an entry stored behind another may take: each byte
+/// holds seven bits of a number of 64.
+const SIZE_BYTES: usize = 10;
+
+/// The bytes the pass inflates of an entry stored behind another: the two sizes it begins
+/// with, of the object it is stored behind and of the object it makes.
+const SIZES_BYTES: usize = 2 * SIZE_BYTES;
 
 /// Whether the Git library and this pass find the same entry by every id of `index`, the
 /// index in the file `path`. Both search an id among the ids of the index, between the two
@@ -88,6 +105,9 @@ struct Pack {
     offsets: Vec<u64>,
     /// How many entries the entry at each of those offsets is stored behind.
     behind: Vec<u16>,
+    /// The bytes a whole read of the entry at each of those offsets inflates and makes: its
+    /// own and those of every entry it is stored behind.
+    whole: Vec<u64>,
 }
 
 impl Pack {
@@ -100,6 +120,9 @@ impl Pack {
         searched_alike(&index, path)?;
         let offsets = index.sorted_offsets();
         let mut behind = vec![UNREAD; offsets.len()];
+        // Of an entry the pass has read and whose chain it is following: its own bytes.
+        let mut whole = vec![0_u64; offsets.len()];
+        let mut inflate = gix::zlib::Inflate::default();
         // The entries of the chain the pass is following, the one it started at first. An
         // entry stored behind as many entries as the list holds is over the bound, so the
         // list is never longer than the bound.
@@ -109,22 +132,25 @@ impl Pack {
                 continue;
             }
             let mut entry = first;
-            // How many entries the last entry of the list is stored behind.
-            let mut steps = loop {
+            // How many entries the last entry of the list is stored behind, and the bytes a
+            // whole read of the entry it is stored behind inflates and makes.
+            let (mut steps, mut bytes) = loop {
                 if chain.len() > usize::from(MAX_CHAIN) {
                     return Err(Unadmitted::Limit);
                 }
                 chain.push(entry);
                 behind[entry] = FOLLOWED;
-                let Some(base) = base_of(&data, &index, &offsets, entry)? else {
-                    break 0;
+                let read = Read::of(&data, &index, &offsets, entry, &mut inflate)?;
+                whole[entry] = read.bytes;
+                let Some(base) = read.base else {
+                    break (0, 0);
                 };
                 match behind[base] {
                     UNREAD => entry = base,
                     // Entries stored behind each other in a circle: no object can be read
                     // from them.
                     FOLLOWED => return Err(Unadmitted::Object),
-                    known => break known + 1,
+                    known => break (known + 1, whole[base]),
                 }
             };
             while let Some(entry) = chain.pop() {
@@ -133,52 +159,129 @@ impl Pack {
                 }
                 behind[entry] = steps;
                 steps += 1;
+                bytes = bytes.saturating_add(whole[entry]);
+                whole[entry] = bytes;
             }
         }
         Ok(Self {
             index,
             offsets,
             behind,
+            whole,
         })
+    }
+
+    /// The place of the object `id` among the entries of this pack; none when the pack does
+    /// not hold it.
+    fn entry(&self, id: &gix::hash::oid) -> Option<usize> {
+        let offset = self.index.pack_offset_at_index(self.index.lookup(id)?);
+        self.offsets.binary_search(&offset).ok()
     }
 
     /// How many entries the object `id` is stored behind in this pack; none when the pack
     /// does not hold it.
     fn behind(&self, id: &gix::hash::oid) -> Option<u16> {
-        let offset = self.index.pack_offset_at_index(self.index.lookup(id)?);
-        let entry = self.offsets.binary_search(&offset).ok()?;
-        Some(self.behind[entry])
+        Some(self.behind[self.entry(id)?])
+    }
+
+    /// The bytes a whole read of the object `id` inflates and makes in this pack; none when
+    /// the pack does not hold it.
+    fn whole(&self, id: &gix::hash::oid) -> Option<u64> {
+        Some(self.whole[self.entry(id)?])
     }
 }
 
-/// The entry the entry `entry` is stored behind, as its place among `offsets`; none for an
-/// entry the pack stores as it is.
+/// What the pass reads of one entry.
+struct Read {
+    /// The entry it is stored behind, as its place among the offsets; none for an entry the
+    /// pack stores as it is.
+    base: Option<usize>,
+    /// The bytes a whole read inflates of this entry and, for an entry stored behind
+    /// another, makes of it.
+    bytes: u64,
+}
+
+impl Read {
+    /// Reads the entry `entry` of `offsets`: its header, and of an entry stored behind
+    /// another the two sizes it begins with ([`made`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Unadmitted::Object`] for an entry whose header cannot be read; for one stored behind
+    /// what is no entry of this pack, an offset that is not an earlier entry's or an id the
+    /// index does not hold; and for one stored behind another whose first bytes do not state
+    /// the two sizes.
+    fn of(
+        data: &pack::data::File,
+        index: &pack::index::File,
+        offsets: &[u64],
+        entry: usize,
+        inflate: &mut gix::zlib::Inflate,
+    ) -> Result<Self, Unadmitted> {
+        let offset = offsets[entry];
+        let read = data.entry(offset).map_err(|_| Unadmitted::Object)?;
+        let base = match read.header {
+            Header::OfsDelta { base_distance } => offset
+                .checked_sub(base_distance)
+                .filter(|base| *base < offset),
+            Header::RefDelta { base_id } => index
+                .lookup(base_id)
+                .map(|held| index.pack_offset_at_index(held)),
+            Header::Commit | Header::Tree | Header::Blob | Header::Tag => {
+                return Ok(Self {
+                    base: None,
+                    bytes: read.decompressed_size,
+                });
+            }
+        };
+        let base = base
+            .and_then(|base| offsets.binary_search(&base).ok())
+            .ok_or(Unadmitted::Object)?;
+        let end = u64::try_from(data.pack_end()).map_err(|_| Unadmitted::Object)?;
+        let stored = data
+            .entry_slice(read.data_offset..end)
+            .ok_or(Unadmitted::Object)?;
+        Ok(Self {
+            base: Some(base),
+            bytes: read
+                .decompressed_size
+                .saturating_add(made(inflate, stored)?),
+        })
+    }
+}
+
+/// The bytes of the object an entry stored behind another makes. `stored` begins with what
+/// the pack stores of the entry behind its header. An entry stored behind another inflates to
+/// two sizes, of the object it is stored behind and of the object it makes, and then the
+/// instructions that make it. No more than [`SIZES_BYTES`] are inflated, whatever the entry
+/// states.
 ///
 /// # Errors
 ///
-/// [`Unadmitted::Object`] for an entry whose header cannot be read, and for one stored behind
-/// what is no entry of this pack: an offset that is not an earlier entry's, or an id the
-/// index does not hold.
-fn base_of(
-    data: &pack::data::File,
-    index: &pack::index::File,
-    offsets: &[u64],
-    entry: usize,
-) -> Result<Option<usize>, Unadmitted> {
-    let offset = offsets[entry];
-    let header = data.entry(offset).map_err(|_| Unadmitted::Object)?.header;
-    let base = match header {
-        Header::OfsDelta { base_distance } => offset
-            .checked_sub(base_distance)
-            .filter(|base| *base < offset),
-        Header::RefDelta { base_id } => index
-            .lookup(base_id)
-            .map(|held| index.pack_offset_at_index(held)),
-        Header::Commit | Header::Tree | Header::Blob | Header::Tag => return Ok(None),
-    };
-    base.and_then(|base| offsets.binary_search(&base).ok())
-        .map(Some)
-        .ok_or(Unadmitted::Object)
+/// [`Unadmitted::Object`] for what does not inflate, and for what does not begin with two
+/// sizes of at most [`SIZE_BYTES`] each: no object can be read from such an entry.
+fn made(inflate: &mut gix::zlib::Inflate, stored: &[u8]) -> Result<u64, Unadmitted> {
+    let mut first = [0_u8; SIZES_BYTES];
+    inflate.reset();
+    let (_, _, inflated) = inflate
+        .once(stored, &mut first)
+        .map_err(|_| Unadmitted::Object)?;
+    let mut bytes = first[..inflated].iter();
+    let _stored_behind = size(&mut bytes)?;
+    size(&mut bytes)
+}
+
+/// One size as an entry stored behind another states it: seven bits in each byte, the lowest
+/// first, and a byte with its highest bit clear last.
+fn size(bytes: &mut std::slice::Iter<'_, u8>) -> Result<u64, Unadmitted> {
+    let mut size = 0_u64;
+    for (place, byte) in bytes.take(SIZE_BYTES).enumerate() {
+        size |= u64::from(byte & 0x7f) << (7 * place);
+        if byte & 0x80 == 0 {
+            return Ok(size);
+        }
+    }
+    Err(Unadmitted::Object)
 }
 
 /// How the packs of one object store store their objects behind each other.
@@ -195,7 +298,7 @@ impl Chains {
     /// [`Unadmitted::Limit`] for a pack with an entry stored behind more than [`MAX_CHAIN`]
     /// entries, found before that chain is followed further. [`Unadmitted::Object`] for a
     /// pack or an index that cannot be read as one, for an index of [`searched_alike`]'s
-    /// errors, and for an entry of [`base_of`]'s errors or one stored behind itself.
+    /// errors, and for an entry of [`Read::of`]'s errors or one stored behind itself.
     pub(in crate::git) fn read(objects: &Path) -> Result<Self, Unadmitted> {
         let listing = match std::fs::read_dir(objects.join("pack")) {
             Ok(listing) => listing,
@@ -225,5 +328,13 @@ impl Chains {
             .filter_map(|pack| pack.behind(id))
             .max()
             .map_or(0, u64::from)
+    }
+
+    /// The bytes a whole read of the object `id` inflates and makes: of the entry a pack
+    /// holds it as and of every entry that one is stored behind, the most of any pack that
+    /// holds it. None for an object no pack holds.
+    pub(in crate::git) fn whole(&self, id: Oid) -> Option<u64> {
+        let id = gix::hash::oid::try_from_bytes(id.as_bytes()).ok()?;
+        self.packs.iter().filter_map(|pack| pack.whole(id)).max()
     }
 }

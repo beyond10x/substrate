@@ -52,6 +52,14 @@ pub(super) const TREE_BYTES_PER_PATH: u64 = 283;
 /// writes by default, 50, is within it with one object for every path the limit admits.
 pub(super) const CHAIN_STEPS_PER_PATH: u64 = 64;
 
+/// How many times the byte limit the whole reads of a baseline may come to (design 21,
+/// § *The baseline store*, *The work and the memory of a create follow its byte limit*).
+/// Reading an object whole inflates every entry its pack stores it behind and makes the
+/// object of each ([`Chains::whole`]); an object no pack holds inflates to the bytes it
+/// states. Those bytes count for the commit, for each tree and for each file and link
+/// object, once for each place the baseline names it.
+pub(super) const WHOLE_READ_BYTES_PER_BYTE: u64 = 64;
+
 /// Why a baseline was not admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Unadmitted {
@@ -65,7 +73,8 @@ pub(super) enum Unadmitted {
     /// trees take more bytes than that limit or the tree's own entries admit; or a pack
     /// stores an object behind more than [`chains::MAX_CHAIN`] entries, or the objects of the
     /// baseline together behind more than [`CHAIN_STEPS_PER_PATH`] for each path the inode
-    /// limit admits.
+    /// limit admits; or reading the objects of the baseline whole inflates and makes more
+    /// than [`WHOLE_READ_BYTES_PER_BYTE`] times the byte limit.
     Limit,
     /// The baseline names a path no checkout can make as one entry: its directories nest
     /// deeper than [`MAX_BASELINE_DEPTH`], a name is longer than [`MAX_NAME_BYTES`] or holds a
@@ -219,6 +228,9 @@ struct Shape {
     /// The bytes its files and links state together: each object once for each name the tree
     /// or a directory beneath it holds it by.
     bytes: u64,
+    /// The bytes whole reads of it inflate and make: of the tree itself, and of each file,
+    /// link and directory once for each name the tree or a directory beneath it holds it by.
+    whole: u64,
 }
 
 impl Shape {
@@ -227,6 +239,7 @@ impl Shape {
     fn hold(&mut self, name: u64, held: Shape) {
         self.beneath = self.beneath.max(held.beneath + 1);
         self.bytes = self.bytes.saturating_add(held.bytes);
+        self.whole = self.whole.saturating_add(held.whole);
         self.paths = self.paths.saturating_add(held.paths);
         self.path_bytes = self
             .path_bytes
@@ -239,8 +252,9 @@ impl Shape {
 
     /// Whether the tree is within the bounds of `limit`: no path longer than
     /// [`MAX_PATH_BYTES`], no more paths than the inode limit, the paths together no more than
-    /// [`PATH_BYTES_PER_PATH`] for each path that limit admits, and the files together no more
-    /// than the byte limit.
+    /// [`PATH_BYTES_PER_PATH`] for each path that limit admits, the files together no more
+    /// than the byte limit, and the whole reads together no more than
+    /// [`WHOLE_READ_BYTES_PER_BYTE`] times that limit.
     fn within(&self, limit: StorageLimit) -> Result<(), Unadmitted> {
         if self.longest > MAX_PATH_BYTES {
             return Err(Unadmitted::Path);
@@ -248,11 +262,26 @@ impl Shape {
         if self.paths > limit.max_inodes
             || self.path_bytes > PATH_BYTES_PER_PATH.saturating_mul(limit.max_inodes)
             || self.bytes > limit.max_bytes
+            || self.whole > whole_read_bound(limit)
         {
             return Err(Unadmitted::Limit);
         }
         Ok(())
     }
+}
+
+/// The bytes the whole reads of a baseline may inflate and make together under `limit`.
+fn whole_read_bound(limit: StorageLimit) -> u64 {
+    WHOLE_READ_BYTES_PER_BYTE.saturating_mul(limit.max_bytes)
+}
+
+/// What the header of an object states, and what reading the object whole takes.
+#[derive(Clone, Copy)]
+struct Stated {
+    /// The bytes of the object.
+    bytes: u64,
+    /// The bytes a whole read of it inflates and makes ([`WHOLE_READ_BYTES_PER_BYTE`]).
+    whole: u64,
 }
 
 /// What a check that passed read.
@@ -272,6 +301,9 @@ pub(super) struct Checked {
     /// The bytes the files and links of the baseline state together, each once for each place
     /// the baseline names it.
     pub(super) bytes: u64,
+    /// The bytes that reading the commit, the trees and the files and links whole inflates
+    /// and makes together, each once for each place the baseline names it.
+    pub(super) whole_read_bytes: u64,
 }
 
 /// What a check had read and kept when it ended, whether it passed or refused.
@@ -294,8 +326,11 @@ struct Check<'a> {
     limit: StorageLimit,
     /// The entries the objects the check has read the header of are stored behind together.
     chain_steps: u64,
-    /// The bytes every file and link object the check has read the header of states.
-    files: HashMap<Oid, u64>,
+    /// The bytes that reading whole the objects the check has read the header of inflates
+    /// and makes, each object once.
+    whole_read: u64,
+    /// What the header of every file and link object the check has read it of states.
+    files: HashMap<Oid, Stated>,
     /// Every tree the check has left, with what it holds.
     left: HashMap<Oid, Shape>,
     /// The directories the check is in, the root first.
@@ -314,7 +349,13 @@ impl Check<'_> {
     /// [`CHAIN_STEPS_PER_PATH`] for each path the inode limit admits: before the Git library
     /// walks this object's chain. The check reads the header of each object once, so what the
     /// Git library walks for all of them is within that bound.
-    fn stated(&mut self, id: Oid, kind: ObjectType) -> Result<u64, Unadmitted> {
+    ///
+    /// The bytes a whole read of the object inflates and makes are counted once its header
+    /// is read, and the check ends when those of the objects it has read the header of are
+    /// more than [`WHOLE_READ_BYTES_PER_BYTE`] times the byte limit: before this object, or
+    /// any after it, is read whole. Each object counts once here, so the sum is no more
+    /// than the baseline's, which counts it once for each place.
+    fn stated(&mut self, id: Oid, kind: ObjectType) -> Result<Stated, Unadmitted> {
         self.chain_steps = self.chain_steps.saturating_add(self.chains.behind(id));
         if self.chain_steps > CHAIN_STEPS_PER_PATH.saturating_mul(self.limit.max_inodes) {
             return Err(Unadmitted::Limit);
@@ -337,18 +378,24 @@ impl Check<'_> {
         if size > bound {
             return Err(Unadmitted::Limit);
         }
-        Ok(size)
+        let whole = self.chains.whole(id).unwrap_or(size);
+        self.whole_read = self.whole_read.saturating_add(whole);
+        if self.whole_read > whole_read_bound(self.limit) {
+            return Err(Unadmitted::Limit);
+        }
+        Ok(Stated { bytes: size, whole })
     }
 
     /// Reads the tree `id`, which a directory holds by a name of `name` bytes, and answers it
     /// as a directory the check is in, with its own entries counted and its directories yet
     /// to enter.
     ///
-    /// The tree's header is read first ([`Check::stated`]). Once the tree is read, its entries
-    /// are added to those of the trees read before, and the check ends when they are more than
-    /// the inode limit: before anything of this tree is kept and before another tree is read.
-    /// So the ids the check keeps of directories it has not entered are never more than the
-    /// inode limit.
+    /// The tree's header is read first ([`Check::stated`]), which also counts what reading
+    /// the tree whole takes: a check over that bound ends there, before the read. Once the
+    /// tree is read, its entries are added to those of the trees read before, and the check
+    /// ends when they are more than the inode limit: before anything of this tree is kept and
+    /// before another tree is read. So the ids the check keeps of directories it has not
+    /// entered are never more than the inode limit.
     fn enter(&mut self, id: Oid, name: u64) -> Result<Directory, Unadmitted> {
         let stated = self.stated(id, ObjectType::Tree)?;
         let tree = self
@@ -368,6 +415,7 @@ impl Check<'_> {
             path_bytes: 0,
             longest: 0,
             bytes: 0,
+            whole: stated.whole,
         };
         for entry in &tree {
             let name = entry.name_bytes();
@@ -387,13 +435,14 @@ impl Check<'_> {
                         self.files.insert(entry.id(), stated);
                         stated
                     };
-                    shape.bytes = shape.bytes.saturating_add(file);
+                    shape.bytes = shape.bytes.saturating_add(file.bytes);
+                    shape.whole = shape.whole.saturating_add(file.whole);
                 }
                 _ => {}
             }
         }
         // No name is longer than the bound here, so an entry takes at most this many bytes.
-        if stated > TREE_BYTES_PER_PATH.saturating_mul(entries) {
+        if stated.bytes > TREE_BYTES_PER_PATH.saturating_mul(entries) {
             return Err(Unadmitted::Limit);
         }
         Ok(Directory {
@@ -441,6 +490,36 @@ impl Check<'_> {
         // The root's tree was left last.
         self.left.get(&root).copied().ok_or(Unadmitted::Object)
     }
+
+    /// Checks the baseline of `commit`: its header, the commit, and every tree it reaches.
+    fn baseline(&mut self, commit: Oid) -> Result<Checked, Unadmitted> {
+        let stated =
+            self.stated(commit, ObjectType::Commit)
+                .map_err(|unadmitted| match unadmitted {
+                    Unadmitted::Object => Unadmitted::Commit,
+                    other => other,
+                })?;
+        let tree = self
+            .repository
+            .find_commit(commit)
+            .map_err(|_| Unadmitted::Commit)?
+            .tree_id();
+        let shape = self.walk(tree)?;
+        // The root's tree is within the bound; the commit is read whole once beside it.
+        let whole_read_bytes = stated.whole.saturating_add(shape.whole);
+        if whole_read_bytes > whole_read_bound(self.limit) {
+            return Err(Unadmitted::Limit);
+        }
+        Ok(Checked {
+            chain_steps: self.chain_steps,
+            trees: self.trees,
+            paths: shape.paths,
+            path_bytes: shape.path_bytes,
+            longest: shape.longest,
+            bytes: shape.bytes,
+            whole_read_bytes,
+        })
+    }
 }
 
 /// Checks the baseline of `commit` in the repository `repository`, a staging tree the driver
@@ -470,6 +549,13 @@ impl Check<'_> {
 ///   once, than the inode limit: it ends before it reads another.
 /// - **Bytes.** The files and links of the baseline state at most `limit.max_bytes` together,
 ///   each once for each place the baseline names it.
+/// - **Whole reads.** Reading the commit, each tree and each file and link object whole
+///   inflates and makes at most [`WHOLE_READ_BYTES_PER_BYTE`] times `limit.max_bytes`
+///   together, each once for each place the baseline names it: for an object in a pack the
+///   bytes of the entry and of every entry it is stored behind ([`Chains::whole`]), else the
+///   bytes it states. The check counts an object when it has read its header, so it ends
+///   before the read of the commit or of a tree that would take it over, and it reads no
+///   file or link object whole.
 ///
 /// The check reads each tree once, however often the baseline names it: what it found in a
 /// tree it has left it keeps by the tree's id, relative to the tree. It reads the header of
@@ -524,32 +610,14 @@ fn check_in(
         chains: &chains,
         limit,
         chain_steps: 0,
+        whole_read: 0,
         files: HashMap::new(),
         left: HashMap::new(),
         inside: Vec::new(),
         trees: 0,
         entries: 0,
     };
-    let checked = check
-        .stated(commit, ObjectType::Commit)
-        .map_err(|unadmitted| match unadmitted {
-            Unadmitted::Object => Unadmitted::Commit,
-            other => other,
-        })
-        .and_then(|_| {
-            repository
-                .find_commit(commit)
-                .map_err(|_| Unadmitted::Commit)
-        })
-        .and_then(|commit| check.walk(commit.tree_id()))
-        .map(|shape| Checked {
-            chain_steps: check.chain_steps,
-            trees: check.trees,
-            paths: shape.paths,
-            path_bytes: shape.path_bytes,
-            longest: shape.longest,
-            bytes: shape.bytes,
-        });
+    let checked = check.baseline(commit);
     let kept = Kept {
         trees: check.trees,
         entries: check.entries,
