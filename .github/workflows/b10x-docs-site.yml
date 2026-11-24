@@ -30,7 +30,7 @@ jobs:
       pages: write
       id-token: write
       actions: read
-    uses: beyond10x/website/.github/workflows/project-site.yml@fb4024ef7846729e5456591b9070db3d48c87e64
+    uses: beyond10x/website/.github/workflows/project-site.yml@c870d2c8fa1d62c15c066a9bc382015091575734
     with:
       repository: substrate
       control_sha: ${{ github.event.workflow_run.head_sha || github.sha }}
