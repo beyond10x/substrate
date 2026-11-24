@@ -1,6 +1,5 @@
 #![cfg(unix)]
 
-use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -179,12 +178,9 @@ fn daemon_binary() -> PathBuf {
     path
 }
 
-fn unused_address() -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral listener");
-    let address = listener.local_addr().expect("ephemeral address");
-    drop(listener);
-    address
-}
+#[path = "../../../test-support/ports.rs"]
+mod ports;
+use ports::unused_address;
 
 struct Fixture {
     root: TempDir,

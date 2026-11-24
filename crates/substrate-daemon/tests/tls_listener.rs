@@ -88,7 +88,7 @@ fn atomic_replace(path: &Path, bytes: &[u8], mode: u32) {
     std::fs::rename(temporary, path).expect("replace identity file");
 }
 
-#[path = "support/ports.rs"]
+#[path = "../../../test-support/ports.rs"]
 mod ports;
 #[path = "../../../test-support/readiness.rs"]
 mod readiness;

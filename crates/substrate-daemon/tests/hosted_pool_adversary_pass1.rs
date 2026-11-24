@@ -51,7 +51,7 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("file mode");
 }
 
-#[path = "support/ports.rs"]
+#[path = "../../../test-support/ports.rs"]
 mod ports;
 #[path = "../../../test-support/readiness.rs"]
 mod readiness;

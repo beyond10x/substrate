@@ -36,7 +36,7 @@ use substrate_store::Store;
 use tempfile::TempDir;
 use tower::ServiceExt as _;
 
-#[path = "support/ports.rs"]
+#[path = "../../../test-support/ports.rs"]
 mod ports;
 use ports::unused_address;
 
