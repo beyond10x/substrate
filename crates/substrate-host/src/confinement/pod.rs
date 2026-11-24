@@ -1591,7 +1591,9 @@ fn ended(pod: &Value, force: bool) -> Option<(RunExit, Option<u64>)> {
 
 /// The limit that ended a `pod` run (design 36 D7), from the last Pod the API showed and the
 /// adapter's own stop, in D4's order: memory, where the container's `terminated.reason` is
-/// `OOMKilled` and its exit is a signal or a code above 128; wall time, where the Pod's
+/// `OOMKilled` and its exit is a signal or a code above 128, whoever stopped the run, so a main
+/// process that itself exits with a code above 128 after a child's OOM kill names `Memory`, and one
+/// that exits with 128 or less names none; wall time, where the Pod's
 /// `status.reason` is `DeadlineExceeded` or the stop was the monitor's past the deadline. CPU is a
 /// rate and ends no run, and the run has no aperture and no live output. An embedder's stop and an
 /// exit code alone name nothing.

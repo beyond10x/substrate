@@ -41,8 +41,12 @@ pub struct ExecObservation {
 /// exited and before the cgroup was removed (design 36 D9). Host-internal: no wire member
 /// carries it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EndOfRun {
     /// `memory.events` `oom_kill`. `None` where the counter could not be read: absent, never
     /// zero (invariant 3).
     pub memory_oom_kills: Option<u64>,
+    /// The live output queue stalled after the driver saw the child's exit: the record still
+    /// carries `session.output-backpressure`, and the stall ended nothing (design 36 D5).
+    pub output_stall_after_exit: bool,
 }

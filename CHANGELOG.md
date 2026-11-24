@@ -12,14 +12,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `substrate_host::confinement::RunLimit` and `RunObservation.limit` (design 36, story 1): an
   ended or unknown run names the one limit the adapter imposed to end it, `memory`, `cpu_time`,
   `wall_time`, `egress_bytes` or `output_stall`, and a running run and a run that ended on its
-  own or on the embedder's signal name none. Where several were reached, the first of that order
-  is named. No adapter derives a limit from an exit code or a signal alone: `linux` maps the
-  driver's refusal code, `systemd` its own CPU and deadline watch and the run cgroup's OOM count,
-  `oci` the container's OOM flag beside a signal, its deadline and its stall, `pod` the
-  container's `OOMKilled` beside a signal and its deadline, and `local` and `macos` their stall
-  only. Held by unit cases of each adapter's mapping and by lane cases that end a run on each
-  bound (`ESS confinement linux limit …`, `ESS confinement systemd … limit…`, which
-  `scripts/delegated-lane.sh` requires by name, and the `oci` and `pod` lanes).
+  own or on the embedder's signal name none. Where several were reached, the first in the order
+  output stall, egress bytes, memory, CPU time, wall time is named. No adapter derives a limit
+  from an exit code or a signal alone: `linux` maps the driver's refusal code, `systemd` its own
+  CPU and deadline watch and the run cgroup's OOM count, `oci` the container's OOM flag beside a
+  signal (a status of 129 to 192 is read as one), its deadline and its stall, `pod` the
+  container's `OOMKilled` beside a signal or an exit code over 128 and its deadline, and `local`
+  and `macos` their stall only. Held by unit cases of each adapter's mapping and by lane cases
+  that end a run on each bound (`ESS confinement linux limit …`, `ESS confinement systemd …
+  limit…`, which `scripts/delegated-lane.sh` requires by name, and the `oci` and `pod` lanes).
+- A run ended by a bound is told from one that ended by itself:
+  - `systemd` around `local` records a CPU or deadline limit, and kills, only while the run's
+    leader has not exited and the embedder has not killed the run, so a run whose leader exited
+    first names no limit, also when a bound passes while the adapter still drains the run's tree.
+  - `output_stall` is named only where the stall came before the leader's exit (`local`, `macos`,
+    `systemd`, `oci`) or before the host driver saw the child's exit (`linux`). A program that
+    exits on its own and whose unread output then stalls names no limit; `output_stalled` and
+    `OutputEvent::Stalled` still report the stall, and the driver's record still carries
+    `session.output-backpressure`. The driver marks such a stall in
+    `EndOfRun::output_stall_after_exit`.
+  - Held by unit cases on a cgroup of files and a held runtime thread, and by
+    `a_local_run_that_exits_0_before_its_unread_output_stalls_names_no_limit`.
 - `RunObservation.memory_oom_kills` is reported by `linux` and `systemd`: the run cgroup's OOM
   kill count, read before the cgroup is removed, and absent when it cannot be read. The host
   driver's `ExecObservation` carries it in the new `end_of_run` member (`EndOfRun`), read for
@@ -37,6 +50,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   wildcard arm (`_ => …`); a `match` that has one, an `if let` or `matches!` on one variant, and
   building a variant compile unchanged. A struct
   expression of the host driver's `ExecObservation` names `end_of_run`.
+- The host driver records an exec's end by these rules where two ends are ready at once: a child
+  that exited before its deadline is never recorded timed out (the exit is taken first, and the
+  `oci` adapter takes its runtime client's return first in the same way), and a run past both its
+  CPU budget and its deadline is recorded `exec.cpu-limit`, not `exec.timeout`. Held by two cases
+  of `crates/substrate-host/src/process.rs` that make both ends ready before the supervision is
+  polled again.
 
 ### Fixed
 

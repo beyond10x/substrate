@@ -640,11 +640,23 @@ mod imp {
                 limit: if state == RunState::Running {
                     None
                 } else {
-                    limit_named_by(exec.refusal.as_ref().map(|refusal| refusal.code.as_str()))
+                    ended_limit(
+                        exec.refusal.as_ref().map(|refusal| refusal.code.as_str()),
+                        observed.end_of_run,
+                    )
                 },
                 memory_oom_kills: observed.end_of_run.and_then(|end| end.memory_oom_kills),
             }
         }
+    }
+
+    /// The limit that ended an exec: the one its refusal code names, except a stall the driver
+    /// flagged after it saw the child's exit, which ended nothing (design 36 D5) and whose
+    /// refusal stays on the record.
+    fn ended_limit(code: Option<&str>, end: Option<crate::EndOfRun>) -> Option<RunLimit> {
+        limit_named_by(code).filter(|limit| {
+            *limit != RunLimit::OutputStall || !end.is_some_and(|end| end.output_stall_after_exit)
+        })
     }
 
     /// The limit the host driver named on an ended exec, by its refusal code (design 36 D6). The
@@ -905,6 +917,27 @@ mod imp {
             ] {
                 assert_eq!(limit_named_by(code), limit, "{code:?}");
             }
+        }
+
+        /// Design 36 D5: the stall the driver records as `session.output-backpressure` names
+        /// `OutputStall` only where it came before the driver saw the child's exit; any other
+        /// limit is named whatever the stall's mark says.
+        #[test]
+        fn a_stall_after_the_childs_exit_names_no_limit_and_one_before_names_the_stall() {
+            let end = |output_stall_after_exit| {
+                Some(crate::EndOfRun {
+                    memory_oom_kills: Some(0),
+                    output_stall_after_exit,
+                })
+            };
+            let stall = Some(substrate_wire::SESSION_OUTPUT_BACKPRESSURE);
+            assert_eq!(ended_limit(stall, end(false)), Some(RunLimit::OutputStall));
+            assert_eq!(ended_limit(stall, None), Some(RunLimit::OutputStall));
+            assert_eq!(ended_limit(stall, end(true)), None);
+            assert_eq!(
+                ended_limit(Some("exec.timeout"), end(true)),
+                Some(RunLimit::WallTime)
+            );
         }
 
         fn scoped() -> ConfinementProfile {

@@ -70,14 +70,39 @@ pub(crate) fn not_live() -> ConfinementError {
 pub(crate) fn group_kill(pid: i32, reaped: Arc<parking_lot::Mutex<bool>>) -> Kill {
     Box::new(move || {
         let reaped = reaped.lock();
-        if !*reaped {
-            // SAFETY: `kill` with a negative pid signals one process group; no memory is
-            // involved. The leader is unreaped while the lock says so, so the id is this run's.
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-            }
+        if *reaped {
+            return false;
         }
+        let running = !exited_unreaped(pid);
+        // SAFETY: `kill` with a negative pid signals one process group; no memory is
+        // involved. The leader is unreaped while the lock says so, so the id is this run's.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+        running
     })
+}
+
+/// Whether the child `pid`, which its owner has not reaped, has exited: `waitid` with `WNOHANG`
+/// and `WNOWAIT`, which leaves it waitable by its owner. `false` while it runs, and for a `pid`
+/// that is not a child of this process.
+pub(crate) fn exited_unreaped(pid: i32) -> bool {
+    let Ok(id) = libc::id_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: `siginfo_t` is plain data, and `waitid` writes into the one we own.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: as above; `WNOWAIT` leaves the child waitable, `WNOHANG` returns at once and leaves
+    // `si_signo` zero when no child of that id has exited.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            id,
+            &raw mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    result == 0 && info.si_signo == libc::SIGCHLD
 }
 
 /// `session.timeout-invalid`: a read that may not wait at all.
@@ -193,8 +218,10 @@ struct Reader {
     progress: Progress,
 }
 
-/// How an adapter ends a run whose delivery stalled, as its `signal(Kill)` does.
-pub(crate) type Kill = Box<dyn Fn() + Send + Sync>;
+/// How an adapter ends a run whose delivery stalled, as its `signal(Kill)` does. It answers
+/// whether the run's leader had not exited yet when it was called: only then did the stall end
+/// the run (design 36 D5).
+pub(crate) type Kill = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// One run's live queue under the shared drain.
 pub(crate) struct LiveOutput {
@@ -203,6 +230,10 @@ pub(crate) struct LiveOutput {
     closed: watch::Sender<bool>,
     /// Set only by the stall, before `closed`.
     stalled: AtomicBool,
+    /// The stall's outcome: `true` when its kill found the run's leader not yet exited, so the
+    /// stall ended the run. Held by the stall from before it closes the queue until the kill
+    /// returned. A stall of output a program left behind when it exited does not end it.
+    ended_run: parking_lot::Mutex<bool>,
     /// Held across one `read_output` call (design 32 § 3, *One reader at a time*).
     reader: tokio::sync::Mutex<Reader>,
     kill: Kill,
@@ -217,6 +248,7 @@ impl LiveOutput {
         let live = Arc::new(Self {
             closed: watch::Sender::new(false),
             stalled: AtomicBool::new(false),
+            ended_run: parking_lot::Mutex::new(false),
             reader: tokio::sync::Mutex::new(Reader {
                 receiver,
                 progress: Progress::default(),
@@ -247,9 +279,21 @@ impl LiveOutput {
         self.stalled.load(Ordering::Acquire)
     }
 
+    /// Whether the stall ended the run: it came while the run's leader had not exited. Read under
+    /// the lock the stall holds across its kill, so an observation composed while the kill runs,
+    /// or after, reads its outcome.
+    pub(crate) fn ended_run(&self) -> bool {
+        *self.ended_run.lock()
+    }
+
     /// The stall: unless an imposed end closed the queue first, set the flag, close the queue
-    /// and end the run.
+    /// and end the run, all under the `ended_run` lock, which records the kill's outcome.
+    ///
+    /// Lock order: `ended_run`, then what the kill takes (`local` and `macos`: the run's `reaped`
+    /// lock; `systemd`: `Leader::exited`). No reader of `ended_run` holds one of those: each
+    /// composes its observation, or its end, without them.
     fn stall(&self) {
+        let mut ended_run = self.ended_run.lock();
         let stalled = &self.stalled;
         let first = self.closed.send_if_modified(|closed| {
             if *closed {
@@ -260,7 +304,7 @@ impl LiveOutput {
             true
         });
         if first {
-            (self.kill)();
+            *ended_run = (self.kill)();
         }
     }
 
@@ -324,10 +368,12 @@ pub(crate) fn open(
     }
 }
 
-/// `OutputStall` for a run whose live delivery stopped at the stall deadline, which ended the run
-/// (design 36 D5); `None` for a run that did not stall and for one without live output.
+/// `OutputStall` for a run whose live delivery stopped at the stall deadline while its leader had
+/// not exited, so the stall ended the run (design 36 D1, D5); `None` for a run that did not stall,
+/// for one whose leader had exited when it stalled, and for one without live output. The stall
+/// itself is still reported (`stalled`, [`OutputEvent::Stalled`]).
 pub(crate) fn stall_limit(live: Option<&Arc<LiveOutput>>) -> Option<super::RunLimit> {
-    live.is_some_and(|live| live.stalled())
+    live.is_some_and(|live| live.ended_run())
         .then_some(super::RunLimit::OutputStall)
 }
 
@@ -382,6 +428,7 @@ mod tests {
         (
             Box::new(move || {
                 counted.fetch_add(1, Ordering::AcqRel);
+                true
             }),
             kills,
         )
@@ -458,6 +505,58 @@ mod tests {
         );
         assert_eq!(live.read(LONG, record).await.expect("read"), None);
         assert_eq!(live.read(LONG, record).await.expect("read"), None);
+    }
+
+    // Design 36 D5: a stall whose kill finds the run's leader exited is reported as a stall
+    // (`stalled`, `Stalled`) and names no limit; one whose kill finds it running names
+    // `OutputStall`.
+    #[tokio::test(start_paused = true)]
+    async fn a_stall_names_the_output_stall_limit_only_where_the_leader_had_not_exited() {
+        for running in [true, false] {
+            let (live, [stdout, _stderr]) = LiveOutput::new(1, Box::new(move || running));
+            stdout.forward(b"one").await;
+            stdout.forward(b"two").await;
+            assert!(live.stalled(), "running {running}");
+            assert_eq!(
+                stall_limit(Some(&live)),
+                running.then_some(super::super::RunLimit::OutputStall),
+                "running {running}"
+            );
+            let record = || [(false, 6), (false, 0)];
+            assert!(matches!(
+                live.read(LONG, record).await.expect("read"),
+                Some(OutputEvent::Chunk { .. })
+            ));
+            assert_eq!(
+                live.read(LONG, record).await.expect("read"),
+                Some(OutputEvent::Stalled)
+            );
+        }
+    }
+
+    // Design 36 D5: an observation composed while the stall's kill runs reads the stall's
+    // outcome. The kill stand-in tells a second thread it was called and returns `true` 50 ms
+    // later; that thread's `stall_limit`, asked meanwhile, is `OutputStall`.
+    #[tokio::test(start_paused = true)]
+    async fn an_observation_composed_while_the_stalls_kill_runs_names_the_stall() {
+        let (called, kill_called) = std::sync::mpsc::channel();
+        let kill: Kill = Box::new(move || {
+            let _ = called.send(());
+            std::thread::sleep(Duration::from_millis(50));
+            true
+        });
+        let (live, [stdout, _stderr]) = LiveOutput::new(1, kill);
+        stdout.forward(b"one").await;
+        let shared = Arc::clone(&live);
+        let observer = std::thread::spawn(move || {
+            kill_called.recv().expect("the kill was called");
+            stall_limit(Some(&shared))
+        });
+        stdout.forward(b"two").await;
+        assert_eq!(
+            observer.join().expect("joined"),
+            Some(super::super::RunLimit::OutputStall)
+        );
     }
 
     // § 3 *Delivery stops*: an imposed end closes the queue; a pending forward returns at once,

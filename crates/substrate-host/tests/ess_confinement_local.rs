@@ -1250,6 +1250,45 @@ async fn local_live_output_never_read_stalls_and_ends_the_run() {
     assert!(!streams[0].is_empty(), "the one queued chunk was delivered");
 }
 
+/// Design 36 D1, D5: a limit is a bound the adapter imposed to end the run, and an output stall
+/// names one only where it came before the leader's exit. This run's live output is never read;
+/// its second chunk waits for the one queue slot, and the program writes its third into the pipe
+/// and exits 0 about 0.2 s after its start, before that chunk has waited out the 1 s stall
+/// deadline. The run ended on its own, by its own exit 0, so it names no limit; the stall is still
+/// reported.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_run_that_exits_0_before_its_unread_output_stalls_names_no_limit() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let adapter = local();
+    let admitted = adapter
+        .admit(&support::live(&recorded(workspace.path()), 1))
+        .expect("a live profile is admitted");
+    let began = std::time::Instant::now();
+    let run = adapter
+        .start(
+            &admitted,
+            &support::sh("printf one; sleep 0.1; printf two; sleep 0.1; printf three; exit 0"),
+        )
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    println!("the run was observed ended after {:?}", began.elapsed());
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    assert_eq!(
+        ended.exit.as_ref().and_then(|exit| exit.code),
+        Some(0),
+        "the program ran to its own exit 0: {ended:?}"
+    );
+    assert_eq!(
+        ended.limit, None,
+        "a run that exited 0 on its own names a limit: {ended:?}"
+    );
+    assert!(adapter.output_stalled(&run), "the stall is reported");
+}
+
 // T6.
 #[tokio::test(flavor = "multi_thread")]
 async fn local_live_output_past_the_bound_names_it_after_the_last_chunk() {

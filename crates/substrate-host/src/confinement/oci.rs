@@ -57,6 +57,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -776,9 +777,11 @@ impl ContainerState {
     }
 }
 
-/// The limit that ended an `oci` run (design 36 D7), in D4's order: the stall of its live output;
-/// memory, where the runtime's state holds `OOMKilled` and the run's main process ended by a
-/// signal, so a container whose child was killed and whose main process exited by itself names
+/// The limit that ended an `oci` run (design 36 D7), in D4's order: the stall of its live output,
+/// where it came before the runtime client returned; memory, where the runtime's state holds
+/// `OOMKilled` and the run's main process ended by a signal, as [`ContainerState::exit`] reads it:
+/// an exit status of 129 to 192 is read as a signal, so a main process that itself exits with such
+/// a status after a child's OOM kill names `Memory`, and one that exits with 128 or less names
 /// none; the monitor's own deadline. `--cpus` is a rate and ends no run, and no aperture exists,
 /// so neither CPU time nor egress bytes is named. A signal alone names nothing.
 fn oci_limit(stalled: bool, deadline: bool, state: Option<&ContainerState>) -> Option<RunLimit> {
@@ -1248,15 +1251,20 @@ impl OciAdapter {
             admitted.profile().output_retention,
             limit,
         )));
+        // Set by the monitor once the runtime client returned, which it does when the container's
+        // main process exited: a stall after that did not end the run (design 36 D5).
+        let client_ended = Arc::new(AtomicBool::new(false));
         // A stall ends the run as `signal(Kill)` does: `KILL` to the container, retried.
         let (live, [stdout_feed, stderr_feed]) =
             live::open(admitted.profile().output_delivery, || {
                 let program = program.clone();
                 let id = id.clone();
+                let client_ended = Arc::clone(&client_ended);
                 Box::new(move || {
                     let program = program.clone();
                     let id = id.clone();
                     tokio::spawn(async move { kill_retried(&program, &id).await });
+                    !client_ended.load(Ordering::Acquire)
                 })
             });
         let readers = [
@@ -1289,6 +1297,7 @@ impl OciAdapter {
             phase,
             writer.as_ref().map(Arc::downgrade),
             live.clone(),
+            client_ended,
         ));
         self.runs.lock().push(Arc::new(OciRun {
             id: id.clone(),
@@ -1465,13 +1474,20 @@ async fn monitor(
     // the client's pipe and the container reads end of file.
     writer: Option<std::sync::Weak<StdinWriter>>,
     live: Option<Arc<LiveOutput>>,
+    client_ended: Arc<AtomicBool>,
 ) {
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
+    // A client that returned before the deadline wins where both are ready at once: a run that
+    // ended by itself is never recorded as ended by its deadline (design 36 D7).
     let mut ended = tokio::select! {
+        biased;
         status = child.wait() => Some(status),
         () = &mut deadline => None,
     };
+    if ended.is_some() {
+        client_ended.store(true, Ordering::Release);
+    }
     // Recorded before the kill below: the run's end is then the deadline's (design 36 D7).
     let deadline_fired = ended.is_none();
     if ended.is_none() {
@@ -1507,7 +1523,8 @@ async fn monitor(
     if let Some(writer) = writer.as_ref().and_then(std::sync::Weak::upgrade) {
         writer.end().await;
     }
-    let stalled = live.as_ref().is_some_and(|live| live.stalled());
+    // The stall ended the run only where it came before the client returned (design 36 D5).
+    let stalled = live::stall_limit(live.as_ref()).is_some();
     let limit = oci_limit(stalled, deadline_fired, state.as_ref());
     let _ = phase.send(match (ended, state) {
         (Some(Ok(_)), Some(state)) if removed && !state.running => state

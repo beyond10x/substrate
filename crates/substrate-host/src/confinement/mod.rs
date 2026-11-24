@@ -801,7 +801,8 @@ pub enum RunLimit {
     WallTime,
     /// The byte ceiling of an egress aperture the run used.
     EgressBytes,
-    /// The run's live output waited unread past the stall deadline.
+    /// The run's live output waited unread past the stall deadline while the run's leader had
+    /// not exited (design 36 D5).
     OutputStall,
 }
 
