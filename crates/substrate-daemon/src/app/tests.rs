@@ -2092,7 +2092,7 @@ fn every_resource_id_the_system_authority_mints_is_within_the_store_bound() {
     ] {
         assert!(
             id.len() <= substrate_wire::MAX_RESOURCE_ID_CHARS,
-            "{kind}: {id} is {} bytes",
+            "a {kind} id of {} bytes",
             id.len()
         );
     }
