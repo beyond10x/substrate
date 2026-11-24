@@ -874,6 +874,9 @@ impl OciAdapter {
             limit,
             // The runtime's state holds a flag, not a count (design 36 D8).
             memory_oom_kills: None,
+            // It passes `--pids-limit`; the state it reads holds no count of refused creations
+            // (design 36 D14).
+            process_limit_hits: None,
         }
     }
 

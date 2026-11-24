@@ -400,6 +400,52 @@ async fn a_linux_run_over_its_memory_bound_writes_one_run_ended_naming_memory_un
     println!("{NAME}: executed");
 }
 
+// Design 36 § 8, story 2, the story's acceptance: a run with a process bound of 4 that tries to
+// start 16 processes counts the creations the bound refused, above zero, on `observe` while it
+// still runs and on its ended observation, and its one `run_ended` carries the same count. The
+// hit ends nothing: the run's timeout ends it, and that is the limit it names (D12, D13).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_over_its_process_bound_counts_the_refused_creations() {
+    const NAME: &str = "ESS confinement linux process limit hits";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::over_the_process_bound(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            workspace: Some(workspace.clone()),
+            process_bounds: Some(ProcessBounds {
+                processes: support::PROCESS_BOUND,
+                ..BOUNDED
+            }),
+            ..ConfinementProfile::default()
+        },
+        &workspace,
+    )
+    .await;
+}
+
+// Design 36 § 8, story 2: a run under its process bound counts zero refused creations on its
+// ended observation and on its `run_ended`: the driver read the counter (D9, D11).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_under_its_process_bound_counts_zero_refused_creations() {
+    const NAME: &str = "ESS confinement linux process limit hits";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::under_the_process_bound(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            workspace: Some(workspace),
+            process_bounds: Some(BOUNDED),
+            ..ConfinementProfile::default()
+        },
+    )
+    .await;
+}
+
 /// Admits `profile`, runs `script` under `/bin/sh -c` and returns its stdout once it ended.
 async fn run_script(
     adapter: &Arc<dyn ConfinementAdapter>,

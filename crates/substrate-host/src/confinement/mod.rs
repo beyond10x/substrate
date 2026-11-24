@@ -415,6 +415,10 @@ pub enum AuditRecord {
         /// Absent where the adapter does not observe it, as on the observation.
         #[serde(skip_serializing_if = "Option::is_none")]
         memory_oom_kills: Option<u64>,
+        /// Process creations the run's process bound refused; absent where the adapter does not
+        /// read it, as on the observation (design 36 § 3).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        process_limit_hits: Option<u64>,
     },
 }
 
@@ -682,6 +686,7 @@ impl PendingEnd {
             exit,
             limit,
             memory_oom_kills,
+            process_limit_hits,
             ..
         } = observation;
         AuditRecord::RunEnded {
@@ -698,6 +703,7 @@ impl PendingEnd {
             exit,
             limit,
             memory_oom_kills,
+            process_limit_hits,
         }
     }
 
@@ -713,6 +719,7 @@ impl PendingEnd {
             exit: None,
             limit: None,
             memory_oom_kills: None,
+            process_limit_hits: None,
         }
     }
 }
@@ -1021,6 +1028,13 @@ pub struct RunObservation {
     /// Processes of the run the kernel's OOM killer ended, once the run has ended; `None` where
     /// the adapter does not observe it (absent, never zero: invariant 3).
     pub memory_oom_kills: Option<u64>,
+    /// Process creations the run's process bound refused: the `max` counter of `pids.events` in
+    /// the run's cgroup (design 36 § 3). A running run carries the count at the moment of the
+    /// observation, an ended one the count once its leader exited. `Some(0)`: read, and nothing
+    /// was refused. `None` where the adapter does not read it or the read failed (invariant 3):
+    /// `linux` and `systemd` read it, `oci`, `pod`, `local` and `macos` do not (design 36 D14).
+    /// A hit ends no run and sets no `limit`.
+    pub process_limit_hits: Option<u64>,
 }
 
 impl RunObservation {
@@ -1037,6 +1051,7 @@ impl RunObservation {
             exit: None,
             limit: None,
             memory_oom_kills: None,
+            process_limit_hits: None,
         }
     }
 }
@@ -1287,6 +1302,7 @@ mod tests {
         assert_eq!(observation.exit, None);
         assert_eq!(observation.limit, None);
         assert_eq!(observation.memory_oom_kills, None);
+        assert_eq!(observation.process_limit_hits, None);
     }
 
     /// Design 36 D4: of the limits true at a run's end the first of output stall, egress bytes,
@@ -1344,6 +1360,7 @@ mod tests {
             exit: None,
             limit: None,
             memory_oom_kills: None,
+            process_limit_hits: None,
         };
         assert_eq!(
             serde_json::to_value(&bare).expect("serializes"),
@@ -1365,6 +1382,7 @@ mod tests {
             }),
             limit: Some(RunLimit::Memory),
             memory_oom_kills: Some(1),
+            process_limit_hits: Some(0),
         };
         assert_eq!(
             serde_json::to_value(&full).expect("serializes"),
@@ -1372,6 +1390,7 @@ mod tests {
                 "event": "run_ended", "run": "ex_1", "profile": "p1", "adapter": "systemd",
                 "inner": "linux", "declared_insecure": REASON, "state": "ended",
                 "exit": {"signal": 9}, "limit": "memory", "memory_oom_kills": 1,
+                "process_limit_hits": 0,
             })
         );
         assert_eq!(
@@ -1446,6 +1465,7 @@ mod tests {
             signal: None,
         });
         observation.limit = Some(RunLimit::OutputStall);
+        observation.process_limit_hits = Some(3);
         end.write(observation);
         let record = tokio::time::timeout(std::time::Duration::from_secs(5), ended.recv())
             .await
@@ -1456,7 +1476,7 @@ mod tests {
             serde_json::json!({
                 "event": "run_ended", "run": "local-1-1", "profile": admitted.id().as_str(),
                 "adapter": "local", "declared_insecure": REASON, "state": "ended",
-                "exit": {"code": 0}, "limit": "output_stall",
+                "exit": {"code": 0}, "limit": "output_stall", "process_limit_hits": 3,
             })
         );
         assert!(ended.try_recv().is_err(), "a second run_ended");

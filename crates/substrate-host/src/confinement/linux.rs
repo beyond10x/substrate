@@ -693,6 +693,8 @@ mod imp {
                     )
                 },
                 memory_oom_kills: observed.end_of_run.and_then(|end| end.memory_oom_kills),
+                // The ended count; `observe` reads a running run's own (design 36 D13).
+                process_limit_hits: observed.end_of_run.and_then(|end| end.process_limit_hits),
             }
         }
     }
@@ -869,8 +871,12 @@ mod imp {
 
         async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
             let observed = self.driver.observe_exec(run.as_str()).await?;
-            let observation = Self::observation(run, &observed);
-            if observation.state != RunState::Running {
+            let mut observation = Self::observation(run, &observed);
+            if observation.state == RunState::Running {
+                // Read at this moment, here and not in `wait`'s loop (design 36 D13).
+                observation.process_limit_hits =
+                    self.driver.running_process_limit_hits(run.as_str());
+            } else {
                 self.ended(run).await;
             }
             Ok(observation)
@@ -980,6 +986,7 @@ mod imp {
         fn end(after_exit: bool, oom_kills: u64, egress: bool) -> crate::EndOfRun {
             crate::EndOfRun {
                 memory_oom_kills: Some(oom_kills),
+                process_limit_hits: Some(0),
                 output_stall_after_exit: after_exit,
                 egress_ceiling_reached: egress,
             }

@@ -31,10 +31,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use substrate_host::confinement::{
-    self, AdapterFacts, AdapterRequest, Command, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, ContractFamily, DeclaredWritableRoot, FAMILY_ORDER, FAMILY_UNSERVED, Fact,
-    HostConfig, Network, ReadOnlyRoot, RunState, WritableHostRoot, linux::LinuxRequest,
-    local::LocalRequest,
+    self, AdapterFacts, AdapterRequest, AuditRecord, AuditSink, Command, ConfinementAdapter,
+    ConfinementError, ConfinementProfile, ContractFamily, DeclaredWritableRoot, FAMILY_ORDER,
+    FAMILY_UNSERVED, Fact, HostConfig, Network, ProcessBounds, ReadOnlyRoot, RunLimit, RunState,
+    WritableHostRoot, linux::LinuxRequest, local::LocalRequest,
 };
 
 /// Every need this file states. Pinned, so a need lost from the list fails here.
@@ -490,4 +490,130 @@ async fn delegated_lane_runs_every_need_on_an_adapter_not_declared_insecure() {
          declared insecure",
         outcome.executed.len()
     );
+}
+
+/// The governed run's script: the denied program fails, `xargs` then tries to keep 16 `sleep`
+/// processes running, one per line of `sixteen`, and the shell replaces itself with a `sleep`
+/// that outlives the run's timeout.
+const GOVERNED: &str = "/workspace/bin/denied 2>/dev/null; echo \"denied $?\"; \
+                        xargs -P 16 -n 1 sleep < sixteen 2>/dev/null; echo tried; exec sleep 30";
+
+/// The host's copy of a base tool, where this distribution keeps it; the run sees it at the
+/// same path.
+fn host_tool(name: &str) -> PathBuf {
+    ["/usr/bin", "/bin"]
+        .iter()
+        .map(|directory| Path::new(directory).join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("no {name} in /usr/bin or /bin"))
+}
+
+/// The directories that hold `name` on the host, where its path is and where it leads, as list
+/// entries: an entry admits a program by where the file itself lies.
+fn tool_directories(name: &str) -> Vec<String> {
+    let path = host_tool(name);
+    let target = std::fs::canonicalize(&path).expect("the tool resolves");
+    [path, target]
+        .iter()
+        .map(|file| text(file.parent().expect("a directory")))
+        .collect()
+}
+
+/// Design 36 § 8, story 2: the acceptance test of `epic:runs-are-governed-and-limit-hits-are-
+/// events`, through public items only. One profile names an allow-list, a deny-list and process
+/// bounds, and runs on an adapter whose facts serve it. The run sees its denied program fail
+/// with status 126, has process creations refused by its bound, and is then ended by its
+/// timeout: its observation and its `run_ended` record each name the wall-time limit and a
+/// count of refused creations above zero. Absent, never reported as passed, without the
+/// delegated root or without the executable gate `SUBSTRATE_EXEC_GATE` names.
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_lane_a_governed_run_names_its_timeout_and_counts_its_refused_creations() {
+    const NAME: &str = "consumer surface governed run";
+    let cgroup_root = match delegated() {
+        Ok(root) => root,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let Some(gate) = std::env::var_os("SUBSTRATE_EXEC_GATE").map(PathBuf::from) else {
+        println!("{NAME}: ABSENT (SUBSTRATE_EXEC_GATE is unset)");
+        return;
+    };
+    let fixture = Fixture::new();
+    let mut config = HostConfig::minimum(&fixture.workspaces);
+    config.exec_gate = Some(gate);
+    let adapter = confinement::open(AdapterRequest::Linux(Box::new(
+        LinuxRequest::new(config).with_cgroup_root(Some(cgroup_root)),
+    )))
+    .expect("linux opens on the delegated root with the executable gate");
+    let workspace = &fixture.loom;
+    std::fs::create_dir_all(workspace.join("bin")).expect("bin");
+    std::fs::copy(host_tool("true"), workspace.join("bin").join("denied"))
+        .expect("the denied program");
+    std::fs::write(workspace.join("sixteen"), "0.05\n".repeat(16)).expect("sixteen");
+    let mut entries: Vec<String> = ["sh", "xargs", "sleep"]
+        .into_iter()
+        .flat_map(tool_directories)
+        .collect();
+    entries.sort();
+    entries.dedup();
+    entries.push("/workspace/bin".to_owned());
+    let (sender, mut ended_records) = tokio::sync::mpsc::unbounded_channel();
+    let sink = AuditSink::new(move |record: &AuditRecord| {
+        let value = serde_json::to_value(record).expect("an audit record serializes");
+        if value["event"] == "run_ended" {
+            let _ = sender.send(value);
+        }
+    });
+    let profile = ConfinementProfile {
+        workspace: Some(workspace.clone()),
+        exec_subpaths: entries,
+        exec_denied_paths: vec!["/workspace/bin/denied".to_owned()],
+        process_bounds: Some(ProcessBounds {
+            timeout_ms: 2_000,
+            processes: 4,
+            memory_bytes: 64 << 20,
+            cpu_millis: 2_000,
+        }),
+        audit: Some(sink),
+        ..ConfinementProfile::default()
+    };
+    assert!(
+        serves(&profile, adapter.facts()),
+        "{NAME}: the adapter's facts do not serve the governed profile: {:?}",
+        adapter.facts()
+    );
+    let admitted = adapter.admit(&profile).expect("admitted");
+    let command = Command {
+        argv: vec![text(&host_tool("sh")), "-c".into(), GOVERNED.into()],
+        env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+    };
+    let began = std::time::Instant::now();
+    let run = adapter.start(&admitted, &command).await.expect("started");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(20), adapter.wait(&run))
+        .await
+        .expect("the run ends at its timeout")
+        .expect("waited");
+    println!("{NAME}: the run ended after {:?}", began.elapsed());
+    let output = adapter.output(&run).await.expect("output");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "denied 126\ntried\n",
+        "{NAME}: stderr {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(ended.state, RunState::Ended, "{NAME}: {ended:?}");
+    assert_eq!(ended.limit, Some(RunLimit::WallTime), "{NAME}: {ended:?}");
+    let hits = ended
+        .process_limit_hits
+        .filter(|hits| *hits > 0)
+        .unwrap_or_else(|| panic!("{NAME}: no refused creation counted: {ended:?}"));
+    let record = tokio::time::timeout(std::time::Duration::from_secs(5), ended_records.recv())
+        .await
+        .expect("run_ended reaches the sink")
+        .expect("the sink lives");
+    assert_eq!(record["limit"], "wall_time", "{NAME}: {record}");
+    assert_eq!(record["process_limit_hits"], hits, "{NAME}: {record}");
+    println!("{NAME}: executed, {hits} process creations refused");
 }

@@ -1388,6 +1388,12 @@ impl HostDriver {
         self.processes.output_stalled(id)
     }
 
+    /// The process creations exec `id`'s process bound refused so far: the `linux` adapter's
+    /// `process_limit_hits` for a running run (design 36 D13). `None` where it cannot be read.
+    pub(crate) fn running_process_limit_hits(&self, id: &str) -> Option<u64> {
+        self.processes.running_process_limit_hits(id)
+    }
+
     /// Half-closes stdin without ending output observation.
     ///
     /// # Errors

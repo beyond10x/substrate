@@ -46,6 +46,9 @@ pub struct EndOfRun {
     /// `memory.events` `oom_kill`. `None` where the counter could not be read: absent, never
     /// zero (invariant 3).
     pub memory_oom_kills: Option<u64>,
+    /// `pids.events` `max`: the process creations the exec's process bound refused (design 36
+    /// § 3). `None` where the counter could not be read: absent, never zero (invariant 3).
+    pub process_limit_hits: Option<u64>,
     /// The live output queue stalled after the child had exited on its own: the record still
     /// carries `session.output-backpressure`, and the stall ended nothing (design 36 D5).
     pub output_stall_after_exit: bool,

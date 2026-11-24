@@ -548,6 +548,8 @@ impl MacosAdapter {
                 live::stall_limit(live)
             },
             memory_oom_kills: None,
+            // No `limits` family, so no process bound to count (design 36 D14).
+            process_limit_hits: None,
         }
     }
 

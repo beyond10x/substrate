@@ -1291,6 +1291,8 @@ impl PodAdapter {
                 *run.limit.lock()
             },
             memory_oom_kills,
+            // The Pod status it reads holds no count of refused creations (design 36 D14).
+            process_limit_hits: None,
         }
     }
 

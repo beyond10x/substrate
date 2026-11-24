@@ -1654,3 +1654,144 @@ pub async fn one_run_ended_unobserved(
     );
     record
 }
+
+/// The process bound of design 36 § 8, story 2: below what [`OVER_THE_PROCESS_BOUND`] tries to
+/// start.
+pub const PROCESS_BOUND: u32 = 4;
+
+/// Design 36 § 8, story 2: a run that tries to start 16 processes. `xargs` tries to keep one
+/// `sleep` per line of the workspace's `sixteen` ([`write_sixteen`]) running at once, so a
+/// bound of [`PROCESS_BOUND`] refuses creations. The shell then writes `tried` and replaces
+/// itself with a `sleep` that outlives the run's timeout: it starts nothing more, and the run
+/// ends at its timeout. The paths are relative to the run's working directory, its workspace.
+pub const OVER_THE_PROCESS_BOUND: &str =
+    "xargs -P 16 -n 1 sleep < sixteen 2>/dev/null; : > tried; exec sleep 30";
+
+/// A run that starts two processes and waits for them: under any bound of four or more.
+pub const UNDER_THE_PROCESS_BOUND: &str = "sleep 0.05 & sleep 0.05 & wait";
+
+/// Writes `sixteen` into `workspace`, the input of [`OVER_THE_PROCESS_BOUND`]: sixteen lines of
+/// `0.05`, each a `sleep` of 50 ms.
+pub fn write_sixteen(workspace: &std::path::Path) {
+    std::fs::write(workspace.join("sixteen"), "0.05\n".repeat(16)).expect("sixteen");
+}
+
+/// Design 36 § 8, story 2, on an adapter that reads the count: admits `profile`, whose workspace
+/// is `workspace` on the host and which bounds the run's processes below 16, with a sink, and
+/// starts [`OVER_THE_PROCESS_BOUND`] in it. Once the run wrote `tried`, `observe` reports it
+/// running with a count above zero (D13). The ended observation then names the wall-time limit,
+/// since a hit ends nothing and names no limit (D12), and a count no lower; its one `run_ended`
+/// carries the same limit and count. Prints `<name> running: executed`, then `<name> over:
+/// executed`.
+pub async fn over_the_process_bound(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: ConfinementProfile,
+    workspace: &std::path::Path,
+) {
+    write_sixteen(workspace);
+    let (sink, mut recorded) = recorded();
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..profile
+        })
+        .expect("admitted");
+    let began = std::time::Instant::now();
+    let run = adapter
+        .start(&admitted, &sh(OVER_THE_PROCESS_BOUND))
+        .await
+        .expect("started");
+    let tried = workspace.join("tried");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !tried.exists() {
+        if std::time::Instant::now() >= deadline {
+            let observed = adapter.observe(&run).await;
+            panic!("{name}: the run wrote no `tried` within 10 s: {observed:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let running = adapter.observe(&run).await.expect("observed");
+    assert_eq!(
+        running.state,
+        confinement::RunState::Running,
+        "{name}: {running:?}"
+    );
+    assert_eq!(running.limit, None, "{name}: {running:?}");
+    let counted = running
+        .process_limit_hits
+        .filter(|hits| *hits > 0)
+        .unwrap_or_else(|| panic!("{name}: no refused creation while running: {running:?}"));
+    println!("{name} running: executed");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(20), adapter.wait(&run))
+        .await
+        .unwrap_or_else(|_| panic!("{name}: the run outlived its timeout"))
+        .expect("waited");
+    println!("{name}: the run ended after {:?}", began.elapsed());
+    assert_eq!(
+        ended.state,
+        confinement::RunState::Ended,
+        "{name}: {ended:?}"
+    );
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::WallTime),
+        "{name}: {ended:?}"
+    );
+    let hits = ended
+        .process_limit_hits
+        .unwrap_or_else(|| panic!("{name}: the ended run read no count: {ended:?}"));
+    assert!(
+        hits >= counted,
+        "{name}: {hits} after {counted} while running"
+    );
+    let record = recorded.run_ended(name).await;
+    assert_eq!(record["process_limit_hits"], hits, "{name}: {record}");
+    assert_eq!(record["limit"], "wall_time", "{name}: {record}");
+    assert_eq!(
+        recorded.events(),
+        ["profile_admitted", "run_started", "run_ended"],
+        "{name}"
+    );
+    println!("{name} over: executed");
+}
+
+/// Design 36 § 8, story 2, on an adapter that reads the count: [`UNDER_THE_PROCESS_BOUND`] under
+/// `profile`, with a sink, exits 0 and counts zero refused creations on its ended observation
+/// and on its `run_ended`. Prints `<name> under: executed`.
+pub async fn under_the_process_bound(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: ConfinementProfile,
+) {
+    let (sink, mut recorded) = recorded();
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..profile
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &sh(UNDER_THE_PROCESS_BOUND))
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(20), adapter.wait(&run))
+        .await
+        .unwrap_or_else(|_| panic!("{name}: the run outlived its bounds"))
+        .expect("waited");
+    assert_eq!(
+        ended.state,
+        confinement::RunState::Ended,
+        "{name}: {ended:?}"
+    );
+    assert_eq!(
+        ended.exit.and_then(|exit| exit.code),
+        Some(0),
+        "{name}: {ended:?}"
+    );
+    assert_eq!(ended.limit, None, "{name}: {ended:?}");
+    assert_eq!(ended.process_limit_hits, Some(0), "{name}: {ended:?}");
+    let record = recorded.run_ended(name).await;
+    assert_eq!(record["process_limit_hits"], 0, "{name}: {record}");
+    println!("{name} under: executed");
+}

@@ -61,6 +61,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   runtime, a dropped adapter) and lane cases on `linux`, `systemd` around both inner adapters,
   `oci`, `pod` and `macos` (`ESS confinement … run ended`, the delegated ones required by name in
   `scripts/delegated-lane.sh`).
+- `RunObservation.process_limit_hits` and the same member of `run_ended` (design 36, story 2):
+  the number of process creations the run's process bound refused, the `max` counter of
+  `pids.events` in the run's cgroup. `linux` and `systemd` report it: on an ended run the count
+  read once the leader exited and before the cgroup is removed, and on `observe` of a running run
+  the count at that moment; `0` says the counter was read and nothing was refused. `oci`, `pod`,
+  `local` and `macos` leave it absent, and so does a read that failed, which never fails
+  `observe`. A hit ends no run and names no limit: a run that hits its process bound and then its
+  timeout names `wall_time` and a count above zero. The host driver reads the counter for every
+  exec, measured or not, into the new `EndOfRun::process_limit_hits`. Held by unit cases of the
+  driver's read, of the `systemd` read and of the record, by `ess_confinement_local` (absent on
+  the observation and on the record), and by lane cases on `linux` and `systemd` around `local`
+  (`ESS confinement … process limit hits …`), on `macos`, and by `consumer_surface`'s run held to
+  an allow-list and a deny-list that hits its process bound and then its timeout, which
+  `scripts/delegated-lane.sh` requires by name.
 
 ### Changed
 

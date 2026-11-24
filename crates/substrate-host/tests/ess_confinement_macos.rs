@@ -323,6 +323,8 @@ async fn a_confined_run_writes_its_workspace_and_reports_how_it_ended() {
     assert_eq!(ended.adapter, AdapterName::Macos);
     assert_eq!(ended.declared_insecure, None);
     assert_eq!(ended.exit.and_then(|exit| exit.code), Some(3));
+    // Design 36 D14: `macos` reads no count of refused process creations.
+    assert_eq!(ended.process_limit_hits, None, "{ended:?}");
     let output = adapter.output(&run).await.expect("output");
     let sub = std::fs::canonicalize(workspace.path().join("sub")).expect("canonical");
     assert_eq!(
@@ -335,7 +337,8 @@ async fn a_confined_run_writes_its_workspace_and_reports_how_it_ended() {
         "done"
     );
     // Design 36 D20: the run's end task writes its end after it published it.
-    recorded.run_ended("macos run").await;
+    let record = recorded.run_ended("macos run").await;
+    assert!(record.get("process_limit_hits").is_none(), "{record}");
     assert_eq!(
         recorded.events(),
         ["profile_admitted", "run_started", "run_ended"]
@@ -365,6 +368,10 @@ async fn a_macos_run_nobody_observes_writes_one_run_ended() {
     assert_eq!(record["exit"], json!({"code": 3}), "{NAME}: {record}");
     assert!(record.get("limit").is_none(), "{NAME}: {record}");
     assert!(record.get("memory_oom_kills").is_none(), "{NAME}: {record}");
+    assert!(
+        record.get("process_limit_hits").is_none(),
+        "{NAME}: {record}"
+    );
     println!("{NAME}: executed");
 }
 
