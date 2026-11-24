@@ -36,8 +36,11 @@ use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio_rustls::TlsAcceptor;
 
+#[path = "../../../test-support/ports.rs"]
+mod ports;
 #[path = "../../../test-support/readiness.rs"]
 mod readiness;
+use ports::unused_address;
 
 const SERVER_NAME: &str = "substrate.test";
 /// The name a headless Service would carry (ADR 0046 K2): the daemon's certificate must not.
@@ -420,13 +423,6 @@ fn daemon_binary() -> PathBuf {
     }
     path.push("substrate-daemon");
     path
-}
-
-fn unused_address() -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral listener");
-    let address = listener.local_addr().expect("ephemeral address");
-    drop(listener);
-    address
 }
 
 fn private_directory(path: &Path) {
