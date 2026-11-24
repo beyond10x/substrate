@@ -8,7 +8,7 @@ summary: One hosted gate run failed on a daemon that could not bind the port its
 tags:
 - defect
 - flaky
-revision: 1
+revision: 2
 ---
 # Story: a test that starts the daemon on a TCP port cannot lose the port to another test
 
@@ -39,3 +39,12 @@ cargo-nextest. Stakeholder: the operator.
 
 A case that holds the mechanism chosen in step 2, and the count of step 1 at zero outside the
 named test group.
+
+## Seen again, 2026-11-24
+
+Hosted gate of `main` at `f9421f58f` (run 45293748554), 1 of 3406 tests:
+`only_a_kubernetes_daemon_serves_the_collision_series` in
+`crates/substrate-daemon/tests/kubernetes_driver_selection.rs`, "the operational listener never
+answered" after 10 s. The case takes the address of its operational listener from
+`unused_address()`, as two more cases of that file do. The cause is inferred, not shown. No
+rerun was started: the next commit on `main` gets its own run.

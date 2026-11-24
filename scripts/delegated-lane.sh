@@ -696,6 +696,18 @@ SUBSTRATE_TEST_DAEMON="${daemon_bin}" require_executed -p b10x-substrate-sdk man
   'sdk writable root delegated: executed' \
   'sdk workdir delegated: executed'
 
+# The CLI's retried `session signal` signals a live session, retires it and signals again under
+# the same operation id. Its retried `exec run` runs a program, destroys the workspace, runs
+# again under the same operation id, and is refused once the exec is retired. Both need confined
+# exec, so each case is absent, exit 0, without the delegated root, and is required by its line.
+# Two more cases need it: a replayed `exec run` keeps its exit status, its truncation flags and
+# a timeout, and the limit case dispatches one exec before the daemon is started again.
+SUBSTRATE_TEST_DAEMON="${daemon_bin}" require_executed -p b10x-substrate-cli scenarios \
+  'cli session signal replay: executed' \
+  'cli exec run replay: executed' \
+  'adversary exec run replay fidelity: executed' \
+  'limit exec run under another capability snapshot: executed, 1 exec dispatched'
+
 SUBSTRATE_TEST_DAEMON="${daemon_bin}" \
   cargo test -p b10x-substrate-sdk --test unrecorded --locked -- --nocapture --test-threads=1
 

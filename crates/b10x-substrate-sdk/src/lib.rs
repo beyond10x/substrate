@@ -289,6 +289,64 @@ impl Client {
         Ok(absent.absent)
     }
 
+    /// Renew a workspace's lease by id, without reading the workspace first.
+    ///
+    /// A retry under the same operation id is answered with the stored outcome, also once the
+    /// workspace is gone and [`Client::get_workspace`] answers `resource.not-found`. The handle
+    /// then holds the observation the renewal stored, not a workspace that still exists.
+    ///
+    /// The id is one path segment, held to the rule [`Client::destroy_workspace`] states.
+    pub async fn renew_workspace_lease(
+        &self,
+        id: impl AsRef<str>,
+        ttl: Duration,
+        operation_id: Option<String>,
+    ) -> Result<Workspace, SdkError> {
+        let input = substrate_wire::LeaseRenewInput {
+            ttl_ms: required_duration_millis(ttl)?,
+        };
+        let target = format!(
+            "/v1/workspaces/{}/lease/renew",
+            id_segment(IdKind::Workspace, id.as_ref())?
+        );
+        let (_, observed): (_, substrate_wire::Workspace) =
+            self.mutation("POST", &target, &input, operation_id).await?;
+        Ok(Workspace {
+            client: self.clone(),
+            observed: observed.into(),
+        })
+    }
+
+    /// Signal a session by id, without reading the session first.
+    ///
+    /// A retry under the same operation id is answered with the stored outcome, also once the
+    /// session was retired and [`Client::get_pipe_session`] answers `resource.not-found`. The
+    /// handle then holds the observation the signal stored, not a session that still exists.
+    ///
+    /// The id is one path segment, held to the rule [`Client::destroy_workspace`] states.
+    pub async fn signal_pipe_session(
+        &self,
+        id: impl AsRef<str>,
+        signal: Signal,
+        grace: Duration,
+        operation_id: Option<String>,
+    ) -> Result<PipeSession, SdkError> {
+        let input = substrate_wire::ExecSignalInput {
+            signal: signal.into(),
+            grace_ms: required_duration_millis(grace)?,
+        };
+        let target = format!(
+            "/v1/sessions/{}/signal",
+            id_segment(IdKind::Session, id.as_ref())?
+        );
+        let (_, observed): (_, substrate_wire::PipeSession) =
+            self.mutation("POST", &target, &input, operation_id).await?;
+        Ok(PipeSession {
+            client: self.clone(),
+            observed: observed.into(),
+        })
+    }
+
     pub async fn get_exec(&self, id: impl AsRef<str>) -> Result<Exec, SdkError> {
         let path = format!("/v1/execs/{}", id_segment(IdKind::Exec, id.as_ref())?);
         let observed: substrate_wire::Exec = self.get(&path).await?;
@@ -811,8 +869,37 @@ impl Workspace {
     }
 
     pub fn command(&self, program: impl Into<String>) -> CommandBuilder {
+        self.client
+            .command_in_workspace(self.observed.id.clone(), program)
+    }
+}
+
+impl Client {
+    /// Build a command for a workspace named by id, without reading the workspace first.
+    ///
+    /// A start retried under the same operation id is answered with the stored exec, also once
+    /// the workspace is gone and [`Client::get_workspace`] answers `resource.not-found`.
+    /// [`CommandBuilder::run`] then reads the output from that exec's record, which outlives the
+    /// workspace and is gone once the exec was retired.
+    ///
+    /// The replay holds while the daemon publishes the capability snapshot the first start
+    /// named: the start's input carries it. After a daemon restart the same start is another
+    /// request under its operation id and is refused `operation.request-conflict`;
+    /// [`Client::operation`] then answers the stored outcome.
+    ///
+    /// The id is one path segment, as at every call that names a resource by id
+    /// ([`Client::destroy_workspace`]): [`CommandBuilder::start`] and [`CommandBuilder::run`]
+    /// refuse any other word with [`SdkError::Protocol`] before anything is sent. A start that
+    /// names a workspace which does not exist is a refused operation recorded under its
+    /// operation id.
+    pub fn command_in_workspace(
+        &self,
+        workspace: impl Into<String>,
+        program: impl Into<String>,
+    ) -> CommandBuilder {
         CommandBuilder {
-            workspace: self.clone(),
+            client: self.clone(),
+            workspace_id: workspace.into(),
             argv: vec![program.into()],
             allowed_environment: Vec::new(),
             environment: BTreeMap::new(),
@@ -832,7 +919,9 @@ impl Workspace {
             operation_id: None,
         }
     }
+}
 
+impl Workspace {
     pub fn pipe_session(&self, program: impl Into<String>) -> PipeSessionBuilder {
         PipeSessionBuilder {
             capture: substrate_wire::CaptureMode::Recorded,
@@ -1054,15 +1143,11 @@ impl Workspace {
         ttl: Duration,
         operation_id: impl Into<Option<String>>,
     ) -> Result<&WorkspaceObservation, SdkError> {
-        let input = substrate_wire::LeaseRenewInput {
-            ttl_ms: required_duration_millis(ttl)?,
-        };
-        let target = format!("/v1/workspaces/{}/lease/renew", self.id_segment()?);
-        let (_, observed): (_, substrate_wire::Workspace) = self
+        let renewed = self
             .client
-            .mutation("POST", &target, &input, operation_id.into())
+            .renew_workspace_lease(&self.observed.id, ttl, operation_id.into())
             .await?;
-        self.observed = observed.into();
+        self.observed = renewed.observed;
         Ok(&self.observed)
     }
 
@@ -1268,7 +1353,8 @@ impl Workspace {
 
 #[must_use]
 pub struct CommandBuilder {
-    workspace: Workspace,
+    client: Client,
+    workspace_id: String,
     argv: Vec<String>,
     allowed_environment: Vec<BaselineEnvironment>,
     environment: BTreeMap<String, String>,
@@ -1623,16 +1709,11 @@ impl PipeSession {
         grace: Duration,
         operation_id: impl Into<Option<String>>,
     ) -> Result<&PipeSessionObservation, SdkError> {
-        let input = substrate_wire::ExecSignalInput {
-            signal: signal.into(),
-            grace_ms: required_duration_millis(grace)?,
-        };
-        let target = format!("/v1/sessions/{}/signal", self.id_segment()?);
-        let (_, observed): (_, substrate_wire::PipeSession) = self
+        let signalled = self
             .client
-            .mutation("POST", &target, &input, operation_id.into())
+            .signal_pipe_session(&self.observed.id, signal, grace, operation_id.into())
             .await?;
-        self.observed = observed.into();
+        self.observed = signalled.observed;
         Ok(&self.observed)
     }
 
@@ -1988,6 +2069,10 @@ impl CommandBuilder {
     }
 
     async fn dispatch(self, wait: bool) -> Result<Exec, SdkError> {
+        // The start names its workspace in the request body. The id is held to the rule of an id
+        // in a path all the same, before anything is sent: one rule at every call that names a
+        // resource by id, and a word it refuses records no operation.
+        id_segment(IdKind::Workspace, &self.workspace_id)?;
         if self.argv.first().is_none_or(String::is_empty) {
             return Err(SdkError::Builder { field: "program" });
         }
@@ -1995,11 +2080,11 @@ impl CommandBuilder {
         validate_execution_storage(&self.workspace_access, self.scratch)?;
         validate_writable_root_bound(&self.writable_roots)?;
         let policy = self.policy.ok_or(SdkError::Builder { field: "policy" })?;
-        let capability_snapshot = self.workspace.client.machine().capability_snapshot;
+        let capability_snapshot = self.client.machine().capability_snapshot;
         let (aperture, apertures) = aperture_selection(self.apertures);
         let input = substrate_wire::ExecStartInput {
             writable_roots: self.writable_roots,
-            workspace: self.workspace.observed.id.clone(),
+            workspace: self.workspace_id,
             argv: self.argv,
             env: substrate_wire::ExecEnvironment {
                 allow: self
@@ -2034,12 +2119,11 @@ impl CommandBuilder {
         };
         validate_workdir(&input)?;
         let (_, observed): (_, substrate_wire::Exec) = self
-            .workspace
             .client
             .mutation("POST", "/v1/execs", &input, self.operation_id)
             .await?;
         Ok(Exec {
-            client: self.workspace.client,
+            client: self.client,
             observed: observed.into(),
         })
     }
@@ -3751,6 +3835,26 @@ mod tests {
                 "Client::destroy_workspace",
                 word,
                 client.destroy_workspace(word, None).await,
+            );
+            refused(
+                named,
+                "Client::renew_workspace_lease",
+                word,
+                client.renew_workspace_lease(word, second, None).await,
+            );
+            refused(
+                named,
+                "CommandBuilder::start",
+                word,
+                client.command_in_workspace(word, "true").start().await,
+            );
+            refused(
+                "session id",
+                "Client::signal_pipe_session",
+                word,
+                client
+                    .signal_pipe_session(word, Signal::Kill, second, None)
+                    .await,
             );
             refused(
                 "exec id",
