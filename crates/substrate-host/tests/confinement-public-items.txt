@@ -152,6 +152,7 @@ confinement/mod.rs: impl AdmittedProfile > pub fn insecure_reason(&self) -> Opti
 confinement/mod.rs: impl AdmittedProfile > pub fn profile(&self) -> &ConfinementProfile
 confinement/mod.rs: impl AdmittedProfile > pub fn record(&self) -> AuditRecord
 confinement/mod.rs: impl Drop for EndWrite
+confinement/mod.rs: impl Drop for EndWriting
 confinement/mod.rs: impl Drop for RunEndRecord
 confinement/mod.rs: #[derive(Debug, Clone)] pub struct Command
 confinement/mod.rs: struct Command > pub argv: Vec<String>,

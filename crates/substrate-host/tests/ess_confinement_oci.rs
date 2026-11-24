@@ -1073,7 +1073,15 @@ async fn an_oci_run_nobody_observes_writes_one_run_ended() {
             return;
         }
     };
+    // The whole case ends by its own assertion within 50 s, inside the test step's 60 s. The open
+    // is synchronous and not cancellable (its runtime probes are bounded at 20 s each, the
+    // image's store check is not), so it is measured; the start (create, the started loop) and
+    // the record share what is left.
+    let began = std::time::Instant::now();
     let adapter = open_lane(&runtime, Vec::new());
+    let left = Duration::from_secs(50)
+        .checked_sub(began.elapsed())
+        .unwrap_or_else(|| panic!("{NAME}: opening the oci adapter took {:?}", began.elapsed()));
     let (_dir, workspace) = canonical_tempdir();
     let record = support::one_run_ended_unobserved(
         NAME,
@@ -1090,9 +1098,7 @@ async fn an_oci_run_nobody_observes_writes_one_run_ended() {
         ("oci", None),
         // No polling: the monitor sees the end when the runtime client returns, then makes two
         // runtime calls (inspect, remove) before it publishes the end and the record follows.
-        // The bound of the other run cases' `wait` on that publication, so this case fails by
-        // its own assertion well inside the test step's 60 s.
-        Duration::from_secs(30),
+        left,
     )
     .await;
     assert_eq!(record["state"], "ended", "{NAME}: {record}");

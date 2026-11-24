@@ -819,6 +819,92 @@ async fn a_sink_that_blocks_on_run_ended_does_not_stop_wait_on_a_current_thread_
     assert_eq!(record, first.as_str());
 }
 
+/// Design 36 D20, amended 2026-11-24: a sink that reaches the current Tokio runtime when it is
+/// called with a run's `run_started` reaches it when it is called with that run's `run_ended`,
+/// so a sink that hands records to the runtime (`Handle::current().spawn`) receives every record
+/// of a run, the last among them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sink_that_reaches_the_runtime_on_run_started_reaches_it_on_run_ended() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (seen, mut sightings) = tokio::sync::mpsc::unbounded_channel::<(String, bool)>();
+    let sink = AuditSink::new(move |record: &AuditRecord| {
+        let value = serde_json::to_value(record).expect("record");
+        let event = value["event"].as_str().expect("event").to_owned();
+        let _ = seen.send((event, tokio::runtime::Handle::try_current().is_ok()));
+    });
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..local_profile(workspace.path())
+        })
+        .expect("admitted");
+    adapter
+        .start(&admitted, &support::sh("exit 0"))
+        .await
+        .expect("started");
+    let mut reached = BTreeMap::new();
+    while reached.len() < 3 {
+        let (event, runtime) = tokio::time::timeout(support::RECORD_WAIT, sightings.recv())
+            .await
+            .expect("the run's records")
+            .expect("the sink lives");
+        reached.insert(event, runtime);
+    }
+    assert!(reached["run_started"], "{reached:?}");
+    assert_eq!(
+        reached["run_ended"], reached["run_started"],
+        "run_ended reaches the sink outside the runtime run_started reached it in: {reached:?}"
+    );
+}
+
+/// Design 36 Q5 (A, chosen): every `run_started` in a process that returns from its
+/// runtime has its `run_ended`. Held where one process can observe it: once the runtime that ran
+/// a run to its end was dropped, the run's `run_ended` is in the sink, so a process whose `main`
+/// returns then does not exit before the record. The sink takes 500 ms over `run_ended`, as a
+/// sink that writes to a slow store does.
+#[test]
+fn a_run_that_ended_has_its_run_ended_in_the_sink_once_its_runtime_returned() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let kept = Arc::clone(&events);
+    let sink = AuditSink::new(move |record: &AuditRecord| {
+        let value = serde_json::to_value(record).expect("record");
+        let event = value["event"].as_str().expect("event").to_owned();
+        if event == "run_ended" {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        kept.lock().push(event);
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let adapter = local();
+        let admitted = adapter
+            .admit(&ConfinementProfile {
+                audit: Some(sink),
+                ..local_profile(workspace.path())
+            })
+            .expect("admitted");
+        let run = adapter
+            .start(&admitted, &support::sh("exit 0"))
+            .await
+            .expect("started");
+        tokio::time::timeout(support::RECORD_WAIT, adapter.wait(&run))
+            .await
+            .expect("wait returns")
+            .expect("waited");
+    });
+    drop(runtime);
+    assert_eq!(
+        *events.lock(),
+        ["profile_admitted", "run_started", "run_ended"],
+        "the runtime returned before the run's run_ended reached the sink"
+    );
+}
+
 /// Design 36 D21: dropping the adapter while its run runs neither ends the run nor loses its
 /// record: the run's end task writes `run_ended` when the run ends.
 #[tokio::test(flavor = "multi_thread")]

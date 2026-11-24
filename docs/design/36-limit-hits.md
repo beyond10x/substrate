@@ -411,12 +411,36 @@ record shares no bounded resource with any run's exit detection or `wait`.
   (`std::thread::Builder`). A sink that blocks or panics then holds that thread only: no worker
   of the runtime and no thread of its blocking pool, so it delays neither `wait`, nor another
   run, nor another record, whatever the size of the pool, on a current-thread runtime and with no
-  runtime at all.
+  runtime at all. The thread enters the runtime that was current when the record was handed to
+  it, so a sink that reaches the runtime on `run_started` reaches it on `run_ended`; a sink that
+  spawns onto that runtime once it shut down gets Tokio's behaviour, a task dropped unrun, and
+  the record is still written. A sink that panics is contained where the consumer is built with
+  `panic = "unwind"`; with `panic = "abort"` it ends the process, as on every other record.
+- The end task does not end at the hand-off. It waits on a channel until the record's write is
+  over, so it holds no thread while it waits, and it ends once the sink returned. Where the
+  runtime drops the task before that (`drop(runtime)`), the task's guard joins the record's
+  thread on the dropping thread: the runtime's drop returns once `run_ended` is in the sink, so
+  every `run_started` in a process that returns from its runtime has its `run_ended` (Q5). A
+  guard dropped by a thread that is panicking does not join: the record's thread is already
+  running and still writes while the process lives, and a panic is never held by a sink. A sink
+  that never returns holds the runtime's drop, as a started blocking-pool job does. `pod`, whose
+  monitor goes on to remove the Pod and its policy after it published the end, awaits the write
+  on a task of its own. Amended 2026-11-24 with the change that built the record.
+- `Runtime::shutdown_timeout` and `Runtime::shutdown_background` bound that wait only where the
+  task is dropped on a worker of a multi-thread runtime: those workers are threads of the
+  blocking pool (Tokio 1.53, `runtime/scheduler/multi_thread/worker.rs`, `spawn_blocking(move ||
+  run(worker))`), and both calls stop waiting for that pool after their duration and leak what
+  still runs (`runtime/runtime.rs`, § *Shutdown*: "spawned work that did not stop in time and
+  threads running it are leaked"). The join then goes on there and the record is written while
+  the process lives. A current-thread runtime drops its tasks on the thread that shuts it down,
+  in `Runtime`'s `Drop` after either call, so there the join is not bounded by the duration.
 - Where the system refuses the thread, the record is not dropped. It goes to the current
-  runtime's blocking pool, and only where no runtime is current, or that pool cannot take it
-  either, is it written on the calling thread, with a sink that panics there contained. A
-  warning names the refused thread. On that path a sink that blocks holds a thread of the pool,
-  or the calling thread, for as long as it blocks.
+  runtime's blocking pool, and only where no runtime is current, or that pool does not take it
+  (it cannot start a thread, or it is shutting down and drops the job unrun), is it written on
+  the calling thread before the hand-off returns. On every path it is written once and a sink
+  that panics on the calling thread is contained. A warning names the refused thread. On that
+  path a sink that blocks holds a thread of the pool, or the calling thread, for as long as it
+  blocks.
 - The consequence a consumer must know: `run_ended` may arrive after `wait` returned. A consumer
   that needs the record waits for its own sink. Listed as Q4.
 - `AuditSink`'s documentation gains the sentence for `run_ended`. The other records keep their
@@ -433,7 +457,10 @@ The record is written when the run ends.
 is the case of a tokio runtime that shuts down while the run still runs: the end task is dropped
 with it. The record then has no exit, no limit and no count, and is written synchronously on the
 thread that drops the task. It says what `RunState::Unknown` means: the adapter lost sight of
-the run. Nothing is written from a thread that is panicking. A process that exits or is killed
+the run. Nothing is written from a thread that is panicking, and a sink that panics on this
+record is contained (amended 2026-11-24 with the change that built the record). A run that ended
+before the task was dropped is D20's: its record is written on its own thread, which the dropped
+task joins. A process that exits or is killed
 writes nothing; a consumer that must account for that pairs `run_started` with `run_ended` in
 its own store. Listed as Q5.
 
@@ -630,7 +657,7 @@ Every change also regenerates
 | D17 | `run_ended` follows `run_started`; the value reaches the end task after `audit_start` returned |
 | D18 | written for `Unknown` as well |
 | D19 | no sink: nothing written, no task added |
-| D20 | the end task writes after it published the end; the sink runs on a thread of its own per record (Q4; amended 2026-11-24) |
+| D20 | the end task writes after it published the end; the sink runs on a thread of its own per record, which the end task awaits and a dropped end task joins (Q4, Q5; amended 2026-11-24) |
 | D21 | dropping an adapter neither ends a run nor loses its record |
 | D22 | a runtime that ends first: `run_ended` with `state: unknown` (Q5) |
 | D23 | a declared-insecure run's record carries its reason |
@@ -682,7 +709,9 @@ first consumer's session answered all five on 2026-11-24, each with A.
 
 - A (chosen): the dropped value writes `run_ended` with `state: unknown`. Every `run_started` in
   a process that returns from its runtime has its `run_ended`. Cost: a sink is called from a
-  destructor, on the thread that drops the runtime.
+  destructor, on the thread that drops the runtime, and that drop waits for a `run_ended` still
+  being written on its own thread (D20, amended 2026-11-24), so a sink that never returns holds
+  it.
 - B: nothing is written. Cost: a consumer cannot tell a run that is still running from one whose
   adapter went away; it must time out on its own.
 
@@ -703,8 +732,11 @@ this tree:
   137. `oci.rs` maps 129 to 192 to a signal, and, beside `OOMKilled`, any other status outside 0
   to 128 to signal 9; the `pod` rule of D7 takes a code above 128.
 - That a task dropped by a runtime shutdown runs the destructors of what it owns on the thread
-  that drops the runtime, and that a thread started for a record runs to its end while the
-  process lives.
+  that drops the runtime for a current-thread runtime and on a worker for a multi-thread one
+  (read in Tokio 1.53, `Runtime`'s `Drop`; not run on the multi-thread flavour). What holds by
+  the guard of D20: the runtime's drop returns after the record's thread wrote; a thread whose
+  guard was dropped by a panicking thread, or that `shutdown_timeout` or `shutdown_background`
+  left behind, writes only while the process lives.
 - That the digest in the header of a generated projection covers comments of the YAML (D25).
 - That the Kubernetes API exposes no counter of refused process creations for a Pod. What was
   read: the adapter reads none.
@@ -727,8 +759,8 @@ this tree:
 - A record of a denied execution or connection, a record at the moment of a hit, a wire event:
   the epic's boundaries.
 - Limits summed over several runs, `rate_bounds`, a block I/O bound: the epic's boundaries.
-- A bound on how long the sink may hold its thread, and on how many such threads a sink that
-  never returns may leave behind.
+- A bound on how long the sink may hold its thread, on how many such threads a sink that never
+  returns may leave behind, and on how long such a sink may hold a runtime's drop (D20).
 - A constructor or builder for `AuditRecord::RunEnded` for a consumer that tests its own sink.
 
 ## 14. Not read

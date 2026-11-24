@@ -1610,8 +1610,8 @@ impl Recorded {
 /// Design 36 § 8, story 3, on any adapter: a run that nobody observes or waits on after `start`
 /// returned puts exactly one `run_ended` into its profile's sink, after its `run_started`, naming
 /// the run, the profile and `adapter` (with `inner`). `profile` is the adapter's own profile
-/// without a sink; the case sets one. The record is waited for at most `within` after `start`
-/// returned. Returns the record for the lane's own assertions.
+/// without a sink; the case sets one. The start and the record are waited for at most `within`
+/// together. Returns the record for the lane's own assertions.
 pub async fn one_run_ended_unobserved(
     name: &str,
     adapter: &Arc<dyn ConfinementAdapter>,
@@ -1627,8 +1627,15 @@ pub async fn one_run_ended_unobserved(
             ..profile
         })
         .expect("admitted");
-    let run = adapter.start(&admitted, command).await.expect("started");
-    let record = recorded.run_ended_within(name, within).await;
+    // `within` bounds the start and the record together, so the case ends by its own assertion.
+    let began = std::time::Instant::now();
+    let run = tokio::time::timeout(within, adapter.start(&admitted, command))
+        .await
+        .unwrap_or_else(|_| panic!("{name}: the run did not start within {within:?}"))
+        .expect("started");
+    let record = recorded
+        .run_ended_within(name, within.saturating_sub(began.elapsed()))
+        .await;
     assert_eq!(
         recorded.events(),
         ["profile_admitted", "run_started", "run_ended"],
