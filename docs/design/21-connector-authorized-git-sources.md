@@ -179,26 +179,45 @@ and the workspace is proved absent, as for every failure before the rename.
   and nothing the pack states: a file object is read once when it is checked out and once when
   the store is written.
 - **The table of entries.** While a pack arrives the fetch keeps one item of 64 bytes for each
-  entry. The table grows with the entries that arrive: before the first entry it is reserved
-  for no more than 8,192 items, whatever number the pack states. Its items take no more bytes
-  than the byte limit. A pack that states more entries than that is refused before its first
-  entry is read, and a pack that brings more is refused at the entry that would be over. At
-  2 GiB that is 33,554,432 entries.
+  entry and, beside the items, a list for each object that entries are stored behind. The
+  table grows with the entries that arrive: before the first entry it is reserved for no more
+  than 8,192 items, whatever number the pack states. The fetch counts each item as 64 bytes,
+  each list as four bytes for each entry it has reserved for and 16 more, and each id that
+  entries name an object by as 128 bytes more. An entry stored as it is therefore counts 64
+  bytes, the first entry stored behind an object 96, and an entry that names an object by an
+  id no earlier entry named 224. The items and the lists together take no more bytes than the
+  byte limit. A pack that states more entries than the byte limit has items for is refused
+  before its first entry is read, and a pack that brings more than the count admits is refused
+  at the entry that takes it over. At 2 GiB that is 33,554,432 entries stored as they are,
+  22,369,621 entries stored one behind the other in a line, or 9,586,980 entries that each
+  name another id.
 - **Objects that wait.** When the fetch computes the ids, an object that other entries are
   stored behind is held until each of them has been made, so what is held at once follows how
-  the entries of the pack branch. The fetch counts the bytes reserved for each object it holds
-  this way and holds no more than the byte limit: the object that would take it over
-  ends the fetch. Beside them each of its two threads holds what the rule of object sizes
-  admits for the one entry it works on.
-- **What the fetch makes.** When it computes the ids the fetch inflates each entry once and
-  makes the object of each entry stored behind another once. It counts those bytes before it
-  allocates for them and ends before they come to more than 64 times the byte limit.
+  the entries of the pack branch. The fetch keeps each object it holds this way at its own
+  length, counts that length, and holds no more than the byte limit: the object that would
+  take it over ends the fetch. The fetch computes the ids on one thread. Beside the objects
+  that wait it holds what the rule of object sizes admits for the one entry it works on, and
+  which objects wait at once follows the pack alone: the same pack under the same byte limit
+  gets the same answer every time. Files that have nothing to do with each other never wait
+  beside one another: what waits at once lies on one path, from an object stored as it is
+  down to the entry the fetch works on.
+- **What the fetch inflates and makes.** The fetch inflates each entry once while the pack
+  arrives, to find where the entry ends. When it computes the ids it inflates each entry once
+  more and makes the object of each entry stored behind another once. It counts those bytes
+  while the pack arrives and when it computes the ids, each pass counted on its own against 64
+  times the byte limit, and ends before the count of a pass is over. While the pack arrives it
+  inflates no more of an entry than the bytes the entry states and one more; an entry that
+  inflates to more than it states ends the fetch as every pack that is not well formed does,
+  `workspace.git-fetch-failed`. When it computes the ids it counts the bytes before it
+  allocates for them.
 
 The first bound is held where the chains are read and the baseline is checked
 (`crates/substrate-host/src/git/store`). The other three are held in `gix-pack`, the crate in
-which the fetch indexes a pack. It takes the byte limit as the most it allocates for one object
-(`gitoxide.objects.allocLimit`) and refuses each of the three with the error it has for an
-allocation over that limit, which the create already names `workspace.git-storage-limit`.
+which the fetch indexes a pack, as four counts: the fourth bound is one count for each of its
+two passes. The crate takes the byte limit as the most it allocates for one object
+(`gitoxide.objects.allocLimit`) and refuses each of the four with the error it has for an
+allocation over that limit, which the create already names `workspace.git-storage-limit`. The
+create names the one thread in the same settings (`pack.threads=1`).
 
 **What the bounds refuse of an ordinary source.** A byte limit can be no smaller
 than the files of the baseline and the fetched pack together; the figures here are multiples of
@@ -206,13 +225,18 @@ that sum. Measured on 2026-11-24 on a fetch of depth 50 of five repositories and
 generated history of 1,000 files and 50 commits (1,022 to 16,703 places, 2.2 MB to 114 MB of
 baseline objects, 2,096 to 20,431 entries): whole reads 0.8 to 14.4 against the bound 64, the
 table 0.003 to 0.07 against 1, the objects that wait at most 0.11 against 1, and what the
-fetch makes 1.3 to 3.1 against 64. With a byte limit as small as that sum, the bounds refuse:
+fetch makes 1.3 to 3.1 against 64. The table was measured as its items alone: with its list, an
+entry stored behind another by its place in the pack counts no more than 96 bytes for those 64,
+so the table is at most 0.11. The objects that wait were measured on two threads, which hold
+two paths at once where the one thread of a create holds one. What the entries inflate to while
+the pack arrives is part of what the fetch makes when it computes the ids, so it is no more
+than those 1.3 to 3.1. With a byte limit as small as that sum, the bounds refuse:
 
 - a baseline of which a whole read of each object inflates and makes, on average by bytes,
   more than 64 times the object: one stored behind 63 entries that each make an object of its
   size;
-- a fetch with fewer than 64 bytes of byte limit for each entry of its pack: many files of a
-  few bytes with a long history;
+- a fetch with fewer bytes of byte limit than 64 for each entry of its pack and 32 more for
+  each object that entries are stored behind: many files of a few bytes with a long history;
 - a pack in which more than the byte limit waits at once. Versions of a file stored
   one behind the other in a line hold two of them at once. Stored as a tree, with more than
   one entry behind each level, they hold one for each level: for a file of a tenth of the byte
@@ -223,21 +247,25 @@ fetch makes 1.3 to 3.1 against 64. With a byte limit as small as that sum, the b
 A larger requested storage limit admits each of them.
 
 **The copy of `gix-pack`.** The repository carries the crate as `vendor/gix-pack-0.74.2`: the
-published source of the version `gix` 0.87.1 resolves, with the three bounds, selected by
-`[patch.crates-io]` as `vendor/axum-0.8.9` is. The change is about 100 added lines in three
-files (`src/cache/delta/tree.rs`, `src/index/write/mod.rs` and
-`src/cache/delta/traverse/resolve.rs`). It adds two counters the threads of the fetch share,
-no thread and no lock, and changes no public item of the crate. It is kept this way:
+published source of the version `gix` 0.87.1 resolves, with the four counts, selected by
+`[patch.crates-io]` as `vendor/axum-0.8.9` is. The change is about 215 added lines in five
+files (`src/data/input/bytes_to_entries.rs`, `src/bundle/write/mod.rs`,
+`src/cache/delta/tree.rs`, `src/index/write/mod.rs` and
+`src/cache/delta/traverse/resolve.rs`). It adds two counters a traversal shares between its
+threads, one count to the iterator of the entries that arrive and one to the loop that fills
+the table, no thread and no lock, and changes no public item of the crate. It is kept this
+way:
 
-- `vendor/gix-pack-0.74.2/README.substrate.md` states the change file by file, the three
-  multiples, and the checksum of the published crate the copy was made from. The crate's
-  licence files stay in the copy.
+- `vendor/gix-pack-0.74.2/README.substrate.md` states the change file by file, the four
+  multiples, what an update must preserve, and the checksum of the published crate the copy
+  was made from. The crate's licence files stay in the copy.
 - The workspace names `gix` by its exact version. A `[patch.crates-io]` entry replaces only the
   version it has, and cargo builds the published crate with no more than a warning when the two
   differ. `cargo xtask check-packages` therefore refuses a `[patch.crates-io]` entry that
-  `Cargo.lock` does not resolve to.
+  `Cargo.lock` does not resolve to, and a lock that also resolves a package of an entry's name
+  from the registry: a dependent of that second version would build the published crate.
 - The cases below run the fetch of a create, so they fail with a `gix-pack` that does not hold
-  the three bounds, whichever version it is.
+  the four counts, whichever version it is.
 - An update of `gix` takes the published source of the `gix-pack` it resolves as
   `vendor/gix-pack-<version>`, makes the change in it again and runs the cases. The copy is
   removed with the update whose `gix-pack` passes them unchanged.
@@ -245,17 +273,53 @@ no thread and no lock, and changes no public item of the crate. It is kept this 
 **What an ordinary create pays.** The reading of the chains keeps eighteen bytes for each
 entry of the fetched pack, eight of them for this bound, and inflates the first bytes of each
 entry stored behind another: for the six fetched packs above, no more than 0.02 s of processor
-time. The fetch adds to two counters for each entry, and its table grows with the entries.
-Indexing those six packs with the three bounds took 0.05 s to 2.6 s of processor time and
-4 MB to 48 MB of peak resident memory.
+time. The fetch adds to its counts for each entry, and its table grows with the entries.
+Indexing those six packs on two threads, with the bounds of the table and of the id pass, took
+0.05 s to 2.6 s of processor time and 4 MB to 48 MB of peak resident memory. On one thread the
+ids of a pack are computed one entry after the other. Measured on 2026-11-24 with the indexer
+of the fetch: the pack of the generated history above (440,816 bytes) was indexed in 35 ms to
+58 ms on one thread and in 27 ms to 38 ms on two, 6 ms to 15 ms of which is the arrival of the
+pack; the largest pack a case builds, 123 entries that make 492 MiB, in 1.5 s to 2.3 s on one
+thread and in 0.8 s to 1.6 s on two.
+
+**The memory the indexing keeps.** On a pack within every count the fetch holds, beside its
+table, the objects that wait, the instructions of the one entry it works on and the object
+they make. Measured on 2026-11-24 with the indexer of the fetch on one thread, on a pack of
+one file object of the byte limit and six entries stored behind it, each with instructions of
+the byte limit that make an object of nearly the byte limit, under byte limits of 8 MiB and of
+16 MiB, alone and beside a store of earlier objects: over the indexing the peak resident
+memory of the process grew by 3.07 to 3.14 times the byte limit. Four cases hold that growth
+under 4 times the byte limit, the three measured and one of margin:
+`an_indexer_within_every_bound_keeps_its_memory_under_four_times_its_byte_limit` and the three
+beside it in `crates/substrate-host/src/git/adversary_create_bounds_tests.rs`. A full table
+is resident beside that. Over a fetch that fills one, under a byte limit of 8 MiB, the peak
+resident memory of the test process, which also serves the pack, grew by 2.07 to 2.14 times
+the byte limit for entries that each name another id, held under 3 times, and by 3.7 to 4.0
+times for entries stored as they are, held under 6 times. No case
+measures a pack that fills the table and makes the byte limit wait at once.
 
 **How it is proved.** One case for each of the four bounds, against a source served on
 loopback: a pack within every other bound and over that one. The create is refused
 `workspace.git-storage-limit`, the workspace is proved absent, and the memory of the test
 process stays under a bound the case states: its peak resident memory, and for the table of
 entries its peak address space, because a reservation that is never written is no resident
-memory. Each case runs under 5 s. The cases of a create that the host crate already has run
-against the copy unchanged.
+memory. Beside them, in `crates/substrate-host/src/git`:
+
+- cases at the byte and at the entry where a count turns
+  (`security_create_bounds_tests.rs`): a pack that makes the byte limit wait, one that makes
+  64 times the byte limit and one that brings as many entries as the byte limit has items for
+  are indexed, and one byte or one entry more is refused; what the entries inflate to while
+  the pack arrives is within 64 times the byte limit;
+- cases of the table's count (`create_bounds_tests.rs`): the list of an entry stored behind
+  another and the id an entry names are counted, each entry that arrives is counted whatever
+  number the pack states, an object that waits is counted at its own length whichever entry
+  was made before it, and the settings of a create's fetch name one thread;
+- two packs within their byte limit that are indexed eight times each with one answer, and a
+  fetch of one of them that is served (`adversary_create_bounds_tests.rs`), beside the four
+  cases of the memory above.
+
+Each case ran under 5 s. The cases of a create that the host crate already has run against the
+copy unchanged.
 
 Decided: comparing the worktree by kept stat facts instead of hashing each tracked file (ADR
 0051's manifest) is not part of this step. The observation hashes as before.

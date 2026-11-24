@@ -37,7 +37,7 @@ pub fn check(root: &Path) -> Result<Report> {
 
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; the host driver declares exactly the features git and kubernetes, both default; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature; Cargo.lock resolves each of the {patches} [patch.crates-io] entries",
+            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; the host driver declares exactly the features git and kubernetes, both default; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature; Cargo.lock resolves each of the {patches} [patch.crates-io] entries and no package of their names from a registry",
             packages.len()
         )))
     } else {
@@ -48,16 +48,18 @@ pub fn check(root: &Path) -> Result<Report> {
 /// How a lock file begins the `source` of a package it resolves from a registry.
 const REGISTRY_SOURCE: &str = "registry+";
 
-/// Every `[patch.crates-io]` entry of the workspace is what `Cargo.lock` resolves. An entry
-/// replaces only the version its source has: where a dependent resolves another version, cargo
-/// builds the published crate and says no more than a warning. Returns how many entries were
-/// read.
+/// Every `[patch.crates-io]` entry of the workspace is what `Cargo.lock` resolves, and the lock
+/// file resolves no package of an entry's name from a registry. An entry replaces only the
+/// version its source has: where a dependent resolves another version, cargo builds the
+/// published crate and says no more than a warning. Returns how many entries were read.
 ///
 /// An entry with a `path` has the name and the version of the manifest at that path: the lock
 /// file holds a package of that name and version, and holds it without a registry `source`. Any
 /// other entry has the name it replaces and a version this check does not read: the lock file
-/// holds a package of that name with a `source` that is no registry's. A workspace without an
-/// entry needs no lock file.
+/// holds a package of that name with a `source` that is no registry's. In both forms a second
+/// package of the entry's name that the lock file resolves from a registry is refused, whatever
+/// its version: some dependent would build the published crate beside the entry's source. A
+/// workspace without an entry needs no lock file.
 fn check_patches(root: &Path, failures: &mut Vec<String>) -> Result<usize> {
     let text =
         std::fs::read_to_string(root.join("Cargo.toml")).context("reading workspace Cargo.toml")?;
@@ -95,6 +97,17 @@ fn check_patches(root: &Path, failures: &mut Vec<String>) -> Result<usize> {
     let from_registry =
         |source: Option<&str>| source.is_some_and(|source| source.starts_with(REGISTRY_SOURCE));
 
+    // The versions of `name` the lock file resolves from the registry.
+    let published = |name: &str| -> Vec<&str> {
+        locked
+            .iter()
+            .filter(|(locked_name, _, source)| {
+                locked_name == name && from_registry(source.as_deref())
+            })
+            .map(|(_, version, _)| version.as_str())
+            .collect()
+    };
+
     for (key, entry) in patches {
         let Some(path) = entry.get("path").and_then(toml::Value::as_str) else {
             let name = text_of(entry, "package").unwrap_or_else(|| key.clone());
@@ -104,6 +117,12 @@ fn check_patches(root: &Path, failures: &mut Vec<String>) -> Result<usize> {
             if !resolved {
                 failures.push(format!(
                     "Cargo.toml: patch.crates-io.{key} replaces {name}, and Cargo.lock resolves no package {name} from it: the build takes no source of this entry"
+                ));
+                continue;
+            }
+            for other in published(&name) {
+                failures.push(format!(
+                    "Cargo.toml: patch.crates-io.{key} replaces {name}, and Cargo.lock also resolves {name} {other} from the registry: a dependent of that version builds the published crate"
                 ));
             }
             continue;
@@ -134,6 +153,12 @@ fn check_patches(root: &Path, failures: &mut Vec<String>) -> Result<usize> {
             failures.push(format!(
                 "Cargo.toml: patch.crates-io.{key} is {name} {version}, and Cargo.lock resolves {name} {version} from the registry: the build takes the published crate, not {path}"
             ));
+        } else {
+            for other in published(&name) {
+                failures.push(format!(
+                    "Cargo.toml: patch.crates-io.{key} is {name} {version}, and Cargo.lock also resolves {name} {other} from the registry: a dependent of that version builds the published crate, not {path}"
+                ));
+            }
         }
     }
     Ok(patches.len())
@@ -1129,10 +1154,25 @@ mod tests {
         "source = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"00\"\n";
 
     /// A patch entry replaces a crate only where the lock file resolves the entry's own name and
-    /// version from it. The accepted side: the locked package has no `source`, and a second
-    /// version of the same name from the registry is another package.
+    /// version from it. The accepted side: the locked package has no `source`, and the lock
+    /// file holds no other package of that name.
     #[test]
     fn a_patch_entry_the_lock_file_resolves_is_accepted() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        patched(
+            directory.path(),
+            "\n[[package]]\nname = \"foo\"\nversion = \"1.2.3\"\n\n[[package]]\nname = \"bar\"\nversion = \"2.0.0\"\n",
+        );
+
+        let report = check(directory.path()).expect("package check");
+        assert_eq!(report.failure_text(), "");
+    }
+
+    /// The third refused side: the lock file resolves the entry's own name and version from
+    /// it, and holds a second package of that name from the registry. An entry replaces one
+    /// version, so a dependent of the other one builds the published crate.
+    #[test]
+    fn a_second_package_of_a_patched_name_from_the_registry_is_refused() {
         let directory = tempfile::tempdir().expect("temporary workspace");
         patched(
             directory.path(),
@@ -1142,7 +1182,47 @@ mod tests {
         );
 
         let report = check(directory.path()).expect("package check");
+        assert_eq!(
+            report.failure_text(),
+            "Cargo.toml: patch.crates-io.foo is foo 1.2.3, and Cargo.lock also resolves foo 2.0.0 from the registry: a dependent of that version builds the published crate, not vendor/foo-1.2.3"
+        );
+    }
+
+    /// The same holds for an entry without a `path`: the lock file resolves its name from the
+    /// entry's source, and a second package of that name from the registry is refused.
+    #[test]
+    fn a_second_package_of_a_name_patched_from_another_source_is_refused() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        patched(directory.path(), "");
+        let manifest = directory.path().join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).expect("workspace manifest");
+        std::fs::write(
+            &manifest,
+            text.replace(
+                "foo = { path = \"vendor/foo-1.2.3\" }",
+                "foo = { git = \"https://example.invalid/foo\" }",
+            ),
+        )
+        .expect("workspace manifest");
+        let from_the_entry = "\n[[package]]\nname = \"foo\"\nversion = \"1.2.3\"\nsource = \"git+https://example.invalid/foo#00\"\n";
+        let lock = directory.path().join("Cargo.lock");
+
+        std::fs::write(&lock, format!("version = 4\n{from_the_entry}")).expect("lock file");
+        let report = check(directory.path()).expect("package check");
         assert_eq!(report.failure_text(), "");
+
+        std::fs::write(
+            &lock,
+            format!(
+                "version = 4\n{from_the_entry}\n[[package]]\nname = \"foo\"\nversion = \"2.0.0\"\n{FROM_THE_REGISTRY}"
+            ),
+        )
+        .expect("lock file");
+        let report = check(directory.path()).expect("package check");
+        assert_eq!(
+            report.failure_text(),
+            "Cargo.toml: patch.crates-io.foo replaces foo, and Cargo.lock also resolves foo 2.0.0 from the registry: a dependent of that version builds the published crate"
+        );
     }
 
     /// The first refused side: the lock file holds the entry's name and version and resolves it

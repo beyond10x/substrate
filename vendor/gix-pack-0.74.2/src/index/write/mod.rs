@@ -119,13 +119,17 @@ pub(super) mod function {
         let mut num_objects: usize = 0;
         let mut last_seen_trailer = None;
         let (anticipated_num_objects, upper_bound) = entries.size_hint();
-        // The items of the tree take no more bytes than one object may. A pack that states more entries than
-        // that is not read.
-        let items_over_limit =
-            |items: usize| alloc_limit_bytes.is_some_and(|limit| Tree::<TreeEntry>::bytes_of_items(items) > limit);
-        if items_over_limit(anticipated_num_objects) {
+        // The items of the tree and the lists it keeps beside them take no more bytes than one object may. A pack
+        // that states more entries than that is not read.
+        let table_over_limit = |items: usize, lists: usize| {
+            alloc_limit_bytes
+                .is_some_and(|limit| Tree::<TreeEntry>::bytes_of_items(items).saturating_add(lists) > limit)
+        };
+        if table_over_limit(anticipated_num_objects, 0) {
             return Err(Error::TreeTraversal(traverse::Error::OutOfMemory));
         }
+        // What the tree counted for the lists of the entries that are stored behind another.
+        let mut bytes_of_lists: usize = 0;
         let worst_case_num_objects_after_thin_pack_resolution = upper_bound.unwrap_or(anticipated_num_objects);
         let mut tree = Tree::with_capacity(worst_case_num_objects_after_thin_pack_resolution)?;
         let indexing_start = std::time::Instant::now();
@@ -148,7 +152,15 @@ pub(super) mod function {
                 compressed_size,
                 decompressed_size,
                 trailer,
-            } = entry?;
+            } = entry.map_err(|error| {
+                // What the entries inflate to while the pack arrives is counted against the allocation limit too,
+                // and ends as the other bounds of that limit do.
+                if crate::data::input::BytesToEntriesIter::<()>::is_over_inflate_budget(&error) {
+                    Error::TreeTraversal(traverse::Error::OutOfMemory)
+                } else {
+                    Error::from(error)
+                }
+            })?;
 
             decompressed_progress.inc_by(decompressed_size as usize);
 
@@ -156,11 +168,6 @@ pub(super) mod function {
             pack_entries_end = pack_offset + entry_len;
 
             let crc32 = crc32.expect("crc32 to be computed by the iterator. Caller assures correct configuration.");
-
-            // The tree grows with the entries that arrive, whatever number the pack states.
-            if items_over_limit(num_objects + 1) {
-                return Err(Error::TreeTraversal(traverse::Error::OutOfMemory));
-            }
 
             use crate::data::entry::Header::*;
             match header {
@@ -174,14 +181,14 @@ pub(super) mod function {
                     )?;
                 }
                 RefDelta { base_id } => {
-                    tree.add_child_by_id(
+                    bytes_of_lists = bytes_of_lists.saturating_add(tree.add_child_by_id(
                         base_id,
                         pack_offset,
                         TreeEntry {
                             id: object_hash.null(),
                             crc32,
                         },
-                    )?;
+                    )?);
                 }
                 OfsDelta { base_distance } => {
                     let base_pack_offset =
@@ -191,15 +198,20 @@ pub(super) mod function {
                                 distance: base_distance,
                             },
                         )?;
-                    tree.add_child(
+                    bytes_of_lists = bytes_of_lists.saturating_add(tree.add_child(
                         base_pack_offset,
                         pack_offset,
                         TreeEntry {
                             id: object_hash.null(),
                             crc32,
                         },
-                    )?;
+                    )?);
                 }
+            }
+            // The tree grows with the entries that arrive, whatever number the pack states: the entry that takes
+            // its items and its lists over the limit ends the indexing.
+            if table_over_limit(num_objects + 1, bytes_of_lists) {
+                return Err(Error::TreeTraversal(traverse::Error::OutOfMemory));
             }
             last_seen_trailer = trailer;
             num_objects += 1;

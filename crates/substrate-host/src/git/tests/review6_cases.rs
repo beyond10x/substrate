@@ -554,8 +554,8 @@ fn large_entries(kind: u8, entries: u32, objects: &[(Oid, Vec<u8>)]) -> Pack {
 }
 
 /// Indexes `pack` into the directory `packs` as the fetch of a create does: with
-/// `Bundle::write_to_directory`, two threads, and `limit` as the most it allocates for one
-/// object.
+/// `Bundle::write_to_directory`, the threads a create names, and `limit` as the most it
+/// allocates for one object.
 fn index_as_the_fetch(
     packs: &Path,
     pack: &[u8],
@@ -570,7 +570,7 @@ fn index_as_the_fetch(
         None::<gix::OdbHandle>,
         gix::hash::Kind::Sha1,
         gix::odb::pack::bundle::write::Options {
-            thread_limit: Some(2),
+            thread_limit: Some(super::super::INDEXING_THREADS),
             alloc_limit_bytes: Some(limit),
             ..Default::default()
         },

@@ -68,6 +68,23 @@ impl<T> Tree<T> {
         count.saturating_mul(std::mem::size_of::<Item<T>>())
     }
 
+    /// The bytes a list of child indices is counted as beside the bytes it reserves: its allocation.
+    const LIST_BYTES: usize = 16;
+
+    /// The bytes an id that entries name is counted as in `ref_child_indices`, beside what its list reserves. The
+    /// map keeps an id and the head of its list, 44 bytes, in nodes of eleven that it fills to five at the least,
+    /// and a node has one above it for every six: that is less than 128 bytes for each id however the ids arrive.
+    const NAMED_ID_BYTES: usize = 128;
+
+    /// Add `index` to `list` and answer the bytes the list is counted as more than before: four for each index
+    /// it newly reserves for, and [`Self::LIST_BYTES`] when it reserved for none before.
+    fn push_counted(list: &mut Vec<u32>, index: u32) -> usize {
+        let reserved = list.capacity();
+        list.push(index);
+        let grown = (list.capacity() - reserved).saturating_mul(std::mem::size_of::<u32>());
+        if reserved == 0 { grown + Self::LIST_BYTES } else { grown }
+    }
+
     pub(super) fn num_items(&self) -> usize {
         self.root_items.len() + self.child_items.len()
     }
@@ -144,12 +161,15 @@ impl<T> Tree<T> {
     }
 
     /// Add a child of the item at `base_offset` which itself resides at pack `offset` and associate custom `data` with it.
+    ///
+    /// Answers the bytes the tree keeps for the child beside its item: what the list it was added to is counted
+    /// as more than before.
     pub(crate) fn add_child(
         &mut self,
         base_offset: crate::data::Offset,
         offset: crate::data::Offset,
         data: T,
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         self.assert_is_incrementing_and_update_next_offset(offset)?;
 
         let next_child_index = self.child_items.len();
@@ -166,13 +186,16 @@ impl<T> Tree<T> {
         // - Since next_child_index will always be a valid index by the end of this method,
         //   this always produces valid in-bounds indices, upholding the bounds invariant.
 
-        if let Ok(i) = self.child_items.binary_search_by_key(&base_offset, |i| i.offset) {
-            self.child_items[i].children.push(next_child_index as u32);
+        let kept = if let Ok(i) = self.child_items.binary_search_by_key(&base_offset, |i| i.offset) {
+            Self::push_counted(&mut self.child_items[i].children, next_child_index as u32)
         } else if let Ok(i) = self.root_items.binary_search_by_key(&base_offset, |i| i.offset) {
-            self.root_items[i].children.push(next_child_index as u32);
+            Self::push_counted(&mut self.root_items[i].children, next_child_index as u32)
         } else {
+            let reserved = self.future_child_offsets.capacity();
             self.future_child_offsets.push((base_offset, next_child_index));
-        }
+            (self.future_child_offsets.capacity() - reserved)
+                .saturating_mul(std::mem::size_of::<(crate::data::Offset, usize)>())
+        };
 
         self.last_seen = NodeKind::Child.into();
         self.child_items.push(Item {
@@ -182,21 +205,28 @@ impl<T> Tree<T> {
             // SAFETY INVARIANT upheld: there are no children
             children: Default::default(),
         });
-        Ok(())
+        Ok(kept)
     }
 
     /// Add a child whose base is identified by object id and may occur anywhere in the pack.
+    ///
+    /// Answers the bytes the tree keeps for the child beside its item: what the list of its id is counted as
+    /// more than before, and [`Self::NAMED_ID_BYTES`] for an id no earlier child named.
     #[cfg(feature = "streaming-input")]
     pub(crate) fn add_child_by_id(
         &mut self,
         base_id: gix_hash::ObjectId,
         offset: crate::data::Offset,
         data: T,
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         self.assert_is_incrementing_and_update_next_offset(offset)?;
 
         let child_index = self.child_items.len() as u32;
-        self.ref_child_indices.entry(base_id).or_default().push(child_index);
+        let named = self.ref_child_indices.len();
+        let mut kept = Self::push_counted(self.ref_child_indices.entry(base_id).or_default(), child_index);
+        if self.ref_child_indices.len() > named {
+            kept += Self::NAMED_ID_BYTES;
+        }
         self.last_seen = NodeKind::Child.into();
         self.child_items.push(Item {
             offset,
@@ -204,7 +234,7 @@ impl<T> Tree<T> {
             data,
             children: Default::default(),
         });
-        Ok(())
+        Ok(kept)
     }
 }
 

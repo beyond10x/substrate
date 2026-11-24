@@ -578,7 +578,7 @@ where
         )?
     };
 
-    let resolved = ResolvedBase {
+    let mut resolved = ResolvedBase {
         entry,
         entry_end,
         bytes: if is_root {
@@ -598,7 +598,10 @@ where
     let has_children = node.has_children();
     inspect(&mut node, level, &resolved, progress, modify_base, objects, size)?;
     let mut reusable = if has_children {
-        let charge = Some(Budget::hold(budget, resolved.bytes.capacity())?);
+        // An object that waits is kept at its own length and counted as that, whatever the buffer it was made in
+        // had reserved for an entry before it.
+        resolved.bytes.shrink_to_fit();
+        let charge = Some(Budget::hold(budget, resolved.bytes.len())?);
         let resolved = OwnShared::new(ResolvedBase {
             _charge: charge,
             ..resolved

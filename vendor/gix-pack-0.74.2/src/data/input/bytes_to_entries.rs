@@ -21,10 +21,47 @@ pub struct BytesToEntriesIter<BR> {
     compressed_buf: Option<Vec<u8>>,
     hash_len: usize,
     object_hash: gix_hash::Kind,
+    /// The bytes the entries may still inflate to while the pack arrives, where the caller gave an allocation limit.
+    inflate_budget: Option<u64>,
+}
+
+/// How many times the allocation limit the entries of a pack may inflate to while it arrives, each entry once.
+const INFLATED_BYTES_PER_LIMIT: u64 = 64;
+
+/// What the error of an iterator holds whose entries would inflate to more than its budget.
+#[derive(Debug)]
+struct OverInflateBudget;
+
+impl std::fmt::Display for OverInflateBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the entries of the pack inflate to more bytes than the allocation limit admits while it arrives")
+    }
+}
+
+impl std::error::Error for OverInflateBudget {}
+
+impl BytesToEntriesIter<()> {
+    /// Whether `error` is the one an iterator that was given an allocation limit ends with when the entries of its
+    /// pack would inflate to more than [`INFLATED_BYTES_PER_LIMIT`] times that limit.
+    pub(crate) fn is_over_inflate_budget(error: &input::Error) -> bool {
+        matches!(
+            error,
+            input::Error::Io(gix_hash::io::Error::Io(error))
+                if error.get_ref().is_some_and(|inner| inner.is::<OverInflateBudget>())
+        )
+    }
 }
 
 /// Access
 impl<BR> BytesToEntriesIter<BR> {
+    /// Count the bytes the entries inflate to against [`INFLATED_BYTES_PER_LIMIT`] times `alloc_limit_bytes`, and
+    /// inflate no more of an entry than the bytes it states and one more. With `None` nothing is counted and an
+    /// entry is inflated to its end.
+    pub(crate) fn with_alloc_limit(mut self, alloc_limit_bytes: Option<usize>) -> Self {
+        self.inflate_budget = alloc_limit_bytes.map(|limit| (limit as u64).saturating_mul(INFLATED_BYTES_PER_LIMIT));
+        self
+    }
+
     /// The pack version currently being iterated
     pub fn version(&self) -> crate::data::Version {
         self.version
@@ -77,6 +114,7 @@ where
             compressed_buf: None,
             hash_len: object_hash.len_in_bytes(),
             object_hash,
+            inflate_budget: None,
         })
     }
 
@@ -117,7 +155,23 @@ where
             decompressor: &mut self.decompressor,
         };
 
-        let bytes_copied = io::copy(&mut decompressed_reader, &mut io::sink()).map_err(gix_hash::io::Error::from)?;
+        // With a budget, an entry is inflated to no more than the bytes it states and one more, and to no more than
+        // the budget has left and one more: the entry that would take what was inflated over the budget ends the
+        // iteration, and one that inflates to more than it states is the size mismatch below.
+        let most = self
+            .inflate_budget
+            .map_or(u64::MAX, |left| entry.decompressed_size.min(left).saturating_add(1));
+        let bytes_copied = io::copy(&mut io::Read::take(&mut decompressed_reader, most), &mut io::sink())
+            .map_err(gix_hash::io::Error::from)?;
+        if let Some(left) = self.inflate_budget.as_mut() {
+            if entry.decompressed_size > *left && bytes_copied > *left {
+                return Err(input::Error::Io(gix_hash::io::Error::Io(io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    OverInflateBudget,
+                ))));
+            }
+            *left = left.saturating_sub(bytes_copied);
+        }
         if bytes_copied != entry.decompressed_size {
             return Err(input::Error::IncompletePack {
                 actual: bytes_copied,

@@ -15,6 +15,9 @@ mod adversary_w20_u1_pass2_tests;
 #[path = "create_bounds_tests.rs"]
 mod create_bounds_tests;
 
+#[path = "adversary_create_bounds_tests.rs"]
+mod adversary_create_bounds_tests;
+
 use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};

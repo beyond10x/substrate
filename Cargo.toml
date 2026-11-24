@@ -92,8 +92,8 @@ must_use_candidate = "allow"
 # `vendor/axum-0.8.9/README.substrate.md` records the fence.
 axum = { path = "vendor/axum-0.8.9" }
 # A Git fetch indexes its pack in `gix-pack`. The local source is the published crate 0.74.2, the
-# version `gix` 0.87.1 resolves, with three bounds that follow the allocation limit a create sets
-# from its byte limit: the table of entries, the objects that wait and the bytes the indexing
-# makes (design 21, § *The baseline store*); `vendor/gix-pack-0.74.2/README.substrate.md` records
-# the change.
+# version `gix` 0.87.1 resolves, with four counts that follow the allocation limit a create sets
+# from its byte limit: the bytes the entries inflate to while the pack arrives, the table of
+# entries, the objects that wait and the bytes the indexing makes (design 21, § *The baseline
+# store*); `vendor/gix-pack-0.74.2/README.substrate.md` records the change.
 gix-pack = { path = "vendor/gix-pack-0.74.2" }

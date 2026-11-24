@@ -100,7 +100,8 @@ impl crate::Bundle {
                         options.iteration_mode,
                         data::input::EntryDataMode::KeepAndCrc32,
                         object_hash,
-                    )?,
+                    )?
+                    .with_alloc_limit(options.alloc_limit_bytes),
                     thin_pack_lookup,
                     options.compression,
                 );
@@ -133,7 +134,8 @@ impl crate::Bundle {
                     options.iteration_mode,
                     data::input::EntryDataMode::Crc32,
                     object_hash,
-                )?;
+                )?
+                .with_alloc_limit(options.alloc_limit_bytes);
                 let pack_version = pack_entries_iter.version();
                 (Box::new(pack_entries_iter), pack_version)
             }
@@ -211,7 +213,8 @@ impl crate::Bundle {
                         options.iteration_mode,
                         data::input::EntryDataMode::KeepAndCrc32,
                         object_hash,
-                    )?,
+                    )?
+                    .with_alloc_limit(options.alloc_limit_bytes),
                     thin_pack_lookup,
                     options.compression,
                 );
@@ -232,7 +235,8 @@ impl crate::Bundle {
                     options.iteration_mode,
                     data::input::EntryDataMode::Crc32,
                     object_hash,
-                )?;
+                )?
+                .with_alloc_limit(options.alloc_limit_bytes);
                 let pack_kind = pack_entries_iter.version();
                 (Box::new(pack_entries_iter), pack_kind)
             }
