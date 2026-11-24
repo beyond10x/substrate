@@ -1,0 +1,56 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "workspace.create",
+      "operation_id": "01JPHASE2LOSTANSWER00001"
+    },
+    "kind": "driver",
+    "port": "workspace"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "lifecycle.lost-answer-reconciliation"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "operation_state": "terminal",
+      "resource": "ws_lostanswer"
+    }
+  },
+  "id": "lost-answer-reconciles-with-original-operation",
+  "layer": "driver",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 1,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/reconciled_operation_id",
+      "expected": "01JPHASE2LOSTANSWER00001",
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "transport",
+      "name": "drop-after-terminal-commit",
+      "state": {
+        "drop_answer": true
+      }
+    }
+  ]
+}

@@ -113,7 +113,8 @@ impl Harness {
             Arc::clone(&driver) as Arc<dyn Driver>,
             DEPLOYMENT,
             authority,
-        );
+        )
+        .expect("application");
         let server = TestServer::spawn(Arc::clone(&app)).await;
         Self {
             driver,

@@ -940,6 +940,43 @@ async fn admit_and_start(
         .expect("started")
 }
 
+/// Design 36 § 8, story 3, the `pod` lane: a run that nobody observes or waits on puts one
+/// `run_ended` into its profile's sink, written by the run's monitor (D20), with the OOM count
+/// `pod` reports.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pod_run_nobody_observes_writes_one_run_ended() {
+    const NAME: &str = "ESS confinement pod run ended";
+    let Some(kubeconfig) = lane() else {
+        println!("pod lane: ABSENT; 0 executed");
+        return;
+    };
+    let adapter: Arc<dyn ConfinementAdapter> = open_lane(&kubeconfig);
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            image: Some(IMAGE.to_owned()),
+            process_bounds: Some(bounds(120_000, 64 << 20)),
+            ..ConfinementProfile::default()
+        },
+        &command(&["/bin/sh", "-c", "exit 3"]),
+        ("pod", None),
+        // The run's end waits for the kubelet and for the Pod's removal.
+        Duration::from_mins(3),
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(record["exit"], json!({"code": 3}), "{NAME}: {record}");
+    assert_eq!(record["memory_oom_kills"], 0, "{NAME}: {record}");
+    // Design 36 D14: `pod` reads no count of refused creations.
+    assert!(
+        record.get("process_limit_hits").is_none(),
+        "{NAME}: {record}"
+    );
+    assert!(record.get("limit").is_none(), "{NAME}: {record}");
+    println!("{NAME}: executed");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_writes_its_workspace_reports_its_output_and_leaves_nothing_after_wait() {
     let Some(kubeconfig) = lane() else {
@@ -947,7 +984,7 @@ async fn a_run_writes_its_workspace_reports_its_output_and_leaves_nothing_after_
         return;
     };
     let adapter = open_lane(&kubeconfig);
-    let (sink, records) = recording();
+    let (sink, mut recorded) = support::recorded();
     let run = admit_and_start(
         &adapter,
         ConfinementProfile {
@@ -972,6 +1009,10 @@ async fn a_run_writes_its_workspace_reports_its_output_and_leaves_nothing_after_
     assert_eq!(ended.adapter, AdapterName::Pod);
     assert_eq!(ended.declared_insecure, None);
     assert_eq!(ended.memory_oom_kills, Some(0), "{ended:?}");
+    // Design 36 D14: `pod` reads no count of refused creations.
+    assert_eq!(ended.process_limit_hits, None, "{ended:?}");
+    // Design 36 D7: a run that exited by itself names no limit.
+    assert_eq!(ended.limit, None, "{ended:?}");
     assert_eq!(ended.exit.and_then(|exit| exit.code), Some(3));
     let output = adapter.output(&run).await.expect("output");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -980,12 +1021,14 @@ async fn a_run_writes_its_workspace_reports_its_output_and_leaves_nothing_after_
         "{stdout}"
     );
     assert!(stdout.contains("read-only"), "{stdout}");
-    let events: Vec<Value> = records
-        .lock()
-        .iter()
-        .map(|record| serde_json::to_value(record).expect("record")["event"].clone())
-        .collect();
-    assert_eq!(events, [json!("profile_admitted"), json!("run_started")]);
+    // Design 36 D20: the monitor writes the run's end after it published it.
+    recorded
+        .run_ended_within("pod run", Duration::from_mins(1))
+        .await;
+    assert_eq!(
+        recorded.events(),
+        ["profile_admitted", "run_started", "run_ended"]
+    );
     assert_eq!(
         leftovers(&kubeconfig, &adapter.settings().namespace, run.as_str()),
         ""
@@ -1026,6 +1069,13 @@ async fn a_run_over_its_memory_bound_is_oom_killed_and_leaves_nothing() {
         "{exit:?}"
     );
     assert_eq!(ended.memory_oom_kills, Some(1), "{ended:?}");
+    assert_eq!(ended.process_limit_hits, None, "{ended:?}");
+    // Design 36 D7, the `pod` row: `OOMKilled` with an exit by a signal or above 128.
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::Memory),
+        "{ended:?}"
+    );
     assert_eq!(
         adapter
             .observe(&run)
@@ -1089,6 +1139,8 @@ async fn a_killed_run_ends_on_sigkill_and_leaves_nothing() {
         .expect("the run ends after a kill")
         .expect("waited");
     assert_eq!(ended.exit.and_then(|exit| exit.signal), Some(9));
+    // Design 36 D7: an embedder's own kill names no limit.
+    assert_eq!(ended.limit, None, "{ended:?}");
     let output = adapter.output(&run).await.expect("output");
     assert_eq!(output.stdout, b"started\n");
     assert_eq!(
@@ -1122,6 +1174,12 @@ async fn a_run_past_its_deadline_ends_and_leaves_nothing() {
     // `sleep 600` ended by its 5 s deadline, not by exiting.
     assert_ne!(ended.exit.and_then(|exit| exit.code), Some(0), "{ended:?}");
     println!("the deadline run ended {ended:?}");
+    // Design 36 D7, the `pod` row: the kubelet's `DeadlineExceeded` names `WallTime`.
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::WallTime),
+        "{ended:?}"
+    );
     assert_eq!(
         leftovers(&kubeconfig, &adapter.settings().namespace, run.as_str()),
         ""

@@ -295,7 +295,8 @@ impl Harness {
             Arc::clone(&store),
             Arc::clone(&driver) as Arc<dyn Driver>,
             "dep_nsadmission",
-        );
+        )
+        .expect("application");
         Self {
             _directory: directory,
             driver,

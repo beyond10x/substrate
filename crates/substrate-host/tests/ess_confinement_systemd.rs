@@ -631,6 +631,8 @@ async fn a_systemd_local_run_is_bounded_and_a_kill_leaves_no_process_of_its_tree
     assert_eq!(ended.state, RunState::Ended);
     assert_eq!(ended.exit.and_then(|exit| exit.signal), Some(9));
     assert_eq!(ended.declared_insecure.as_deref(), Some(REASON));
+    // Design 36 D7: an embedder's own kill names no limit.
+    assert_eq!(ended.limit, None, "{ended:?}");
     let left = std::fs::read_to_string(cgroup.join("cgroup.procs")).unwrap_or_default();
     assert!(
         left.trim().is_empty(),
@@ -693,6 +695,256 @@ async fn a_systemd_local_run_ends_at_its_timeout_and_its_cpu_budget() {
         assert!(started.elapsed() < Duration::from_secs(20));
     }
     println!("ESS confinement systemd local bounds: executed");
+}
+
+/// Design 36 § 8, story 1, around `local`: a run over its memory bound names `Memory` with an OOM
+/// count of at least one, read from the run's cgroup before the adapter removed it; a run past a
+/// CPU budget under one hundredth of its timeout names `CpuTime`; a run past its timeout names
+/// `WallTime`. Every run is bounded at two seconds of wall time or less.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_local_run_names_the_limit_that_ended_it() {
+    const NAME: &str = "ESS confinement systemd local limits";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    for (case, bounds, script, limit) in [
+        (
+            "memory",
+            ProcessBounds {
+                timeout_ms: 2_000,
+                processes: 8,
+                memory_bytes: 32 << 20,
+                cpu_millis: 2_000,
+            },
+            "( grow=x; while : ; do grow=\"$grow$grow\"; done ) & wait",
+            confinement::RunLimit::Memory,
+        ),
+        (
+            "cpu time",
+            ProcessBounds {
+                timeout_ms: 2_000,
+                processes: 8,
+                memory_bytes: 64 << 20,
+                cpu_millis: 10,
+            },
+            "while :; do :; done",
+            confinement::RunLimit::CpuTime,
+        ),
+        (
+            "wall time",
+            ProcessBounds {
+                timeout_ms: 1_000,
+                processes: 8,
+                memory_bytes: 64 << 20,
+                cpu_millis: 1_000,
+            },
+            "sleep 30",
+            confinement::RunLimit::WallTime,
+        ),
+    ] {
+        let admitted = adapter
+            .admit(&ConfinementProfile {
+                inner: Some(InnerAdapter::Local),
+                local_reason: Some(REASON.into()),
+                workspace: Some(workspace.path().to_path_buf()),
+                process_bounds: Some(bounds),
+                ..ConfinementProfile::default()
+            })
+            .expect("admitted");
+        let began = Instant::now();
+        let run = adapter
+            .start(&admitted, &shell(script))
+            .await
+            .expect("started");
+        let ended = tokio::time::timeout(Duration::from_secs(20), adapter.wait(&run))
+            .await
+            .unwrap_or_else(|_| panic!("{NAME} {case}: the run outlived its bounds {bounds:?}"))
+            .expect("waited");
+        println!("{NAME} {case}: the run ended after {:?}", began.elapsed());
+        assert_eq!(ended.state, RunState::Ended, "{NAME} {case}: {ended:?}");
+        assert_eq!(ended.limit, Some(limit), "{NAME} {case}: {ended:?}");
+        if limit == confinement::RunLimit::Memory {
+            assert!(
+                ended.memory_oom_kills.is_some_and(|kills| kills >= 1),
+                "{NAME} {case}: {ended:?}"
+            );
+        } else {
+            assert_eq!(ended.memory_oom_kills, Some(0), "{NAME} {case}: {ended:?}");
+        }
+        println!("{NAME} {case}: executed");
+    }
+}
+
+/// Design 36 § 8, story 2, around `local`: a run with a process bound of 4 that tries to start
+/// 16 processes counts the creations the run cgroup's bound refused, above zero, on `observe`
+/// while it still runs and on its ended observation, which names its timeout, and its one
+/// `run_ended` carries the same count; a run under its bound counts zero on both. The end task
+/// reads the count before it removes the run's cgroup (D13, D14).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_local_run_counts_the_creations_its_process_bound_refused() {
+    const NAME: &str = "ESS confinement systemd local process limit hits";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let profile = |processes| ConfinementProfile {
+        inner: Some(InnerAdapter::Local),
+        local_reason: Some(REASON.into()),
+        workspace: Some(workspace.path().to_path_buf()),
+        process_bounds: Some(ProcessBounds {
+            timeout_ms: 2_000,
+            processes,
+            memory_bytes: 64 << 20,
+            cpu_millis: 2_000,
+        }),
+        ..ConfinementProfile::default()
+    };
+    support::over_the_process_bound(
+        NAME,
+        &adapter,
+        profile(support::PROCESS_BOUND),
+        workspace.path(),
+    )
+    .await;
+    support::under_the_process_bound(NAME, &adapter, profile(16)).await;
+}
+
+/// Design 36 § 8, story 1, around `linux`: a run past its timeout names `WallTime`, the limit
+/// the inner `linux` observed, on the observation relabelled `systemd` with `inner: linux`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_linux_run_past_its_timeout_names_the_wall_time_limit() {
+    const NAME: &str = "ESS confinement systemd linux limit wall time";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_limit");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            inner: Some(InnerAdapter::Linux),
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 1_000,
+                processes: 16,
+                memory_bytes: 64 << 20,
+                cpu_millis: 1_000,
+            }),
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let began = Instant::now();
+    let run = adapter
+        .start(&admitted, &shell("sleep 30"))
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(Duration::from_secs(20), adapter.wait(&run))
+        .await
+        .expect("the run ends at its timeout")
+        .expect("waited");
+    println!("{NAME}: the run ended after {:?}", began.elapsed());
+    assert_eq!(ended.state, RunState::Ended, "{NAME}: {ended:?}");
+    assert_eq!(ended.adapter, AdapterName::Systemd);
+    assert_eq!(ended.inner, Some(InnerAdapter::Linux));
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::WallTime),
+        "{NAME}: {ended:?}"
+    );
+    assert_eq!(ended.memory_oom_kills, Some(0), "{NAME}: {ended:?}");
+    println!("{NAME}: executed");
+}
+
+/// Design 36 § 8, story 3, around `local`: a run that nobody observes or waits on puts one
+/// `run_ended` into its profile's sink, named `systemd` with `inner: local`, carrying the reason
+/// it is declared insecure and the OOM count the end task read from the run's cgroup (D20, D23).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_local_run_nobody_observes_writes_one_run_ended() {
+    const NAME: &str = "ESS confinement systemd local run ended";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            inner: Some(InnerAdapter::Local),
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            ..ConfinementProfile::default()
+        },
+        &shell("exit 0"),
+        ("systemd", Some("local")),
+        support::RECORD_WAIT,
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(
+        record["exit"],
+        serde_json::json!({"code": 0}),
+        "{NAME}: {record}"
+    );
+    assert_eq!(record["declared_insecure"], REASON, "{NAME}: {record}");
+    assert_eq!(record["memory_oom_kills"], 0, "{NAME}: {record}");
+    assert!(record.get("limit").is_none(), "{NAME}: {record}");
+    println!("{NAME}: executed");
+}
+
+/// Design 36 § 8, story 3, around `linux`: the inner `linux` has no sink, and the outer adapter's
+/// own task writes the run's one `run_ended` with its own profile and the relabelled
+/// observation, `systemd` with `inner: linux`, naming the limit the inner run reached (D20).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_linux_run_nobody_observes_writes_one_run_ended() {
+    const NAME: &str = "ESS confinement systemd linux run ended";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_ended");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            inner: Some(InnerAdapter::Linux),
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 1_000,
+                processes: 16,
+                memory_bytes: 64 << 20,
+                cpu_millis: 1_000,
+            }),
+            ..ConfinementProfile::default()
+        },
+        &shell("sleep 30"),
+        ("systemd", Some("linux")),
+        support::RECORD_WAIT,
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(record["limit"], "wall_time", "{NAME}: {record}");
+    assert!(
+        record.get("declared_insecure").is_none(),
+        "{NAME}: {record}"
+    );
+    println!("{NAME}: executed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

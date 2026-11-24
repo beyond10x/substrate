@@ -95,7 +95,7 @@ pub use aperture::EgressAperture;
 pub use backend::{
     BackendKind, BackendLedger, BackendName, BackendRecord, BackendRole, UidBinding,
 };
-pub use observation::{ExecObservation, PipeFrame, PipeStream};
+pub use observation::{EndOfRun, ExecObservation, PipeFrame, PipeStream};
 use output_retention::OutputRetention;
 // The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
 // is: a client names these, and never `host_process::HostProcessSupervisor`.
@@ -549,6 +549,14 @@ fn validate_writable_roots(roots: &[DeclaredWritableRoot]) -> Result<(), DriverE
             return refuse(format!(
                 "Writable host root {} does not name an absolute path.",
                 root.name
+            ));
+        }
+        // ADR 0053 decision 7: the applied record states this path whole as `host_path`.
+        if root.path.as_os_str().len() > substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES {
+            return refuse(format!(
+                "Writable host root {} names a path longer than {} bytes.",
+                root.name,
+                substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES
             ));
         }
     }
@@ -1388,6 +1396,12 @@ impl HostDriver {
         self.processes.output_stalled(id)
     }
 
+    /// The process creations exec `id`'s process bound refused so far: the `linux` adapter's
+    /// `process_limit_hits` for a running run (design 36 D13). `None` where it cannot be read.
+    pub(crate) fn running_process_limit_hits(&self, id: &str) -> Option<u64> {
+        self.processes.running_process_limit_hits(id)
+    }
+
     /// Half-closes stdin without ending output observation.
     ///
     /// # Errors
@@ -2222,6 +2236,37 @@ mod tests {
             assert_eq!(error.class, super::DriverErrorClass::Refused);
             assert!(error.message.contains(needle), "{}", error.message);
         }
+    }
+
+    /// ADR 0053 decision 7: a declared writable root's path is recorded whole as the applied
+    /// `host_path`, bounded at `MAX_READ_ONLY_FILE_PATH_BYTES`; the driver's open refuses a path
+    /// one byte over it by name and admits one at it.
+    #[test]
+    fn a_writable_root_path_over_the_applied_record_bound_is_refused_before_open() {
+        let segment = format!("/{}", "a".repeat(99));
+        let at_bound = segment.repeat(40);
+        let over = format!("{}/{}", segment.repeat(39), "a".repeat(100));
+        assert_eq!(
+            at_bound.len(),
+            substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES
+        );
+        assert_eq!(
+            over.len(),
+            substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES + 1
+        );
+        let root = |path: &str| super::DeclaredWritableRoot {
+            name: "cache".to_owned(),
+            path: path.into(),
+        };
+        assert!(super::validate_writable_roots(&[root(&at_bound)]).is_ok());
+        let error = super::validate_writable_roots(&[root(&over)])
+            .expect_err("a path the applied record cannot state is refused");
+        assert_eq!(error.code, "config.writable-root-invalid");
+        assert_eq!(error.class, super::DriverErrorClass::Refused);
+        assert_eq!(
+            error.message,
+            "Writable host root cache names a path longer than 4000 bytes."
+        );
     }
 
     #[test]

@@ -802,4 +802,20 @@ mod tests {
         assert!(!reference.contains("tenant-a"));
         assert!(!reference.contains("subject-a"));
     }
+
+    /// ADR 0053 decision 7: a hosted actor and principal, which a lease records, are a digest of
+    /// fixed width whatever the claims are, within `MAX_LEASE_ACTOR_CHARS` and
+    /// `MAX_LEASE_PRINCIPAL_CHARS`.
+    #[test]
+    fn a_hosted_reference_is_of_fixed_width_within_the_lease_identity_bounds() {
+        let long = "x".repeat(10_000);
+        for reference in [
+            hosted_reference("https://identity.test", "t", "s"),
+            hosted_reference(&long, &long, &long),
+        ] {
+            assert_eq!(reference.chars().count(), 50, "{reference}");
+            assert!(reference.chars().count() <= substrate_wire::MAX_LEASE_ACTOR_CHARS);
+            assert!(reference.chars().count() <= substrate_wire::MAX_LEASE_PRINCIPAL_CHARS);
+        }
+    }
 }

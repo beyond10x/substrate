@@ -1,16 +1,17 @@
 use crate::backend::{BackendObjectKind, settle_unbound_backend_objects};
-use crate::events::{append_event, commit_effect};
+use crate::events::{append_event, commit_effect, completion_effects};
 use crate::execs::mark_exec_unknown;
 use crate::execs::upsert_exec;
 use crate::leases::upsert_lease;
+use crate::result_bound::{CompletionEvent, append_completion_events, terminal_success};
 use crate::workspaces::upsert_workspace;
 use crate::{NewLease, Scope, Store, StoreConfig, StoreError, StoredExec, to_i64, to_u64};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::json;
 use substrate_wire::{
-    ErrorClass, ErrorDetail, Event, Exec, OperationOutcome, OperationRecord, OperationState,
-    Workspace,
+    ErrorClass, ErrorDetail, Event, Exec, MAX_OPERATION_ID_CHARS, MAX_RESOURCE_ID_CHARS,
+    OperationOutcome, OperationRecord, OperationState, Workspace, is_operation_id_byte,
 };
 
 #[derive(Debug, Clone)]
@@ -374,6 +375,14 @@ impl Store {
         exec: Option<&StoredExec>,
         lease: Option<(&str, &str, &NewLease)>,
     ) -> Result<(), StoreError> {
+        let recorded;
+        let (outcome, status, recorded_result) = match outcome {
+            OperationOutcome::Success { result } => {
+                recorded = terminal_success(self.config, operation, result.clone(), status);
+                (&recorded.0, recorded.1, Some(result))
+            }
+            OperationOutcome::Error { .. } => (outcome, status, None),
+        };
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let changed = transaction.execute(
@@ -407,26 +416,30 @@ impl Store {
         }
         let (actor, principal, operation_kind) =
             operation_identity_full(&transaction, scope, operation)?;
-        let transition = terminal_transition(&operation_kind, outcome);
-        let event = append_event(
+        // The success's event, written whether or not its result was recorded; an error the
+        // caller completes with has none.
+        let recorded = match recorded_result {
+            Some(result) => vec![CompletionEvent {
+                resource: resource_id.unwrap_or(operation),
+                resource_kind: operation_resource_kind(&operation_kind),
+                transition: success_transition(&operation_kind),
+                observation: Some(result.clone()),
+            }],
+            None => Vec::new(),
+        };
+        let events = append_completion_events(
             &transaction,
             self.event_retention,
             scope,
-            resource_id.unwrap_or(operation),
-            operation_resource_kind(&operation_kind),
-            transition,
-            terminal_at,
-            &actor,
-            principal.as_deref(),
             operation,
-            Some(match outcome {
-                OperationOutcome::Success { result } => result.clone(),
-                OperationOutcome::Error { .. } => serde_json::to_value(outcome)?,
-            }),
+            terminal_at,
+            (&actor, principal.as_deref()),
+            outcome,
+            recorded,
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok(())
     }
 
@@ -587,18 +600,29 @@ fn charge_new_operation(
     Ok(())
 }
 
+/// Settles the charge of a row its terminal update just wrote, inside the caller's transaction.
+/// Every terminal update of this crate calls it, so its refusals roll the whole update back and
+/// the row stays as it was:
+///
+/// - a resource over [`MAX_RESOURCE_ID_CHARS`] bytes is [`StoreError::OperationResourceTooLong`]
+///   ([`resource_within_bound`]), whatever the headroom: the bound holds for an accepted
+///   operation and its terminal update, and the least headroom counts the resource at it;
+/// - a row over its charge or over the row bound is [`StoreError::OperationTerminalHeadroom`].
 pub(crate) fn finalize_operation_accounting(
     connection: &Connection,
     config: StoreConfig,
     scope: &Scope,
     operation: &str,
 ) -> Result<(), StoreError> {
-    let charged: i64 = connection.query_row(
-        "SELECT charged_bytes FROM operations
+    let (charged, resource): (i64, Option<String>) = connection.query_row(
+        "SELECT charged_bytes, resource FROM operations
          WHERE deployment = ?1 AND subject = ?2 AND operation = ?3",
         params![scope.deployment, scope.subject, operation],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    if let Some(resource) = resource {
+        resource_within_bound(&resource)?;
+    }
     let charged = to_u64(charged)?;
     let row_bytes = operation_row_bytes(connection, scope, operation)?;
     if row_bytes > config.operation_max_row_bytes || row_bytes > charged {
@@ -665,12 +689,48 @@ pub(crate) fn existing_reservation(
         .map(|existing| existing.answer_to(&new.request_hash, new.grant_ref.as_deref())))
 }
 
+/// The ids of an operation the store accepts are within what its terminal headroom counts (ADR
+/// 0053 decision 8, [`StoreConfig::minimum_terminal_headroom_bytes`]), in the bytes the row
+/// accounting charges ([`operation_row_bytes`]): the operation id is at most
+/// [`MAX_OPERATION_ID_CHARS`] characters of the wire's operation-id alphabet
+/// ([`is_operation_id_byte`]), which is ASCII, so as many bytes; and the resource it names is at
+/// most [`MAX_RESOURCE_ID_CHARS`] bytes ([`resource_within_bound`]).
+fn accepted_ids_within_bounds(new: &NewOperation) -> Result<(), StoreError> {
+    if new.operation.len() > MAX_OPERATION_ID_CHARS
+        || !new.operation.bytes().all(is_operation_id_byte)
+    {
+        return Err(StoreError::OperationIdInvalid {
+            max: MAX_OPERATION_ID_CHARS,
+        });
+    }
+    if let Some(resource) = &new.resource {
+        resource_within_bound(resource)?;
+    }
+    Ok(())
+}
+
+/// The resource an accepted operation names, at acceptance and at its terminal update, is at
+/// most [`MAX_RESOURCE_ID_CHARS`] bytes, the figure
+/// [`StoreConfig::minimum_terminal_headroom_bytes`] counts it at. Every identifier the daemon
+/// mints is ASCII and within it. A longer one is [`StoreError::OperationResourceTooLong`]. A
+/// refused row is not held to it (`insert_refused_operation`).
+fn resource_within_bound(resource: &str) -> Result<(), StoreError> {
+    if resource.len() > MAX_RESOURCE_ID_CHARS {
+        return Err(StoreError::OperationResourceTooLong {
+            bytes: resource.len(),
+            max: MAX_RESOURCE_ID_CHARS,
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn insert_accepted_operation(
     connection: &Connection,
     retention: u64,
     config: StoreConfig,
     new: &NewOperation,
 ) -> Result<Event, StoreError> {
+    accepted_ids_within_bounds(new)?;
     connection.execute(
         "INSERT INTO operations (
             deployment, subject, operation, operation_kind, request_hash, state, accepted_at,
@@ -835,13 +895,8 @@ pub(crate) fn operation_resource_kind(operation_kind: &str) -> &str {
     }
 }
 
-pub(crate) fn terminal_transition(
-    operation_kind: &str,
-    outcome: &OperationOutcome,
-) -> &'static str {
-    if matches!(outcome, OperationOutcome::Error { .. }) {
-        return "operation.failed";
-    }
+/// The transition of the event a success of `operation_kind` writes, carrying its result.
+pub(crate) fn success_transition(operation_kind: &str) -> &'static str {
     match operation_kind {
         "workspace.create" | "workspace.adopt" => "workspace.created",
         "workspace.file.write" => "workspace.file-written",

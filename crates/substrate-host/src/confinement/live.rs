@@ -66,18 +66,82 @@ pub(crate) fn not_live() -> ConfinementError {
 
 /// The [`Kill`] of an adapter whose run is the process group its leader `pid` leads: `KILL` to
 /// the group under `reaped`, the lock that keeps the leader unreaped, as its `signal(Kill)`
-/// sends it.
-pub(crate) fn group_kill(pid: i32, reaped: Arc<parking_lot::Mutex<bool>>) -> Kill {
+/// sends it ([`group_signal`]). It answers that the stall ended the run only where the leader
+/// had not exited and the embedder's `KILL` had not come first (`stopped`, design 36 D1).
+pub(crate) fn group_kill(
+    pid: i32,
+    reaped: Arc<parking_lot::Mutex<bool>>,
+    stopped: Arc<AtomicBool>,
+) -> Kill {
     Box::new(move || {
         let reaped = reaped.lock();
-        if !*reaped {
-            // SAFETY: `kill` with a negative pid signals one process group; no memory is
-            // involved. The leader is unreaped while the lock says so, so the id is this run's.
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-            }
+        if *reaped {
+            return false;
         }
+        let running = !stopped.load(Ordering::Acquire) && !exited_unreaped(pid);
+        // SAFETY: `kill` with a negative pid signals one process group; no memory is
+        // involved. The leader is unreaped while the lock says so, so the id is this run's.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+        running
     })
+}
+
+/// The embedder's `signal` to a run that is the process group its leader `pid` leads (`local`,
+/// `macos`). Sent under `reaped`, held across `kill`: the run's task cannot reap the leader
+/// meanwhile, so the group id cannot have been reused by another process; once the leader is
+/// reaped nothing is sent. A `KILL` is recorded in `stopped` before it is sent, under the lock
+/// the stall's kill decides under ([`group_kill`]), so a stall's kill after it answers that it
+/// ended nothing. `adapter` names the adapter in a failure.
+pub(crate) fn group_signal(
+    pid: i32,
+    reaped: &parking_lot::Mutex<bool>,
+    stopped: &AtomicBool,
+    signal: substrate_wire::Signal,
+    adapter: &str,
+) -> Result<(), ConfinementError> {
+    let reaped = reaped.lock();
+    if *reaped {
+        return Ok(());
+    }
+    if signal == substrate_wire::Signal::Kill {
+        stopped.store(true, Ordering::Release);
+    }
+    // SAFETY: `kill` with a negative pid signals one process group; no memory is involved.
+    if unsafe { libc::kill(-pid, signal.number()) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(DriverError::failed(
+                "exec.signal-failed",
+                format!("{adapter} signal: {error}"),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Whether the child `pid`, which its owner has not reaped, has exited: `waitid` with `WNOHANG`
+/// and `WNOWAIT`, which leaves it waitable by its owner. `false` while it runs, and for a `pid`
+/// that is not a child of this process.
+pub(crate) fn exited_unreaped(pid: i32) -> bool {
+    let Ok(id) = libc::id_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: `siginfo_t` is plain data, and `waitid` writes into the one we own.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: as above; `WNOWAIT` leaves the child waitable, `WNOHANG` returns at once and leaves
+    // `si_signo` zero when no child of that id has exited.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            id,
+            &raw mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    result == 0 && info.si_signo == libc::SIGCHLD
 }
 
 /// `session.timeout-invalid`: a read that may not wait at all.
@@ -193,8 +257,11 @@ struct Reader {
     progress: Progress,
 }
 
-/// How an adapter ends a run whose delivery stalled, as its `signal(Kill)` does.
-pub(crate) type Kill = Box<dyn Fn() + Send + Sync>;
+/// How an adapter ends a run whose delivery stalled, as its `signal(Kill)` does. It answers
+/// whether the run's leader had not exited yet when it was called, and, on `local`, `macos`,
+/// `systemd` and `oci`, whether the embedder's `KILL` had not come first: only then did the stall end the
+/// run (design 36 D1, D5).
+pub(crate) type Kill = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// One run's live queue under the shared drain.
 pub(crate) struct LiveOutput {
@@ -203,6 +270,10 @@ pub(crate) struct LiveOutput {
     closed: watch::Sender<bool>,
     /// Set only by the stall, before `closed`.
     stalled: AtomicBool,
+    /// The stall's outcome: `true` when its kill found the run's leader not yet exited, so the
+    /// stall ended the run. Held by the stall from before it closes the queue until the kill
+    /// returned. A stall of output a program left behind when it exited does not end it.
+    ended_run: parking_lot::Mutex<bool>,
     /// Held across one `read_output` call (design 32 § 3, *One reader at a time*).
     reader: tokio::sync::Mutex<Reader>,
     kill: Kill,
@@ -217,6 +288,7 @@ impl LiveOutput {
         let live = Arc::new(Self {
             closed: watch::Sender::new(false),
             stalled: AtomicBool::new(false),
+            ended_run: parking_lot::Mutex::new(false),
             reader: tokio::sync::Mutex::new(Reader {
                 receiver,
                 progress: Progress::default(),
@@ -247,9 +319,21 @@ impl LiveOutput {
         self.stalled.load(Ordering::Acquire)
     }
 
+    /// Whether the stall ended the run: it came while the run's leader had not exited. Read under
+    /// the lock the stall holds across its kill, so an observation composed while the kill runs,
+    /// or after, reads its outcome.
+    pub(crate) fn ended_run(&self) -> bool {
+        *self.ended_run.lock()
+    }
+
     /// The stall: unless an imposed end closed the queue first, set the flag, close the queue
-    /// and end the run.
+    /// and end the run, all under the `ended_run` lock, which records the kill's outcome.
+    ///
+    /// Lock order: `ended_run`, then what the kill takes (`local` and `macos`: the run's `reaped`
+    /// lock; `systemd`: `Leader::exited`). No reader of `ended_run` holds one of those: each
+    /// composes its observation, or its end, without them.
     fn stall(&self) {
+        let mut ended_run = self.ended_run.lock();
         let stalled = &self.stalled;
         let first = self.closed.send_if_modified(|closed| {
             if *closed {
@@ -260,7 +344,7 @@ impl LiveOutput {
             true
         });
         if first {
-            (self.kill)();
+            *ended_run = (self.kill)();
         }
     }
 
@@ -324,6 +408,15 @@ pub(crate) fn open(
     }
 }
 
+/// `OutputStall` for a run whose live delivery stopped at the stall deadline while its leader had
+/// not exited, so the stall ended the run (design 36 D1, D5); `None` for a run that did not stall,
+/// for one whose leader had exited when it stalled, and for one without live output. The stall
+/// itself is still reported (`stalled`, [`OutputEvent::Stalled`]).
+pub(crate) fn stall_limit(live: Option<&Arc<LiveOutput>>) -> Option<super::RunLimit> {
+    live.is_some_and(|live| live.ended_run())
+        .then_some(super::RunLimit::OutputStall)
+}
+
 /// The run's live queue, or `session.not-pipe` for a run admitted `Recorded`.
 pub(crate) fn live(live: Option<&Arc<LiveOutput>>) -> Result<&Arc<LiveOutput>, ConfinementError> {
     live.ok_or_else(not_live)
@@ -375,6 +468,7 @@ mod tests {
         (
             Box::new(move || {
                 counted.fetch_add(1, Ordering::AcqRel);
+                true
             }),
             kills,
         )
@@ -451,6 +545,84 @@ mod tests {
         );
         assert_eq!(live.read(LONG, record).await.expect("read"), None);
         assert_eq!(live.read(LONG, record).await.expect("read"), None);
+    }
+
+    // Design 36 D5: a stall whose kill finds the run's leader exited is reported as a stall
+    // (`stalled`, `Stalled`) and names no limit; one whose kill finds it running names
+    // `OutputStall`.
+    #[tokio::test(start_paused = true)]
+    async fn a_stall_names_the_output_stall_limit_only_where_the_leader_had_not_exited() {
+        for running in [true, false] {
+            let (live, [stdout, _stderr]) = LiveOutput::new(1, Box::new(move || running));
+            stdout.forward(b"one").await;
+            stdout.forward(b"two").await;
+            assert!(live.stalled(), "running {running}");
+            assert_eq!(
+                stall_limit(Some(&live)),
+                running.then_some(super::super::RunLimit::OutputStall),
+                "running {running}"
+            );
+            let record = || [(false, 6), (false, 0)];
+            assert!(matches!(
+                live.read(LONG, record).await.expect("read"),
+                Some(OutputEvent::Chunk { .. })
+            ));
+            assert_eq!(
+                live.read(LONG, record).await.expect("read"),
+                Some(OutputEvent::Stalled)
+            );
+        }
+    }
+
+    // Design 36 D5: an observation composed while the stall's kill runs reads the stall's
+    // outcome. The kill stand-in tells a second thread it was called and returns `true` 50 ms
+    // later; that thread's `stall_limit`, asked meanwhile, is `OutputStall`.
+    #[tokio::test(start_paused = true)]
+    async fn an_observation_composed_while_the_stalls_kill_runs_names_the_stall() {
+        let (called, kill_called) = std::sync::mpsc::channel();
+        let kill: Kill = Box::new(move || {
+            let _ = called.send(());
+            std::thread::sleep(Duration::from_millis(50));
+            true
+        });
+        let (live, [stdout, _stderr]) = LiveOutput::new(1, kill);
+        stdout.forward(b"one").await;
+        let shared = Arc::clone(&live);
+        let observer = std::thread::spawn(move || {
+            kill_called.recv().expect("the kill was called");
+            stall_limit(Some(&shared))
+        });
+        stdout.forward(b"two").await;
+        assert_eq!(
+            observer.join().expect("joined"),
+            Some(super::super::RunLimit::OutputStall)
+        );
+    }
+
+    // Design 36 D1, D5, on `local` and `macos`: a stall's kill that takes the leader's lock after
+    // the embedder's `KILL` answers that it ended nothing, so the run names no `OutputStall`.
+    // The stall closed the queue; the embedder's `KILL` then ran in full (`signal`: its `close`
+    // finds the queue closed, then `group_signal`); then the stall's kill takes the lock. The
+    // stand-in pid names no process, so `exited_unreaped` answers `false`, as it does for a
+    // leader whose `SIGKILL` the kernel has not acted on yet.
+    #[test]
+    fn a_stalls_group_kill_after_the_embedders_kill_answers_that_it_ended_nothing() {
+        let reaped = Arc::new(parking_lot::Mutex::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let kill = group_kill(i32::MAX, Arc::clone(&reaped), Arc::clone(&stopped));
+        group_signal(
+            i32::MAX,
+            &reaped,
+            &stopped,
+            substrate_wire::Signal::Kill,
+            "local",
+        )
+        .expect("no such group is no failure");
+        assert!(
+            !kill(),
+            "a stall's kill after the embedder's `KILL` answers that it ended the run, so the \
+             run names `OutputStall`"
+        );
     }
 
     // § 3 *Delivery stops*: an imposed end closes the queue; a pending forward returns at once,

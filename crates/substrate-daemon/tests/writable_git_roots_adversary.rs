@@ -268,6 +268,7 @@ impl Driver for Fixture {
             output_complete: false,
             cgroup: None,
             leader_pid: None,
+            end_of_run: None,
         };
         self.execs
             .lock()
@@ -337,7 +338,8 @@ impl Harness {
             Arc::clone(&store),
             Arc::clone(&driver) as Arc<dyn Driver>,
             "dep_wrsecurity",
-        );
+        )
+        .expect("application");
         Self {
             directory,
             store,

@@ -26,6 +26,7 @@ use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -139,6 +140,8 @@ struct LocalRun {
     /// before the leader is reaped: while it is false the leader is at least a zombie, so its pid
     /// still names this run's process group.
     reaped: Arc<Mutex<bool>>,
+    /// Set under `reaped`'s lock by the embedder's `KILL`, before it is sent (design 36 D1).
+    stopped: Arc<AtomicBool>,
     /// The run's standard input, when its profile piped it (design 32).
     stdin: Option<Arc<StdinWriter>>,
     /// The run's live output, when its profile asked for it (design 32).
@@ -185,19 +188,43 @@ impl LocalAdapter {
     }
 
     fn observation(run: &LocalRun) -> RunObservation {
-        let (state, exit) = match *run.phase.borrow() {
+        Self::observation_of(
+            &run.id,
+            run.reason.as_deref(),
+            run.live.as_ref(),
+            *run.phase.borrow(),
+        )
+    }
+
+    /// The observation of a run in `phase`: what `observe` and `wait` return, and what the run's
+    /// end task writes as `run_ended` (design 36 D15).
+    fn observation_of(
+        id: &RunId,
+        reason: Option<&str>,
+        live: Option<&Arc<LiveOutput>>,
+        phase: Phase,
+    ) -> RunObservation {
+        let (state, exit) = match phase {
             Phase::Running => (RunState::Running, None),
             Phase::Ended(exit) => (RunState::Ended, Some(exit)),
             Phase::Unknown => (RunState::Unknown, None),
         };
         RunObservation {
-            run: run.id.clone(),
+            run: id.clone(),
             adapter: AdapterName::Local,
             inner: None,
-            declared_insecure: run.reason.clone(),
+            declared_insecure: reason.map(str::to_owned),
             state,
             exit,
+            // No `limits` family: only the stall the adapter imposed (design 36 D7).
+            limit: if state == RunState::Running {
+                None
+            } else {
+                live::stall_limit(live)
+            },
             memory_oom_kills: None,
+            // No `limits` family, so no process bound to count (design 36 D14).
+            process_limit_hits: None,
         }
     }
 
@@ -296,9 +323,10 @@ impl LocalAdapter {
         )));
         let (phase, observed) = watch::channel(Phase::Running);
         let reaped = Arc::new(Mutex::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
         let (live, [stdout_feed, stderr_feed]) =
             live::open(admitted.profile().output_delivery, || {
-                live::group_kill(pid, Arc::clone(&reaped))
+                live::group_kill(pid, Arc::clone(&reaped), Arc::clone(&stopped))
             });
         let stdout = child
             .stdout
@@ -309,6 +337,10 @@ impl LocalAdapter {
             .take()
             .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false, stderr_feed)));
         let reaping = Arc::clone(&reaped);
+        let reason = admitted.insecure_reason().map(str::to_owned);
+        // The run's `run_ended` reaches its end task once `audit_start` made it (design 36 D17).
+        let (hand_end, end_record) = tokio::sync::oneshot::channel();
+        let (end_id, end_reason, end_live) = (id.clone(), reason.clone(), live.clone());
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
             // A process the run started may still hold its output, and the run is not over until
@@ -330,25 +362,31 @@ impl LocalAdapter {
             if let Some(writer) = ending.as_ref().and_then(std::sync::Weak::upgrade) {
                 writer.end().await;
             }
-            let _ = phase.send(match ended {
+            let ended = match ended {
                 Ok(status) => Phase::Ended(RunExit {
                     code: status.code(),
                     signal: status.signal(),
                 }),
                 Err(_) => Phase::Unknown,
-            });
+            };
+            let _ = phase.send(ended);
+            // After the end is published, so neither `wait` nor `observe` waits for it (D20).
+            let observation =
+                Self::observation_of(&end_id, end_reason.as_deref(), end_live.as_ref(), ended);
+            super::write_run_end(end_record, observation).await;
         });
         self.runs.lock().push(Arc::new(LocalRun {
             id: id.clone(),
             pid,
-            reason: admitted.insecure_reason().map(str::to_owned),
+            reason,
             phase: observed,
             captured,
             reaped,
+            stopped,
             stdin: writer,
             live,
         }));
-        admitted.audit_start(&id, &command.argv[0]);
+        let _ = hand_end.send(admitted.audit_start(&id, &command.argv[0]));
         Ok(id)
     }
 }
@@ -431,25 +469,9 @@ impl ConfinementAdapter for LocalAdapter {
         {
             live.close();
         }
-        // Held across `kill`: the run's task cannot reap the leader meanwhile, so the group id
-        // cannot have been reused by another process. Until it is reaped the run is `Running`,
-        // and the signal goes to every member of the group, the leader exited or not.
-        let reaped = run.reaped.lock();
-        if *reaped {
-            return Ok(());
-        }
-        // SAFETY: `kill` with a negative pid signals one process group; no memory is involved.
-        if unsafe { libc::kill(-run.pid, signal.number()) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(DriverError::failed(
-                    "exec.signal-failed",
-                    format!("local signal: {error}"),
-                )
-                .into());
-            }
-        }
-        Ok(())
+        // Until the leader is reaped the run is `Running`, and the signal goes to every member
+        // of the group, the leader exited or not.
+        live::group_signal(run.pid, &run.reaped, &run.stopped, signal, "local")
     }
 
     async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {

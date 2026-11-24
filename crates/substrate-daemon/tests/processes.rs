@@ -62,6 +62,18 @@ mod security_pass1;
 #[path = "processes/adversary_pass1.rs"]
 mod adversary_pass1;
 
+/// ADR 0053: the result bound on the host-process routes.
+#[path = "processes/result_bound.rs"]
+mod result_bound;
+
+/// ADR 0053: adversary cases on the result bound at the shipped reserve.
+#[path = "processes/result_bound_adversary.rs"]
+mod result_bound_adversary;
+
+/// Security review of ADR 0053 unit 2 on the host-process routes, at the shipped reserve.
+#[path = "processes/result_bound_security_review.rs"]
+mod result_bound_security_review;
+
 /// A wall clock the cases move forward; everything else is the system authority's.
 #[derive(Default)]
 struct MovableAuthority {
@@ -130,12 +142,24 @@ impl Harness {
         let workspaces = directory.path().join("workspaces");
         std::fs::create_dir_all(&workspaces).expect("workspace root");
         let driver = HostDriver::open(HostConfig::minimum(workspaces)).expect("host driver");
+        Self::app_over(driver, directory, store, authority, cgroup)
+    }
+
+    /// [`Self::app`] over `driver`.
+    fn app_over(
+        driver: Arc<dyn substrate_host::Driver>,
+        directory: &TempDir,
+        store: &Arc<Store>,
+        authority: &Arc<MovableAuthority>,
+        cgroup: Option<&Path>,
+    ) -> Arc<App> {
         let mut app = App::with_authority(
             Arc::clone(store),
             driver,
             "dep_processes",
             Arc::clone(authority) as Arc<dyn Authority>,
-        );
+        )
+        .expect("application");
         let state = directory.path().join("state.processes");
         let supervisor = cgroup.map(|root| {
             HostProcessSupervisor::open(Some(root), &state)
@@ -496,6 +520,7 @@ async fn host_process_unknown_profile_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)] // One case per lexical refusal, each its own request.
 async fn host_process_invalid_argv_cwd_env_owner_are_refused() {
     let harness = Harness::portable();
     let cwd = harness.workdir("lexical");
@@ -542,6 +567,31 @@ async fn host_process_invalid_argv_cwd_env_owner_are_refused() {
         ),
         (
             with(base.clone(), "cwd", json!(format!("{}/.", cwd.display()))),
+            "process.cwd-invalid",
+        ),
+        // `MAX_PROCESS_CWD_BYTES` on both sides. One byte over is refused by the lexical rule,
+        // before any file-system call. At the bound the lexical rule admits it and the open
+        // refuses it: Linux opens a path of at most 4,095 bytes (`PATH_MAX` counts the NUL).
+        (
+            with(
+                base.clone(),
+                "cwd",
+                json!(format!(
+                    "/{}",
+                    "a".repeat(substrate_wire::MAX_PROCESS_CWD_BYTES - 1)
+                )),
+            ),
+            "process.cwd-invalid",
+        ),
+        (
+            with(
+                base.clone(),
+                "cwd",
+                json!(format!(
+                    "/{}",
+                    "a".repeat(substrate_wire::MAX_PROCESS_CWD_BYTES)
+                )),
+            ),
             "process.cwd-invalid",
         ),
         (without(base.clone(), "env"), "process.env-invalid"),

@@ -208,6 +208,244 @@ fn linux_workspace(
     Some((host, adapter, workspace))
 }
 
+/// Runs `script` under `/bin/sh -c` in `workspace` with `bounds`, and returns the observation
+/// `wait` reports once it ended, after printing how long it took.
+async fn bounded_run(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    workspace: &Path,
+    bounds: ProcessBounds,
+    script: &str,
+) -> confinement::RunObservation {
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            workspace: Some(workspace.to_path_buf()),
+            process_bounds: Some(bounds),
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let began = std::time::Instant::now();
+    let run = adapter
+        .start(
+            &admitted,
+            &Command {
+                argv: vec!["/bin/sh".into(), "-c".into(), script.to_owned()],
+                env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+            },
+        )
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(20), adapter.wait(&run))
+        .await
+        .unwrap_or_else(|_| panic!("{name}: the run outlived its bounds {bounds:?}"))
+        .expect("waited");
+    println!("{name}: the run ended after {:?}", began.elapsed());
+    ended
+}
+
+/// The bounds of a run that is meant to end at one of them: two seconds of wall time, and the
+/// CPU time of the whole timeout, so the CPU budget is reached no earlier than the timeout
+/// (design 36 D7, the note on `linux`).
+const BOUNDED: ProcessBounds = ProcessBounds {
+    timeout_ms: 2_000,
+    processes: 16,
+    memory_bytes: 64 << 20,
+    cpu_millis: 2_000,
+};
+
+// Design 36 § 8, story 1: a run that grows past its memory bound names `Memory`, and its OOM count
+// is at least one. The growth runs in a subshell, as the driver's own memory cases do, so the
+// kernel's victim is the subshell and the cgroup's group kill ends the leader.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_over_its_memory_bound_names_the_memory_limit() {
+    const NAME: &str = "ESS confinement linux limit memory";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let ended = bounded_run(
+        NAME,
+        &adapter,
+        &workspace,
+        ProcessBounds {
+            memory_bytes: 32 << 20,
+            ..BOUNDED
+        },
+        "( grow=x; while : ; do grow=\"$grow$grow\"; done ) & wait",
+    )
+    .await;
+    assert_eq!(ended.state, RunState::Ended, "{NAME}: {ended:?}");
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::Memory),
+        "{NAME}: {ended:?}"
+    );
+    assert!(
+        ended.memory_oom_kills.is_some_and(|kills| kills >= 1),
+        "{NAME}: {ended:?}"
+    );
+    println!("{NAME}: executed");
+}
+
+// Design 36 § 8, story 1: a run that spins past a CPU budget under one hundredth of its timeout
+// reaches the budget first and names `CpuTime` (D7, the note on `linux`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_past_its_cpu_budget_names_the_cpu_time_limit() {
+    const NAME: &str = "ESS confinement linux limit cpu time";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let ended = bounded_run(
+        NAME,
+        &adapter,
+        &workspace,
+        ProcessBounds {
+            cpu_millis: 10,
+            ..BOUNDED
+        },
+        "while :; do :; done",
+    )
+    .await;
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::CpuTime),
+        "{NAME}: {ended:?}"
+    );
+    assert_eq!(ended.memory_oom_kills, Some(0), "{NAME}: {ended:?}");
+    println!("{NAME}: executed");
+}
+
+// Design 36 § 8, story 1: a run that sleeps past its timeout names `WallTime`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_past_its_timeout_names_the_wall_time_limit() {
+    const NAME: &str = "ESS confinement linux limit wall time";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let ended = bounded_run(
+        NAME,
+        &adapter,
+        &workspace,
+        ProcessBounds {
+            timeout_ms: 1_000,
+            cpu_millis: 1_000,
+            ..BOUNDED
+        },
+        "sleep 30",
+    )
+    .await;
+    assert_eq!(ended.state, RunState::Ended, "{NAME}: {ended:?}");
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::WallTime),
+        "{NAME}: {ended:?}"
+    );
+    assert_eq!(ended.memory_oom_kills, Some(0), "{NAME}: {ended:?}");
+    println!("{NAME}: executed");
+}
+
+// Design 36 § 8, story 1: a run that exits 0 names no limit, and the driver read its OOM count,
+// zero, before it removed the run's cgroup (D8, D9).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_that_exits_0_names_no_limit_and_counts_no_oom_kill() {
+    const NAME: &str = "ESS confinement linux limit none";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let ended = bounded_run(NAME, &adapter, &workspace, BOUNDED, "exit 0").await;
+    assert_eq!(ended.state, RunState::Ended, "{NAME}: {ended:?}");
+    assert_eq!(ended.exit.and_then(|exit| exit.code), Some(0), "{NAME}");
+    assert_eq!(ended.limit, None, "{NAME}: {ended:?}");
+    assert_eq!(ended.memory_oom_kills, Some(0), "{NAME}: {ended:?}");
+    println!("{NAME}: executed");
+}
+
+// Design 36 § 8, story 3, the story's acceptance: a run that grows past its memory bound, and that
+// nobody observes or waits on after `start` returned, puts exactly one `run_ended` naming the
+// memory limit into its profile's sink after its `run_started`, written by the adapter's own task
+// for the run (D20).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_over_its_memory_bound_writes_one_run_ended_naming_memory_unobserved() {
+    const NAME: &str = "ESS confinement linux run ended memory";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                memory_bytes: 32 << 20,
+                ..BOUNDED
+            }),
+            ..ConfinementProfile::default()
+        },
+        &support::sh("( grow=x; while : ; do grow=\"$grow$grow\"; done ) & wait"),
+        ("linux", None),
+        support::RECORD_WAIT,
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(record["limit"], "memory", "{NAME}: {record}");
+    assert!(
+        record["memory_oom_kills"]
+            .as_u64()
+            .is_some_and(|kills| kills >= 1),
+        "{NAME}: {record}"
+    );
+    assert!(
+        record.get("declared_insecure").is_none(),
+        "{NAME}: {record}"
+    );
+    println!("{NAME}: executed");
+}
+
+// Design 36 § 8, story 2, the story's acceptance: a run with a process bound of 4 that tries to
+// start 16 processes counts the creations the bound refused, above zero, on `observe` while it
+// still runs and on its ended observation, and its one `run_ended` carries the same count. The
+// hit ends nothing: the run's timeout ends it, and that is the limit it names (D12, D13).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_over_its_process_bound_counts_the_refused_creations() {
+    const NAME: &str = "ESS confinement linux process limit hits";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::over_the_process_bound(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            workspace: Some(workspace.clone()),
+            process_bounds: Some(ProcessBounds {
+                processes: support::PROCESS_BOUND,
+                ..BOUNDED
+            }),
+            ..ConfinementProfile::default()
+        },
+        &workspace,
+    )
+    .await;
+}
+
+// Design 36 § 8, story 2: a run under its process bound counts zero refused creations on its
+// ended observation and on its `run_ended`: the driver read the counter (D9, D11).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_under_its_process_bound_counts_zero_refused_creations() {
+    const NAME: &str = "ESS confinement linux process limit hits";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::under_the_process_bound(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            workspace: Some(workspace),
+            process_bounds: Some(BOUNDED),
+            ..ConfinementProfile::default()
+        },
+    )
+    .await;
+}
+
 /// Admits `profile`, runs `script` under `/bin/sh -c` and returns its stdout once it ended.
 async fn run_script(
     adapter: &Arc<dyn ConfinementAdapter>,

@@ -137,6 +137,7 @@ impl GitRootFixtureDriver {
             output_complete: complete,
             cgroup: None,
             leader_pid: None,
+            end_of_run: None,
         };
         self.execs
             .lock()
@@ -349,7 +350,8 @@ impl Harness {
             store,
             Arc::clone(&driver) as Arc<dyn Driver>,
             "dep_gitroots",
-        );
+        )
+        .expect("application");
         Self {
             directory,
             driver,

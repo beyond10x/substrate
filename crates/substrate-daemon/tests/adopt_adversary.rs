@@ -293,7 +293,8 @@ impl Harness {
             Arc::clone(&driver) as Arc<dyn Driver>,
             DEPLOYMENT,
             Arc::clone(&authority) as Arc<dyn Authority>,
-        );
+        )
+        .expect("application");
         Self {
             directory,
             app,

@@ -1711,6 +1711,7 @@ fn running(id: &str, input: &ExecStartInput, pod: &str) -> ExecObservation {
         output_complete: false,
         cgroup: Some(pod.to_owned()),
         leader_pid: None,
+        end_of_run: None,
     }
 }
 

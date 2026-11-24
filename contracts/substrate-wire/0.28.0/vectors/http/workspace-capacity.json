@@ -1,0 +1,93 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "workspace.create",
+    "request": {
+      "body": {
+        "input": {
+          "labels": {},
+          "source": "empty"
+        },
+        "op": "01JPHASE3WORKSPACECAP001"
+      },
+      "headers": {
+        "x-request-id": "req_workspace_cap1"
+      },
+      "method": "POST",
+      "path": "/v1/workspaces",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "snapshot.resource-capacity"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "workspace",
+          "class": "exhausted",
+          "code": "workspace.capacity",
+          "message": "Current workspace capacity is exhausted; retire or destroy a workspace before retrying with a new operation id.",
+          "operation": "01JPHASE3WORKSPACECAP001",
+          "retriable": false
+        },
+        "request_id": "req_workspace_cap1"
+      },
+      "status": 507
+    }
+  },
+  "id": "workspace-capacity-refusal-is-durable",
+  "layer": "http",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/operation_state",
+      "expected": "refused",
+      "operator": "equals"
+    },
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/workspace_row_count_delta",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "snapshot",
+      "name": "workspace-capacity",
+      "state": {
+        "current_execs": 0,
+        "current_workspaces": 1024,
+        "provenance_events": 0
+      }
+    }
+  ]
+}

@@ -57,6 +57,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -75,7 +76,7 @@ use crate::output_retention::{Captured, drain};
 use super::{
     AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
     ConfinementProfile, ContractFamily, Fact, OutputEvent, ProcessBounds, RenderedCommand, RunExit,
-    RunId, RunObservation, RunOutput, RunState,
+    RunId, RunLimit, RunObservation, RunOutput, RunState, named_limit,
 };
 use crate::{DeclaredWritableRoot, DriverError};
 
@@ -114,6 +115,8 @@ const SIGNAL_RETRY: Duration = Duration::from_secs(5);
 const KILL_GRACE: Duration = Duration::from_secs(30);
 const RETRY_PAUSE: Duration = Duration::from_millis(100);
 const STARTED_POLL: Duration = Duration::from_millis(50);
+/// How long an ended run's state is read again for `OOMKilled` (design 36 D7).
+const OOM_FLAG_WAIT: Duration = Duration::from_secs(1);
 const MAX_INFO_BYTES: u64 = 4 << 20;
 const MAX_TIMEOUT_MS: u64 = 86_400_000;
 const MAX_PROCESSES: u32 = 4_096;
@@ -715,11 +718,12 @@ fn create_failed(message: &str) -> ConfinementError {
     DriverError::failed("exec.spawn-failed", message).into()
 }
 
+/// A run's phase; an ended or unknown one carries the limit its monitor observed (design 36 D7).
 #[derive(Debug, Clone, Copy)]
 enum Phase {
     Running,
-    Ended(RunExit),
-    Unknown,
+    Ended(RunExit, Option<RunLimit>),
+    Unknown(Option<RunLimit>),
 }
 
 struct OciRun {
@@ -731,6 +735,32 @@ struct OciRun {
     stdin: Option<Arc<StdinWriter>>,
     /// The run's live output, when its profile asked for it (design 32).
     live: Option<Arc<LiveOutput>>,
+    /// Set by the embedder's `signal(Kill)` before its runtime-client call (design 36 D1).
+    stopped: Arc<AtomicBool>,
+}
+
+/// The stall's end ([`live::Kill`]): `KILL` to the container, retried, as `signal(Kill)` sends
+/// it. It answers that the stall ended the run only where the runtime client had not returned
+/// (`client_ended`) and the embedder's `signal(Kill)` had not set `stopped` (design 36 D1, D5).
+///
+/// No lock orders the two runtime-client calls, so the flag decides one order only: an
+/// embedder's `KILL` that set `stopped` before the stall's kill was asked ended the run, and the
+/// stall names nothing. Where the stall's kill was asked first, the stall is named, as on the
+/// adapters whose stall acted first, and which client call reaches the container first is left
+/// to the runtime.
+fn stall_kill(
+    program: PathBuf,
+    id: RunId,
+    client_ended: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+) -> live::Kill {
+    Box::new(move || {
+        let ended_run = !client_ended.load(Ordering::Acquire) && !stopped.load(Ordering::Acquire);
+        let program = program.clone();
+        let id = id.clone();
+        tokio::spawn(async move { kill_retried(&program, &id).await });
+        ended_run
+    })
 }
 
 /// A container's state as the runtime's `container inspect` reports it.
@@ -756,6 +786,15 @@ impl ContainerState {
         })
     }
 
+    /// An ended container whose main process ended by `SIGKILL` (status 137) and whose state
+    /// does not hold `OOMKilled`: the state the monitor reads again (design 36 D7). A late flag
+    /// would also change what an end with another signal status names; those are read once.
+    fn killed_without_the_oom_flag(&self) -> bool {
+        !self.running
+            && !self.oom_killed
+            && self.exit_code == Some(128 + i64::from(Signal::Kill.number()))
+    }
+
     /// How the command ended: `128 + n` is signal `n`, whoever sent it, and a kill by the OOM
     /// killer is signal 9, as `local` and `linux` report them.
     fn exit(&self) -> Option<RunExit> {
@@ -773,6 +812,29 @@ impl ContainerState {
             },
         })
     }
+}
+
+/// The limit that ended an `oci` run (design 36 D7), in D4's order: the stall of its live output,
+/// where it came before the runtime client returned; memory, where the runtime's state holds
+/// `OOMKilled` and the run's main process ended by a signal, as [`ContainerState::exit`] reads it:
+/// an exit status of 129 to 192 is read as signal status − 128, and, beside `OOMKilled`, any
+/// status outside 0 to 128 (193 to 255, or a negative one) as `SIGKILL`, so a main process that
+/// itself exits with such a status after a child's OOM kill names `Memory`, and one that exits
+/// with 0 to 128 names none; the monitor's own deadline. `--cpus` is a rate and ends no run, and no aperture exists,
+/// so neither CPU time nor egress bytes is named. A signal alone names nothing.
+fn oci_limit(stalled: bool, deadline: bool, state: Option<&ContainerState>) -> Option<RunLimit> {
+    let memory = state.is_some_and(|state| {
+        state.oom_killed && state.exit().is_some_and(|exit| exit.signal.is_some())
+    });
+    let reached: Vec<RunLimit> = [
+        stalled.then_some(RunLimit::OutputStall),
+        memory.then_some(RunLimit::Memory),
+        deadline.then_some(RunLimit::WallTime),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    named_limit(&reached)
 }
 
 pub struct OciAdapter {
@@ -802,19 +864,30 @@ impl OciAdapter {
     }
 
     fn observation(run: &OciRun) -> RunObservation {
-        let (state, exit) = match *run.phase.borrow() {
-            Phase::Running => (RunState::Running, None),
-            Phase::Ended(exit) => (RunState::Ended, Some(exit)),
-            Phase::Unknown => (RunState::Unknown, None),
+        Self::observation_of(&run.id, *run.phase.borrow())
+    }
+
+    /// The observation of a run in `phase`: what `observe` and `wait` return, and what the
+    /// run's monitor writes as `run_ended` (design 36 D15).
+    fn observation_of(id: &RunId, phase: Phase) -> RunObservation {
+        let (state, exit, limit) = match phase {
+            Phase::Running => (RunState::Running, None, None),
+            Phase::Ended(exit, limit) => (RunState::Ended, Some(exit), limit),
+            Phase::Unknown(limit) => (RunState::Unknown, None, limit),
         };
         RunObservation {
-            run: run.id.clone(),
+            run: id.clone(),
             adapter: AdapterName::Oci,
             inner: None,
             declared_insecure: None,
             state,
             exit,
+            limit,
+            // The runtime's state holds a flag, not a count (design 36 D8).
             memory_oom_kills: None,
+            // It passes `--pids-limit`; the state it reads holds no count of refused creations
+            // (design 36 D14).
+            process_limit_hits: None,
         }
     }
 
@@ -1225,16 +1298,19 @@ impl OciAdapter {
             admitted.profile().output_retention,
             limit,
         )));
+        // Set by the monitor once the runtime client returned, which it does when the container's
+        // main process exited: a stall after that did not end the run (design 36 D5).
+        let client_ended = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
         // A stall ends the run as `signal(Kill)` does: `KILL` to the container, retried.
         let (live, [stdout_feed, stderr_feed]) =
             live::open(admitted.profile().output_delivery, || {
-                let program = program.clone();
-                let id = id.clone();
-                Box::new(move || {
-                    let program = program.clone();
-                    let id = id.clone();
-                    tokio::spawn(async move { kill_retried(&program, &id).await });
-                })
+                stall_kill(
+                    program.clone(),
+                    id.clone(),
+                    Arc::clone(&client_ended),
+                    Arc::clone(&stopped),
+                )
             });
         let readers = [
             child.stdout.take().map(|stream| {
@@ -1257,15 +1333,18 @@ impl OciAdapter {
         }
         let writer = stdin::child_writer(mode, child.stdin.take());
         let (phase, observed) = watch::channel(Phase::Running);
+        // The run's `run_ended` reaches its monitor once `audit_start` made it (design 36 D17).
+        let (hand_end, end_record) = tokio::sync::oneshot::channel();
         tokio::spawn(monitor(
             program,
             id.clone(),
             child,
             readers,
             bounds.timeout,
-            phase,
+            (phase, end_record),
             writer.as_ref().map(Arc::downgrade),
             live.clone(),
+            (client_ended, Arc::clone(&stopped)),
         ));
         self.runs.lock().push(Arc::new(OciRun {
             id: id.clone(),
@@ -1273,8 +1352,9 @@ impl OciAdapter {
             captured,
             stdin: writer,
             live,
+            stopped,
         }));
-        admitted.audit_start(&id, &command.argv[0]);
+        let _ = hand_end.send(admitted.audit_start(&id, &command.argv[0]));
         Ok(id)
     }
 }
@@ -1429,7 +1509,8 @@ async fn create(
 
 /// Watches one started run to its end: its timeout stops live delivery and kills the container,
 /// then the output is drained, the container's state read and the container removed, and the
-/// run's standard input ended, before the phase is published.
+/// run's standard input ended, before the phase is published; then the run's `run_ended` is
+/// written (design 36 D20).
 #[allow(clippy::too_many_arguments)] // The run's client, readers, bound and every end it closes.
 async fn monitor(
     program: PathBuf,
@@ -1437,18 +1518,30 @@ async fn monitor(
     mut child: tokio::process::Child,
     readers: [Option<tokio::task::JoinHandle<()>>; 2],
     timeout: Duration,
-    phase: watch::Sender<Phase>,
+    (phase, end_record): (
+        watch::Sender<Phase>,
+        tokio::sync::oneshot::Receiver<super::RunEndRecord>,
+    ),
     // The run record owns the writer; the monitor only reaches it, so dropping the adapter drops
     // the client's pipe and the container reads end of file.
     writer: Option<std::sync::Weak<StdinWriter>>,
     live: Option<Arc<LiveOutput>>,
+    (client_ended, stopped): (Arc<AtomicBool>, Arc<AtomicBool>),
 ) {
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
+    // A client that returned before the deadline wins where both are ready at once: a run that
+    // ended by itself is never recorded as ended by its deadline (design 36 D7).
     let mut ended = tokio::select! {
+        biased;
         status = child.wait() => Some(status),
         () = &mut deadline => None,
     };
+    if ended.is_some() {
+        client_ended.store(true, Ordering::Release);
+    }
+    // Recorded before the kill below: the run's end is then the deadline's (design 36 D7).
+    let deadline_fired = ended.is_none();
     if ended.is_none() {
         if let Some(live) = &live {
             live.close();
@@ -1476,18 +1569,65 @@ async fn monitor(
     for reader in readers.into_iter().flatten() {
         let _ = reader.await;
     }
-    let state = inspect(&program, &run).await;
+    let mut state = inspect(&program, &run).await;
+    // A kill this monitor or the stall sent, or one the embedder asked for, explains the exit;
+    // any other is read again, because the runtime may set `OOMKilled` after the exit (design
+    // 36 D7).
+    let ours = deadline_fired
+        || stopped.load(Ordering::Acquire)
+        || live::stall_limit(live.as_ref()).is_some();
+    if !ours {
+        state = oom_flag_settled(state, || inspect(&program, &run)).await;
+    }
     let removed = remove(&program, &run).await;
     // The run's end, for its standard input too: a write pending now fails.
     if let Some(writer) = writer.as_ref().and_then(std::sync::Weak::upgrade) {
         writer.end().await;
     }
-    let _ = phase.send(match (ended, state) {
-        (Some(Ok(_)), Some(state)) if removed && !state.running => {
-            state.exit().map_or(Phase::Unknown, Phase::Ended)
+    // The stall ended the run only where it came before the client returned (design 36 D5).
+    let stalled = live::stall_limit(live.as_ref()).is_some();
+    let limit = oci_limit(stalled, deadline_fired, state.as_ref());
+    let ended = match (ended, state) {
+        (Some(Ok(_)), Some(state)) if removed && !state.running => state
+            .exit()
+            .map_or(Phase::Unknown(limit), |exit| Phase::Ended(exit, limit)),
+        _ => Phase::Unknown(limit),
+    };
+    let _ = phase.send(ended);
+    super::write_run_end(end_record, OciAdapter::observation_of(&run, ended)).await;
+}
+
+/// The state of an ended container once its `OOMKilled` is settled (design 36 D7). A runtime
+/// sets the flag when its OOM event for the container arrives, and that may be after the event
+/// of the container's exit, which is what returns the runtime client. So a state whose main
+/// process ended by `SIGKILL` without the flag is read again every [`STARTED_POLL`] until it
+/// holds the flag or [`OOM_FLAG_WAIT`] has passed. The bound holds for the reads too: one still
+/// running when the time is over is dropped, which kills its runtime call. Any other state is
+/// returned as it is, and so is the last state read when a later read fails or is dropped. The
+/// caller asks only for a `SIGKILL` that it did not send and the embedder did not ask for.
+async fn oom_flag_settled<Read, Reading>(
+    first: Option<ContainerState>,
+    mut read: Read,
+) -> Option<ContainerState>
+where
+    Read: FnMut() -> Reading,
+    Reading: Future<Output = Option<ContainerState>>,
+{
+    let mut state = first?;
+    let deadline = tokio::time::Instant::now() + OOM_FLAG_WAIT;
+    while state.killed_without_the_oom_flag() {
+        let next = tokio::time::timeout_at(deadline, async {
+            tokio::time::sleep(STARTED_POLL).await;
+            read().await
+        })
+        .await;
+        match next {
+            Ok(Some(next)) => state = next,
+            // The read failed, or the second ended before it or during it.
+            Ok(None) | Err(_) => break,
         }
-        _ => Phase::Unknown,
-    });
+    }
+    Some(state)
 }
 
 /// Waits until the runtime reports the container started; `false` when the client ended first
@@ -1629,10 +1769,13 @@ impl ConfinementAdapter for OciAdapter {
     /// delivery first; `Int` and `Term` close nothing (design 32 § 3).
     async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
         let run = self.run(run)?;
-        if signal == Signal::Kill
-            && let Some(live) = &run.live
-        {
-            live.close();
+        if signal == Signal::Kill {
+            if let Some(live) = &run.live {
+                live.close();
+            }
+            // Before the runtime-client call: a stall's kill asked from here on ended nothing
+            // (`stall_kill`, design 36 D1).
+            run.stopped.store(true, Ordering::Release);
         }
         let deadline = Instant::now() + SIGNAL_RETRY;
         loop {
@@ -1964,6 +2107,134 @@ mod tests {
         assert!(!never.started);
     }
 
+    /// Design 36 D7, the `oci` row: the runtime's `OOMKilled` names `Memory` only when the run's
+    /// main process ended by a signal, the monitor's own deadline names `WallTime`, a stall wins
+    /// over both and memory over the deadline (D4). An exit by signal 9 alone names nothing.
+    #[test]
+    fn an_oci_run_names_memory_its_deadline_or_a_stall_and_nothing_from_a_signal_alone() {
+        let state = |code: i64, oom: bool| ContainerState {
+            started: true,
+            running: false,
+            oom_killed: oom,
+            exit_code: Some(code),
+        };
+        let oom = state(137, true);
+        let killed = state(137, false);
+        let exited = state(0, false);
+        for (stalled, deadline, state, limit) in [
+            (false, false, Some(&oom), Some(RunLimit::Memory)),
+            (
+                false,
+                false,
+                Some(&state(255, true)),
+                Some(RunLimit::Memory),
+            ),
+            (false, false, Some(&state(3, true)), None),
+            (false, false, Some(&state(0, true)), None),
+            (false, false, Some(&killed), None),
+            (false, false, Some(&exited), None),
+            (false, false, None, None),
+            (false, true, Some(&killed), Some(RunLimit::WallTime)),
+            (false, true, None, Some(RunLimit::WallTime)),
+            (false, true, Some(&oom), Some(RunLimit::Memory)),
+            (true, true, Some(&oom), Some(RunLimit::OutputStall)),
+            (true, false, Some(&killed), Some(RunLimit::OutputStall)),
+        ] {
+            assert_eq!(
+                oci_limit(stalled, deadline, state),
+                limit,
+                "stalled {stalled}, deadline {deadline}, {state:?}"
+            );
+        }
+    }
+
+    /// Design 36 D7: an ended container whose main process ended by `SIGKILL` and whose state
+    /// holds no `OOMKilled` is read again until the flag is there, and then names `Memory`. No
+    /// other state is read again; a flag that never comes leaves the state as it was after
+    /// [`OOM_FLAG_WAIT`]; a later read that fails keeps the state read before it.
+    #[tokio::test]
+    async fn an_oom_flag_the_runtime_sets_after_the_exit_is_read() {
+        let state = |code: i64, oom: bool, running: bool| ContainerState {
+            started: true,
+            running,
+            oom_killed: oom,
+            exit_code: Some(code),
+        };
+        let reads = std::cell::Cell::new(0_u32);
+        let flag_on_read = |on: u32| {
+            let reads = &reads;
+            move || {
+                reads.set(reads.get() + 1);
+                let read = reads.get();
+                async move { Some(state(137, read >= on, false)) }
+            }
+        };
+
+        let late = oom_flag_settled(Some(state(137, false, false)), flag_on_read(3)).await;
+        assert_eq!(late, Some(state(137, true, false)));
+        assert_eq!(reads.get(), 3);
+        assert_eq!(
+            oci_limit(false, false, late.as_ref()),
+            Some(RunLimit::Memory)
+        );
+
+        for settled in [
+            state(137, true, false),
+            state(0, false, false),
+            state(1, false, false),
+            state(143, false, false),
+            state(255, false, false),
+            state(137, false, true),
+        ] {
+            reads.set(0);
+            assert_eq!(
+                oom_flag_settled(Some(settled), flag_on_read(1)).await,
+                Some(settled)
+            );
+            assert_eq!(reads.get(), 0, "{settled:?} was read again");
+        }
+        assert_eq!(oom_flag_settled(None, flag_on_read(1)).await, None);
+        assert_eq!(reads.get(), 0);
+
+        let began = Instant::now();
+        let never = oom_flag_settled(Some(state(137, false, false)), flag_on_read(u32::MAX)).await;
+        assert_eq!(never, Some(state(137, false, false)));
+        assert!(began.elapsed() >= OOM_FLAG_WAIT, "{:?}", began.elapsed());
+        assert!(began.elapsed() < OOM_FLAG_WAIT * 3, "{:?}", began.elapsed());
+        assert_eq!(oci_limit(false, false, never.as_ref()), None);
+
+        reads.set(0);
+        let failed = oom_flag_settled(Some(state(137, false, false)), || {
+            reads.set(reads.get() + 1);
+            async { None }
+        })
+        .await;
+        assert_eq!(failed, Some(state(137, false, false)));
+        assert_eq!(reads.get(), 1);
+    }
+
+    /// Design 36 D1, D5: a stall's kill asked after the embedder's `signal(Kill)` set `stopped`
+    /// answers that it ended nothing, so the run names no `OutputStall`, while the runtime
+    /// client has not returned. The runtime is a stand-in that answers every call with success.
+    #[tokio::test]
+    async fn a_stalls_kill_after_the_embedders_kill_answers_that_it_ended_nothing() {
+        let client_ended = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let kill = stall_kill(
+            PathBuf::from("/bin/true"),
+            RunId::new("oci-stall".to_owned()),
+            Arc::clone(&client_ended),
+            Arc::clone(&stopped),
+        );
+        // What `signal(Kill)` does before its runtime-client call.
+        stopped.store(true, Ordering::Release);
+        assert!(
+            !kill(),
+            "a stall's kill after the embedder's `KILL` answers that it ended the run, so the \
+             run names `OutputStall`"
+        );
+    }
+
     // A8: a read-only or scoped workspace is refused by name through the pure profile check,
     // before the image rule; the shared shape and `.git` rules answer first.
     #[test]
@@ -1996,5 +2267,192 @@ mod tests {
         assert_eq!(git.code(), super::super::WRITABLE_SUBTREE_GIT);
         let whole = check_profile(&ConfinementProfile::default()).expect_err("no image");
         assert_eq!(whole.code(), "confinement.image-unpinned");
+    }
+
+    /// A stand-in container runtime for `monitor`. `container inspect` counts its reads in
+    /// `reads` and answers an ended container with status 137 whose `OOMKilled` is true from
+    /// the `flag_on`-th read on; `kill` kills the process named in `pid`; every other call
+    /// succeeds and prints nothing, so `rm` and `ps` report the container gone.
+    const STAND_IN_RUNTIME: &str = r#"#!/bin/sh
+dir=${0%/*}
+case "$1" in
+container)
+  n=$(cat "$dir/reads" 2>/dev/null || echo 0)
+  n=$((n + 1))
+  echo "$n" > "$dir/reads"
+  oom=false
+  [ "$n" -ge "$(cat "$dir/flag_on")" ] && oom=true
+  printf '{"StartedAt":"2026-11-24T00:00:00Z","Running":false,"OOMKilled":%s,"ExitCode":137}\n' "$oom"
+  ;;
+kill)
+  [ -f "$dir/pid" ] && kill -9 "$(cat "$dir/pid")"
+  ;;
+esac
+exit 0
+"#;
+
+    const NEVER: u32 = 1_000_000;
+
+    /// A runtime client that returns at once. `/bin/sh` is on Linux and on macOS; `/bin/true`
+    /// is not on macOS.
+    const RETURNS_AT_ONCE: &[&str] = &["/bin/sh", "-c", "exit 0"];
+
+    /// Runs `monitor` against [`STAND_IN_RUNTIME`] with `argv` as the runtime client, and returns
+    /// the published observation, the number of state reads and the time to the publication.
+    async fn monitored(
+        flag_on: u32,
+        stopped: bool,
+        timeout: Duration,
+        argv: &[&str],
+    ) -> (RunObservation, u32, Duration) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let program = dir.path().join("runtime");
+        std::fs::write(dir.path().join("flag_on"), flag_on.to_string()).expect("flag_on");
+        std::fs::write(&program, STAND_IN_RUNTIME).expect("runtime");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let child = tokio::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .kill_on_drop(true)
+            .spawn()
+            .expect("client");
+        if let Some(pid) = child.id() {
+            std::fs::write(dir.path().join("pid"), pid.to_string()).expect("pid");
+        }
+        let run = RunId::new("oci-monitor-case".to_owned());
+        let (phase, mut observed) = watch::channel(Phase::Running);
+        let (hand_end, end_record) = tokio::sync::oneshot::channel();
+        drop(hand_end);
+        let began = Instant::now();
+        tokio::spawn(monitor(
+            program,
+            run.clone(),
+            child,
+            [None, None],
+            timeout,
+            (phase, end_record),
+            None,
+            None,
+            (
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(stopped)),
+            ),
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            observed.wait_for(|phase| !matches!(phase, Phase::Running)),
+        )
+        .await
+        .expect("the monitor published the end within 20 s")
+        .expect("phase");
+        let elapsed = began.elapsed();
+        let reads = std::fs::read_to_string(dir.path().join("reads"))
+            .expect("reads")
+            .trim()
+            .parse()
+            .expect("a count");
+        let phase = *observed.borrow();
+        (OciAdapter::observation_of(&run, phase), reads, elapsed)
+    }
+
+    const KILLED: Option<RunExit> = Some(RunExit {
+        code: None,
+        signal: Some(9),
+    });
+
+    /// D7: the embedder's `signal(Kill)` set `stopped`, so the state is read once and the end
+    /// names no limit, without the second's wait.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_embedders_kill_is_read_once() {
+        let (ended, reads, elapsed) =
+            monitored(NEVER, true, Duration::from_mins(1), RETURNS_AT_ONCE).await;
+        assert_eq!(reads, 1, "{ended:?} after {elapsed:?}");
+        assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+        assert_eq!(ended.exit, KILLED, "{ended:?}");
+        assert_eq!(ended.limit, None, "{ended:?}");
+    }
+
+    /// D7: the monitor's own deadline sent the kill, so the state is read once and the end names
+    /// `WallTime`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deadlines_kill_is_read_once() {
+        let (ended, reads, elapsed) = monitored(
+            NEVER,
+            false,
+            Duration::from_millis(200),
+            &["/bin/sleep", "30"],
+        )
+        .await;
+        assert_eq!(reads, 1, "{ended:?} after {elapsed:?}");
+        assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+        assert_eq!(ended.exit, KILLED, "{ended:?}");
+        assert_eq!(ended.limit, Some(RunLimit::WallTime), "{ended:?}");
+    }
+
+    /// D7: a 137 nobody here sent whose flag the runtime sets on the third read names `Memory`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unexplained_kill_reads_a_late_flag_and_names_memory() {
+        let (ended, reads, elapsed) =
+            monitored(3, false, Duration::from_mins(1), RETURNS_AT_ONCE).await;
+        assert_eq!(reads, 3, "{ended:?} after {elapsed:?}");
+        assert!(elapsed >= STARTED_POLL * 2, "{elapsed:?}");
+        assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+        assert_eq!(ended.exit, KILLED, "{ended:?}");
+        assert_eq!(ended.limit, Some(RunLimit::Memory), "{ended:?}");
+    }
+
+    /// D7: a flag that never comes is read every 50 ms for one second, no more often, and the
+    /// end names no limit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unexplained_kill_without_a_flag_is_read_every_50_ms_for_a_second() {
+        let (ended, reads, elapsed) =
+            monitored(NEVER, false, Duration::from_mins(1), RETURNS_AT_ONCE).await;
+        assert!(elapsed >= OOM_FLAG_WAIT, "{elapsed:?}");
+        // The first read, then one every 50 ms at most while the second lasts.
+        let most =
+            2 + u32::try_from(OOM_FLAG_WAIT.as_millis() / STARTED_POLL.as_millis()).expect("small");
+        assert!((5..=most).contains(&reads), "{reads} reads in {elapsed:?}");
+        assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+        assert_eq!(ended.exit, KILLED, "{ended:?}");
+        assert_eq!(ended.limit, None, "{ended:?}");
+    }
+
+    /// Design 36 D7, `oci` row: "Such a run's end is published up to one second later." With
+    /// reads of 400 ms each, the third is dropped when the second is over, and the state of the
+    /// second read stands.
+    #[tokio::test]
+    async fn a_slow_read_keeps_the_wait_within_one_second() {
+        let reads = std::cell::Cell::new(0_u32);
+        let began = Instant::now();
+        let settled = oom_flag_settled(
+            Some(ContainerState {
+                started: true,
+                running: false,
+                oom_killed: false,
+                exit_code: Some(137),
+            }),
+            || {
+                reads.set(reads.get() + 1);
+                async {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    Some(ContainerState {
+                        started: true,
+                        running: false,
+                        oom_killed: false,
+                        exit_code: Some(137),
+                    })
+                }
+            },
+        )
+        .await;
+        let elapsed = began.elapsed();
+        assert!(settled.is_some());
+        assert_eq!(reads.get(), 3, "after {elapsed:?}");
+        assert!(elapsed >= OOM_FLAG_WAIT, "{elapsed:?}");
+        assert!(
+            elapsed <= OOM_FLAG_WAIT + STARTED_POLL,
+            "the wait took {elapsed:?} over {} reads",
+            reads.get()
+        );
     }
 }

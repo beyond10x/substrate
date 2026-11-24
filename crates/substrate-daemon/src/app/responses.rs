@@ -252,3 +252,64 @@ pub(super) fn failure_detail(
 pub(super) fn success<T: Serialize>(status: StatusCode, body: Success<T>) -> Response {
     (status, Json(body)).into_response()
 }
+
+/// The answer to a mutation whose row the store has just ended with `result`: the success at
+/// `status` when the store records that result, else `operation.result-unrecorded` at 500, the
+/// error the store wrote into the row instead (ADR 0053 decision 8). The store and this answer
+/// ask the one rule, [`substrate_store::Store::records_success_result`], so the first answer and
+/// every replay of the operation id agree.
+pub(super) fn completed<T: Serialize>(
+    store: &substrate_store::Store,
+    status: StatusCode,
+    request_id: &str,
+    operation: &str,
+    result: T,
+) -> Response {
+    if store.records_success_result(&result) {
+        success(status, Success::mutation(request_id, operation, result))
+    } else {
+        failure_detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            request_id,
+            substrate_store::result_unrecorded(operation),
+        )
+    }
+}
+
+/// The message of `operation.result-limit` (ADR 0053 decision 2).
+pub(super) const RESULT_LIMIT_MESSAGE: &str =
+    "The result of this operation exceeds what the operation ledger can record.";
+
+/// `operation.result-limit`: class `exhausted`, 429, not retriable, address `result` (ADR 0053
+/// decision 2). The width a start's or file change's result can reach is over the bytes the
+/// store records for a success result, so the mutation is refused before dispatch.
+pub(super) fn result_limit(operation: &str) -> ErrorDetail {
+    ErrorDetail {
+        class: ErrorClass::Exhausted,
+        code: substrate_wire::OPERATION_RESULT_LIMIT.to_owned(),
+        message: RESULT_LIMIT_MESSAGE.to_owned(),
+        retriable: false,
+        address: Some("result".to_owned()),
+        operation: Some(operation.to_owned()),
+    }
+}
+
+/// ADR 0053 decision 1: a mutation whose result can be `widest` bytes of compact JSON is refused
+/// [`result_limit`] at 429 when that is over what `store` records for a success result. The
+/// caller records the refusal before dispatch.
+pub(super) fn within_result_reserve(
+    store: &substrate_store::Store,
+    request_id: &str,
+    operation: &str,
+    widest: usize,
+) -> Result<(), Response> {
+    if u64::try_from(widest).is_ok_and(|widest| widest <= store.success_result_json_bytes()) {
+        Ok(())
+    } else {
+        Err(failure_detail(
+            StatusCode::TOO_MANY_REQUESTS,
+            request_id,
+            result_limit(operation),
+        ))
+    }
+}

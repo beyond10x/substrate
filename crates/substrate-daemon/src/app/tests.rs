@@ -38,7 +38,10 @@ pub(super) fn host_app(deployment: &str) -> (tempfile::TempDir, Arc<super::App>)
     let store = Arc::new(Store::open(":memory:").expect("state store"));
     let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
         .expect("host driver");
-    (directory, super::App::new(store, driver, deployment))
+    (
+        directory,
+        super::App::new(store, driver, deployment).expect("application"),
+    )
 }
 
 async fn bound_refusal_response(app: Arc<super::App>, operation: &str) -> Value {
@@ -83,7 +86,7 @@ async fn development_router_serves_neither_session_mint_nor_attachment() {
     let store = Arc::new(Store::open(":memory:").expect("state store"));
     let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
         .expect("host driver");
-    let app = super::App::new(store, driver, "dep_transport_routes");
+    let app = super::App::new(store, driver, "dep_transport_routes").expect("application");
     let identity = super::Identity {
         subject: "development:test".to_owned(),
         actor: "route-test".to_owned(),
@@ -119,7 +122,7 @@ async fn legacy_session_route_family_is_not_registered() {
     let store = Arc::new(Store::open(":memory:").expect("state store"));
     let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
         .expect("host driver");
-    let app = super::App::new(store, driver, "dep_legacy_session_routes");
+    let app = super::App::new(store, driver, "dep_legacy_session_routes").expect("application");
     let identity = super::Identity {
         subject: "local:1000".to_owned(),
         actor: "route-test".to_owned(),
@@ -443,7 +446,7 @@ async fn bound_refusal_store_failure_never_returns_the_original_refusal() {
     let store = Arc::new(Store::open(&state_path).expect("state store"));
     let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
         .expect("host driver");
-    let app = super::App::new(Arc::clone(&store), driver, "dep_refusal_test");
+    let app = super::App::new(Arc::clone(&store), driver, "dep_refusal_test").expect("application");
     let break_path = state_path.clone();
     app.refusal_before_record.lock().replace(Arc::new(move |_| {
         rusqlite::Connection::open(&break_path)
@@ -463,7 +466,7 @@ async fn bound_refusal_losing_to_accepted_reservation_returns_outcome_unknown() 
     let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
     let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
         .expect("host driver");
-    let app = super::App::new(Arc::clone(&store), driver, "dep_refusal_test");
+    let app = super::App::new(Arc::clone(&store), driver, "dep_refusal_test").expect("application");
     let racing_store = Arc::clone(&store);
     app.refusal_before_record
         .lock()
@@ -584,7 +587,8 @@ mod replay_compares_the_grant_where_the_row_is_found {
             Arc::new(SystemAuthority),
             policy,
             PrivateHostPaths::of_no_daemon_configuration(),
-        );
+        )
+        .expect("application");
         (directory, store, app)
     }
 
@@ -1072,7 +1076,7 @@ mod upgraded_transport_slot {
         let store = Arc::new(Store::open(":memory:").expect("state store"));
         let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
             .expect("host driver");
-        let app = App::new(store, driver, deployment);
+        let app = App::new(store, driver, deployment).expect("application");
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind the admitted listener");
@@ -2071,6 +2075,27 @@ fn the_session_input_bound_is_the_adapter_stdin_bound() {
         super::PIPE_MAX_INPUT_BYTES,
         substrate_host::confinement::MAX_STDIN_BYTES
     );
+}
+
+/// Every resource id the daemon's own authority mints is one the store accepts an operation
+/// with: at most `MAX_RESOURCE_ID_CHARS` bytes (ADR 0053 decision 8), for each of the five kinds.
+#[test]
+fn every_resource_id_the_system_authority_mints_is_within_the_store_bound() {
+    use super::service::{Authority as _, SystemAuthority};
+    let authority = SystemAuthority;
+    for (kind, id) in [
+        ("workspace", authority.workspace_id()),
+        ("exec", authority.exec_id()),
+        ("session", authority.session_id()),
+        ("snapshot", authority.snapshot_id()),
+        ("process", authority.process_id()),
+    ] {
+        assert!(
+            id.len() <= substrate_wire::MAX_RESOURCE_ID_CHARS,
+            "a {kind} id of {} bytes",
+            id.len()
+        );
+    }
 }
 
 mod review_replay_grant_cases;

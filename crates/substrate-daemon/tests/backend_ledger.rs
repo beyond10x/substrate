@@ -282,6 +282,7 @@ impl Driver for Fixture {
                 output_complete: false,
                 cgroup: Some(pod_name(id)),
                 leader_pid: None,
+                end_of_run: None,
             });
         }
         DispatchOutcome::OutcomeUnknown(DriverError::failed(
@@ -352,7 +353,7 @@ impl Harness {
         let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
         let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
             .expect("host driver");
-        let app = App::new(Arc::clone(&store), driver, DEPLOYMENT);
+        let app = App::new(Arc::clone(&store), driver, DEPLOYMENT).expect("application");
         Self {
             directory,
             store,
@@ -375,7 +376,7 @@ impl Harness {
             end_on_recovery: AtomicBool::new(false),
             recovered: Mutex::new(Vec::new()),
         });
-        let app = App::new(Arc::clone(&store), driver.clone(), DEPLOYMENT);
+        let app = App::new(Arc::clone(&store), driver.clone(), DEPLOYMENT).expect("application");
         (
             Self {
                 directory,
@@ -389,7 +390,7 @@ impl Harness {
     /// The same state directory and store under a new daemon run over `driver`.
     fn restart(&self, driver: Arc<dyn Driver>) -> Arc<App> {
         assert!(self.directory.path().join("state.db").is_file());
-        App::new(Arc::clone(&self.store), driver, DEPLOYMENT)
+        App::new(Arc::clone(&self.store), driver, DEPLOYMENT).expect("application")
     }
 
     async fn call(&self, method: Method, uri: &str, body: Body) -> (StatusCode, Value) {
@@ -867,7 +868,8 @@ async fn the_ledger_port_stamps_rows_with_the_daemon_authority_clock() {
         driver,
         DEPLOYMENT,
         Arc::new(StoppedClock(at)),
-    );
+    )
+    .expect("application");
     let ledger = app.backend_ledger();
     let name = "sbx-pr-aaaaaaaaaaaaaaaa-pod";
     ledger

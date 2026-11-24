@@ -8,7 +8,7 @@ summary: One hosted gate run failed on a daemon that could not bind the port its
 tags:
 - defect
 - flaky
-revision: 2
+revision: 4
 ---
 # Story: a test that starts the daemon on a TCP port cannot lose the port to another test
 
@@ -48,3 +48,43 @@ Hosted gate of `main` at `f9421f58f` (run 45293748554), 1 of 3406 tests:
 answered" after 10 s. The case takes the address of its operational listener from
 `unused_address()`, as two more cases of that file do. The cause is inferred, not shown. No
 rerun was started: the next commit on `main` gets its own run.
+
+## Seen a third time, 2026-11-24
+
+Hosted gate of pull request 291 (run 45382205250), 1 of 3561 tests:
+`readiness_reads_the_snapshot_taken_once_the_first_open_sequence_has_settled` in
+`crates/substrate-daemon/tests/kubernetes_driver_selection.rs`, a readiness answer of 503 where
+200 was expected. The pull request changed no file under `crates/substrate-daemon/src`. The
+failed job was run again once and passed. The cause is inferred, not shown.
+
+## Seen a fourth time, 2026-11-24
+
+Hosted gate of pull request 295 at `b3cf567ed` (run 45397925142), 1 of 3743 tests:
+`only_a_daemon_that_opened_a_confinement_adapter_names_it_to_the_operator` in
+`crates/substrate-daemon/tests/kubernetes_driver_selection.rs`, no answer from the operational
+listener in 10 s. The cause is inferred, not shown. The failed job was not run again: the
+branch of this story was merged into the pull request's branch at `4dfffcf3b`, and the next
+hosted gate of that branch, at `1a566aec0` (run 45413469441), did not fail in this binary.
+
+## What was built, 2026-11-24
+
+Step 1's count: 31 callers of `unused_address()` in the daemon's `tls_listener`,
+`hosted_pool_adversary_pass1` and `kubernetes_driver_selection`, 1 in the SDK's `remote` and 2
+in the conformance `local_endpoint`, 34 in all. After the change none picks a port for a later
+bind outside the lock.
+
+Step 2, decided: neither an inherited descriptor nor a reported port, and no test group. A port
+is handed out only to a process that holds an exclusive lock on the port's file under the target
+directory's `tmp/test-ports`, and keeps it until the process ends (`test-support/ports.rs`). A
+descriptor or a reported port would change the daemon's command line or its start for test use;
+the lock changes test code only. Why the earlier helper did not hold under cargo-nextest is in
+the commit that adds the lock.
+
+Cases, in every including binary with a test harness: the three of the first commit and the
+three added after the adversary pass (`review-result:test-ports-adversary`: no S1, no S2, two
+S3, both fixed).
+
+Open: a test killed after it started a daemon process and before that daemon bound loses its
+lock, and the bind check catches the port only once the orphaned daemon has bound. Two checkouts
+that test on one host share no lock; their scans start 7919 ports apart for process ids one
+apart, and the bind check at the draw is the only guard between them.

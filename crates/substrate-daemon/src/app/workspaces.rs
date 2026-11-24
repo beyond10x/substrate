@@ -14,11 +14,12 @@ use substrate_store::{
     WorkspaceObservationWrite, WorkspaceRootHolder, adopt_not_found,
 };
 use substrate_wire::{
-    EmptyInput, ErrorClass, FileEditInput, FileMode, FileMutationResult, FilePatchInput,
-    FileReadQuery, FileReplaceInput, FileWriteInput, GitBaselineFileQuery, GitChangesQuery,
-    LeaseRenewInput, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, OMITTED_ENTRIES_HEADER, Success,
-    WorkspaceAdoptInput, WorkspaceCreateInput, WorkspaceKind, WorkspaceOrigin, WorkspaceState,
-    WorkspaceTreeQuery, validate_directory_address, validate_relative_path,
+    EmptyInput, ErrorClass, FileAbsence, FileEditInput, FileMode, FileMutationResult,
+    FileObservation, FilePatchInput, FileReadQuery, FileReplaceInput, FileWriteInput,
+    GitBaselineFileQuery, GitChangesQuery, LeaseRenewInput, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS,
+    OMITTED_ENTRIES_HEADER, Success, WorkspaceAdoptInput, WorkspaceCreateInput, WorkspaceKind,
+    WorkspaceOrigin, WorkspaceState, WorkspaceTreeQuery, validate_directory_address,
+    validate_relative_path,
 };
 
 use super::operations::{
@@ -29,9 +30,10 @@ use super::operations::{
     validate_workspace_input,
 };
 use super::responses::{
-    failure, failure_detail, normalized_file_address, not_found, not_found_with_operation,
-    operation_ledger_capacity, outcome_unknown, path_refusal, query_is_empty, request_id,
-    schema_invalid, store_failure, success, workspace_frozen_refusal, workspace_missing_refusal,
+    completed, failure, failure_detail, normalized_file_address, not_found,
+    not_found_with_operation, operation_ledger_capacity, outcome_unknown, path_refusal,
+    query_is_empty, request_id, schema_invalid, store_failure, success, within_result_reserve,
+    workspace_frozen_refusal, workspace_missing_refusal,
 };
 use super::service::{end_workspace, run_maintenance_driver};
 use super::{App, Identity};
@@ -230,9 +232,12 @@ pub(super) async fn workspace_create(
             {
                 return store_failure(&request_id, Some(&operation), &error);
             }
-            success(
+            completed(
+                &app.store,
                 StatusCode::CREATED,
-                Success::mutation(request_id, operation, workspace),
+                &request_id,
+                &operation,
+                workspace,
             )
         }
         DispatchOutcome::NotDispatched(error) | DispatchOutcome::ContainedAbsent(error) => {
@@ -421,9 +426,12 @@ pub(super) async fn workspace_adopt(
         })
         .await
     {
-        Ok(WorkspaceAdoptReservation::Adopted(workspace)) => success(
+        Ok(WorkspaceAdoptReservation::Adopted(workspace)) => completed(
+            &app.store,
             StatusCode::CREATED,
-            Success::mutation(request_id, mutation.op, workspace),
+            &request_id,
+            &mutation.op,
+            workspace,
         ),
         Ok(WorkspaceAdoptReservation::Answered(reservation)) => {
             reservation_response(Ok(reservation), &request_id, &mutation.op)
@@ -791,6 +799,26 @@ pub(super) async fn workspace_file_write(
             .await;
         }
     };
+    // ADR 0053 decision 1: a write whose file observation the ledger cannot record is refused
+    // before the workspace is admitted and before any driver reads or writes.
+    if let Err(response) = within_result_reserve(
+        &app.store,
+        &request_id,
+        &mutation.op,
+        FileObservation::widest_json_bytes(&workspace_id, &path),
+    ) {
+        return refuse_before_dispatch_response(
+            &app,
+            &identity,
+            &request_id,
+            "workspace.file.write",
+            "PUT",
+            &address,
+            &mutation,
+            response,
+        )
+        .await;
+    }
     let scope = app.scope(&identity);
     let _workspace_guard = app.lock_workspace(&scope, &workspace_id).await;
     let root_name = match app.admit_workspace(&scope, &workspace_id).await {
@@ -1220,6 +1248,26 @@ pub(super) async fn workspace_file_delete(
         )
         .await;
     }
+    // ADR 0053 decision 1: a delete whose absence the ledger cannot record is refused before the
+    // workspace is admitted and before any driver deletes.
+    if let Err(response) = within_result_reserve(
+        &app.store,
+        &request_id,
+        &mutation.op,
+        FileAbsence::widest_json_bytes(&workspace_id, &path),
+    ) {
+        return refuse_before_dispatch_response(
+            &app,
+            &identity,
+            &request_id,
+            "workspace.file.delete",
+            "DELETE",
+            &address,
+            &mutation,
+            response,
+        )
+        .await;
+    }
     let scope = app.scope(&identity);
     let _workspace_guard = app.lock_workspace(&scope, &workspace_id).await;
     let root_name = match app.admit_workspace(&scope, &workspace_id).await {
@@ -1408,10 +1456,7 @@ pub(super) async fn workspace_destroy(
             {
                 return store_failure(&request_id, Some(&operation), &error);
             }
-            success(
-                StatusCode::OK,
-                Success::mutation(request_id, operation, absence),
-            )
+            completed(&app.store, StatusCode::OK, &request_id, &operation, absence)
         }
         Ok(WorkspaceDestroyProgress::Pending { removed_items }) => {
             let pending = substrate_store::PendingWorkspaceDestroy {
@@ -1584,9 +1629,12 @@ pub(super) async fn workspace_lease_renew(
         })
         .await
     {
-        Ok(resource) => success(
+        Ok(resource) => completed(
+            &app.store,
             StatusCode::OK,
-            Success::mutation(request_id, operation, resource),
+            &request_id,
+            &operation,
+            resource,
         ),
         Err(error) => finish_lease_store_error(&app, &scope, &request_id, &operation, &error).await,
     }

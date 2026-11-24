@@ -234,6 +234,7 @@ impl Driver for Fixture {
             output_complete: false,
             cgroup: None,
             leader_pid: None,
+            end_of_run: None,
         };
         self.execs
             .lock()
@@ -337,7 +338,8 @@ impl Harness {
             Arc::new(SystemAuthority),
             DelegatedContextPolicy::none(),
             PrivateHostPaths::of(&config).expect("the read set"),
-        );
+        )
+        .expect("application");
         Self {
             directory,
             driver,

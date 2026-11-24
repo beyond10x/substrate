@@ -197,6 +197,13 @@ require_executed sandbox_parity \
 # a program that is a link to a denied program and one directory under two names, the second in
 # the base view's form (`/usr/bin` listed, `/bin/id` denied) and from two declared roots. The
 # base view's form is absent, so refused here, on a host whose `/bin` is not a link to `/usr/bin`.
+# The `limit` lines are design 36's story 1: runs ended by their memory bound, their CPU budget
+# and their timeout name that limit, and a run that exits 0 names none. The `run ended` line is
+# its story 3: a run over its memory bound that nobody observes puts one `run_ended` naming the
+# memory limit into its profile's sink. The `process limit hits` lines are its story 2: a run
+# over its process bound counts the refused creations on its ended observation and on its
+# `run_ended`, a run under it counts zero on both, and `observe` of the first run while it still
+# runs counts above zero.
 require_executed ess_confinement_linux \
   'ESS confinement linux scoped write: executed' \
   'ESS confinement linux scoped git: executed' \
@@ -262,8 +269,31 @@ require_executed ess_confinement_linux \
   'ESS confinement linux exec deny limit script: executed' \
   'ESS confinement linux exec deny limit replaced: executed' \
   'ESS confinement linux exec deny limit unreadable directory: executed' \
-  'ESS confinement linux exec deny probe held mount: executed'
+  'ESS confinement linux exec deny probe held mount: executed' \
+  'ESS confinement linux limit memory: executed' \
+  'ESS confinement linux limit cpu time: executed' \
+  'ESS confinement linux limit wall time: executed' \
+  'ESS confinement linux limit none: executed' \
+  'ESS confinement linux run ended memory: executed' \
+  'ESS confinement linux process limit hits over: executed' \
+  'ESS confinement linux process limit hits under: executed' \
+  'ESS confinement linux process limit hits running: executed'
+# Design 36, story 1: the limit that ended a run, around `local` from the scope's own watch and
+# the run cgroup's OOM count, around `linux` from the driver. Story 3: one `run_ended` per run
+# nobody observes, around each inner adapter, with the outer adapter's name. Story 2: around
+# `local`, the run cgroup's count of refused process creations, above zero over the bound, on
+# `observe` while the run runs and on its end, and zero under it, on the ended observation and
+# on `run_ended`.
 require_executed ess_confinement_systemd \
+  'ESS confinement systemd local limits memory: executed' \
+  'ESS confinement systemd local limits cpu time: executed' \
+  'ESS confinement systemd local limits wall time: executed' \
+  'ESS confinement systemd linux limit wall time: executed' \
+  'ESS confinement systemd local run ended: executed' \
+  'ESS confinement systemd linux run ended: executed' \
+  'ESS confinement systemd local process limit hits running: executed' \
+  'ESS confinement systemd local process limit hits over: executed' \
+  'ESS confinement systemd local process limit hits under: executed' \
   'ESS confinement systemd local scoped write: executed' \
   'ESS confinement systemd linux scoped write: executed' \
   'ESS confinement systemd local retention tail: executed' \
@@ -665,6 +695,13 @@ if [[ -z "${consumer_line}" ]]; then
   exit 1
 fi
 echo "delegated-lane: ${consumer_line}"
+# Design 36's acceptance: one run held to an allow-list and a deny-list that hits its process
+# bound and then its timeout, read through public items only. Absent, exit 0, without the root
+# or the helper, so required by its own line.
+if ! grep -qF 'consumer surface governed run: executed' <<<"${consumer_log}"; then
+  echo "delegated-lane: consumer_surface did not print 'consumer surface governed run: executed'" >&2
+  exit 1
+fi
 
 # The public SDK owns a separate clean-room journey against the shipped daemon binary. It proves
 # PTY resize, live metrics and orderly whole-tree cleanup through SDK types only; without this

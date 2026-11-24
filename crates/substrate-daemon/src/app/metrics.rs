@@ -649,7 +649,8 @@ mod tests {
                 Arc::clone(&store),
                 Arc::new(NoDriver { metrics_stream }),
                 DEPLOYMENT,
-            );
+            )
+            .expect("application");
             seed_streaming_exec(&store);
 
             let listener = TcpListener::bind("127.0.0.1:0")

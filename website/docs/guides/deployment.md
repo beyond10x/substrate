@@ -152,8 +152,8 @@ listener closes.
 
 The metric set is fixed. Labels are closed sets: listener, route family, outcome class, refusal
 code, check, maintenance task, admission result and confinement adapter. No subject, resource id,
-path, address or credential appears in a label or a value. A scrape carries at most 585 samples on
-a host daemon and at most 585 samples on a daemon running `--driver kubernetes`.
+path, address or credential appears in a label or a value. A scrape carries at most 587 samples on
+a host daemon and at most 587 samples on a daemon running `--driver kubernetes`.
 
 - **Build and readiness:** `substrate_build_info`, `substrate_ready`.
 - **Host daemon only:** `substrate_adapter_info{adapter}`, always `1`, labeled with the

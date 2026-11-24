@@ -592,11 +592,12 @@ async fn a_run_read_unknown_is_removed_when_the_kubelet_outlasts_two_removal_rou
         started: AtomicBool::new(false),
         stop: Mutex::new(None),
         pod_gone: AtomicBool::new(false),
+        limit: Mutex::new(None),
     });
     let task = tokio::spawn(monitor(
         api,
         run,
-        sender,
+        (sender, EndCell::new()),
         Instant::now() + Duration::from_mins(10),
         PodTrace::default(),
     ));
@@ -655,6 +656,7 @@ fn tracked(name: &str) -> (Arc<PodRun>, watch::Sender<Phase>) {
         started: AtomicBool::new(false),
         stop: Mutex::new(None),
         pod_gone: AtomicBool::new(false),
+        limit: Mutex::new(None),
     });
     (run, sender)
 }
@@ -683,7 +685,7 @@ async fn a_run_read_unknown_with_its_removal_pending_counts_against_the_tracking
     let task = tokio::spawn(monitor(
         api,
         Arc::clone(&run),
-        sender,
+        (sender, EndCell::new()),
         Instant::now() + Duration::from_mins(10),
         PodTrace::default(),
     ));

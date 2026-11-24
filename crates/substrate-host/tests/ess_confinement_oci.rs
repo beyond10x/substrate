@@ -966,7 +966,7 @@ async fn an_oci_run_is_confined_bounded_and_removed_after_wait() {
             path: cache.clone(),
         }],
     );
-    let (sink, records) = recording();
+    let (sink, mut recorded) = support::recorded();
     let admitted = adapter
         .admit(&ConfinementProfile {
             image: Some(image()),
@@ -1052,12 +1052,69 @@ async fn an_oci_run_is_confined_bounded_and_removed_after_wait() {
         "",
         "the container remains"
     );
-    let events: Vec<_> = events(&records)
-        .into_iter()
-        .map(|record| record["event"].as_str().expect("event").to_owned())
-        .collect();
-    assert_eq!(events, ["profile_admitted", "run_started"]);
+    // Design 36 D20: the monitor writes the run's end after it published it.
+    recorded.run_ended("ESS confinement oci run").await;
+    assert_eq!(
+        recorded.events(),
+        ["profile_admitted", "run_started", "run_ended"]
+    );
     println!("ESS confinement oci run: executed");
+}
+
+/// Design 36 § 8, story 3, the `oci` lane: a run that nobody observes or waits on puts one
+/// `run_ended` into its profile's sink, written by the run's monitor (D20).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oci_run_nobody_observes_writes_one_run_ended() {
+    const NAME: &str = "ESS confinement oci run ended";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    // The whole case ends by its own assertion within 50 s, inside the test step's 60 s. The open
+    // is synchronous and not cancellable (its runtime probes are bounded at 20 s each, the
+    // image's store check is not), so it is measured; the start (create, the started loop) and
+    // the record share what is left.
+    let began = std::time::Instant::now();
+    let adapter = open_lane(&runtime, Vec::new());
+    let left = Duration::from_secs(50)
+        .checked_sub(began.elapsed())
+        .unwrap_or_else(|| panic!("{NAME}: opening the oci adapter took {:?}", began.elapsed()));
+    let (_dir, workspace) = canonical_tempdir();
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            image: Some(image()),
+            workspace: Some(workspace),
+            ..ConfinementProfile::default()
+        },
+        &Command {
+            argv: vec!["/bin/sh".into(), "-c".into(), "exit 3".into()],
+            env: BTreeMap::new(),
+        },
+        ("oci", None),
+        // No polling: the monitor sees the end when the runtime client returns, then makes two
+        // runtime calls (inspect, remove) before it publishes the end and the record follows.
+        left,
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(
+        record["exit"],
+        serde_json::json!({"code": 3}),
+        "{NAME}: {record}"
+    );
+    assert!(record.get("limit").is_none(), "{NAME}: {record}");
+    assert!(record.get("memory_oom_kills").is_none(), "{NAME}: {record}");
+    // Design 36 D14: `oci` reads no count of refused creations.
+    assert!(
+        record.get("process_limit_hits").is_none(),
+        "{NAME}: {record}"
+    );
+    println!("{NAME}: executed");
 }
 
 /// Starts `sleep 60` and returns once its container exists.
@@ -1122,6 +1179,8 @@ async fn an_oci_run_is_removed_after_a_kill() {
         Some(9),
         "{ended:?}"
     );
+    // Design 36 D7: an embedder's own kill names no limit.
+    assert_eq!(ended.limit, None, "{ended:?}");
     assert_eq!(
         containers(&runtime, run.as_str()),
         "",
@@ -1166,12 +1225,92 @@ async fn an_oci_run_is_removed_after_its_timeout() {
         Some(9),
         "{ended:?}"
     );
+    // Design 36 D7, D8: the monitor's own deadline names `WallTime`; `oci` reads no OOM count.
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::WallTime),
+        "{ended:?}"
+    );
+    assert_eq!(ended.memory_oom_kills, None, "{ended:?}");
+    // Design 36 D14: nor a count of refused creations.
+    assert_eq!(ended.process_limit_hits, None, "{ended:?}");
     assert_eq!(
         containers(&runtime, run.as_str()),
         "",
         "the container remains"
     );
     println!("ESS confinement oci timeout: executed");
+}
+
+/// Design 36 § 8, story 1, the `oci` lane: a container whose one process grows past its memory
+/// bound is ended by the kernel, the runtime states `OOMKilled` and the main process ended by a
+/// signal, so the run names `Memory`; `oci` reads no OOM count (D8). Bounded at two seconds.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oci_run_over_its_memory_bound_names_the_memory_limit() {
+    const NAME: &str = "ESS confinement oci limit memory";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let adapter = open_lane(&runtime, Vec::new());
+    let (_dir, workspace) = canonical_tempdir();
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            image: Some(image()),
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 2_000,
+                processes: 8,
+                memory_bytes: 16 << 20,
+                cpu_millis: 2_000,
+            }),
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let began = Instant::now();
+    let run = adapter
+        .start(
+            &admitted,
+            &Command {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "grow=x; while : ; do grow=\"$grow$grow\"; done".into(),
+                ],
+                env: BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(Duration::from_mins(1), adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    println!("{NAME}: the run ended after {:?}", began.elapsed());
+    assert_eq!(ended.state, RunState::Ended, "{NAME}: {ended:?}");
+    // The adapter reads the state again for a second when the first read holds no `OOMKilled`
+    // (design 36 D7), so an end that names no limit is a runtime whose state did not hold the
+    // flag a second after the exit.
+    assert_ne!(
+        ended.limit, None,
+        "{NAME}: the runtime's state held no OOMKilled within a second of the exit: {ended:?}"
+    );
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::Memory),
+        "{NAME}: {ended:?}"
+    );
+    assert_eq!(ended.memory_oom_kills, None, "{NAME}: {ended:?}");
+    assert_eq!(ended.process_limit_hits, None, "{NAME}: {ended:?}");
+    assert_eq!(
+        containers(&runtime, run.as_str()),
+        "",
+        "the container remains"
+    );
+    println!("{NAME}: executed");
 }
 
 #[test]

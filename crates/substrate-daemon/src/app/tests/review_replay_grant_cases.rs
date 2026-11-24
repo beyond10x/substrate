@@ -143,7 +143,8 @@ fn daemon(required: bool) -> Daemon {
         Arc::clone(&authority) as Arc<dyn Authority>,
         policy,
         PrivateHostPaths::of_no_daemon_configuration(),
-    );
+    )
+    .expect("application");
     Daemon {
         directory,
         store,

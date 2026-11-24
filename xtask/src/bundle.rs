@@ -50,6 +50,7 @@ mod namespace_driver;
 mod omitted_entries;
 mod process_events;
 mod read_only_roots;
+mod result_bound;
 mod run_bounds;
 mod session_exec_fields;
 mod stream_bounds;
@@ -901,6 +902,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     check_standing_additions(version, released, failures);
+    if version == "0.28.0" {
+        result_bound::check_introduction(released, failures);
+        return;
+    }
     if version == "0.27.0" {
         run_bounds::check_introduction(released, failures);
         return;
@@ -953,6 +958,10 @@ fn check_standing_additions(version: &str, released: &Tree, failures: &mut Vec<S
     // `0.27.0` on.
     if run_bounds::applies_to(version) {
         run_bounds::check(version, released, failures);
+    }
+    // The result bound of ADR 0053 binds every bundle from `0.28.0` on.
+    if result_bound::applies_to(version) {
+        result_bound::check(version, released, failures);
     }
 }
 
@@ -5949,7 +5958,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 27, "every released bundle must be checked");
+        assert_eq!(checked, 28, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

@@ -120,7 +120,21 @@ story's "memory, CPU, timeout" is the tail of this order.
 
 **D5. Both are variants: `EgressBytes` and `OutputStall`.** `linux` maps
 `exec.aperture-byte-limit` and `session.output-backpressure` to them. The adapters that read the
-run's pipes themselves name `OutputStall` from `LiveOutput::stalled`.
+run's pipes themselves name `OutputStall` from `LiveOutput::ended_run`. A stall is named only where
+it came before the leader's exit: a program that exits on its own and whose unread output then
+stalls names no limit, while `output_stalled` and `OutputEvent::Stalled` still report the stall.
+Nor does a stall whose kill comes after the embedder's `KILL` (`local`, `macos`, `systemd` around
+`local`, `oci`): that run names no limit (D1).
+On `linux` the driver marks a backpressure it flagged after the child had exited on its own,
+whether or not its supervision had taken the exit yet: asked under the lock its reap holds, so it
+never asks about a reaped pid (`EndOfRun::output_stall_after_exit`). A backpressure flagged after
+the supervision began to end the run by a bound of its own is not marked, and D4 names the stall.
+Such an exec names the limit that ended it, or none when it ended by itself: in D4's order, the
+aperture ceiling where the driver reached it (`EndOfRun::egress_ceiling_reached`), then memory
+where the OOM count is above zero. Its record keeps `session.output-backpressure`. The OOM count
+names `Memory` there also where the run's other counters could not be read: the driver reads it
+from the cgroup by itself (`Cgroup::end_of_run` falls back to the `oom_kill` counter), so it is a
+measurement the driver has, and the record carries no `exec.metrics-unavailable` to rank (D6).
 
 Reason. Both end a run by the adapter's own hand: the driver kills the cgroup. Left absent, such a
 run would read as killed by signal 9 with no cause, which is the case this design exists to
@@ -150,7 +164,8 @@ reading, its relay's counters and the cgroup's OOM count. The adapter repeats no
 function is total over strings, so a code a later driver adds is `None` until a variant exists
 for it, never a guess. The driver names `exec.metrics-unavailable` before a memory, CPU or
 wall-time bound; on such an exec a bound that was also reached is not named, and the state is
-`Unknown`.
+`Unknown`. That rule is about the code on the record: an exec whose stall is marked after its
+exit carries `session.output-backpressure` instead, and names the limit D5 reads from its end.
 
 ### Per adapter
 
@@ -159,13 +174,13 @@ wall-time bound; on such an exec a bound that was also reached is not named, and
 
 | adapter | `Memory` | `CpuTime` | `WallTime` | `EgressBytes` | `OutputStall` |
 |---|---|---|---|---|---|
-| `linux` | the driver's `exec.memory-limit`: `memory.events` `oom_kill` above zero in the exec's cgroup | the driver's `exec.cpu-limit`: its supervision read `cpu.stat` at or above the budget and killed the cgroup | the driver's `exec.timeout`: its own timer fired | the driver's `exec.aperture-byte-limit`: its relay's counters | the driver's `session.output-backpressure`: its live queue flag |
+| `linux` | the driver's `exec.memory-limit`: `memory.events` `oom_kill` above zero in the exec's cgroup; under a stall after the exit, the end's OOM count above zero (D5) | the driver's `exec.cpu-limit`: its supervision read `cpu.stat` at or above the budget, at a tick or when its timer fired, and killed the cgroup | the driver's `exec.timeout`: its own timer fired before the child's exit and below the CPU budget | the driver's `exec.aperture-byte-limit`: its relay's counters; under a stall after the exit, `EndOfRun::egress_ceiling_reached` (D5) | the driver's `session.output-backpressure`: its live queue flag, unless flagged after the child exited on its own (D5) |
 | `systemd` around `linux` | `linux`'s, relabelled | `linux`'s | `linux`'s | `linux`'s | `linux`'s |
-| `systemd` around `local` | `memory.events` `oom_kill` above zero in the run's cgroup, read by the run's end task before the cgroup is removed | its watch task records that the CPU check fired, before it kills | its watch task records that the deadline fired, before it kills | absent: it starts no aperture | `LiveOutput::stalled` |
-| `oci` | the runtime's state has `OOMKilled` true and the run's exit is a signal | absent: `--cpus` is a rate, and no cumulative budget ends a run | its monitor's own deadline fired, before it kills the container | absent | `LiveOutput::stalled` |
-| `pod` | the container's `terminated.reason` is `OOMKilled` and its exit is a signal or a code above 128 | absent: a rate | the Pod's `status.reason` is `DeadlineExceeded`, or the monitor's own stop past the deadline was the one that ended it | absent | absent: no live output (design 32 D10) |
-| `local` | absent: no `limits` family | absent | absent | absent | `LiveOutput::stalled` |
-| `macos` | absent: no `limits` family | absent | absent | absent | `LiveOutput::stalled` |
+| `systemd` around `local` | `memory.events` `oom_kill` above zero in the run's cgroup, read by the run's end task before the cgroup is removed | its watch task records that the CPU check fired, before it kills, while the leader has not exited and the embedder has not stopped it | its watch task records that the deadline fired, on the same terms | absent: it starts no aperture | `LiveOutput::ended_run` |
+| `oci` | the runtime's state has `OOMKilled` true and the run's exit, as the adapter reads it, is a signal: an exit status of 129 to 192, read as signal status − 128, or, beside `OOMKilled`, any status outside 0 to 128 (193 and above, or negative), read as `SIGKILL` | absent: `--cpus` is a rate, and no cumulative budget ends a run | its monitor's own deadline fired before the runtime client returned, before it kills the container | absent | `LiveOutput::ended_run`: the stall came before the runtime client returned |
+| `pod` | the container's `terminated.reason` is `OOMKilled` and its exit is a signal or a code above 128, whoever stopped the run | absent: a rate | the Pod's `status.reason` is `DeadlineExceeded`, or the monitor's own stop past the deadline was the one that ended it | absent | absent: no live output (design 32 D10) |
+| `local` | absent: no `limits` family | absent | absent | absent | `LiveOutput::ended_run` |
+| `macos` | absent: no `limits` family | absent | absent | absent | `LiveOutput::ended_run` |
 
 Notes on the rows.
 
@@ -178,16 +193,40 @@ Notes on the rows.
   check D4 names `CpuTime`. A run whose budget is under that share can reach it earlier. The
   first consumer's session named this on 2026-11-24 and accepted the order. The rate is not
   changed here (§ 13).
+- `linux`: where the child's exit and the timer are ready at once, the driver takes the exit, so
+  a child that exited before its deadline is never recorded timed out; where the timer fires
+  with the CPU budget passed, the run is recorded CPU-exhausted (D4).
 - `systemd` around `local`: the watch task tests the CPU budget before the deadline, so one tick
-  in which both are true names `CpuTime` (D4). The run's cgroup has `memory.oom.group` 1, so an
+  in which both are true names `CpuTime` (D4). It decides under the lock that marks the leader's
+  exit: a run whose leader exited, by itself or by the embedder's kill, names no limit, also when
+  a bound passes while the end task still drains the tree. The run's cgroup has `memory.oom.group` 1, so an
   OOM kill ends every process in it. The run is declared insecure, and the adapter's module
   documentation says what such a run can do to its own cgroup; the limit and the counters are
   those of the cgroup the run was started in.
 - `oci`: the adapter sets no group kill, and whether the runtime's flag means the whole container
   ended is not read here (§ 12). So the flag alone is not taken as the end of the run: the run's
-  main process must have ended by a signal as well. A container whose child was killed and whose
-  main process exited by itself names no limit.
-- `pod`: the same rule, with the exit the container status reports. The monitor's stop past the
+  main process must have ended by a signal as well. The adapter reads an exit status of 129 to
+  192 as a signal, and, beside `OOMKilled`, any status outside 0 to 128 (193 to 255, or a
+  negative one) as `SIGKILL`, so a main process that itself exits with such a status after a
+  child's OOM kill names `Memory`; one that exits with 0 to 128 names none. The runtime sets the
+  flag when its OOM event for the container arrives, and that may be after the exit that returns
+  the runtime client (amendment of 2026-11-24). The monitor therefore reads the state again,
+  every 50 ms for at most one second, where the first read shows an ended container with exit
+  status 137 and no flag, neither its own deadline nor the stall sent the kill, and the embedder
+  asked for none with `signal(Kill)`; the container is removed after that. Such a run's end is
+  published up to one second later: a read still running when the second is over is dropped,
+  and the state read before it stands. A flag the runtime sets later than that, or never, names
+  no limit (§ 12). So does one set after an embedder's `signal(Kill)` that was asked when the
+  container had ended and so sent nothing: the monitor knows that a kill was asked, not which
+  kill ended the container. An end with another signal status is read once. Where the runtime
+  client's
+  return and the deadline are ready at once, the monitor takes the return. A stall's kill asked
+  after the embedder's `signal(Kill)` set its flag, before that call reached the runtime, names
+  no stall; one asked before names the stall. No lock orders the two runtime-client calls, so
+  which reaches the container first is the runtime's.
+- `pod`: the same rule, with the exit the container status reports: the flag beside a signal or
+  an exit code over 128 names `Memory`, whoever stopped the run, so a main process that itself
+  exits with a code over 128 after a child's OOM kill names it too. The monitor's stop past the
   deadline goes through `request_stop`, as an embedder's `signal` does; the `Stop` record gains
   its origin so the two are told apart. An embedder's own `signal` names no limit on any adapter.
 - `pod` reads `status.reason` at the end. That the kubelet writes `DeadlineExceeded` there is not
@@ -256,6 +295,13 @@ of this section; it is a usage figure and belongs to `story:run-observation-carr
 Reason. The requirement asks for the hit. The counter is the kernel's own count of it and needs
 no sampling. The wire already names the same counter `process_limit_hits`.
 
+What the kernel counts in it depends on the kernel. Where the cgroup has no `pids.events.local`,
+it counts every creation refused for a process of this cgroup, also one a bound of a cgroup above
+it refused. Where it has that file, and the cgroup2 mount has no `pids_localevents` option, it
+counts the hits of this cgroup's bound and of the bound of any cgroup beneath it. For `systemd`
+this means that on a kernel without `pids.events.local`, runs whose run cgroups share a bound
+above them each count a creation that shared bound refused for one of their processes.
+
 **D11. `RunObservation` gains `process_limit_hits: Option<u64>`.** `Some(0)` says the adapter
 read the counter and nothing was refused. `None` says the adapter does not read it or could not
 (invariant 3).
@@ -274,6 +320,9 @@ polls `observe`. `wait` and the ended observation carry the final value. Listed 
   (`WAIT_POLL`) and does not call it.
 - The ended value is `end_of_run.process_limit_hits` (D9).
 - A read that fails gives `None` for that observation; it does not fail `observe`.
+- A running `observe` made after the end's read and before the kill of the tree is complete can
+  read a higher count than the ended observation carries, because a process left in the tree can
+  still be refused. The ended observation's count is the one read once the leader exited.
 
 **D14. Which adapters report it.**
 
@@ -349,6 +398,16 @@ a run that received no `run_started` gets no `run_ended`, and no run gets two. `
 the run's end task (§ 1). The adapter therefore hands the value of D16 to the end task after
 `audit_start` returned, through a one-shot channel. The end task takes it after the run ended. A
 start that failed after the task was spawned sends nothing, and the task writes nothing.
+`linux` and `systemd` around `linux` have no end task before the run started (D20): they spawn
+theirs after `audit_start` returned and move the value into it, with no channel, and spawn none
+where the profile has no sink (D19). `pod` spawns its monitor before `audit_start` returned, and
+the monitor may publish the run's end before `start` hands it the value: there `start` and the
+monitor meet in one cell instead of a channel. The cell holds the value where `start` came first
+and the ended observation where the publication came first, and whichever side comes second
+writes the record; no task waits for the other side. A cell dropped with the value in it writes
+`unknown` through the value's drop (D22); one dropped with an observation in it, as after a
+start that failed once it spawned the monitor, writes nothing. Amended 2026-11-24 with the change
+that built the record.
 
 **D18. The record is written for a run that ends `Unknown` as well.** The end task writes it on
 every path on which it publishes the run's end, `Ended` or `Unknown`. For `Unknown` the record
@@ -361,11 +420,15 @@ spawns no task for it.
 ### Which task calls the sink
 
 **D20. The run's end task writes the record, after it published the run's end, and the sink runs
-on the runtime's blocking pool.**
+on a thread of its own, one per record.** Amended 2026-11-24 with the change that built the
+record, in place of the runtime's blocking pool: `local`, `macos` and `systemd` around `local`
+detect each run's exit on that pool, whose size the consumer's runtime sets, and the write of a
+record shares no bounded resource with any run's exit detection or `wait`.
 
 | adapter | the task |
 |---|---|
-| `local`, `macos`, `systemd` around `local`, `oci`, `pod` | the task that publishes the run's phase today. `macos` writes `private_tmpdir_left` first, as today |
+| `local`, `macos`, `systemd` around `local`, `oci` | the task that publishes the run's phase today. `macos` writes `private_tmpdir_left` first, as today |
+| `pod` | the monitor that publishes the run's phase, or `start` where it hands the value of D16 after that publication (D17's cell); a task of its own awaits the write (amended 2026-11-24) |
 | `linux` | a new task per run that has a sink: it awaits `ProcessRuntime::wait_ended`, observes the exec once and writes. It is the shape of the task that ends a piped standard input today |
 | `systemd` around `linux` | a task of the outer adapter: it awaits the inner run's end and writes with its own admitted profile and the relabelled observation. The inner adapter has no sink (§ 1) |
 
@@ -373,9 +436,67 @@ on the runtime's blocking pool.**
   on a caller.
 - The end is published first. `wait` on the adapters with a phase channel returns from that
   channel; `wait` on `linux` polls the driver. Neither waits for the record.
-- The sink is called through `tokio::task::spawn_blocking`. A sink that blocks then holds one
-  thread of the blocking pool and no worker of the runtime, so it delays neither `wait` nor
-  another run, also on a current-thread runtime.
+- The sink is called on a thread started for the one record, named `substrate-run-ended`
+  (`std::thread::Builder`). A sink that blocks or panics then holds that thread only: no worker
+  of the runtime and no thread of its blocking pool, so it delays neither `wait`, nor another
+  run, nor another record, whatever the size of the pool, on a current-thread runtime and with no
+  runtime at all. The thread enters the runtime that was current when the record was handed to
+  it, so a sink that reaches the runtime on `run_started` reaches it on `run_ended`; a sink that
+  spawns onto that runtime once it shut down gets Tokio's behaviour, a task dropped unrun, and
+  the record is still written. A sink that panics is contained where the consumer is built with
+  `panic = "unwind"`; with `panic = "abort"` it ends the process, as on every other record.
+- The end task does not end at the hand-off. It waits on a channel until the record's write is
+  over, so it holds no thread while it waits, and it ends once the sink returned. Where the
+  runtime drops the task before that (`drop(runtime)`), the task's guard joins the record's
+  thread on the dropping thread: the runtime's drop returns once `run_ended` is in the sink, so
+  every `run_started` in a process that returns from its runtime has its `run_ended` (Q5). A
+  guard dropped by a thread that is panicking does not join: the record's thread is already
+  running and still writes while the process lives, and a panic is never held by a sink. A sink
+  that never returns holds the runtime's drop, as a started blocking-pool job does. On `pod`,
+  whose monitor goes on to remove the Pod and its policy after it published the end, the side of
+  D17's cell that comes second, the publication or `start`, hands the ended record to its thread
+  before it returns and awaits the write on a task of its own; a runtime that drops that task
+  joins the thread like any other. So a sink that blocks does not hold the Pod's or its policy's
+  removal, with one exception: where the system refused the record's thread and the runtime's
+  blocking pool is shutting down, the record is written on the side's own task (below). Amended
+  2026-11-24 with the change that built the record.
+- A sink is a synchronous call. It may hand work to the runtime it finds current (a spawn, a
+  channel send) and must not wait on that runtime (`Handle::block_on`, a blocking wait for a
+  task, a timer or I/O of it). Once nothing drives that runtime, nothing drives such a wait: on
+  a current-thread runtime that is once its `Runtime::block_on` returned, before its drop
+  begins, and on every runtime once its drop began. The sink then does not return, the guard's
+  join does not return, and the runtime's drop does not return. This is the case above of a sink
+  that never returns, reached by a sink that waits on the runtime that waits for it;
+  `limit_a_sink_that_waits_on_its_runtime_holds_that_runtimes_drop` holds it on a current-thread
+  runtime with a 200 ms timer: 1 s after the drop began it has not returned and the record is
+  not in the sink. Its counterpart,
+  `a_sink_whose_wait_its_runtime_drives_returns_and_the_drop_returns`, holds that the same sink
+  returns, and the drop returns with the record in the sink, where `Runtime::block_on` still
+  drives the timer while the sink waits. The other records are called on the caller's
+  thread, inside the runtime where the caller is async. Tokio 1.53.1 (`runtime/handle.rs`, the
+  documentation of `Handle::block_on`, lines 248 to 253 and 263 to 269) says that on a
+  current-thread runtime only `Runtime::block_on` drives the I/O and timer drivers, so timers and
+  I/O do not work under `Handle::block_on` unless another thread is in `Runtime::block_on`, and
+  that `Handle::block_on` panics when it is called from an asynchronous context. Amended
+  2026-11-24 with the change that built the record.
+- `Runtime::shutdown_timeout` and `Runtime::shutdown_background` bound that wait only where the
+  task is dropped on a worker of a multi-thread runtime: those workers are threads of the
+  blocking pool (Tokio 1.53, `runtime/scheduler/multi_thread/worker.rs`, `spawn_blocking(move ||
+  run(worker))`), and both calls stop waiting for that pool after their duration and leak what
+  still runs (`runtime/runtime.rs`, § *Shutdown*: "spawned work that did not stop in time and
+  threads running it are leaked"). The join then goes on there and the record is written while
+  the process lives. A current-thread runtime drops its tasks on the thread that shuts it down,
+  in `Runtime`'s `Drop` after either call, so there the join is not bounded by the duration.
+- Where the system refuses the thread, the record is not dropped. It goes to the current
+  runtime's blocking pool, and only where no runtime is current, or that pool is shutting down
+  and drops the job unrun, is it written on the calling thread before the hand-off returns. A
+  pool that cannot start a thread keeps the job in its queue and panics; the panic is
+  contained, and a thread of the pool writes the record once one is free, or the runtime's
+  shutdown drops the job and writes it on that thread (Tokio 1.53.1,
+  `runtime/blocking/pool.rs`, `spawn_task`, lines 393 to 438, and `spawn_blocking`'s
+  `NoThreads` panic, lines 324 to 326). On every path it is written once and a sink that
+  panics is contained. A warning names the refused thread. On that path a sink that blocks holds
+  a thread of the pool, or the calling thread, for as long as it blocks.
 - The consequence a consumer must know: `run_ended` may arrive after `wait` returned. A consumer
   that needs the record waits for its own sink. Listed as Q4.
 - `AuditSink`'s documentation gains the sentence for `run_ended`. The other records keep their
@@ -392,8 +513,12 @@ The record is written when the run ends.
 is the case of a tokio runtime that shuts down while the run still runs: the end task is dropped
 with it. The record then has no exit, no limit and no count, and is written synchronously on the
 thread that drops the task. It says what `RunState::Unknown` means: the adapter lost sight of
-the run. Nothing is written from a thread that is panicking. A process that exits or is killed
-writes nothing; a consumer that must account for that pairs `run_started` with `run_ended` in
+the run. Nothing is written from a thread that is panicking, and a sink that panics on this
+record is contained (amended 2026-11-24 with the change that built the record). A run that ended
+before the task was dropped is D20's: its record is written on its own thread, which the dropped
+task joins; on `pod`, whichever side of D17's cell comes second hands the ended record to that
+thread before it returns, in either order, so a runtime that drops the waiting task right after
+cannot turn it into `unknown`. A process that exits or is killed writes nothing; a consumer that must account for that pairs `run_started` with `run_ended` in
 its own store. Listed as Q5.
 
 ### What the record is not
@@ -480,6 +605,12 @@ use single-variant patterns. The consumers outside this repository were not read
 `crates/substrate-host/tests/confinement-public-items.txt` is regenerated in each story's change,
 and each story's `CHANGELOG.md` entry names the break.
 
+The host driver's `EndOfRun` (D9) is public and `#[non_exhaustive]`, so a field it gains breaks
+no consumer outside this crate. Story 1 gives it two public fields beside `memory_oom_kills`:
+`output_stall_after_exit` and `egress_ceiling_reached` (D5). No public item of the
+confinement module names `EndOfRun` or `ExecObservation`, so neither is in that list, and it does
+not change for them.
+
 ## 8. How it is proved
 
 Budgets: no test runs longer than 60 s, the gate's test step ends within 120 s, a job in the
@@ -556,7 +687,7 @@ Every change also regenerates
 | `systemd` around `linux` | all five | read | read | a task of the outer adapter |
 | `systemd` around `local` | `Memory`, `CpuTime`, `WallTime`, `OutputStall` | read | read | the run's end task |
 | `oci` | `Memory`, `WallTime`, `OutputStall` | `None` | `None` | its monitor |
-| `pod` | `Memory`, `WallTime` | `Some(0)` or `Some(1)` | `None` | its monitor |
+| `pod` | `Memory`, `WallTime` | `Some(0)` or `Some(1)` | `None` | its monitor, or `start` where it hands the value after the publication (D17) |
 | `local` | `OutputStall` | `None` | `None` | the run's end task |
 | `macos` | `OutputStall` | `None` | `None` | the run's end task |
 
@@ -580,10 +711,10 @@ Every change also regenerates
 | D14 | `linux` and `systemd` report it; `oci`, `pod`, `local`, `macos` `None` |
 | D15 | `AuditRecord::RunEnded`, `"event": "run_ended"`: the ended observation plus the profile id |
 | D16 | `audit_start` returns the one value that writes `run_ended` |
-| D17 | `run_ended` follows `run_started`; the value reaches the end task after `audit_start` returned |
+| D17 | `run_ended` follows `run_started`; the value reaches the end task after `audit_start` returned; on `pod` the value and the publication meet in one cell, and the side that comes second writes (amended 2026-11-24) |
 | D18 | written for `Unknown` as well |
 | D19 | no sink: nothing written, no task added |
-| D20 | the end task writes after it published the end; the sink runs on the blocking pool (Q4) |
+| D20 | the end task writes after it published the end; the sink runs on a thread of its own per record, which the end task awaits and a dropped end task joins (Q4, Q5; amended 2026-11-24) |
 | D21 | dropping an adapter neither ends a run nor loses its record |
 | D22 | a runtime that ends first: `run_ended` with `state: unknown` (Q5) |
 | D23 | a declared-insecure run's record carries its reason |
@@ -623,7 +754,8 @@ first consumer's session answered all five on 2026-11-24, each with A.
 
 **Q4. When the sink is called for `run_ended`.**
 
-- A (chosen): after the end is published, on the blocking pool. `wait` never waits for a sink.
+- A (chosen): after the end is published, on a thread of its own (D20, amended 2026-11-24; it
+  named the blocking pool). `wait` never waits for a sink.
   Cost: the record may arrive after `wait` returned; a consumer that reads its sink right after
   `wait` must wait for the record.
 - B: before the end is published, on the end task. After `wait` the record is in the sink. Cost:
@@ -634,7 +766,9 @@ first consumer's session answered all five on 2026-11-24, each with A.
 
 - A (chosen): the dropped value writes `run_ended` with `state: unknown`. Every `run_started` in
   a process that returns from its runtime has its `run_ended`. Cost: a sink is called from a
-  destructor, on the thread that drops the runtime.
+  destructor, on the thread that drops the runtime, and that drop waits for a `run_ended` still
+  being written on its own thread (D20, amended 2026-11-24), so a sink that never returns holds
+  it.
 - B: nothing is written. Cost: a consumer cannot tell a run that is still running from one whose
   adapter went away; it must time out on its own.
 
@@ -644,17 +778,45 @@ Nothing was built or run for this document. Beyond that, these claims rest on kn
 this tree:
 
 - That `memory.events` `oom_kill` and `pids.events` `max` only grow over the life of a cgroup.
+- What `pids.events` `max` counts (D10). Read: the kernel's `cgroup-v2.rst`, which says that
+  without `pids_localevents` the counter "represents any pids.max enforcemnt across cgroup's
+  subtree" and that the option restores the v1-like count of local fork failures, and a host
+  whose cgroups have `pids.events.local` and whose cgroup2 mount has no `pids_localevents`. Read
+  too: `kernel/cgroup/pids.c` of Linux 6.12. Its `pids_event` counts `max` in the cgroup whose
+  bound was exceeded and in every cgroup above it, so a cgroup counts no creation that a bound
+  above it refused; under `CGRP_ROOT_PIDS_LOCAL_EVENTS` it counts instead in the cgroup of the
+  process refused, whichever bound refused it, and `__pids_events_show` prints `max %lld\n`. The
+  count on a kernel without `pids.events.local` is taken to be that second form, which the
+  document calls v1-like. The source of such a kernel was not read, and neither was which
+  kernel release added the file.
 - That an OOM kill in a cgroup with `memory.oom.group` 1 ends every process in it. The host
   driver's test `an_exec_that_crosses_its_memory_bound_leaves_no_process_in_its_cgroup` holds it
   for `linux`; it was read, not run.
 - What a container runtime's `OOMKilled` flag covers (the main process or any process of the
   container), and whether the runtime sets a group kill. D7 does not depend on the answer.
+- When a container runtime sets `OOMKilled`, relative to the exit. Seen on a hosted runner on
+  2026-11-24: one of two runs of the `oci` lane's memory case ended by signal 9 with no flag at
+  the one read the monitor then made. On a workstation with Docker 29.8.2, cgroup v2 and runc,
+  330 of 330 containers of that case's shape held the flag at the first read after the client
+  returned, 300 of them started twelve at a time. Read in the sources of Docker and of
+  containerd's cgroup library on that day, not run: Docker sets the flag when the OOM event
+  arrives, whatever the container's state, and the event's watcher sends none when the cgroup is
+  removed before it reads `memory.events`. So a late flag and a missing one are both possible;
+  which of the two the runner showed, and how late a late one is, is not known. The one second
+  of D7's `oci` rule is a choice, not a measurement.
 - That the kubelet writes `status.reason` `DeadlineExceeded` on a Pod it ended for
   `activeDeadlineSeconds`, and how long after the deadline.
 - That a container runtime and the kubelet report a main process killed by signal 9 as exit code
-  137. `oci.rs` maps 129 to 192 to a signal; the `pod` rule of D7 takes a code above 128.
+  137. `oci.rs` maps 129 to 192 to a signal, and, beside `OOMKilled`, any other status outside 0
+  to 128 to signal 9; the `pod` rule of D7 takes a code above 128.
 - That a task dropped by a runtime shutdown runs the destructors of what it owns on the thread
-  that drops the runtime, and that a started `spawn_blocking` closure runs to its end.
+  that drops the runtime for a current-thread runtime and on a worker for a multi-thread one
+  (read in Tokio 1.53, `Runtime`'s `Drop`; not run on the multi-thread flavour). What holds by
+  the guard of D20: the runtime's drop returns after the record's thread wrote; a thread whose
+  guard was dropped by a panicking thread, or that `shutdown_timeout` or `shutdown_background`
+  left behind, writes only while the process lives; the runtime's drop returns only once the sink
+  returned, so a sink that waits on that runtime holds it (measured on a current-thread runtime
+  by the `limit_` case of D20; read, not run, for a multi-thread runtime's drop).
 - That the digest in the header of a generated projection covers comments of the YAML (D25).
 - That the Kubernetes API exposes no counter of refused process creations for a Pod. What was
   read: the adapter reads none.
@@ -677,7 +839,10 @@ this tree:
 - A record of a denied execution or connection, a record at the moment of a hit, a wire event:
   the epic's boundaries.
 - Limits summed over several runs, `rate_bounds`, a block I/O bound: the epic's boundaries.
-- A bound on how long the sink may hold a thread of the blocking pool.
+- A bound on how long the sink may hold its thread, on how many such threads a sink that never
+  returns may leave behind, and on how long such a sink may hold a runtime's drop (D20). A sink
+  that waits on the runtime it finds current is such a sink once nothing drives that runtime;
+  the design states it as a rule for the sink and holds it as a limit, and detects nothing.
 - A constructor or builder for `AuditRecord::RunEnded` for a consumer that tests its own sink.
 
 ## 14. Not read

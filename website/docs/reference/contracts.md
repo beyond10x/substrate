@@ -13,7 +13,7 @@ families and facts.
 
 | Contract | Used by | Defined in | Checked by |
 |---|---|---|---|
-| Wire contract: HTTP and WebSocket | the [Rust SDK](../guides/rust-sdk.md), the [command line](../guides/cli.md), the [MCP adapter](../guides/mcp-adapter.md), other callers of the daemon | immutable versioned bundles in `contracts/substrate-wire/`, newest `0.27.0`, published as the signed OCI artifact `ghcr.io/beyond10x/b10x-substrate-wire` | the full gate; every response names its bundle and digest in headers |
+| Wire contract: HTTP and WebSocket | the [Rust SDK](../guides/rust-sdk.md), the [command line](../guides/cli.md), the [MCP adapter](../guides/mcp-adapter.md), other callers of the daemon | immutable versioned bundles in `contracts/substrate-wire/`, newest `0.28.0`, published as the signed OCI artifact `ghcr.io/beyond10x/b10x-substrate-wire` | the full gate; every response names its bundle and digest in headers |
 | Confinement contract | embedders of the `b10x-substrate-host` crate and `b10x-substrate confine run` | the ESS domain `substrate.confinement` in `spec/confinement/` | `cargo xtask check-ess` against the interpreted reference, and each adapter's lane against the adapter |
 | Confinement consumer surface | Rust code that calls `substrate_host::confinement` | `tests/confinement-public-items.txt` in the host crate | `tests/confinement_public_items.rs` and `tests/consumer_surface.rs` |
 | Command line | people and scripts in a shell | the ESS domain `substrate.client` and its `ess-cli/2` binding in `spec/client/` | `cargo xtask check-ess` against the generated package in `spec/generated/cli` |
@@ -62,7 +62,7 @@ A refusal names the first missing family in this order.
 | `network_egress` | `network: Egress`, and `network: Isolated` on an adapter that proves `host_network` |
 | `network_ingress` | no adapter serves it; `ingress_routes` is reserved |
 | `limits` | `process_bounds` and `io_bounds` |
-| `audit` | an `audit` sink for admission, refusal and start records |
+| `audit` | an `audit` sink for admission, refusal, start and end records |
 
 Every adapter's declared set in the specification holds `process_run`, `process_watch`,
 `output_read`, `wait`, `workspace` and

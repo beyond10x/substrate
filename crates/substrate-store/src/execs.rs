@@ -1,11 +1,12 @@
 use crate::backend::insert_backend_objects;
-use crate::events::{append_event, commit_effect};
+use crate::events::{append_event, commit_effect, completion_effects};
 use crate::leases::{freeze_workspace_lease_if_due, upsert_lease};
 use crate::operations::{
     existing_reservation, finalize_operation_accounting, insert_accepted_operation,
     insert_refused_operation, operation_identity, operation_identity_full,
-    resource_operation_identity, resource_partition_at_capacity, terminal_transition,
+    resource_operation_identity, resource_partition_at_capacity, success_transition,
 };
+use crate::result_bound::{CompletionEvent, append_completion_events, terminal_success};
 use crate::sessions::{load_session_for_exec, project_session_from_exec, session_transition};
 use crate::{
     BackendObjectKind, BackendReservation, LeaseClock, NewLease, NewOperation, OperationCapacity,
@@ -15,7 +16,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use substrate_wire::{
     ErrorClass, ErrorDetail, Event, Exec, ExecAbsence, ExecKind, ExecState, ExecUsage, LeaseState,
-    OperationOutcome, Workspace, WorkspaceState,
+    Workspace, WorkspaceState,
 };
 
 pub(crate) fn mark_exec_unknown(resource: &mut Exec, observed_at: DateTime<Utc>) {
@@ -323,13 +324,16 @@ impl Store {
             absent: true,
             observed_at,
         };
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(&absence)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            &new.operation,
+            serde_json::to_value(&absence)?,
+            200,
+        );
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
-                 response_status = 200
+                 response_status = ?7
              WHERE deployment = ?1 AND subject = ?2 AND operation = ?3 AND state = 'accepted'",
             params![
                 new.scope.deployment,
@@ -338,6 +342,7 @@ impl Store {
                 observed_at.to_rfc3339(),
                 id,
                 serde_json::to_string(&outcome)?,
+                i64::from(status),
             ],
         )?;
         if changed != 1 {
@@ -353,25 +358,29 @@ impl Store {
             "DELETE FROM execs WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
             params![new.scope.deployment, new.scope.subject, id],
         )?;
-        let retired = append_event(
+        let retired = append_completion_events(
             &transaction,
             self.event_retention,
             &new.scope,
-            id,
-            "exec",
-            "exec.retired",
-            &observed_at.to_rfc3339(),
-            &new.actor,
-            new.principal.as_deref(),
             &new.operation,
-            Some(serde_json::to_value(&absence)?),
+            &observed_at.to_rfc3339(),
+            (&new.actor, new.principal.as_deref()),
+            &outcome,
+            vec![CompletionEvent {
+                resource: id,
+                resource_kind: "exec",
+                transition: "exec.retired",
+                observation: Some(serde_json::to_value(&absence)?),
+            }],
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[
-            commit_effect(&new.scope, &accepted),
-            commit_effect(&new.scope, &retired),
-        ]);
+        self.report_committed(
+            &std::iter::once(&accepted)
+                .chain(&retired)
+                .map(|event| commit_effect(&new.scope, event))
+                .collect::<Vec<_>>(),
+        );
         Ok(ExecRetireReservation::Retired(absence))
     }
 
@@ -448,9 +457,12 @@ impl Store {
             } else {
                 (proposed.clone(), true)
             };
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(&authoritative.resource)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            operation,
+            serde_json::to_value(&authoritative.resource)?,
+            status,
+        );
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
@@ -486,22 +498,24 @@ impl Store {
         }
         let (actor, principal, operation_kind) =
             operation_identity_full(&transaction, scope, operation)?;
-        let event = append_event(
+        let events = append_completion_events(
             &transaction,
             self.event_retention,
             scope,
-            &authoritative.resource.id,
-            "exec",
-            terminal_transition(&operation_kind, &outcome),
-            terminal_at,
-            &actor,
-            principal.as_deref(),
             operation,
-            Some(serde_json::to_value(&authoritative.resource)?),
+            terminal_at,
+            (&actor, principal.as_deref()),
+            &outcome,
+            vec![CompletionEvent {
+                resource: &authoritative.resource.id,
+                resource_kind: "exec",
+                transition: success_transition(&operation_kind),
+                observation: Some(serde_json::to_value(&authoritative.resource)?),
+            }],
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok(if exact {
             ExecWrite::PersistedExact(authoritative)
         } else {
