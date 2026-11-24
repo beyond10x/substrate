@@ -3,7 +3,14 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-bot_token="$(${repo_root}/scripts/bot-token.sh)"
+if ! bot_token="$("${repo_root}/scripts/bot-token.sh")"; then
+  echo "as-bot: scripts/bot-token.sh failed; git is not run" >&2
+  exit 1
+fi
+if [ -z "$bot_token" ]; then
+  echo "as-bot: scripts/bot-token.sh printed no token; git is not run" >&2
+  exit 1
+fi
 export B10X_BOT_TOKEN="$bot_token"
 
 bot_id="$(

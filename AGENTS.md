@@ -1242,6 +1242,18 @@ at `scripts/bot-token.sh:8` — `org="${B10X_BOT_ORG:-beyond10x}"` — **is** th
 lives in (`git remote -v` shows `github.com/beyond10x/substrate`), so the default is right here. Set
 `B10X_BOT_ORG` only to mint against a different org.
 
+**On the operator's workstation, bot writes go through `b10x-gates`, not through these scripts,
+until `story:bot-token-mints-without-cargo` is done.** `scripts/bot-token.sh` checks its two
+credential files with `cargo xtask check-bot-files`, and since 2026-11-24 the workstation's
+build pool sends `cargo xtask` to a build node, where those files are not: the mint fails. A
+commit, a merge and a push are `b10x-gates bot -- <git arguments>`, a `gh` write is
+`b10x-gates --repository beyond10x/substrate --policy <policy file> gh -- <gh arguments>`, and a
+pull-request merge is `b10x-gates … api --method PUT --path /repos/beyond10x/substrate/pulls/<n>/merge`.
+Where this file writes `scripts/as-bot.sh` or `scripts/bot-gh.sh` below, read that form.
+Both scripts end non-zero and run no program where the mint fails or prints no token
+(`xtask/tests/bot_scripts.rs`): `gh` without a `GH_TOKEN` would act under the login of the
+caller's keyring, which no session may publish under.
+
 **Bot authentication does not bypass `main`'s ruleset.** A direct `scripts/as-bot.sh push origin
 main` is rejected with `GH006`: the ruleset restricts `creation`, `update`, `deletion` and
 `non_fast_forward` on that ref (ruleset `b10x-bot-branch-authority`, id 22044994). A rule *does*
