@@ -349,12 +349,13 @@ fn check_unused_patches(
 /// only the top-level keys of [`ADMITTED_CONFIGURATION_KEYS`] ([`check_configuration`]), and no
 /// directory holds more than one cargo configuration file, a link included: `config` beside
 /// `config.toml`, or two spellings in letter case of the `.cargo` directory or of a file name
-/// ([`CONFIGURATION_NAMES`]). Of `config` beside `config.toml` cargo reads the first alone; of
-/// two spellings in letter case, which one cargo reads depends on the file system, which is not
-/// this check's to decide. Cargo reads the configuration of the directory it runs in and of
-/// every directory above it, so a file beneath the root applies to every command run beneath
-/// its directory. Every file is read and named as spelled on disk. Returns how many files were
-/// read.
+/// ([`CONFIGURATION_NAMES`]). Of `config` beside `config.toml` in one `.cargo` directory, of
+/// any spelling, cargo reads the first alone; of two spellings in letter case, which one cargo
+/// reads depends on the file system, which is not this check's to decide. Cargo reads the
+/// configuration of the directory it runs in and of every directory above it, so a file
+/// beneath the root applies to every command run beneath its directory. Every file is read
+/// from the path the walk found it at, a name that is not UTF-8 included, and named in a
+/// refusal by that path's display form. Returns how many files were read.
 ///
 /// The walk ([`cargo_directories`]) reads the working tree, which holds every file Git tracks
 /// that cargo could read. It runs no Git command, so an untracked file is read as well.
@@ -374,11 +375,14 @@ fn check_configurations(root: &Path, failures: &mut Vec<String>) -> Result<usize
             .iter()
             .map(|file| file.display().to_string())
             .collect();
-        let exact: Vec<PathBuf> = CONFIGURATION_NAMES
-            .iter()
-            .map(|name| parent.join(CONFIGURATION_DIRECTORY).join(name))
-            .collect();
-        if files == exact {
+        let [config, config_toml] = CONFIGURATION_NAMES;
+        let exact = matches!(
+            files.as_slice(),
+            [first, second] if first.parent() == second.parent()
+                && first.file_name() == Some(config.as_ref())
+                && second.file_name() == Some(config_toml.as_ref())
+        );
+        if exact {
             failures.push(format!(
                 "{} and {} are both there, and cargo reads {} alone: keep one of them",
                 present[0], present[1], present[0]
@@ -396,13 +400,13 @@ fn check_configurations(root: &Path, failures: &mut Vec<String>) -> Result<usize
                 listed.join(", ")
             ));
         }
-        for file in present {
+        for (file, shown) in files.iter().zip(&present) {
             read += 1;
-            let text = std::fs::read_to_string(root.join(&file))
-                .with_context(|| format!("reading {file}"))?;
+            let text = std::fs::read_to_string(root.join(file))
+                .with_context(|| format!("reading {shown}"))?;
             let configuration: toml::Value =
-                toml::from_str(&text).with_context(|| format!("parsing {file}"))?;
-            check_configuration(&file, &configuration, failures);
+                toml::from_str(&text).with_context(|| format!("parsing {shown}"))?;
+            check_configuration(shown, &configuration, failures);
         }
     }
     Ok(read)
@@ -2807,26 +2811,31 @@ mod tests {
     }
 
     /// Cargo reads `.cargo/config` where a directory holds it and `.cargo/config.toml` both, and
-    /// warns. Both in one directory are refused by name, though each holds only admitted keys.
+    /// warns, in a `.cargo` directory of any spelling in letter case. Both in one directory are
+    /// refused by name, though each holds only admitted keys.
     #[test]
     fn a_cargo_directory_holding_both_configuration_names_is_refused() {
-        let directory = tempfile::tempdir().expect("temporary workspace");
-        patched(
-            directory.path(),
-            "\n[[package]]\nname = \"foo\"\nversion = \"1.2.3\"\n",
-        );
-        let configuration = directory.path().join("crates/substrate-host/.cargo");
-        std::fs::create_dir_all(&configuration).expect("cargo configuration");
-        for name in ["config", "config.toml"] {
-            std::fs::write(configuration.join(name), "[profile.dev]\ndebug = false\n")
-                .expect("cargo configuration");
-        }
+        for spelling in ["crates/substrate-host/.cargo", ".Cargo"] {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            patched(
+                directory.path(),
+                "\n[[package]]\nname = \"foo\"\nversion = \"1.2.3\"\n",
+            );
+            let configuration = directory.path().join(spelling);
+            std::fs::create_dir_all(&configuration).expect("cargo configuration");
+            for name in ["config", "config.toml"] {
+                std::fs::write(configuration.join(name), "[profile.dev]\ndebug = false\n")
+                    .expect("cargo configuration");
+            }
 
-        let report = check(directory.path()).expect("package check");
-        assert_eq!(
-            report.failure_text(),
-            "crates/substrate-host/.cargo/config and crates/substrate-host/.cargo/config.toml are both there, and cargo reads crates/substrate-host/.cargo/config alone: keep one of them"
-        );
+            let report = check(directory.path()).expect("package check");
+            assert_eq!(
+                report.failure_text(),
+                format!(
+                    "{spelling}/config and {spelling}/config.toml are both there, and cargo reads {spelling}/config alone: keep one of them"
+                )
+            );
+        }
     }
 
     /// The accepted side of the walk: a cargo configuration with admitted keys alone, aliases
@@ -3104,6 +3113,47 @@ mod tests {
             report.failure_text(),
             ".Cargo/config.toml and .cargo/config.toml are each a cargo configuration of the directory ., and which of them cargo reads depends on the letter case its file system compares: keep one of them"
         );
+    }
+
+    /// Cargo reads the cargo configuration of a directory whose name is not UTF-8 for a
+    /// command run beneath it (shown with `cargo metadata --offline` 1.97.1 run in
+    /// `odd\xff/m`: the source replacement of `odd\xff/.cargo/config.toml` was applied). Each
+    /// configuration file is read from the path the walk found it at, so the file beneath such
+    /// a directory is held to the admitted keys, also beside a directory whose name is the
+    /// replacement-character spelling of that name, which holds only admitted keys. The check
+    /// refuses the replacement, or ends with an error; it never passes.
+    #[cfg(unix)]
+    #[test]
+    fn a_configuration_beneath_a_directory_name_that_is_not_utf8_is_read_from_its_own_path() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        patched(
+            directory.path(),
+            "\n[[package]]\nname = \"foo\"\nversion = \"1.2.3\"\n",
+        );
+        let crates = directory.path().join("crates");
+        for (name, text) in [
+            (&b"odd\xff"[..], REPLACED_BY_A_DIRECTORY),
+            ("odd\u{FFFD}".as_bytes(), "[profile.dev]\ndebug = false\n"),
+        ] {
+            let configuration = crates
+                .join(std::ffi::OsStr::from_bytes(name))
+                .join(".cargo");
+            std::fs::create_dir_all(&configuration).expect("cargo configuration");
+            std::fs::write(configuration.join("config.toml"), text).expect("cargo configuration");
+        }
+
+        match check(directory.path()) {
+            Err(_) => {}
+            Ok(report) => assert!(
+                report
+                    .failure_text()
+                    .contains("source.crates-io.replace-with"),
+                "the source replacement beneath crates/odd\\xff is not refused: {}",
+                report.failure_text()
+            ),
+        }
     }
 
     /// A `paths` override in the cargo configuration replaces a package of its name and version

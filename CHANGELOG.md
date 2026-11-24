@@ -96,8 +96,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `vendor` write the source replacement into the copy they run. Outside the check are
   configuration outside the repository (a file above the root, `CARGO_HOME`, `--config` on a
   command line or in a script or workflow, `CARGO_*` variables), files beneath a directory
-  named `target` or `.git`, and what `profile` sets. Held by 27 cases of
-  `xtask/src/packages.rs`: 26 on throwaway workspaces, and one that holds that this tree's
+  named `target` or `.git`, and what `profile` sets. Held by 28 cases of
+  `xtask/src/packages.rs`: 27 on throwaway workspaces, and one that holds that this tree's
   fixture directory has no `.cargo`. On this tree the check reads the two entries and the one
   cargo configuration, `.cargo/config.toml`, and passes.
 
