@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-11-24
+
 ### Added
 
 - The wire crate states the bytes the operation ledger reserves for one success result,
@@ -86,16 +88,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-- `RunObservation` is `#[non_exhaustive]` and has a constructor,
-  `RunObservation::new(run, adapter, state)`, which leaves every optional member absent. A struct
-  expression `RunObservation { … }` outside `b10x-substrate-host` no longer compiles: write
-  `RunObservation::new(…)` and assign the fields it needs, which stay public. A pattern that
-  names every field needs `..`; one that has `..` and every field read compile unchanged.
-  `RunLimit` is `#[non_exhaustive]` too, so a `match` over it needs a wildcard arm. So is
-  `AuditRecord`: a `match` over it outside `b10x-substrate-host` that names every variant needs a
-  wildcard arm (`_ => …`); a `match` that has one, an `if let` or `matches!` on one variant, and
-  building a variant compile unchanged. A struct
-  expression of the host driver's `ExecObservation` names `end_of_run`.
+- **Breaking (`b10x-substrate-daemon` public API, ADR 0053):** `App::new`,
+  `App::with_authority` and `App::with_delegated_context` return
+  `Result<Arc<App>, ResultBoundMismatch>` where they returned `Arc<App>`. The error is
+  returned only when the driver's capability snapshot states another
+  `operation.result-max-json-bytes` than the ledger reserves for a success result; it holds
+  both figures (`published`, `reserved`). A caller takes the value with `?` or handles the
+  error.
+- **Breaking (`b10x-substrate-host` public API, design 36):** `RunObservation` is
+  `#[non_exhaustive]` and has a constructor, `RunObservation::new(run, adapter, state)`, which
+  leaves every optional member absent. A struct expression `RunObservation { … }` outside
+  `b10x-substrate-host` no longer compiles: write `RunObservation::new(…)` and assign the fields
+  it needs, which stay public. A pattern that names every field needs `..`; one that has `..` and
+  every field read compile unchanged. `RunLimit` is `#[non_exhaustive]` too, so a `match` over it
+  needs a wildcard arm. So is `AuditRecord`: a `match` over it outside `b10x-substrate-host` that
+  names every variant needs a wildcard arm (`_ => …`); a `match` that has one, an `if let` or
+  `matches!` on one variant, and building a variant compile unchanged. A struct expression of the
+  host driver's `ExecObservation` names `end_of_run`.
 - The host driver records an exec's end by these rules where two ends are ready at once: a child
   that exited before its deadline is never recorded timed out (the exit is taken first, and the
   `oci` adapter takes its runtime client's return first in the same way), and a run past both its
