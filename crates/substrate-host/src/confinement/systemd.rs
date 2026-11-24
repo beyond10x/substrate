@@ -719,7 +719,7 @@ mod imp {
                     let ended = self.inner.ended_observation(&run);
                     tokio::spawn(async move {
                         if let Some(observation) = ended.await {
-                            end.write(Self::relabel(observation));
+                            end.write(Self::relabel(observation)).finished().await;
                         }
                     });
                 }

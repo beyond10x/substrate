@@ -1640,13 +1640,14 @@ struct Ending {
 #[cfg(feature = "kubernetes")]
 impl Ending {
     /// Publishes the run's end, its output sealed first, and the first time writes its
-    /// `run_ended` from the adapter's observation (design 36 D18, D20). A later publication
-    /// repeats `Unknown` and writes nothing.
-    async fn publish(&mut self, run: &PodRun, ended: Phase) {
+    /// `run_ended` from the adapter's observation (design 36 D18, D20), on a task of its own
+    /// that awaits the write, so a sink that blocks never holds the Pod's or its policy's
+    /// removal. A later publication repeats `Unknown` and writes nothing.
+    fn publish(&mut self, run: &PodRun, ended: Phase) {
         seal(run);
         self.phase.send_replace(ended);
         if let Some(receiver) = self.record.take() {
-            super::write_run_end(receiver, PodAdapter::observation(run)).await;
+            tokio::spawn(super::write_run_end(receiver, PodAdapter::observation(run)));
         }
     }
 }
@@ -1743,7 +1744,7 @@ async fn monitor(
         }
     };
     if matches!(outcome, Phase::Unknown) {
-        ending.publish(&run, Phase::Unknown).await;
+        ending.publish(&run, Phase::Unknown);
     }
     // The Pod first, never forced, and its policy only once the Pod is confirmed gone and its
     // container stopped; a removal not confirmed within the limit reports the run `Unknown` while
@@ -1759,7 +1760,7 @@ async fn monitor(
     if removed {
         return release(&api, &run, &mut ending, outcome, &trace, deadline).await;
     }
-    ending.publish(&run, Phase::Unknown).await;
+    ending.publish(&run, Phase::Unknown);
     // A kubelet may stay away longer than any bound the adapter could pick: the task asks until the
     // API confirms the Pod gone and answers whether its container stopped, for as long as its
     // runtime lives, and only then removes the policy. Until then the run counts against
@@ -1796,13 +1797,13 @@ async fn release(
         let policy_removed = tokio::time::timeout_at(deadline, api.remove(&policy_path, 0))
             .await
             .unwrap_or(false);
-        ending.publish(run, outcome).await;
+        ending.publish(run, outcome);
         if !policy_removed {
             api.remove_until_gone(&policy_path, 0).await;
         }
         return;
     }
-    ending.publish(run, Phase::Unknown).await;
+    ending.publish(run, Phase::Unknown);
     // A watch the API keeps not answering is asked for as long as the runtime lives; until it is
     // answered the run counts against `POD_MAX_TRACKED_RUNS`, so these tasks stay bounded.
     let stopped = match stopped {

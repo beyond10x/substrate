@@ -637,7 +637,7 @@ mod imp {
                             // An exec the driver no longer tracks leaves the value unwritten,
                             // and its drop writes `unknown` (D22).
                             if let Some(observation) = ended.await {
-                                end.write(observation);
+                                end.write(observation).finished().await;
                             }
                         });
                     }

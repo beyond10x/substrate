@@ -451,12 +451,20 @@ impl AuditRecord {
 ///
 /// `run_ended` is called on a thread of its own, named `substrate-run-ended`, after the run's end
 /// was published, so it may arrive after `wait` returned, and a sink that blocks or panics on it
-/// holds that thread only, never `wait`, another run or another record (design 36 D20). Where the
-/// system refuses the thread, the call goes to the runtime's blocking pool, or, where no runtime
-/// is current or its pool cannot take it, to the run's end task's own thread. Where the run's end
-/// task is dropped before the run ended, as when its runtime shuts down, the record is written
-/// with `state: unknown` on the thread that drops the task, and not from a thread that is
-/// panicking (D22).
+/// holds that thread only, never `wait`, another run or another record (design 36 D20). A panic
+/// is contained where the consumer is built with `panic = "unwind"`; with `panic = "abort"` a
+/// sink that panics ends the process, on this record as on every other. The thread enters the
+/// runtime that was current when the run's end was handed to it, so a sink that reaches the
+/// runtime on `run_started` reaches it on `run_ended`; a sink that spawns onto that runtime once
+/// it shut down gets Tokio's behaviour for that, a task dropped unrun, and the record itself is
+/// still written. Where the system refuses the thread, the call goes to the runtime's blocking
+/// pool, or, where no runtime is current or its pool does not take it, to the run's end task's
+/// own thread. The run's end task ends once the call returned; a runtime that drops the task
+/// before that waits for the call, so `run_ended` is in the sink when the runtime's drop
+/// returned, and a sink that never returns holds that drop. Where the run's end task is dropped
+/// before the run ended, as when its runtime shuts down, the record is written with
+/// `state: unknown` on the thread that drops the task, and not from a thread that is panicking
+/// (D22).
 #[derive(Clone)]
 pub struct AuditSink(Arc<dyn Fn(&AuditRecord) + Send + Sync>);
 
@@ -727,18 +735,64 @@ impl PendingEnd {
     }
 }
 
-/// A built `run_ended` on its way to the sink: written when dropped, so a job dropped unrun, as
-/// by a runtime's shutdown, still writes it on the dropping thread, and nothing is written from
-/// a thread that is panicking (D22).
+/// Calls `sink` with `record`, and a sink that panics does not unwind into the caller.
+fn record_contained(sink: &AuditSink, record: &AuditRecord) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink.record(record)));
+}
+
+/// A built `run_ended` on its way to the sink: written once, when it is dropped, on whichever
+/// thread drops it, so a job dropped unrun, as by a runtime's shutdown, still writes it there. A
+/// sink that panics is contained, and nothing is written from a thread that is panicking (D22).
+/// Dropping `written` afterwards tells the run's end task that the write is over.
 struct EndWrite {
     sink: AuditSink,
     record: AuditRecord,
+    written: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Drop for EndWrite {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            self.sink.record(&self.record);
+            record_contained(&self.sink, &self.record);
+        }
+    }
+}
+
+/// What the run's end task holds while its `run_ended` is written (D20, amended 2026-11-24).
+/// [`Self::finished`] waits on a channel until the write is over, holding no thread. Dropped
+/// before that, as when the runtime drops the task at its shutdown, it joins the record's thread
+/// on the dropping thread, so the runtime's drop returns once the record is in the sink. From a
+/// thread that is panicking it does not join: the record's thread still writes while the process
+/// lives, and a panic is never held by a sink.
+#[must_use = "the end task awaits the write (design 36 D20)"]
+pub(crate) struct EndWriting {
+    thread: Option<std::thread::JoinHandle<()>>,
+    done: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl EndWriting {
+    const NONE: Self = Self {
+        thread: None,
+        done: None,
+    };
+
+    /// Ends once the record's write is over: written, contained or abandoned by a panicking
+    /// thread.
+    pub(crate) async fn finished(mut self) {
+        if let Some(done) = self.done.take() {
+            let _ = done.await;
+        }
+        // The write is over; the thread ends by itself.
+        self.thread = None;
+    }
+}
+
+impl Drop for EndWriting {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take()
+            && !std::thread::panicking()
+        {
+            let _ = thread.join();
         }
     }
 }
@@ -751,40 +805,61 @@ type EndJob = Box<dyn FnOnce() + Send>;
 
 /// Calls the sink with `write` on a thread of its own, so a sink that blocks or panics shares no
 /// thread with any run's exit detection, `wait` or other record (D20, amended 2026-11-24).
-fn deliver(write: EndWrite) {
+fn deliver(write: EndWrite) -> EndWriting {
     deliver_with(write, |job| {
         std::thread::Builder::new()
             .name(RUN_ENDED_THREAD.to_owned())
             .spawn(job)
-            .map(drop)
-    });
+    })
 }
 
-/// [`deliver`] with the thread's creation passed in. Where the system refuses the thread, the
-/// record is not lost: it goes to the current runtime's blocking pool, and where no runtime is
-/// current, or that pool cannot take it either, it is written on the calling thread, which is
-/// then no worker of a runtime or has no other place left. A sink that panics there is contained.
-fn deliver_with(write: EndWrite, spawn_thread: impl FnOnce(EndJob) -> std::io::Result<()>) {
+/// [`deliver`] with the thread's creation passed in. The thread enters the runtime current at
+/// the call, where there is one, so a sink reaches the runtime on `run_ended` as it does on
+/// `run_started`. Where the system refuses the thread, the record is not lost: it goes to the
+/// current runtime's blocking pool, and where no runtime is current, or that pool does not take
+/// it, it is written on the calling thread before the call returns. On every path it is written
+/// once and a sink that panics is contained.
+fn deliver_with(
+    mut write: EndWrite,
+    spawn_thread: impl FnOnce(EndJob) -> std::io::Result<std::thread::JoinHandle<()>>,
+) -> EndWriting {
+    let (written, done) = tokio::sync::oneshot::channel();
+    write.written = Some(written);
+    let runtime = tokio::runtime::Handle::try_current().ok();
     let slot = Arc::new(parking_lot::Mutex::new(Some(write)));
-    let Err(error) = spawn_thread(take_and_write(&slot)) else {
-        return;
+    let job = take_and_write(&slot);
+    let entered = runtime.clone();
+    let error = match spawn_thread(Box::new(move || {
+        let _entered = entered.as_ref().map(tokio::runtime::Handle::enter);
+        job();
+    })) {
+        Ok(thread) => {
+            return EndWriting {
+                thread: Some(thread),
+                done: Some(done),
+            };
+        }
+        Err(error) => error,
     };
     tracing::warn!(
         %error,
         "the system refused a thread for an audit run_ended record; it is written on the \
-         runtime's blocking pool, or on this thread where that pool cannot take it"
+         runtime's blocking pool, or on this thread where that pool does not take it"
     );
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+    if let Some(runtime) = runtime {
         let job = take_and_write(&slot);
-        let queued = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // A pool that cannot start a thread panics; one that is shutting down drops the job
+        // unrun. Either way the job no longer holds the slot, and the drop below writes.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             drop(runtime.spawn_blocking(job));
         }));
-        if queued.is_ok() {
-            return;
-        }
     }
-    let write = slot.lock().take();
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(write)));
+    // Written here only where no job holds the slot any more.
+    drop(slot);
+    EndWriting {
+        thread: None,
+        done: Some(done),
+    }
 }
 
 /// A job that takes the write out of `slot` and writes it, outside the lock; a job that never
@@ -804,16 +879,18 @@ impl RunEndRecord {
     }
 
     /// Writes the run's `run_ended` from `observation`, the adapter's own observation of the
-    /// ended run, on a thread of its own ([`deliver`], D20), with or without a current runtime.
-    /// Without a sink it starts no thread (D19).
-    pub(crate) fn write(mut self, observation: RunObservation) {
+    /// ended run, on a thread of its own ([`deliver`], D20), with or without a current runtime,
+    /// and returns what the end task awaits until the write is over. Without a sink it starts no
+    /// thread (D19).
+    pub(crate) fn write(mut self, observation: RunObservation) -> EndWriting {
         let Some(pending) = self.0.take() else {
-            return;
+            return EndWriting::NONE;
         };
         deliver(EndWrite {
             record: pending.record(observation),
             sink: pending.sink,
-        });
+            written: None,
+        })
     }
 }
 
@@ -822,20 +899,21 @@ impl Drop for RunEndRecord {
         if let Some(pending) = self.0.take()
             && !std::thread::panicking()
         {
-            pending.sink.record(&pending.unknown());
+            record_contained(&pending.sink, &pending.unknown());
         }
     }
 }
 
 /// The run's end task's half of design 36 D17: once the end is published, it takes the value
-/// `audit_start` made from `receiver` and writes the record of the ended `observation`. A start
-/// that failed after the task was spawned dropped the sender, and nothing is written.
+/// `audit_start` made from `receiver`, writes the record of the ended `observation` and ends
+/// once the write is over (D20). A start that failed after the task was spawned dropped the
+/// sender, and nothing is written.
 pub(crate) async fn write_run_end(
     receiver: tokio::sync::oneshot::Receiver<RunEndRecord>,
     observation: RunObservation,
 ) {
     if let Ok(record) = receiver.await {
-        record.write(observation);
+        record.write(observation).finished().await;
     }
 }
 
@@ -1518,7 +1596,7 @@ mod tests {
         });
         observation.limit = Some(RunLimit::OutputStall);
         observation.process_limit_hits = Some(3);
-        end.write(observation);
+        end.write(observation).finished().await;
         let record = tokio::time::timeout(std::time::Duration::from_secs(5), ended.recv())
             .await
             .expect("run_ended reaches the sink")
@@ -1582,7 +1660,9 @@ mod tests {
             run.clone(),
             AdapterName::Local,
             RunState::Ended,
-        ));
+        ))
+        .finished()
+        .await;
         let dropped = admitted.audit_start(&run, "/bin/true");
         assert!(dropped.is_inert());
         drop(dropped);
@@ -1648,6 +1728,7 @@ mod tests {
                 memory_oom_kills: None,
                 process_limit_hits: None,
             },
+            written: None,
         }
     }
 
@@ -1656,11 +1737,11 @@ mod tests {
     #[test]
     fn a_run_ended_is_written_on_a_thread_of_its_own() {
         let (sink, calls) = naming_sink();
-        deliver(end_write(sink.clone()));
+        drop(deliver(end_write(sink.clone())));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime");
-        runtime.block_on(async { deliver(end_write(sink)) });
+        runtime.block_on(async { deliver(end_write(sink)).finished().await });
         for _ in 0..2 {
             assert_eq!(
                 calls
@@ -1681,7 +1762,9 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            deliver_with(end_write(sink), |_| Err(std::io::Error::other("no thread")));
+            deliver_with(end_write(sink), |_| Err(std::io::Error::other("no thread")))
+                .finished()
+                .await;
         });
         assert_eq!(
             calls
@@ -1699,15 +1782,89 @@ mod tests {
     fn a_run_ended_with_no_thread_and_no_runtime_is_written_by_the_caller() {
         let (sink, calls) = naming_sink();
         let caller = std::thread::current().name().map(str::to_owned);
-        deliver_with(end_write(sink), |_| Err(std::io::Error::other("no thread")));
+        drop(deliver_with(end_write(sink), |_| {
+            Err(std::io::Error::other("no thread"))
+        }));
         assert_eq!(
             calls.try_recv().expect("written before the call returned"),
             caller
         );
         let panicking = AuditSink::new(|_: &AuditRecord| panic!("the sink panics"));
-        deliver_with(end_write(panicking), |_| {
+        drop(deliver_with(end_write(panicking), |_| {
             Err(std::io::Error::other("no thread"))
+        }));
+    }
+
+    /// Design 36 D20, amended: where the system refuses the thread and the current
+    /// runtime's blocking pool has shut down, so that pool cannot take the record, the record is
+    /// written on the calling thread once, and a sink that panics there does not unwind into the
+    /// caller.
+    #[test]
+    fn a_run_ended_a_shut_down_pool_cannot_take_is_written_once_by_the_caller_and_contained() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let handle = runtime.handle().clone();
+        drop(runtime);
+        let _entered = handle.enter();
+        let (sink, calls) = naming_sink();
+        let caller = std::thread::current().name().map(str::to_owned);
+        drop(deliver_with(end_write(sink), |_| {
+            Err(std::io::Error::other("no thread"))
+        }));
+        assert_eq!(
+            calls.try_recv().expect("written before the call returned"),
+            caller
+        );
+        assert!(calls.try_recv().is_err(), "the record is written once");
+        let panicking = AuditSink::new(|_: &AuditRecord| panic!("the sink panics"));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(deliver_with(end_write(panicking), |_| {
+                Err(std::io::Error::other("no thread"))
+            }));
+        }));
+        assert!(
+            unwound.is_ok(),
+            "a sink that panics on the calling thread unwound into the caller"
+        );
+    }
+
+    /// Design 36 D20, amended: dropped before the write is over, the end task's guard joins the
+    /// record's thread, so the record is in the sink when the drop returns; dropped by a thread
+    /// that is panicking, it does not wait for the sink, and the record's thread still writes.
+    #[test]
+    fn an_end_writing_dropped_joins_the_records_thread_unless_its_thread_is_panicking() {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = parking_lot::Mutex::new(released);
+        let (called, calls) = std::sync::mpsc::channel::<()>();
+        let called = parking_lot::Mutex::new(called);
+        let holding = AuditSink::new(move |_: &AuditRecord| {
+            let _ = released
+                .lock()
+                .recv_timeout(std::time::Duration::from_secs(5));
+            let _ = called.lock().send(());
         });
+        let writing = deliver(end_write(holding.clone()));
+        release.send(()).expect("the sink waits");
+        drop(writing);
+        calls
+            .try_recv()
+            .expect("the record is in the sink once the drop returned");
+        let writing = deliver(end_write(holding));
+        let unwound = std::thread::spawn(move || {
+            let _writing = writing;
+            panic!("the thread unwinds holding the guard");
+        })
+        .join();
+        assert!(unwound.is_err());
+        assert!(
+            calls.try_recv().is_err(),
+            "the panicking thread waited for the sink"
+        );
+        release.send(()).expect("the sink waits");
+        calls
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the record's thread still writes");
     }
 
     /// Design 36 D17: an end task whose start failed after it was spawned gets no value, and
