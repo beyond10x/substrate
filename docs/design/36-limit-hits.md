@@ -212,10 +212,14 @@ Notes on the rows.
   flag when its OOM event for the container arrives, and that may be after the exit that returns
   the runtime client (amendment of 2026-11-24). The monitor therefore reads the state again,
   every 50 ms for at most one second, where the first read shows an ended container with exit
-  status 137 and no flag, and neither its own deadline, the stall nor the embedder's
-  `signal(Kill)` sent the kill; the container is removed after that. Such a run's end is
-  published up to one second later. A flag the runtime sets later than that, or never, names no
-  limit (§ 12). Where the runtime client's
+  status 137 and no flag, neither its own deadline nor the stall sent the kill, and the embedder
+  asked for none with `signal(Kill)`; the container is removed after that. Such a run's end is
+  published up to one second later: a read still running when the second is over is dropped,
+  and the state read before it stands. A flag the runtime sets later than that, or never, names
+  no limit (§ 12). So does one set after an embedder's `signal(Kill)` that was asked when the
+  container had ended and so sent nothing: the monitor knows that a kill was asked, not which
+  kill ended the container. An end with another signal status is read once. Where the runtime
+  client's
   return and the deadline are ready at once, the monitor takes the return. A stall's kill asked
   after the embedder's `signal(Kill)` set its flag, before that call reached the runtime, names
   no stall; one asked before names the stall. No lock orders the two runtime-client calls, so

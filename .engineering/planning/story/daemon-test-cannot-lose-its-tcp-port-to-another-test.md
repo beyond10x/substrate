@@ -8,7 +8,7 @@ summary: One hosted gate run failed on a daemon that could not bind the port its
 tags:
 - defect
 - flaky
-revision: 3
+revision: 4
 ---
 # Story: a test that starts the daemon on a TCP port cannot lose the port to another test
 
@@ -56,6 +56,15 @@ Hosted gate of pull request 291 (run 45382205250), 1 of 3561 tests:
 `crates/substrate-daemon/tests/kubernetes_driver_selection.rs`, a readiness answer of 503 where
 200 was expected. The pull request changed no file under `crates/substrate-daemon/src`. The
 failed job was run again once and passed. The cause is inferred, not shown.
+
+## Seen a fourth time, 2026-11-24
+
+Hosted gate of pull request 295 at `b3cf567ed` (run 45397925142), 1 of 3743 tests:
+`only_a_daemon_that_opened_a_confinement_adapter_names_it_to_the_operator` in
+`crates/substrate-daemon/tests/kubernetes_driver_selection.rs`, no answer from the operational
+listener in 10 s. The cause is inferred, not shown. The failed job was not run again: the
+branch of this story was merged into the pull request's branch at `4dfffcf3b`, and the next
+hosted gate of that branch, at `1a566aec0` (run 45413469441), did not fail in this binary.
 
 ## What was built, 2026-11-24
 

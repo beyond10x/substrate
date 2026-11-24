@@ -787,7 +787,8 @@ impl ContainerState {
     }
 
     /// An ended container whose main process ended by `SIGKILL` (status 137) and whose state
-    /// does not hold `OOMKilled`: the one state a late OOM event can still change.
+    /// does not hold `OOMKilled`: the state the monitor reads again (design 36 D7). A late flag
+    /// would also change what an end with another signal status names; those are read once.
     fn killed_without_the_oom_flag(&self) -> bool {
         !self.running
             && !self.oom_killed
@@ -1569,8 +1570,9 @@ async fn monitor(
         let _ = reader.await;
     }
     let mut state = inspect(&program, &run).await;
-    // A kill this monitor, the stall or the embedder sent explains the exit; any other is read
-    // again, because the runtime may set `OOMKilled` after the exit (design 36 D7).
+    // A kill this monitor or the stall sent, or one the embedder asked for, explains the exit;
+    // any other is read again, because the runtime may set `OOMKilled` after the exit (design
+    // 36 D7).
     let ours = deadline_fired
         || stopped.load(Ordering::Acquire)
         || live::stall_limit(live.as_ref()).is_some();
@@ -1599,9 +1601,10 @@ async fn monitor(
 /// sets the flag when its OOM event for the container arrives, and that may be after the event
 /// of the container's exit, which is what returns the runtime client. So a state whose main
 /// process ended by `SIGKILL` without the flag is read again every [`STARTED_POLL`] until it
-/// holds the flag or [`OOM_FLAG_WAIT`] has passed. Any other state is returned as it is, and so
-/// is the last state read when a later read fails. The caller asks only for a `SIGKILL` that
-/// neither it nor the embedder sent.
+/// holds the flag or [`OOM_FLAG_WAIT`] has passed. The bound holds for the reads too: one still
+/// running when the time is over is dropped, which kills its runtime call. Any other state is
+/// returned as it is, and so is the last state read when a later read fails or is dropped. The
+/// caller asks only for a `SIGKILL` that it did not send and the embedder did not ask for.
 async fn oom_flag_settled<Read, Reading>(
     first: Option<ContainerState>,
     mut read: Read,
@@ -1611,12 +1614,17 @@ where
     Reading: Future<Output = Option<ContainerState>>,
 {
     let mut state = first?;
-    let deadline = Instant::now() + OOM_FLAG_WAIT;
-    while state.killed_without_the_oom_flag() && Instant::now() < deadline {
-        tokio::time::sleep(STARTED_POLL).await;
-        match read().await {
-            Some(next) => state = next,
-            None => break,
+    let deadline = tokio::time::Instant::now() + OOM_FLAG_WAIT;
+    while state.killed_without_the_oom_flag() {
+        let next = tokio::time::timeout_at(deadline, async {
+            tokio::time::sleep(STARTED_POLL).await;
+            read().await
+        })
+        .await;
+        match next {
+            Ok(Some(next)) => state = next,
+            // The read failed, or the second ended before it or during it.
+            Ok(None) | Err(_) => break,
         }
     }
     Some(state)
@@ -2259,5 +2267,188 @@ mod tests {
         assert_eq!(git.code(), super::super::WRITABLE_SUBTREE_GIT);
         let whole = check_profile(&ConfinementProfile::default()).expect_err("no image");
         assert_eq!(whole.code(), "confinement.image-unpinned");
+    }
+
+    /// A stand-in container runtime for `monitor`. `container inspect` counts its reads in
+    /// `reads` and answers an ended container with status 137 whose `OOMKilled` is true from
+    /// the `flag_on`-th read on; `kill` kills the process named in `pid`; every other call
+    /// succeeds and prints nothing, so `rm` and `ps` report the container gone.
+    const STAND_IN_RUNTIME: &str = r#"#!/bin/sh
+dir=${0%/*}
+case "$1" in
+container)
+  n=$(cat "$dir/reads" 2>/dev/null || echo 0)
+  n=$((n + 1))
+  echo "$n" > "$dir/reads"
+  oom=false
+  [ "$n" -ge "$(cat "$dir/flag_on")" ] && oom=true
+  printf '{"StartedAt":"2026-11-24T00:00:00Z","Running":false,"OOMKilled":%s,"ExitCode":137}\n' "$oom"
+  ;;
+kill)
+  [ -f "$dir/pid" ] && kill -9 "$(cat "$dir/pid")"
+  ;;
+esac
+exit 0
+"#;
+
+    const NEVER: u32 = 1_000_000;
+
+    /// Runs `monitor` against [`STAND_IN_RUNTIME`] with `argv` as the runtime client, and returns
+    /// the published observation, the number of state reads and the time to the publication.
+    async fn monitored(
+        flag_on: u32,
+        stopped: bool,
+        timeout: Duration,
+        argv: &[&str],
+    ) -> (RunObservation, u32, Duration) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let program = dir.path().join("runtime");
+        std::fs::write(dir.path().join("flag_on"), flag_on.to_string()).expect("flag_on");
+        std::fs::write(&program, STAND_IN_RUNTIME).expect("runtime");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let child = tokio::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .kill_on_drop(true)
+            .spawn()
+            .expect("client");
+        if let Some(pid) = child.id() {
+            std::fs::write(dir.path().join("pid"), pid.to_string()).expect("pid");
+        }
+        let run = RunId::new("oci-monitor-case".to_owned());
+        let (phase, mut observed) = watch::channel(Phase::Running);
+        let (hand_end, end_record) = tokio::sync::oneshot::channel();
+        drop(hand_end);
+        let began = Instant::now();
+        tokio::spawn(monitor(
+            program,
+            run.clone(),
+            child,
+            [None, None],
+            timeout,
+            (phase, end_record),
+            None,
+            None,
+            (
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(stopped)),
+            ),
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            observed.wait_for(|phase| !matches!(phase, Phase::Running)),
+        )
+        .await
+        .expect("the monitor published the end within 20 s")
+        .expect("phase");
+        let elapsed = began.elapsed();
+        let reads = std::fs::read_to_string(dir.path().join("reads"))
+            .expect("reads")
+            .trim()
+            .parse()
+            .expect("a count");
+        let phase = *observed.borrow();
+        (OciAdapter::observation_of(&run, phase), reads, elapsed)
+    }
+
+    const KILLED: Option<RunExit> = Some(RunExit {
+        code: None,
+        signal: Some(9),
+    });
+
+    /// D7: the embedder's `signal(Kill)` set `stopped`, so the state is read once and the end
+    /// names no limit, without the second's wait.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_embedders_kill_is_read_once() {
+        let (ended, reads, elapsed) =
+            monitored(NEVER, true, Duration::from_mins(1), &["/bin/true"]).await;
+        assert_eq!(reads, 1, "{ended:?} after {elapsed:?}");
+        assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+        assert_eq!(ended.exit, KILLED, "{ended:?}");
+        assert_eq!(ended.limit, None, "{ended:?}");
+    }
+
+    /// D7: the monitor's own deadline sent the kill, so the state is read once and the end names
+    /// `WallTime`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deadlines_kill_is_read_once() {
+        let (ended, reads, elapsed) = monitored(
+            NEVER,
+            false,
+            Duration::from_millis(200),
+            &["/bin/sleep", "30"],
+        )
+        .await;
+        assert_eq!(reads, 1, "{ended:?} after {elapsed:?}");
+        assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+        assert_eq!(ended.exit, KILLED, "{ended:?}");
+        assert_eq!(ended.limit, Some(RunLimit::WallTime), "{ended:?}");
+    }
+
+    /// D7: a 137 nobody here sent whose flag the runtime sets on the third read names `Memory`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unexplained_kill_reads_a_late_flag_and_names_memory() {
+        let (ended, reads, elapsed) =
+            monitored(3, false, Duration::from_mins(1), &["/bin/true"]).await;
+        assert_eq!(reads, 3, "{ended:?} after {elapsed:?}");
+        assert!(elapsed >= STARTED_POLL * 2, "{elapsed:?}");
+        assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+        assert_eq!(ended.exit, KILLED, "{ended:?}");
+        assert_eq!(ended.limit, Some(RunLimit::Memory), "{ended:?}");
+    }
+
+    /// D7: a flag that never comes is read every 50 ms for one second, no more often, and the
+    /// end names no limit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unexplained_kill_without_a_flag_is_read_every_50_ms_for_a_second() {
+        let (ended, reads, elapsed) =
+            monitored(NEVER, false, Duration::from_mins(1), &["/bin/true"]).await;
+        assert!(elapsed >= OOM_FLAG_WAIT, "{elapsed:?}");
+        // The first read, then one every 50 ms at most while the second lasts.
+        let most =
+            2 + u32::try_from(OOM_FLAG_WAIT.as_millis() / STARTED_POLL.as_millis()).expect("small");
+        assert!((5..=most).contains(&reads), "{reads} reads in {elapsed:?}");
+        assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+        assert_eq!(ended.exit, KILLED, "{ended:?}");
+        assert_eq!(ended.limit, None, "{ended:?}");
+    }
+
+    /// Design 36 D7, `oci` row: "Such a run's end is published up to one second later." With
+    /// reads of 400 ms each, the third is dropped when the second is over, and the state of the
+    /// second read stands.
+    #[tokio::test]
+    async fn a_slow_read_keeps_the_wait_within_one_second() {
+        let reads = std::cell::Cell::new(0_u32);
+        let began = Instant::now();
+        let settled = oom_flag_settled(
+            Some(ContainerState {
+                started: true,
+                running: false,
+                oom_killed: false,
+                exit_code: Some(137),
+            }),
+            || {
+                reads.set(reads.get() + 1);
+                async {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    Some(ContainerState {
+                        started: true,
+                        running: false,
+                        oom_killed: false,
+                        exit_code: Some(137),
+                    })
+                }
+            },
+        )
+        .await;
+        let elapsed = began.elapsed();
+        assert!(settled.is_some());
+        assert_eq!(reads.get(), 3, "after {elapsed:?}");
+        assert!(elapsed >= OOM_FLAG_WAIT, "{elapsed:?}");
+        assert!(
+            elapsed <= OOM_FLAG_WAIT + STARTED_POLL,
+            "the wait took {elapsed:?} over {} reads",
+            reads.get()
+        );
     }
 }

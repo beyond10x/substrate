@@ -1292,12 +1292,16 @@ async fn an_oci_run_over_its_memory_bound_names_the_memory_limit() {
     println!("{NAME}: the run ended after {:?}", began.elapsed());
     assert_eq!(ended.state, RunState::Ended, "{NAME}: {ended:?}");
     // The adapter reads the state again for a second when the first read holds no `OOMKilled`
-    // (design 36 D7), so a failure here is a runtime whose state did not hold the flag a second
-    // after the exit.
+    // (design 36 D7), so an end that names no limit is a runtime whose state did not hold the
+    // flag a second after the exit.
+    assert_ne!(
+        ended.limit, None,
+        "{NAME}: the runtime's state held no OOMKilled within a second of the exit: {ended:?}"
+    );
     assert_eq!(
         ended.limit,
         Some(confinement::RunLimit::Memory),
-        "{NAME}: the runtime's state held no OOMKilled within a second of the exit: {ended:?}"
+        "{NAME}: {ended:?}"
     );
     assert_eq!(ended.memory_oom_kills, None, "{NAME}: {ended:?}");
     assert_eq!(ended.process_limit_hits, None, "{NAME}: {ended:?}");
