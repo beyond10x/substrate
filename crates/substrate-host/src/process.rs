@@ -75,6 +75,21 @@ const MAX_EXEC_NESTED_CGROUPS: usize = 256;
 /// (invariant 3).
 pub(crate) const USER_NAMESPACE_ARGV: [&str; 2] = ["--unshare-user", "--disable-userns"];
 
+/// Moves the calling process into the cgroup whose `cgroup.procs` is open at `procs`.
+///
+/// Runs inside `pre_exec`, before anything else: one async-signal-safe `write`, no allocation.
+/// Writing `0` names the writer itself, so the forked child is in the exec's cgroup before it
+/// executes the confinement backend. Every process the backend forks is born there, whether it
+/// lives for the whole run or ends before the driver's next instruction, and the driver never
+/// names a process of the run to the kernel by an id that may already be gone.
+fn join_cgroup(procs: RawFd) -> io::Result<()> {
+    // SAFETY: one byte from a static to a descriptor the parent holds open across the fork.
+    if unsafe { libc::write(procs, b"0".as_ptr().cast(), 1) } != 1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Clears `FD_CLOEXEC` on each pinned descriptor so bubblewrap inherits it to mount.
 ///
 /// Runs inside `pre_exec`: async-signal-safe `fcntl` only, no allocation. Bubblewrap's descriptor
@@ -1544,11 +1559,21 @@ impl ProcessRuntime {
         if let Err(error) = inherited_clear_of_slots(&inherited, &placements) {
             return contain_cgroup(&cgroup, error);
         }
+        // The child joins the exec's cgroup itself, as the first thing it does after the fork. The
+        // descriptor is close-on-exec and not retained, so `place_and_close` closes it and
+        // bubblewrap never holds it. A join that fails ends the child before `execve` and is the
+        // spawn's own error below: nothing ran, inside the cgroup or outside it.
+        let procs = match cgroup.open_procs() {
+            Ok(procs) => procs,
+            Err(error) => return contain_cgroup(&cgroup, error),
+        };
+        let procs_fd = procs.as_raw_fd();
         // SAFETY: pre_exec runs after fork; it invokes only async-signal-safe libc calls and does
         // not allocate. The captured descriptors are plain integers owned by the parent until spawn,
         // and the vectors are built before the fork and only read after it.
         unsafe {
             command.as_std_mut().pre_exec(move || {
+                join_cgroup(procs_fd)?;
                 if libc::close(write_fd) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -1561,6 +1586,7 @@ impl ProcessRuntime {
             });
         }
         let spawned = command.spawn();
+        drop(procs);
         // The parent's copies of the terminal go with the builder: while any of them is open the
         // master never sees the child's exit, so a session that ended would read as one that stalled.
         drop(command);
@@ -1575,12 +1601,18 @@ impl ProcessRuntime {
         drop(writable_roots);
         let mut child = match spawned {
             Ok(child) => child,
+            // The forked child reports one error number and not the step it came from: joining
+            // the exec's cgroup, preparing its descriptors, or executing the backend.
             Err(error) => {
                 return contain_cgroup(
                     &cgroup,
                     DriverError::failed(
                         "exec.spawn-failed",
-                        format!("bubblewrap spawn failed: {error}"),
+                        format!(
+                            "The forked child ended before the confinement backend executed \
+                             (joining the exec's cgroup, preparing descriptors, or executing \
+                             the backend): {error}"
+                        ),
                     ),
                 );
             }
@@ -1615,9 +1647,9 @@ impl ProcessRuntime {
                 DriverError::failed("exec.spawn-failed", "spawn returned no process identity");
             return contain_spawned(child, cgroup, error).await;
         };
-        if let Err(error) = cgroup.attach_tree(leader_pid) {
-            return contain_spawned(child, cgroup, error).await;
-        }
+        // The leader put itself in the cgroup before it executed (`join_cgroup`), so there is no
+        // process of this run to move here and none to look for.
+        //
         // Between the namespace existing and the child running: every aperture is there for every
         // instruction the child executes, and for none before it (ADR 0013). The info pipe exists
         // exactly when there are apertures to install.
@@ -4488,16 +4520,23 @@ impl Cgroup {
         &self.name
     }
 
-    fn attach(&self, pid: u32) -> Result<(), DriverError> {
-        write_control(&self.path, "cgroup.procs", &pid.to_string())
-    }
-
-    fn attach_tree(&self, leader: u32) -> Result<(), DriverError> {
-        self.attach(leader)?;
-        for process in process_tree(leader)? {
-            self.attach(process)?;
-        }
-        Ok(())
+    /// This cgroup's `cgroup.procs`, open for the one write by which the exec's leader joins it
+    /// ([`join_cgroup`]): close-on-exec and above the secret-slot range.
+    ///
+    /// Never a standard descriptor. `std` puts the child's standard streams at 0 to 2 before
+    /// `pre_exec` runs, so a join descriptor the daemon opened at one of those numbers, having
+    /// been started with that stream closed, would be the child's own stream by the time the
+    /// child writes to it: the write would succeed and join nothing. [`bubblewrap_descriptor`]
+    /// moves it above `MAX_SECRET_SLOT_FD`, or refuses the start `exec.spawn-failed`.
+    fn open_procs(&self) -> Result<OwnedFd, DriverError> {
+        let procs = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.procs())
+            .map_err(|error| {
+                DriverError::failed("exec.cgroup-write-failed", format!("cgroup.procs: {error}"))
+            })?;
+        bubblewrap_descriptor(OwnedFd::from(procs), "cgroup join")
     }
 
     /// This cgroup's `cgroup.procs`, which is how a forked process joins it by writing `0`.
@@ -4854,37 +4893,6 @@ fn release_barrier(descriptor: &OwnedFd) -> Result<(), DriverError> {
         ));
     }
     Ok(())
-}
-
-fn process_tree(leader: u32) -> Result<Vec<u32>, DriverError> {
-    let mut discovered = Vec::new();
-    let mut pending = vec![leader];
-    while let Some(parent) = pending.pop() {
-        let children =
-            match std::fs::read_to_string(format!("/proc/{parent}/task/{parent}/children")) {
-                Ok(children) => children,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(DriverError::failed(
-                        "exec.process-tree-failed",
-                        format!("process-tree observation failed: {error}"),
-                    ));
-                }
-            };
-        for child in children.split_whitespace() {
-            let child = child.parse::<u32>().map_err(|_| {
-                DriverError::failed(
-                    "exec.process-tree-failed",
-                    "Kernel process-tree observation was malformed.",
-                )
-            })?;
-            if !discovered.contains(&child) {
-                discovered.push(child);
-                pending.push(child);
-            }
-        }
-    }
-    Ok(discovered)
 }
 
 #[cfg(test)]
@@ -8335,7 +8343,7 @@ mod tests {
     /// envelope). Measured on this host before the fix: `oom_kill 1`, `oom_group_kill 0`, the
     /// leader exits 0 and prints its marker.
     ///
-    /// The leader is itself inside the exec cgroup (`Cgroup::attach_tree`), so "no process left"
+    /// The leader is itself inside the exec cgroup (`join_cgroup`), so "no process left"
     /// is observable as the leader's own death by `SIGKILL` and not only as a missing marker.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_exec_that_crosses_its_memory_bound_leaves_no_process_in_its_cgroup() {
@@ -9592,6 +9600,51 @@ mod tests {
             &[(ceiling + 3, 3), (ceiling + 4, ceiling)],
         )
         .expect("descriptors above the slot range are clear of every placement");
+    }
+
+    /// A forked child that cannot join its cgroup does not execute: the refused write is the
+    /// spawn's own error, and the program never ran. The descriptor here is open for reading
+    /// only, so the one write `join_cgroup` makes is refused.
+    #[test]
+    fn a_child_that_cannot_join_its_cgroup_does_not_execute() {
+        use std::os::unix::process::CommandExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let ran = directory.path().join("ran");
+        let unwritable = File::open("/dev/null").expect("a descriptor open for reading only");
+        let procs = unwritable.as_raw_fd();
+        let mut command = std::process::Command::new("/bin/sh");
+        command.arg("-c").arg(r#": >"$0""#).arg(&ran);
+        // SAFETY: the closure makes one async-signal-safe write on a descriptor this test holds
+        // open across the fork, and allocates nothing.
+        unsafe {
+            command.pre_exec(move || super::join_cgroup(procs));
+        }
+        let error = command
+            .spawn()
+            .expect_err("a child outside its cgroup was executed");
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF), "{error}");
+        assert!(!ran.exists(), "the program ran without joining its cgroup");
+    }
+
+    /// The descriptor the leader joins through is never a standard one, and no slot placement
+    /// can stand on it: wherever the open landed, what `open_procs` hands back lies above the
+    /// secret-slot range and is close-on-exec. `std` installs the child's standard streams at
+    /// 0 to 2 before `pre_exec`, so a join descriptor at one of those numbers would be written
+    /// to as that stream.
+    #[test]
+    fn the_join_descriptor_is_above_the_slot_range_and_close_on_exec() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("cgroup.procs"), b"").expect("cgroup.procs");
+        let cgroup = super::Cgroup::at(directory.path().to_path_buf(), "substrate-ex_join".into());
+        let ceiling = RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap();
+        let procs = cgroup.open_procs().expect("the join descriptor");
+        assert!(
+            procs.as_raw_fd() > ceiling,
+            "the join descriptor {} is a standard descriptor or inside the slot range",
+            procs.as_raw_fd()
+        );
+        assert_cloexec(procs.as_raw_fd());
     }
 
     /// The same claim for the three sandboxes this module's neighbours open: both pty probes and

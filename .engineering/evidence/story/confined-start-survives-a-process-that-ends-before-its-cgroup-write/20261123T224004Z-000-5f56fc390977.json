@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-23T22:40:04Z",
+  "actor": "agent:substrate",
+  "artifact": "story:confined-start-survives-a-process-that-ends-before-its-cgroup-write",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:cgroup-join-security-review",
+    "review": "review-result:cgroup-join-security-review",
+    "outcome": "fixed"
+  }
+}
