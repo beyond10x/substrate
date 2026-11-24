@@ -648,6 +648,77 @@ async fn a_start_at_the_bound_completes_and_every_later_mutation_of_it_completes
     assert_eq!(driver.signals.load(Ordering::SeqCst), 1);
 }
 
+/// The fact a daemon publishes, `operation.result-max-json-bytes`, is the reserve its ledger
+/// decides against (ADR 0053 decision 4): with the reserve lowered to an exec start's widest
+/// result the machine states that figure and the start is dispatched; one byte lower, the machine
+/// states the lower figure and the same start is refused before dispatch.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_published_result_bound_is_the_reserve_the_daemon_decides_against() {
+    let width = exec_width(&exec_input(&minted_workspace_id()));
+    for (reserve, dispatched) in [(width, 1), (width - 1, 0)] {
+        let (harness, driver, workspace) = harness(reserve, None).await;
+        let (status, machine) = harness
+            .call(
+                "local:1000",
+                Method::GET,
+                "/v1/machine",
+                "req_result_bound_machine",
+                axum::body::Body::empty(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{machine}");
+        assert_eq!(
+            machine["result"]["facts"]["operation.result-max-json-bytes"],
+            json!(reserve),
+            "{reserve}"
+        );
+        let (status, answered) = harness
+            .call(
+                "local:1000",
+                Method::POST,
+                "/v1/execs",
+                "req_result_bound_start",
+                mutation("01JRESULTBOUNDFACT00001", exec_input(&workspace)),
+            )
+            .await;
+        if dispatched == 1 {
+            assert_eq!(status, StatusCode::ACCEPTED, "{answered}");
+        } else {
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{answered}");
+            assert_eq!(answered["error"]["code"], "operation.result-limit");
+        }
+        assert_eq!(
+            driver.starts.load(Ordering::SeqCst),
+            dispatched,
+            "{reserve}"
+        );
+    }
+}
+
+/// A daemon over the ledger as shipped publishes the wire constant.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_over_the_shipped_reserve_publishes_the_wire_constant() {
+    let (harness, _driver, _workspace) = harness(
+        substrate_store::DEFAULT_OPERATION_TERMINAL_HEADROOM_BYTES - AROUND_A_RESULT,
+        None,
+    )
+    .await;
+    let (status, machine) = harness
+        .call(
+            "local:1000",
+            Method::GET,
+            "/v1/machine",
+            "req_result_bound_shipped",
+            axum::body::Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{machine}");
+    assert_eq!(
+        machine["result"]["facts"]["operation.result-max-json-bytes"],
+        json!(substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES)
+    );
+}
+
 /// A request another published code refuses keeps that code, though no result of it could fit
 /// either: a stale capability snapshot, a path outside the workspace, and a session start whose
 /// exec breaks its own shape.

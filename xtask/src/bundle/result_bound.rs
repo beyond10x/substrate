@@ -177,8 +177,8 @@ fn member_bounds() -> Vec<(&'static str, String, usize, &'static str)> {
         ),
         (
             "/$defs/process/properties/cwd/maxLength",
-            wire::MAX_WORKDIR_BYTES,
-            "MAX_WORKDIR_BYTES",
+            wire::MAX_PROCESS_CWD_BYTES,
+            "MAX_PROCESS_CWD_BYTES",
         ),
         (
             "/$defs/process/properties/env_names/items/maxLength",
@@ -978,7 +978,7 @@ mod tests {
             "MAX_RESOURCE_ID_CHARS",
             "MAX_EXEC_REFUSAL_CODE_CHARS",
             "MAX_PROCESS_ARGV_BYTES",
-            "MAX_WORKDIR_BYTES",
+            "MAX_PROCESS_CWD_BYTES",
             "MAX_PROCESS_ENV_BYTES",
             "no requirement security.bounds.result",
         ] {
@@ -1190,7 +1190,10 @@ mod tests {
                 "/$defs/process/properties/argv/items",
                 "MAX_PROCESS_ARGV_BYTES is 131072",
             ),
-            ("/$defs/process/properties/cwd", "MAX_WORKDIR_BYTES is 4096"),
+            (
+                "/$defs/process/properties/cwd",
+                "MAX_PROCESS_CWD_BYTES is 4096",
+            ),
             (
                 "/$defs/process/properties/env_names/items",
                 "MAX_PROCESS_ENV_BYTES is 131072",

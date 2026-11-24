@@ -81,7 +81,7 @@ like any other directory. Send the segment as written: a client that removes dot
 `/files/` and gets 404. Every other file route refuses `.` with `workspace.path-escape`. A daemon
 that predates the root page answers that code too, and a client may then fall back to the tree.
 
-Release `0.26.0` advertises `substrate-wire/0.27.0` in `x-b10x-contract` and its inner
+Release `0.26.0` advertises `substrate-wire/0.28.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest, because it identifies the distribution package and not
 the inner contract manifest.
@@ -90,7 +90,7 @@ the inner contract manifest.
 `/v1/sessions` in bundle `0.15.0`, and no `/v1/pipe-sessions` compatibility alias is served.
 
 Frozen compatibility declarations and route/schema details are in the
-[0.27.0 bundle](https://github.com/beyond10x/substrate/tree/0.26.0/contracts/substrate-wire/0.27.0).
+[0.28.0 bundle](https://github.com/beyond10x/substrate/tree/0.26.0/contracts/substrate-wire/0.28.0).
 See [system model and derivation](../concepts/model.md) for which artifacts are generated and
 [status](../status.md) for release maturity.
 
@@ -159,6 +159,22 @@ Read [operations and observations](../concepts/operations.md) for retry semantic
 Earlier bundle directories remain immutable. A source contract promotion is not by itself a signed
 daemon release. Consumers must pin and test the matching SDK/daemon revision. The SDK refuses an
 older daemon's contract before issuing mutations.
+
+### `0.28.0`
+
+`0.28.0` adds no route and publishes the result bound of ADR 0053:
+
+- Every capability snapshot states `operation.result-max-json-bytes`, the bytes of compact JSON
+  the operation ledger records for one success result: 524,217. Its description says how a
+  client counts the widest result of a request before sending it.
+- A start of an exec, a session or a host process, and a v1 file write or delete, whose widest
+  result exceeds that bound is `operation.result-limit` (429), and nothing starts. A request
+  under the bound by that count is never refused for this cause.
+- An operation that took effect and whose result the ledger cannot record ends with the error
+  `operation.result-unrecorded` (500) and names its resource. Read the resource; do not repeat
+  the mutation under a new operation id.
+
+A client that validates snapshots against `0.27.0` must move to `0.28.0` to accept the fact.
 
 ### `0.27.0`
 

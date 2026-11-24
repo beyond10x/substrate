@@ -154,6 +154,9 @@ struct VectorDriver {
     after_observed_hook: StdMutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// The facts a vector's `machine` setup declares, served in place of the default set.
     machine_facts: StdMutex<Option<substrate_wire::CapabilityFacts>>,
+    /// A host directory a v1 file write or delete takes effect in, when a case sets one, so the
+    /// case reads on the host whether a file changed.
+    files: StdMutex<Option<PathBuf>>,
 }
 
 impl VectorDriver {
@@ -350,6 +353,11 @@ impl Driver for VectorDriver {
     ) -> Result<FileObservation, DriverError> {
         self.dispatch_count.fetch_add(1, Ordering::SeqCst);
         self.write_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(root) = self.files.lock().expect("files").clone() {
+            let file = root.join(path);
+            std::fs::create_dir_all(file.parent().expect("a parent")).expect("parent directory");
+            std::fs::write(&file, content).expect("host write");
+        }
         if self.write_limit.is_some_and(|limit| content.len() > limit) {
             return Err(DriverError::exhausted(
                 "workspace.write-limit",
@@ -381,9 +389,12 @@ impl Driver for VectorDriver {
         &self,
         _workspace_id: &str,
         _root_name: &str,
-        _path: &str,
+        path: &str,
     ) -> Result<FileAbsence, DriverError> {
         self.dispatch_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(root) = self.files.lock().expect("files").clone() {
+            std::fs::remove_file(root.join(path)).expect("host delete");
+        }
         Err(DriverError::not_found())
     }
 
@@ -605,6 +616,7 @@ impl Harness {
             workspace_create_observed: AtomicBool::new(false),
             after_observed_hook: StdMutex::new(None),
             machine_facts: StdMutex::new(None),
+            files: StdMutex::new(None),
         });
         let erased: Arc<dyn Driver> = driver.clone();
         let clock_available = Arc::new(AtomicBool::new(true));
@@ -903,6 +915,245 @@ async fn confinement_requires_vectors_refuse_exactly_before_dispatch() {
         assert_eq!(harness.driver.dispatch_count.load(Ordering::SeqCst), 0);
         assert_eq!(harness.driver.start_count.load(Ordering::SeqCst), 0);
     }
+}
+
+/// The bytes by which each `0.28.0` result-bound request exceeds the least reserve a store opens
+/// with, at least: the vectors stay refused when the headroom moves by a few bytes.
+const RESULT_BOUND_MARGIN: u64 = 64;
+
+/// A store whose ledger reserves the least a store opens with
+/// (`StoreConfig::minimum_terminal_headroom_bytes`).
+fn least_reserve() -> StoreConfig {
+    StoreConfig {
+        operation_terminal_headroom_bytes: StoreConfig::minimum_terminal_headroom_bytes(),
+        ..StoreConfig::default()
+    }
+}
+
+/// `widest` exceeds the least reserve by [`RESULT_BOUND_MARGIN`] bytes or more.
+fn assert_over_the_least_reserve(name: &str, widest: usize) {
+    let reserve = least_reserve().success_result_json_bytes();
+    let widest = u64::try_from(widest).expect("u64");
+    assert!(
+        widest >= reserve + RESULT_BOUND_MARGIN,
+        "{name}: the widest result is {widest} bytes, under {RESULT_BOUND_MARGIN} bytes over the \
+         least reserve {reserve}"
+    );
+}
+
+/// A daemon at the least reserve whose machine is the one `vector`'s setup declares, with the
+/// vector's workspace stored.
+fn result_bound_harness(name: &str, vector: &Value) -> Harness {
+    let machine = &vector["setup"][0];
+    assert_eq!(machine["kind"], "machine", "{name}");
+    assert_eq!(machine["state"]["snapshot"], SNAPSHOT, "{name}");
+    let harness = Harness::open_custom(
+        least_reserve(),
+        "snap_vector",
+        None,
+        false,
+        false,
+        false,
+        None,
+        None,
+    );
+    *harness.driver.machine_facts.lock().expect("machine facts") =
+        Some(serde_json::from_value(machine["state"]["facts"].clone()).expect("declared facts"));
+    seed_workspace(&harness.store);
+    harness
+}
+
+/// `vector` is answered exactly, recorded refused as one new row, and no driver is called.
+async fn assert_refused_before_dispatch(name: &str, harness: &Harness, vector: &Value) {
+    let rows_before = operation_rows(harness);
+    assert_exact_http(&harness.execute(vector).await, vector);
+    let operation = vector["action"]["request"]["body"]["op"]
+        .as_str()
+        .expect("operation id");
+    assert_eq!(
+        harness
+            .store
+            .operation(&vector_scope(), operation)
+            .expect("operation lookup")
+            .expect("refused operation")
+            .state,
+        substrate_wire::OperationState::Refused,
+        "{name}"
+    );
+    assert_eq!(operation_rows(harness), rows_before + 1, "{name}");
+    assert_eq!(
+        harness.driver.dispatch_count.load(Ordering::SeqCst),
+        0,
+        "{name}"
+    );
+    assert_eq!(
+        harness.driver.start_count.load(Ordering::SeqCst),
+        0,
+        "{name}"
+    );
+    assert_eq!(
+        harness.driver.write_count.load(Ordering::SeqCst),
+        0,
+        "{name}"
+    );
+}
+
+/// The workspace and the file a v1 file vector addresses.
+fn v1_file_address(vector: &Value) -> (String, String) {
+    let path = vector["action"]["request"]["path"]
+        .as_str()
+        .expect("request path");
+    let (workspace, file) = path
+        .strip_prefix("/v1/workspaces/")
+        .and_then(|rest| rest.split_once("/files/"))
+        .expect("a v1 file address");
+    substrate_wire::validate_relative_path(file).expect("a published workspace path");
+    // `common.json#/$defs/relative-path` publishes a maxLength of 4096, and a host file name is
+    // at most 255 bytes.
+    assert!(file.len() <= 4_096, "{file}");
+    assert!(
+        file.split('/').all(|component| component.len() <= 255),
+        "{file}"
+    );
+    (workspace.to_owned(), file.to_owned())
+}
+
+/// A host directory the driver writes and deletes v1 files in.
+fn host_files(harness: &Harness) -> PathBuf {
+    let root = harness.directory.path().join("files");
+    std::fs::create_dir(&root).expect("host files");
+    *harness.driver.files.lock().expect("files") = Some(root.clone());
+    root
+}
+
+/// Bundle `0.28.0`'s refusals of a start whose widest result the ledger cannot record (ADR 0053
+/// decision 11), against a daemon whose ledger reserves the least a store opens with and whose
+/// machine is the one each vector's setup declares: each request is answered exactly, recorded
+/// refused as one new row, and never dispatched. The host-process vector runs in
+/// `tests/processes.rs`, whose daemon serves host processes.
+#[tokio::test(flavor = "multi_thread")]
+async fn result_bound_vectors_refuse_exactly_before_dispatch() {
+    for name in [
+        "exec-start-result-over-the-ledger-bound-is-refused",
+        "session-start-result-over-the-ledger-bound-is-refused",
+    ] {
+        let vector = bundle_vector("0.28.0", "http", name);
+        let input = vector["action"]["request"]["body"]["input"].clone();
+        let widest = if name.starts_with("session") {
+            let session: PipeSessionStartInput =
+                serde_json::from_value(input).expect("session input");
+            Exec::widest_json_bytes(&session.exec)
+        } else {
+            Exec::widest_json_bytes(
+                &serde_json::from_value::<ExecStartInput>(input).expect("input"),
+            )
+        };
+        assert_over_the_least_reserve(name, widest);
+        let harness = result_bound_harness(name, &vector);
+        assert_refused_before_dispatch(name, &harness, &vector).await;
+    }
+}
+
+/// Bundle `0.28.0`'s v1 file write whose widest observation the ledger cannot record (ADR 0053
+/// decision 11), against a daemon at the least reserve: answered exactly, recorded refused as one
+/// new row, no driver called, and no file on the host.
+#[tokio::test(flavor = "multi_thread")]
+async fn result_bound_file_write_vector_refuses_exactly_and_writes_nothing() {
+    let name = "file-write-result-over-the-ledger-bound-is-refused";
+    let vector = bundle_vector("0.28.0", "http", name);
+    let (workspace, file) = v1_file_address(&vector);
+    assert_over_the_least_reserve(name, FileObservation::widest_json_bytes(&workspace, &file));
+    let harness = result_bound_harness(name, &vector);
+    let root = host_files(&harness);
+    assert_refused_before_dispatch(name, &harness, &vector).await;
+    assert!(
+        std::fs::symlink_metadata(root.join(&file)).is_err(),
+        "the file is not on the host"
+    );
+    assert_eq!(
+        std::fs::read_dir(&root).expect("host files").count(),
+        0,
+        "nothing is created on the host"
+    );
+}
+
+/// Bundle `0.28.0`'s v1 file delete whose widest absence the ledger cannot record (ADR 0053
+/// decision 11), against a daemon at the least reserve: answered exactly, recorded refused as one
+/// new row, no driver called, and the file on the host unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn result_bound_file_delete_vector_refuses_exactly_and_deletes_nothing() {
+    let name = "file-delete-result-over-the-ledger-bound-is-refused";
+    let vector = bundle_vector("0.28.0", "http", name);
+    let (workspace, file) = v1_file_address(&vector);
+    assert_over_the_least_reserve(name, FileAbsence::widest_json_bytes(&workspace, &file));
+    let harness = result_bound_harness(name, &vector);
+    let root = host_files(&harness);
+    let seeded = root.join(&file);
+    std::fs::create_dir_all(seeded.parent().expect("a parent")).expect("seed directories");
+    std::fs::write(&seeded, b"seeded").expect("seed file");
+    assert_refused_before_dispatch(name, &harness, &vector).await;
+    assert_eq!(
+        std::fs::read(&seeded).expect("the seeded file is on the host"),
+        b"seeded"
+    );
+}
+
+/// Bundle `0.28.0`'s row that ended `operation.result-unrecorded` (ADR 0053 decision 8), stored
+/// as its setup states through the store's completion that names the resource, and read through
+/// `operation.get` exactly.
+#[tokio::test(flavor = "multi_thread")]
+async fn result_unrecorded_vector_reads_its_row_exactly() {
+    let vector = bundle_vector(
+        "0.28.0",
+        "http",
+        "operation-result-unrecorded-names-its-resource",
+    );
+    let setup = &vector["setup"][0];
+    assert_eq!(setup["kind"], "operation");
+    assert_eq!(setup["state"]["deployment"], "dep_vector");
+    assert_eq!(setup["state"]["owner"], "local:1000");
+    let record = &setup["state"]["record"];
+    let text = |member: &str| record[member].as_str().expect(member).to_owned();
+    let harness = Harness::open(false);
+    let accepted = NewOperation {
+        scope: vector_scope(),
+        operation: text("operation"),
+        operation_kind: text("operation_kind"),
+        request_hash: text("request_hash"),
+        accepted_at: text("accepted_at"),
+        capability_snapshot: Some(text("capability_snapshot")),
+        actor: text("actor"),
+        principal: None,
+        grant_ref: None,
+        platform_principal: None,
+        resource: None,
+    };
+    assert_eq!(
+        harness.store.reserve(&accepted).expect("reserve operation"),
+        Reservation::Accepted
+    );
+    let error: substrate_wire::ErrorDetail =
+        serde_json::from_value(record["outcome"]["error"].clone()).expect("the recorded error");
+    harness
+        .store
+        .complete_error(
+            &vector_scope(),
+            &accepted.operation,
+            &text("terminal_at"),
+            500,
+            Some(&text("resource")),
+            &error,
+        )
+        .expect("complete the row unrecorded");
+    assert_exact_http(&harness.execute(&vector).await, &vector);
+    assert_eq!(harness.driver.dispatch_count.load(Ordering::SeqCst), 0);
+}
+
+fn operation_rows(harness: &Harness) -> i64 {
+    rusqlite::Connection::open(harness.directory.path().join("state.db"))
+        .expect("ledger")
+        .query_row("SELECT count(*) FROM operations", [], |row| row.get(0))
+        .expect("operation rows")
 }
 
 #[tokio::test(flavor = "multi_thread")]

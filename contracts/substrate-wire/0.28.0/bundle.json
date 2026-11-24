@@ -1896,10 +1896,10 @@
       "sha256": "78bb4ba0c721c44247d662059ac7e5461042be78b922497d9966b3540c466fce"
     },
     {
-      "byte_length": 3919,
+      "byte_length": 4321,
       "media_type": "application/json",
       "path": "vectors/http/file-delete-result-over-the-ledger-bound-is-refused.json",
-      "sha256": "6b0973fc5d9ec64415f4635ad9f213872db83a0f6dfe1a81d17dccb9c2e98492"
+      "sha256": "6bed8831867ff6a119f8621709749caf705e48c53805abe2c315744325092afb"
     },
     {
       "byte_length": 1912,
@@ -1914,10 +1914,10 @@
       "sha256": "709da295bc9332d6e28ba6556a608e4443e6027d72a8e4ad240e0bee2c9cc40a"
     },
     {
-      "byte_length": 4021,
+      "byte_length": 4423,
       "media_type": "application/json",
       "path": "vectors/http/file-write-result-over-the-ledger-bound-is-refused.json",
-      "sha256": "5a096e13ecc916108f6afd5a7b25d8402e7d76e18d5c110a06d150a1dc9b025e"
+      "sha256": "7e96bea2d9437ad222a992bcbb76b62e95b9a84ecfb22e439091259f8cba2429"
     },
     {
       "byte_length": 2288,
@@ -1974,10 +1974,10 @@
       "sha256": "ba47e822cd107ad3508f541600bfa8252452ea0b14c838b431e8c408edce474f"
     },
     {
-      "byte_length": 3236,
+      "byte_length": 3344,
       "media_type": "application/json",
       "path": "vectors/http/operation-result-unrecorded-names-its-resource.json",
-      "sha256": "35a452cf0007a09aa1349512f7521089600582b5806437059b0342ff6db3bf51"
+      "sha256": "1debfa4fef95c1c32a887d71044c189af737baa6e640c5103cc2570471647480"
     },
     {
       "byte_length": 1691,

@@ -509,6 +509,7 @@ substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "operation.
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "operation.ledger-subject-max-bytes")] pub operation_ledger_subject_max_bytes: u64,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "operation.ledger-global-max-rows")] pub operation_ledger_global_max_rows: u64,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "operation.ledger-global-max-bytes")] pub operation_ledger_global_max_bytes: u64,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "operation.result-max-json-bytes", default = "operation_result_max_json_bytes")] pub operation_result_max_json_bytes: u64,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "leases.explicit", skip_serializing_if = "Option::is_none")] pub leases_explicit: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "leases.clock-tolerance-ms", skip_serializing_if = "Option::is_none")] pub leases_clock_tolerance_ms: Option<u64>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.guarded-io", skip_serializing_if = "Option::is_none")] pub workspace_guarded_io: Option<bool>,

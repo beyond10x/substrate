@@ -23,8 +23,8 @@ use tokio_rustls::TlsAcceptor;
 const RUNNER: &str = env!("CARGO_BIN_EXE_b10x-substrate-conformance");
 const SCHEMA: &str = include_str!("../schema/remote-conformance-report.v1.schema.json");
 const SERVER_NAME: &str = "substrate.test";
-const PINNED_CONTRACT: &str = "substrate-wire/0.27.0";
-const PINNED_SHA256: &str = "b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7";
+const PINNED_CONTRACT: &str = "substrate-wire/0.28.0";
+const PINNED_SHA256: &str = "a9354f3ecca4e029f7cf8054f0230a25a2eca76d270bd66ad1172d33a5cb7280";
 const PRINTF: &str = "/usr/bin/printf";
 const BOUND: Duration = Duration::from_secs(90);
 

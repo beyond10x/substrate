@@ -369,7 +369,7 @@ fn nine_roots() -> Value {
 
 fn bundle_vector(name: &str) -> Value {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../contracts/substrate-wire/0.27.0/vectors/http")
+        .join("../../contracts/substrate-wire/0.28.0/vectors/http")
         .join(name);
     serde_json::from_slice(&std::fs::read(&path).expect("vector bytes")).expect("vector JSON")
 }
@@ -421,7 +421,7 @@ async fn an_unserved_sibling_capability_is_answered_before_a_broken_root_rule() 
     );
 }
 
-/// The three lexical vectors 0.23.0 introduced, as the advertised 0.27.0 states them, replayed
+/// The three lexical vectors 0.23.0 introduced, as the advertised 0.28.0 states them, replayed
 /// against the daemon with the fact published: the status and the whole error body, apart from the
 /// per-call operation and request id, must be the daemon's own answer.
 #[tokio::test(flavor = "multi_thread")]

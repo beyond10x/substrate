@@ -48,6 +48,7 @@
               "class": "failed",
               "code": "operation.result-unrecorded",
               "message": "The operation took effect, but its result exceeds what the operation ledger can record. Read the resource.",
+              "operation": "01JADR0053UNRECORDED001",
               "retriable": false
             },
             "kind": "error"
@@ -91,6 +92,7 @@
               "class": "failed",
               "code": "operation.result-unrecorded",
               "message": "The operation took effect, but its result exceeds what the operation ledger can record. Read the resource.",
+              "operation": "01JADR0053UNRECORDED001",
               "retriable": false
             },
             "kind": "error"

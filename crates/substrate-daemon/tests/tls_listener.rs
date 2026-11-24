@@ -879,7 +879,7 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert!(
         response
             .to_ascii_lowercase()
-            .contains("x-b10x-contract: substrate-wire/0.27.0"),
+            .contains("x-b10x-contract: substrate-wire/0.28.0"),
         "{response}"
     );
 
