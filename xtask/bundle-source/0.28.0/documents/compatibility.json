@@ -1,0 +1,25 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.28.0",
+  "client_visible_changes": [
+    "0.28.0 adds no route and preserves the 45 routes of 0.27.0 (ADR 0053 decision 11). It adds one required capability fact, one refusal and one error, and a published length on the result members that had none.",
+    "The required fact operation.result-max-json-bytes publishes the bytes of compact JSON the operation ledger records for one success result: const 524217, substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES. A snapshot that does not state it does not validate against 0.28.0. Its description states how a client counts the widest result of a request: members the request sets as sent, every other string at 6 bytes for each character of its maxLength, every integer at its longest decimal form, and every optional member as present.",
+    "A start of an exec, a session or a host process, and a v1 file write or delete, whose widest result exceeds the bound is refused operation.result-limit (429), class exhausted, address result, not retriable, before anything takes effect: recorded as refused with no driver called, and the same operation id replays the refusal. The five inputs name it in x-b10x-refusals, and one vector per kind publishes it against a machine that states a lower value of the fact. A request within the bound by the published count is never refused for this cause, and a signal, stop, lease renewal, retire or destroy never is.",
+    "An operation whose effect happened and whose result exceeds what the ledger records ends terminal with the error operation.result-unrecorded (500), class failed, address result, not retriable, and the row names its resource: the client reads the resource and does not repeat the mutation under a new operation id. One vector reads such a row through operation.get. The v2 file routes keep answering workspace.write-limit for this cause.",
+    "Result members a request does not set have a published length: the five minted identifiers of common.json (workspace, exec, session, snapshot and process id) at 32 characters (MAX_RESOURCE_ID_CHARS), an exec refusal's code at 128, and the process record's argv items at 131072, cwd at 4096 and env_names items at 131072. The identifier definitions also bound the route addresses that name one, so an identifier longer than 32 characters, which no daemon mints, is no longer a valid address.",
+    "The vector schema's three machine shapes require the fact as an integer, so a vector's machine may state a lower value, and the stored-operation setup admits an error outcome beside a success. Every machine of a 0.28.0 vector states the fact at 524217 except the five that publish operation.result-limit."
+  ]
+}

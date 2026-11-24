@@ -1,0 +1,55 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "frame": {
+        "kind": "close-input",
+        "sequence": 2
+      },
+      "operation": "session.frame"
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "session.protocol-failure-containment"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "code": "session.sequence-invalid",
+      "state": "cancelled"
+    }
+  },
+  "id": "invalid-pipe-frame-kills-the-whole-process-tree",
+  "layer": "driver",
+  "phase": 4,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/cgroup_process_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "session",
+      "name": "durable-pipe",
+      "state": {
+        "exec": "ex_vector",
+        "id": "ses_vector"
+      }
+    }
+  ]
+}

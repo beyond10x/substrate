@@ -1,0 +1,62 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "metrics.stream",
+    "request": {
+      "headers": {
+        "x-request-id": "req_metrics_stream_missing"
+      },
+      "method": "GET",
+      "path": "/v1/metrics/stream",
+      "query": {
+        "exec_id": "ex_missing"
+      }
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-31T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "metrics.subject-isolation",
+    "route.metrics.stream"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "class": "refused",
+          "code": "resource.not-found",
+          "message": "The resource is absent or not visible to this subject.",
+          "retriable": false
+        },
+        "request_id": "req_metrics_stream_missing"
+      },
+      "status": 404
+    }
+  },
+  "id": "metrics-stream-does-not-cross-subject-or-absence-boundaries",
+  "layer": "http",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/probes/websocket_upgraded",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": []
+}
