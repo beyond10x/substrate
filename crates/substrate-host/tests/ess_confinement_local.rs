@@ -973,6 +973,152 @@ fn limit_a_sink_that_waits_on_its_runtime_holds_that_runtimes_drop() {
     );
 }
 
+/// Design 36 D20, the control of the `limit_` case above: the same sink, waiting 200 ms on its
+/// current-thread runtime's timer, returns where `Runtime::block_on` keeps driving that timer
+/// after the sink was entered; the drop then returns and `run_ended` is in the sink. So the
+/// `limit_` case holds because nothing drives the timer once `block_on` returned, before the drop
+/// began, and its figures rest on the main thread not turning the driver 200 ms after the sink
+/// was entered.
+#[test]
+fn a_sink_whose_wait_its_runtime_drives_returns_and_the_drop_returns() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let kept = Arc::clone(&events);
+    let (entered, mut sink_entered) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let sink = AuditSink::new(move |record: &AuditRecord| {
+        let value = serde_json::to_value(record).expect("record");
+        let event = value["event"].as_str().expect("event").to_owned();
+        if event == "run_ended" {
+            let _ = entered.send(());
+            tokio::runtime::Handle::current()
+                .block_on(tokio::time::sleep(std::time::Duration::from_millis(200)));
+        }
+        kept.lock().push(event);
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let adapter = local();
+        let admitted = adapter
+            .admit(&ConfinementProfile {
+                audit: Some(sink),
+                ..local_profile(workspace.path())
+            })
+            .expect("admitted");
+        let run = adapter
+            .start(&admitted, &support::sh("exit 0"))
+            .await
+            .expect("started");
+        tokio::time::timeout(support::RECORD_WAIT, adapter.wait(&run))
+            .await
+            .expect("wait returns")
+            .expect("waited");
+        tokio::time::timeout(support::RECORD_WAIT, sink_entered.recv())
+            .await
+            .expect("the sink is called with run_ended")
+            .expect("the sink lives");
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    });
+    let (dropped, drop_returned) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        drop(runtime);
+        let _ = dropped.send(());
+    });
+    assert!(
+        drop_returned
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_ok(),
+        "the drop returns once the timer was driven"
+    );
+    assert_eq!(
+        *events.lock(),
+        ["profile_admitted", "run_started", "run_ended"],
+    );
+}
+
+/// Design 36 D20, the rule's other half: a sink "may hand work to the runtime it finds
+/// current (a spawn, a channel send)". This sink does both once its current-thread runtime's
+/// drop has begun and that drop waits on it; it returns, the drop returns, `run_ended` is in the
+/// sink, and the spawned work never ran (Tokio drops a task spawned onto a closed runtime).
+#[test]
+fn a_sink_that_spawns_and_sends_while_its_runtime_drops_returns() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let kept = Arc::clone(&events);
+    let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spawned_ran = Arc::clone(&ran);
+    let (entered, mut sink_entered) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (go, dropping) = std::sync::mpsc::channel::<()>();
+    let dropping = Mutex::new(dropping);
+    let (handed, mut handed_work) = tokio::sync::mpsc::unbounded_channel::<u8>();
+    let sink = AuditSink::new(move |record: &AuditRecord| {
+        let value = serde_json::to_value(record).expect("record");
+        let event = value["event"].as_str().expect("event").to_owned();
+        if event == "run_ended" {
+            let _ = entered.send(());
+            let _ = dropping
+                .lock()
+                .recv_timeout(std::time::Duration::from_secs(5));
+            // The dropping thread has reached the end task's join by now.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let flag = Arc::clone(&spawned_ran);
+            drop(tokio::runtime::Handle::current().spawn(async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }));
+            let _ = handed.send(7);
+        }
+        kept.lock().push(event);
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let adapter = local();
+        let admitted = adapter
+            .admit(&ConfinementProfile {
+                audit: Some(sink),
+                ..local_profile(workspace.path())
+            })
+            .expect("admitted");
+        let run = adapter
+            .start(&admitted, &support::sh("exit 0"))
+            .await
+            .expect("started");
+        tokio::time::timeout(support::RECORD_WAIT, adapter.wait(&run))
+            .await
+            .expect("wait returns")
+            .expect("waited");
+        tokio::time::timeout(support::RECORD_WAIT, sink_entered.recv())
+            .await
+            .expect("the sink is called with run_ended")
+            .expect("the sink lives");
+    });
+    let (dropped, drop_returned) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = go.send(());
+        drop(runtime);
+        let _ = dropped.send(());
+    });
+    assert!(
+        drop_returned
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_ok(),
+        "the drop returns after a sink that spawned and sent during it"
+    );
+    assert_eq!(
+        *events.lock(),
+        ["profile_admitted", "run_started", "run_ended"],
+    );
+    assert_eq!(handed_work.try_recv().ok(), Some(7), "the send arrived");
+    assert!(
+        !ran.load(std::sync::atomic::Ordering::SeqCst),
+        "a task spawned onto a dropping runtime ran"
+    );
+}
+
 /// Design 36 D21: dropping the adapter while its run runs neither ends the run nor loses its
 /// record: the run's end task writes `run_ended` when the run ends.
 #[tokio::test(flavor = "multi_thread")]

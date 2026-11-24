@@ -1401,17 +1401,17 @@ impl PodAdapter {
             limit: Mutex::new(None),
         });
         let wall = Duration::from_secs(resolved.deadline_seconds);
-        // The run's `run_ended` reaches its monitor once `audit_start` made it (design 36 D17).
-        let (hand_end, end_record) = tokio::sync::oneshot::channel();
+        // The run's `run_ended` meets its monitor's publication in one cell (design 36 D17).
+        let end = EndCell::new();
         tokio::spawn(monitor(
             Arc::clone(&self.api),
             Arc::clone(&run),
-            (sender, Some(end_record)),
+            (sender, end.clone()),
             Instant::now() + wall + DEADLINE_GRACE,
             trace,
         ));
         self.runs.lock().push(run);
-        let _ = hand_end.send(admitted.audit_start(&id, &command.argv[0]));
+        end.hand_record(admitted.audit_start(&id, &command.argv[0]));
         Ok(id)
     }
 
@@ -1623,45 +1623,113 @@ fn pod_limit(pod: Option<&Value>, stop: Option<Stop>) -> Option<RunLimit> {
     super::named_limit(&reached)
 }
 
-/// Where a run's monitor takes its `run_ended` from (design 36 D17): `None` in the cases that
-/// follow a monitor without a sink.
+/// What a run's [`EndCell`] holds (design 36 D17, amended 2026-11-24).
 #[cfg(feature = "kubernetes")]
-type EndRecord = Option<tokio::sync::oneshot::Receiver<super::RunEndRecord>>;
+enum EndMeeting {
+    /// Neither `start`'s value nor the monitor's publication arrived yet.
+    Waiting,
+    /// `start` handed the value of D16 first.
+    Record(super::RunEndRecord),
+    /// The monitor published the run's end first: the observation the record is written from.
+    Ended(Box<RunObservation>),
+    /// Both met, and the record went to its thread.
+    Taken,
+}
 
-/// How a run's monitor publishes the run's end: its phase, and its `run_ended` until written.
+/// Where `start` and a run's monitor meet for the run's `run_ended` (design 36 D17, amended
+/// 2026-11-24). `start` spawns the monitor before `audit_start` returned the value of D16, so
+/// either can come first: whichever comes second writes the record, and no task waits for the
+/// other side. Neither side calls a sink or writes while it holds the lock. A cell dropped with
+/// the value still in it writes `unknown` through the value's drop (D22); one dropped with an
+/// observation in it, as after a start that failed once it spawned the monitor, writes nothing.
+#[cfg(feature = "kubernetes")]
+#[derive(Clone)]
+struct EndCell(Arc<std::sync::Mutex<EndMeeting>>);
+
+#[cfg(feature = "kubernetes")]
+impl EndCell {
+    /// A cell that waits for both sides.
+    fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(EndMeeting::Waiting)))
+    }
+
+    /// Puts `mine` in where the cell waits, and otherwise takes what the other side left, all
+    /// under one lock; what is neither stored nor met comes back to be dropped outside it.
+    fn meet(&self, mine: EndMeeting) -> EndMeeting {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*state, EndMeeting::Waiting) {
+            *state = mine;
+            return EndMeeting::Taken;
+        }
+        let pair = matches!(
+            (&*state, &mine),
+            (EndMeeting::Record(_), EndMeeting::Ended(_))
+                | (EndMeeting::Ended(_), EndMeeting::Record(_))
+        );
+        if !pair {
+            // A second publication, or anything after the two met: it writes nothing.
+            return mine;
+        }
+        let other = std::mem::replace(&mut *state, EndMeeting::Taken);
+        drop(state);
+        write_end(other, mine);
+        EndMeeting::Taken
+    }
+
+    /// `start`'s side: hands over the value `audit_start` returned.
+    fn hand_record(&self, record: super::RunEndRecord) {
+        drop(self.meet(EndMeeting::Record(record)));
+    }
+
+    /// The monitor's side: the run's end was published with `observation`.
+    fn ended(&self, observation: RunObservation) {
+        drop(self.meet(EndMeeting::Ended(Box::new(observation))));
+    }
+}
+
+/// Writes the record of one met pair outside the cell's lock: the record's thread has it before
+/// this returns, and only the wait for the write runs on a task of its own (design 36 D20). An
+/// inert value starts no task and no thread (D19).
+#[cfg(feature = "kubernetes")]
+fn write_end(first: EndMeeting, second: EndMeeting) {
+    let ((EndMeeting::Record(record), EndMeeting::Ended(observation))
+    | (EndMeeting::Ended(observation), EndMeeting::Record(record))) = (first, second)
+    else {
+        return;
+    };
+    if record.is_inert() {
+        return;
+    }
+    tokio::spawn(record.write(*observation).finished());
+}
+
+/// How a run's monitor publishes the run's end: its phase, and where its `run_ended` meets
+/// `start`'s value.
 #[cfg(feature = "kubernetes")]
 struct Ending {
     phase: watch::Sender<Phase>,
-    record: EndRecord,
+    end: EndCell,
+    published: bool,
 }
 
 #[cfg(feature = "kubernetes")]
 impl Ending {
-    /// Publishes the run's end, its output sealed first, and the first time writes its
-    /// `run_ended` from the adapter's observation (design 36 D18, D20): the record's thread has
-    /// the ended record before this returns, and only the wait for the write runs on a task of
-    /// its own, so a sink that blocks never holds the Pod's or its policy's removal, and a
-    /// runtime that drops that task joins the record's thread. A later publication repeats
-    /// `Unknown` and writes nothing.
+    /// Publishes the run's end, its output sealed first, and the first time hands the adapter's
+    /// observation to the run's [`EndCell`] (design 36 D18, D20): where `start`'s value is there,
+    /// the record's thread has the ended record before this returns, and only the wait for the
+    /// write runs on a task of its own, so a sink that blocks does not hold the Pod's or its
+    /// policy's removal; the one exception is a record whose thread the system refused while
+    /// the runtime's blocking pool is shut down, which is written on this task. A runtime that
+    /// drops the waiting task joins the record's thread. A later publication repeats `Unknown`
+    /// and writes nothing.
     fn publish(&mut self, run: &PodRun, ended: Phase) {
         seal(run);
         self.phase.send_replace(ended);
-        let Some(mut receiver) = self.record.take() else {
-            return;
-        };
-        match receiver.try_recv() {
-            Ok(record) if record.is_inert() => {}
-            Ok(record) => {
-                tokio::spawn(record.write(PodAdapter::observation(run)).finished());
-            }
-            // `start` hands the value over right after it spawned this monitor, which waits a
-            // poll first; only a start whose thread was held past that poll gets here, and the
-            // value is written once it arrives.
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                tokio::spawn(super::write_run_end(receiver, PodAdapter::observation(run)));
-            }
-            // A start that failed after it spawned the monitor: no `run_started`, no `run_ended`.
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {}
+        if !std::mem::replace(&mut self.published, true) {
+            self.end.ended(PodAdapter::observation(run));
         }
     }
 }
@@ -1675,11 +1743,15 @@ impl Ending {
 async fn monitor(
     api: Arc<Api>,
     run: Arc<PodRun>,
-    (phase, record): (watch::Sender<Phase>, EndRecord),
+    (phase, end): (watch::Sender<Phase>, EndCell),
     give_up: Instant,
     mut trace: PodTrace,
 ) {
-    let mut ending = Ending { phase, record };
+    let mut ending = Ending {
+        phase,
+        end,
+        published: false,
+    };
     let name = run.id.as_str().to_owned();
     let pod_path = format!("{}/{name}", api.pods());
     let policy_path = format!("{}/{name}", api.policies());

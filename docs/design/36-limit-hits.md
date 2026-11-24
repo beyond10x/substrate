@@ -379,7 +379,14 @@ the run's end task (§ 1). The adapter therefore hands the value of D16 to the e
 start that failed after the task was spawned sends nothing, and the task writes nothing.
 `linux` and `systemd` around `linux` have no end task before the run started (D20): they spawn
 theirs after `audit_start` returned and move the value into it, with no channel, and spawn none
-where the profile has no sink (D19). Amended 2026-11-24 with the change that built the record.
+where the profile has no sink (D19). `pod` spawns its monitor before `audit_start` returned, and
+the monitor may publish the run's end before `start` hands it the value: there `start` and the
+monitor meet in one cell instead of a channel. The cell holds the value where `start` came first
+and the ended observation where the publication came first, and whichever side comes second
+writes the record; no task waits for the other side. A cell dropped with the value in it writes
+`unknown` through the value's drop (D22); one dropped with an observation in it, as after a
+start that failed once it spawned the monitor, writes nothing. Amended 2026-11-24 with the change
+that built the record.
 
 **D18. The record is written for a run that ends `Unknown` as well.** The end task writes it on
 every path on which it publishes the run's end, `Ended` or `Unknown`. For `Unknown` the record
@@ -399,7 +406,8 @@ record shares no bounded resource with any run's exit detection or `wait`.
 
 | adapter | the task |
 |---|---|
-| `local`, `macos`, `systemd` around `local`, `oci`, `pod` | the task that publishes the run's phase today. `macos` writes `private_tmpdir_left` first, as today |
+| `local`, `macos`, `systemd` around `local`, `oci` | the task that publishes the run's phase today. `macos` writes `private_tmpdir_left` first, as today |
+| `pod` | the monitor that publishes the run's phase, or `start` where it hands the value of D16 after that publication (D17's cell); a task of its own awaits the write (amended 2026-11-24) |
 | `linux` | a new task per run that has a sink: it awaits `ProcessRuntime::wait_ended`, observes the exec once and writes. It is the shape of the task that ends a piped standard input today |
 | `systemd` around `linux` | a task of the outer adapter: it awaits the inner run's end and writes with its own admitted profile and the relabelled observation. The inner adapter has no sink (§ 1) |
 
@@ -423,21 +431,27 @@ record shares no bounded resource with any run's exit detection or `wait`.
   every `run_started` in a process that returns from its runtime has its `run_ended` (Q5). A
   guard dropped by a thread that is panicking does not join: the record's thread is already
   running and still writes while the process lives, and a panic is never held by a sink. A sink
-  that never returns holds the runtime's drop, as a started blocking-pool job does. `pod`, whose
-  monitor goes on to remove the Pod and its policy after it published the end, hands the ended
-  record to its thread before the publication returns and awaits the write on a task of its
-  own; a runtime that drops that task joins the thread like any other. Only where `start`'s
-  thread was held past the monitor's first poll between spawning it and handing it the value of
-  D16 does that task take the value and write. Amended 2026-11-24 with the change that built the
-  record.
+  that never returns holds the runtime's drop, as a started blocking-pool job does. On `pod`,
+  whose monitor goes on to remove the Pod and its policy after it published the end, the side of
+  D17's cell that comes second, the publication or `start`, hands the ended record to its thread
+  before it returns and awaits the write on a task of its own; a runtime that drops that task
+  joins the thread like any other. So a sink that blocks does not hold the Pod's or its policy's
+  removal, with one exception: where the system refused the record's thread and the runtime's
+  blocking pool is shutting down, the record is written on the side's own task (below). Amended
+  2026-11-24 with the change that built the record.
 - A sink is a synchronous call. It may hand work to the runtime it finds current (a spawn, a
   channel send) and must not wait on that runtime (`Handle::block_on`, a blocking wait for a
-  task, a timer or I/O of it). Once the runtime's drop has begun nothing drives such a wait: the
-  sink does not return, the guard's join does not return, and the runtime's drop does not
-  return. This is the case above of a sink that never returns, reached by a sink that waits on
-  the runtime that waits for it; `limit_a_sink_that_waits_on_its_runtime_holds_that_runtimes_drop`
-  holds it on a current-thread runtime with a 200 ms timer: 1 s after the drop began it has not
-  returned and the record is not in the sink. The other records are called on the caller's
+  task, a timer or I/O of it). Once nothing drives that runtime, nothing drives such a wait: on
+  a current-thread runtime that is once its `Runtime::block_on` returned, before its drop
+  begins, and on every runtime once its drop began. The sink then does not return, the guard's
+  join does not return, and the runtime's drop does not return. This is the case above of a sink
+  that never returns, reached by a sink that waits on the runtime that waits for it;
+  `limit_a_sink_that_waits_on_its_runtime_holds_that_runtimes_drop` holds it on a current-thread
+  runtime with a 200 ms timer: 1 s after the drop began it has not returned and the record is
+  not in the sink. Its counterpart,
+  `a_sink_whose_wait_its_runtime_drives_returns_and_the_drop_returns`, holds that the same sink
+  returns, and the drop returns with the record in the sink, where `Runtime::block_on` still
+  drives the timer while the sink waits. The other records are called on the caller's
   thread, inside the runtime where the caller is async. Tokio 1.53.1 (`runtime/handle.rs`, the
   documentation of `Handle::block_on`, lines 248 to 253 and 263 to 269) says that on a
   current-thread runtime only `Runtime::block_on` drives the I/O and timer drivers, so timers and
@@ -453,12 +467,15 @@ record shares no bounded resource with any run's exit detection or `wait`.
   the process lives. A current-thread runtime drops its tasks on the thread that shuts it down,
   in `Runtime`'s `Drop` after either call, so there the join is not bounded by the duration.
 - Where the system refuses the thread, the record is not dropped. It goes to the current
-  runtime's blocking pool, and only where no runtime is current, or that pool does not take it
-  (it cannot start a thread, or it is shutting down and drops the job unrun), is it written on
-  the calling thread before the hand-off returns. On every path it is written once and a sink
-  that panics on the calling thread is contained. A warning names the refused thread. On that
-  path a sink that blocks holds a thread of the pool, or the calling thread, for as long as it
-  blocks.
+  runtime's blocking pool, and only where no runtime is current, or that pool is shutting down
+  and drops the job unrun, is it written on the calling thread before the hand-off returns. A
+  pool that cannot start a thread keeps the job in its queue and panics; the panic is
+  contained, and a thread of the pool writes the record once one is free, or the runtime's
+  shutdown drops the job and writes it on that thread (Tokio 1.53.1,
+  `runtime/blocking/pool.rs`, `spawn_task`, lines 393 to 438, and `spawn_blocking`'s
+  `NoThreads` panic, lines 324 to 326). On every path it is written once and a sink that
+  panics is contained. A warning names the refused thread. On that path a sink that blocks holds
+  a thread of the pool, or the calling thread, for as long as it blocks.
 - The consequence a consumer must know: `run_ended` may arrive after `wait` returned. A consumer
   that needs the record waits for its own sink. Listed as Q4.
 - `AuditSink`'s documentation gains the sentence for `run_ended`. The other records keep their
@@ -478,10 +495,9 @@ thread that drops the task. It says what `RunState::Unknown` means: the adapter 
 the run. Nothing is written from a thread that is panicking, and a sink that panics on this
 record is contained (amended 2026-11-24 with the change that built the record). A run that ended
 before the task was dropped is D20's: its record is written on its own thread, which the dropped
-task joins; on `pod` the publication hands the ended record to that thread before it returns, so
-a runtime that drops the waiting task right after cannot turn it into `unknown`. A process that
-exits or is killed
-writes nothing; a consumer that must account for that pairs `run_started` with `run_ended` in
+task joins; on `pod`, whichever side of D17's cell comes second hands the ended record to that
+thread before it returns, in either order, so a runtime that drops the waiting task right after
+cannot turn it into `unknown`. A process that exits or is killed writes nothing; a consumer that must account for that pairs `run_started` with `run_ended` in
 its own store. Listed as Q5.
 
 ### What the record is not
@@ -650,7 +666,7 @@ Every change also regenerates
 | `systemd` around `linux` | all five | read | read | a task of the outer adapter |
 | `systemd` around `local` | `Memory`, `CpuTime`, `WallTime`, `OutputStall` | read | read | the run's end task |
 | `oci` | `Memory`, `WallTime`, `OutputStall` | `None` | `None` | its monitor |
-| `pod` | `Memory`, `WallTime` | `Some(0)` or `Some(1)` | `None` | its monitor |
+| `pod` | `Memory`, `WallTime` | `Some(0)` or `Some(1)` | `None` | its monitor, or `start` where it hands the value after the publication (D17) |
 | `local` | `OutputStall` | `None` | `None` | the run's end task |
 | `macos` | `OutputStall` | `None` | `None` | the run's end task |
 
@@ -674,7 +690,7 @@ Every change also regenerates
 | D14 | `linux` and `systemd` report it; `oci`, `pod`, `local`, `macos` `None` |
 | D15 | `AuditRecord::RunEnded`, `"event": "run_ended"`: the ended observation plus the profile id |
 | D16 | `audit_start` returns the one value that writes `run_ended` |
-| D17 | `run_ended` follows `run_started`; the value reaches the end task after `audit_start` returned |
+| D17 | `run_ended` follows `run_started`; the value reaches the end task after `audit_start` returned; on `pod` the value and the publication meet in one cell, and the side that comes second writes (amended 2026-11-24) |
 | D18 | written for `Unknown` as well |
 | D19 | no sink: nothing written, no task added |
 | D20 | the end task writes after it published the end; the sink runs on a thread of its own per record, which the end task awaits and a dropped end task joins (Q4, Q5; amended 2026-11-24) |
@@ -783,7 +799,7 @@ this tree:
 - Limits summed over several runs, `rate_bounds`, a block I/O bound: the epic's boundaries.
 - A bound on how long the sink may hold its thread, on how many such threads a sink that never
   returns may leave behind, and on how long such a sink may hold a runtime's drop (D20). A sink
-  that waits on the runtime it finds current is such a sink once that runtime's drop has begun;
+  that waits on the runtime it finds current is such a sink once nothing drives that runtime;
   the design states it as a rule for the sink and holds it as a limit, and detects nothing.
 - A constructor or builder for `AuditRecord::RunEnded` for a consumer that tests its own sink.
 
