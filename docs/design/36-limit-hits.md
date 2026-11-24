@@ -208,7 +208,14 @@ Notes on the rows.
   main process must have ended by a signal as well. The adapter reads an exit status of 129 to
   192 as a signal, and, beside `OOMKilled`, any status outside 0 to 128 (193 to 255, or a
   negative one) as `SIGKILL`, so a main process that itself exits with such a status after a
-  child's OOM kill names `Memory`; one that exits with 0 to 128 names none. Where the runtime client's
+  child's OOM kill names `Memory`; one that exits with 0 to 128 names none. The runtime sets the
+  flag when its OOM event for the container arrives, and that may be after the exit that returns
+  the runtime client (amendment of 2026-11-24). The monitor therefore reads the state again,
+  every 50 ms for at most one second, where the first read shows an ended container with exit
+  status 137 and no flag, and neither its own deadline, the stall nor the embedder's
+  `signal(Kill)` sent the kill; the container is removed after that. Such a run's end is
+  published up to one second later. A flag the runtime sets later than that, or never, names no
+  limit (§ 12). Where the runtime client's
   return and the deadline are ready at once, the monitor takes the return. A stall's kill asked
   after the embedder's `signal(Kill)` set its flag, before that call reached the runtime, names
   no stall; one asked before names the stall. No lock orders the two runtime-client calls, so
@@ -783,6 +790,16 @@ this tree:
   for `linux`; it was read, not run.
 - What a container runtime's `OOMKilled` flag covers (the main process or any process of the
   container), and whether the runtime sets a group kill. D7 does not depend on the answer.
+- When a container runtime sets `OOMKilled`, relative to the exit. Seen on a hosted runner on
+  2026-11-24: one of two runs of the `oci` lane's memory case ended by signal 9 with no flag at
+  the one read the monitor then made. On a workstation with Docker 29.8.2, cgroup v2 and runc,
+  330 of 330 containers of that case's shape held the flag at the first read after the client
+  returned, 300 of them started twelve at a time. Read in the sources of Docker and of
+  containerd's cgroup library on that day, not run: Docker sets the flag when the OOM event
+  arrives, whatever the container's state, and the event's watcher sends none when the cgroup is
+  removed before it reads `memory.events`. So a late flag and a missing one are both possible;
+  which of the two the runner showed, and how late a late one is, is not known. The one second
+  of D7's `oci` rule is a choice, not a measurement.
 - That the kubelet writes `status.reason` `DeadlineExceeded` on a Pod it ended for
   `activeDeadlineSeconds`, and how long after the deadline.
 - That a container runtime and the kubelet report a main process killed by signal 9 as exit code

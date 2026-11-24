@@ -58,7 +58,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   from an exit code or a signal alone: `linux` maps the driver's refusal code, `systemd` its own
   CPU and deadline watch and the run cgroup's OOM count, `oci` the container's OOM flag beside a
   signal (a status of 129 to 192 is read as one, and, beside the flag, any status outside 0 to
-  128, 193 and above or negative, as `SIGKILL`), its deadline and its stall, `pod` the
+  128, 193 and above or negative, as `SIGKILL`; where a run ended by a `SIGKILL` the adapter and
+  the embedder did not send and the state holds no flag yet, the state is read again for at
+  most one second before the end is published), its deadline and its stall, `pod` the
   container's `OOMKilled` beside a signal or an exit code over 128 and its deadline, and `local`
   and `macos` their stall only. Held by unit cases of each adapter's mapping and by lane cases
   that end a run on each bound (`ESS confinement linux limit …`, `ESS confinement systemd …
