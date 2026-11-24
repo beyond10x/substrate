@@ -1246,11 +1246,12 @@ lives in (`git remote -v` shows `github.com/beyond10x/substrate`), so the defaul
 elsewhere.** It checks its two credential files itself, in the shell, before `jq`, `openssl` or
 `curl` starts: each is there, is a regular file and no symbolic link, belongs to the effective
 user and opens for reading; the configuration is not writable by group or other (mask `022`) and
-the key grants group and other nothing (mask `077`). A refusal prints one line per failed file,
+the key grants group and other nothing (mask `077`). A refusal prints one line per failed check,
 naming neither its path nor a byte of it, and ends the script with status 1. The workstation's
 build pool sends `cargo xtask` to a build node, where the two files are not, so the check must
 not be a cargo verb; there is none. `xtask/tests/bot_scripts.rs` runs the script with a `PATH`
-of stand-ins and system tools that holds no `cargo`, against throwaway files: every refusal, the
+of stand-ins and system tools, its `cargo` a stand-in that records a call, against throwaway
+files: every refusal, the
 admitted modes, and a mint with no `cargo` at all. Both scripts end non-zero and run no program
 where the mint fails or prints no token (the same file): `gh` without a `GH_TOKEN` would act
 under the login of the caller's keyring, which no session may publish under.
