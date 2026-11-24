@@ -14,6 +14,11 @@
 //!
 //! Fixtures live under `CARGO_TARGET_TMPDIR` (this checkout's `target/tmp`), canonicalized, so a
 //! declared host path has no symlink component unless a case puts one there on purpose.
+//!
+//! The last three cases are about the start itself, through a backend script as the swapped-root
+//! case uses one: the forked child joins the run's cgroup before it executes the backend
+//! (`story:delegated-start-names-a-child-that-ended-before-its-cgroup-attach`). The two named
+//! `review_…` are its security reviewer's.
 
 // Every case drives the Linux host driver, which refuses to open elsewhere.
 #![cfg(target_os = "linux")]
@@ -21,13 +26,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use substrate_host::{
     DeclaredWritableRoot, DispatchOutcome, Driver as _, ExecObservation, HostConfig, HostDriver,
 };
 use substrate_wire::{
-    AppliedWritableRoot, ConfinementRequest, ExecEnvironment, ExecLimits, ExecStartInput,
-    NetworkMode, SandboxProfile, WorkspaceAccess, WritableHostRoot, WritableRoot,
+    AppliedWritableRoot, CaptureMode, ConfinementRequest, ExecEnvironment, ExecLimits,
+    ExecStartInput, NetworkMode, PipeSessionStartInput, PtyWindow, SandboxProfile, SessionMode,
+    WorkspaceAccess, WritableHostRoot, WritableRoot,
 };
 
 const WORKSPACE: &str = "ws_test";
@@ -503,5 +512,429 @@ async fn a_root_swapped_for_a_symlink_after_admission_still_mounts_the_admitted_
     assert!(
         !argv.iter().any(|part| part.contains(&host_text)),
         "a root host path reaches the bubblewrap argv: {argv:?}"
+    );
+}
+
+/// The program argument that tells [`forking_backend`] which exec to act on.
+const FORKING_MARK: &str = "substrate-forking-leader";
+
+/// A bubblewrap that, only when handed the exec whose program carries [`FORKING_MARK`], records
+/// the cgroup it is in at its first instruction and then forks a thousand short-lived children,
+/// four at a time, before it runs the real bubblewrap with the same arguments: a leader whose
+/// process tree changes for the whole of the driver's start.
+fn forking_backend(directory: &Path) -> (PathBuf, PathBuf) {
+    let backend = directory.join("bwrap");
+    let log = directory.join("leader.log");
+    std::fs::write(
+        &backend,
+        format!(
+            "#!/bin/sh\n\
+             for argument in \"$@\"; do\n\
+             \x20 if [ \"$argument\" = '{FORKING_MARK}' ]; then\n\
+             \x20   read -r own </proc/self/cgroup\n\
+             \x20   printf '%s\\n' \"$own\" >>'{log}'\n\
+             \x20   turn() {{ n=0; while [ \"$n\" -lt 250 ]; do ( : ); n=$((n + 1)); done; }}\n\
+             \x20   turn & turn & turn & turn &\n\
+             \x20   wait\n\
+             \x20   printf 'forked\\n' >>'{log}'\n\
+             \x20   break\n\
+             \x20 fi\n\
+             done\n\
+             exec /usr/bin/bwrap \"$@\"\n",
+            log = text(&log),
+        ),
+    )
+    .expect("write the forking backend");
+    std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755))
+        .expect("make the forking backend executable");
+    (backend, log)
+}
+
+/// A backend that forks short-lived children before it becomes bubblewrap is started like any
+/// other (`story:delegated-start-names-a-child-that-ended-before-its-cgroup-attach`): the start is
+/// dispatched and the program runs. The backend is inside the exec's cgroup at its first
+/// instruction, so every child it forks is born there and the driver moves none of them, and a
+/// child that ended during the start is not a process the driver names to the kernel.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backend_that_forks_short_lived_children_is_started_inside_its_cgroup() {
+    let Some(cgroup_root) = delegated_cgroup_root() else {
+        return;
+    };
+    let (_fixture, host) = fixture("rw-root-forking-");
+    let backend_directory = host.join("backend");
+    std::fs::create_dir(&backend_directory).expect("backend directory");
+    let (backend, log) = forking_backend(&backend_directory);
+    let workspaces = tempfile::tempdir().expect("temporary host root");
+    let driver = delegated_driver(cgroup_root, workspaces.path(), Vec::new(), Some(backend));
+    let machine = driver.machine();
+    let id = "ex_forking_leader";
+    let input = exec_input(
+        &machine.snapshot,
+        &["/bin/sh", "-c", "echo ran", FORKING_MARK],
+        Vec::new(),
+    );
+    let run = observed(&driver, id, &input).await;
+    assert_eq!(exit_code(&run), Some(0), "{}", stderr(&run));
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "ran\n");
+
+    // The backend forked: without it a green is also what a backend that never forked looks like.
+    let recorded = std::fs::read_to_string(&log).expect("the backend recorded its start");
+    let lines: Vec<&str> = recorded.lines().collect();
+    let [own, "forked"] = lines.as_slice() else {
+        panic!("the backend did not fork its children once; the case observed nothing: {lines:?}");
+    };
+    assert!(
+        own.ends_with(&format!("/substrate-{id}")),
+        "the backend ran its first instruction outside the exec's cgroup: {own}"
+    );
+}
+
+/// Every start the two `review_…` cases mark carries one argument with this prefix;
+/// [`RECORDING_BACKEND`] acts on no other.
+const JOIN_MARK: &str = "review-join-mark-";
+
+/// What the confined program of a marked start does: it records its own cgroup and the target of
+/// each of its descriptors in the workspace, under the name of its mark, and says when it is done.
+const JOIN_INSIDE: &str = "read -r own </proc/self/cgroup\n\
+    printf '%s\\n' \"$own\" >\"$0.cgroup\"\n\
+    for descriptor in /proc/$$/fd/*; do\n\
+    \x20 printf '%s\\n' \"$(readlink \"$descriptor\")\"\n\
+    done >\"$0.fds\"\n\
+    : >\"$0.done\"\n";
+
+/// A backend that, for a marked start, records before anything else the cgroup it is in, then a
+/// wall-clock stamp and the target of each of its descriptors; then it is bubblewrap.
+const RECORDING_BACKEND: &str = "#!/bin/sh\n\
+    for argument in \"$@\"; do\n\
+    \x20 case \"$argument\" in\n\
+    \x20   review-join-mark-*)\n\
+    \x20     read -r own </proc/self/cgroup\n\
+    \x20     stamp=$(date +%s%N)\n\
+    \x20     {\n\
+    \x20       printf '%s stamp %s\\n' \"$argument\" \"$stamp\"\n\
+    \x20       printf '%s cgroup %s\\n' \"$argument\" \"$own\"\n\
+    \x20       for descriptor in /proc/$$/fd/*; do\n\
+    \x20         printf '%s fd %s\\n' \"$argument\" \"$(readlink \"$descriptor\")\"\n\
+    \x20       done\n\
+    \x20     } >>'@LOG@'\n\
+    \x20     break\n\
+    \x20     ;;\n\
+    \x20 esac\n\
+    done\n\
+    exec /usr/bin/bwrap \"$@\"\n";
+
+/// Writes [`RECORDING_BACKEND`] into `directory` and returns it with its log.
+fn recording_backend(directory: &Path) -> (PathBuf, PathBuf) {
+    let backend = directory.join("bwrap");
+    let log = directory.join("backend.log");
+    std::fs::write(&backend, RECORDING_BACKEND.replace("@LOG@", &text(&log)))
+        .expect("write the recording backend");
+    std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755))
+        .expect("make the recording backend executable");
+    (backend, log)
+}
+
+/// A session whose program is [`JOIN_INSIDE`] under `mark`.
+fn session_input(snapshot: &str, mark: &str, mode: SessionMode) -> PipeSessionStartInput {
+    PipeSessionStartInput {
+        capture: CaptureMode::Recorded,
+        exec: ExecStartInput {
+            wait: false,
+            ..exec_input(snapshot, &["/bin/sh", "-c", JOIN_INSIDE, mark], Vec::new())
+        },
+        input_limit_bytes: 65_536,
+        frame_limit_bytes: 4_096,
+        queued_frames: 8,
+        mode,
+        window: (mode == SessionMode::Pty).then_some(PtyWindow {
+            columns: 80,
+            rows: 24,
+        }),
+    }
+}
+
+/// The lines the recording backend wrote for `mark`, each without the mark.
+fn recorded(log: &Path, mark: &str) -> Vec<String> {
+    let prefix = format!("{mark} ");
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
+        .collect()
+}
+
+/// Whether a descriptor's link target is a file of the cgroup filesystem. On the host the link
+/// is the path under `/sys/fs/cgroup`; inside the sandbox, where that mount is not in the view,
+/// it is the path within the cgroup filesystem, which still ends in the control file's name.
+fn is_cgroup_file(target: &str) -> bool {
+    target.contains("/sys/fs/cgroup/")
+        || target
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with("cgroup."))
+}
+
+async fn wait_for(what: &str, limit: Duration, mut reached: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !reached() {
+        assert!(Instant::now() < deadline, "{what} within {limit:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// What one marked run must show, whatever started it.
+async fn check_run(cgroup_root: &Path, workspace: &Path, log: &Path, mark: &str, id: &str) {
+    let name = format!("/substrate-{id}");
+    let inside = |suffix: &str| workspace.join(format!("{mark}.{suffix}"));
+    wait_for(
+        "the confined program finished its record",
+        Duration::from_secs(20),
+        || inside("done").exists(),
+    )
+    .await;
+
+    let lines = recorded(log, mark);
+    let backend_cgroups: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("cgroup "))
+        .collect();
+    let [backend_cgroup] = backend_cgroups.as_slice() else {
+        panic!("{id}: the backend did not record its start exactly once: {lines:?}");
+    };
+    assert!(
+        backend_cgroup.ends_with(&name),
+        "{id}: the backend ran its first instruction outside the run's cgroup: {backend_cgroup}"
+    );
+    let backend_fds: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("fd "))
+        .collect();
+    // Without this a green is also what an empty record looks like: the backend holds at least
+    // its three standard descriptors and the launch barrier.
+    assert!(
+        backend_fds.len() >= 4 && backend_fds.iter().any(|fd| fd.starts_with("pipe:")),
+        "{id}: the backend's descriptor record observed nothing: {backend_fds:?}"
+    );
+    assert!(
+        !backend_fds.iter().any(|fd| is_cgroup_file(fd)),
+        "{id}: the backend holds a descriptor on a cgroup file: {backend_fds:?}"
+    );
+
+    let program_cgroup = std::fs::read_to_string(inside("cgroup")).expect("the program's cgroup");
+    assert!(
+        program_cgroup.trim_end().ends_with(&name),
+        "{id}: the confined program is outside the run's cgroup: {program_cgroup}"
+    );
+    let program_fds = std::fs::read_to_string(inside("fds")).expect("the program's descriptors");
+    let program_fds: Vec<&str> = program_fds.lines().collect();
+    assert!(
+        program_fds.len() >= 3,
+        "{id}: the program's descriptor record observed nothing: {program_fds:?}"
+    );
+    assert!(
+        !program_fds.iter().any(|fd| is_cgroup_file(fd)),
+        "{id}: the confined program holds a descriptor on a cgroup file: {program_fds:?}"
+    );
+
+    let cgroup = cgroup_root.join(format!("substrate-{id}"));
+    wait_for(
+        "the ended run's cgroup is removed",
+        Duration::from_secs(20),
+        || !cgroup.exists(),
+    )
+    .await;
+}
+
+fn dispatched(id: &str, outcome: DispatchOutcome<ExecObservation>) -> ExecObservation {
+    match outcome {
+        DispatchOutcome::Observed(observed) => observed,
+        DispatchOutcome::NotDispatched(error)
+        | DispatchOutcome::ContainedAbsent(error)
+        | DispatchOutcome::OutcomeUnknown(error) => panic!(
+            "the delegated lane must dispatch {id}: {} {}",
+            error.code, error.message
+        ),
+    }
+}
+
+/// SECURITY REVIEW CASE 1. Claim under review: every process of a run is inside the run's cgroup
+/// before the backend executes its first instruction, on every start path, and the descriptor
+/// the leader joins through reaches neither the backend nor the confined program.
+///
+/// One driver, three starts through the public API: an exec, a raw-pipe session, a pty session.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_every_start_path_runs_its_backend_inside_the_cgroup_without_a_cgroup_descriptor() {
+    let Some(cgroup_root) = delegated_cgroup_root() else {
+        return;
+    };
+    let (_fixture, host) = fixture("review-join-paths-");
+    let (backend, log) = recording_backend(&host);
+    let workspaces = tempfile::tempdir().expect("temporary host root");
+    let driver = delegated_driver(
+        cgroup_root.clone(),
+        workspaces.path(),
+        Vec::new(),
+        Some(backend),
+    );
+    let machine = driver.machine();
+    assert_eq!(
+        machine.facts.sessions_pty,
+        Some(true),
+        "the delegated lane publishes sessions.pty, or the pty start below observes nothing"
+    );
+    let workspace = driver.root().join(WORKSPACE);
+
+    let (id, mark) = ("ex_review_join_exec", format!("{JOIN_MARK}exec"));
+    let input = exec_input(
+        &machine.snapshot,
+        &["/bin/sh", "-c", JOIN_INSIDE, &mark],
+        Vec::new(),
+    );
+    let run = dispatched(id, driver.start_exec(id, WORKSPACE, &input).await);
+    assert_eq!(exit_code(&run), Some(0), "{}", stderr(&run));
+    check_run(&cgroup_root, &workspace, &log, &mark, id).await;
+
+    for (id, kind, mode) in [
+        ("ex_review_join_pipes", "pipes", SessionMode::Pipes),
+        ("ex_review_join_pty", "pty", SessionMode::Pty),
+    ] {
+        let mark = format!("{JOIN_MARK}{kind}");
+        let input = session_input(&machine.snapshot, &mark, mode);
+        dispatched(id, driver.start_pipe_session(id, WORKSPACE, &input).await);
+        check_run(&cgroup_root, &workspace, &log, &mark, id).await;
+    }
+}
+
+/// Makes the kernel refuse every process the cgroup `substrate-<id>` is offered, from the moment
+/// that cgroup exists: a cgroup that delegates a domain controller to its children takes no
+/// process of its own, and one that holds a process refuses to delegate it (`memory` is such a
+/// controller; `pids` and `cpu` are not). Answers the wall-clock instant the cgroup began to
+/// refuse, in nanoseconds, or the error when it could not be made to (it already held a process,
+/// or never appeared).
+fn refuse_members(
+    cgroup_root: &Path,
+    id: &str,
+    stop: &Arc<AtomicBool>,
+    spinning: &Arc<AtomicBool>,
+) -> std::thread::JoinHandle<std::io::Result<u128>> {
+    let control = cgroup_root
+        .join(format!("substrate-{id}"))
+        .join("cgroup.subtree_control");
+    let (stop, spinning) = (Arc::clone(stop), Arc::clone(spinning));
+    std::thread::spawn(move || {
+        loop {
+            match std::fs::write(&control, "+memory") {
+                Ok(()) => {
+                    return Ok(SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("a clock after the epoch")
+                        .as_nanos());
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && !stop.load(Ordering::Acquire) =>
+                {
+                    spinning.store(true, Ordering::Release);
+                    std::hint::spin_loop();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+}
+
+/// SECURITY REVIEW CASE 2. Claim under review: a child that cannot join its cgroup executes
+/// nothing, the start is refused with a named code, and the cgroup and every other resource of
+/// the start is removed.
+///
+/// The refusal is the kernel's own: the cgroup is made to refuse members between its creation
+/// and the leader's join, by a thread of this process, which stands for a process outside the
+/// sandbox with write access to the delegated subtree. An attempt in which the cgroup could not
+/// be made to refuse before the leader joined built no such condition and is tried again under
+/// another id, at most eight times; the case fails when no attempt builds it, and never passes on
+/// one that did not.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_a_leader_its_cgroup_refuses_executes_nothing_and_the_start_leaves_nothing() {
+    let Some(cgroup_root) = delegated_cgroup_root() else {
+        return;
+    };
+    let (_fixture, host) = fixture("review-join-refused-");
+    let (backend, log) = recording_backend(&host);
+    let workspaces = tempfile::tempdir().expect("temporary host root");
+    let driver = delegated_driver(
+        cgroup_root.clone(),
+        workspaces.path(),
+        Vec::new(),
+        Some(backend),
+    );
+    let machine = driver.machine();
+
+    for attempt in 0..8 {
+        let id = format!("ex_review_join_refused_{attempt}");
+        let mark = format!("{JOIN_MARK}refused-{attempt}");
+        let (stop, spinning) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let refusing = refuse_members(&cgroup_root, &id, &stop, &spinning);
+        wait_for("the refusing thread runs", Duration::from_secs(10), || {
+            spinning.load(Ordering::Acquire)
+        })
+        .await;
+        let input = exec_input(
+            &machine.snapshot,
+            &["/bin/sh", "-c", ":", &mark],
+            Vec::new(),
+        );
+        let outcome = driver.start_exec(&id, WORKSPACE, &input).await;
+        stop.store(true, Ordering::Release);
+        let refused_at = refusing.join().expect("the refusing thread");
+        let backend_ran_at = recorded(&log, &mark)
+            .iter()
+            .find_map(|line| line.strip_prefix("stamp ")?.parse::<u128>().ok());
+        match (refused_at, backend_ran_at) {
+            // The cgroup refused members and no backend executed: the condition, and the claim.
+            (Ok(_), None) => {}
+            (Ok(refused_at), Some(ran_at)) if ran_at > refused_at => panic!(
+                "{id}: the backend executed after its cgroup refused every member, so it ran \
+                 outside the cgroup"
+            ),
+            // The leader had joined before the cgroup could be made to refuse: nothing built.
+            _ => continue,
+        }
+        match outcome {
+            DispatchOutcome::ContainedAbsent(error) => {
+                assert_eq!(error.code, "exec.spawn-failed", "{}", error.message);
+                assert!(
+                    error.message.contains("os error 16"),
+                    "{id}: the refusal is not the join's own EBUSY: {}",
+                    error.message
+                );
+                println!("review: {id} refused {}: {}", error.code, error.message);
+            }
+            DispatchOutcome::Observed(observed) => panic!(
+                "{id}: a start whose leader could not join was observed as a run: {:?} {:?}",
+                observed.resource.state, observed.resource.exit
+            ),
+            DispatchOutcome::NotDispatched(error) | DispatchOutcome::OutcomeUnknown(error) => {
+                panic!(
+                    "{id}: must end contained and absent: {} {}",
+                    error.code, error.message
+                )
+            }
+        }
+        assert!(
+            !cgroup_root.join(format!("substrate-{id}")).exists(),
+            "{id}: the cgroup of a start that executed nothing is still there"
+        );
+        // Every other resource of the refused start went with it: the driver starts the next.
+        let next = "ex_review_join_after_refusal";
+        let input = exec_input(&machine.snapshot, &["/bin/true"], Vec::new());
+        let run = dispatched(next, driver.start_exec(next, WORKSPACE, &input).await);
+        assert_eq!(exit_code(&run), Some(0));
+        return;
+    }
+    panic!(
+        "no attempt made the cgroup refuse its leader before the join; the case observed nothing"
     );
 }

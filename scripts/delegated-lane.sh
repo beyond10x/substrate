@@ -744,7 +744,26 @@ cargo test -p b10x-substrate-daemon --test tls_listener \
 # absent from every lane, and a delegated-only regression in them went unseen.
 cargo test -p b10x-substrate-daemon --test processes --locked -- --nocapture --test-threads=1
 
-cargo test -p b10x-substrate-daemon --test runtime_vectors -- --nocapture "$@"
+# The clean-room runner's delegated lane spans several test functions of this one binary, each
+# with a daemon of its own and its own asserted count. Each prints one line when its delegated
+# cases passed, naming how many it ran and the lane's whole inventory (`DELEGATED_CASES`). A
+# function that a filter left out, or that ran the portable lane, prints no such line and the
+# binary still exits 0, so the lines are summed and a run that did not execute the whole
+# inventory fails here. A filter passed to this script therefore ends in that refusal: it shows
+# one function's output and is never a lane run.
+vectors_log="$(cargo test -p b10x-substrate-daemon --test runtime_vectors \
+  -- --nocapture "$@" 2>&1)" || { printf '%s\n' "${vectors_log}" >&2; exit 1; }
+printf '%s\n' "${vectors_log}"
+vectors_counted="$(printf '%s\n' "${vectors_log}" \
+  | { grep -oE 'passed \(delegated lane\): [0-9]+ of [0-9]+ cases' || true; } \
+  | awk '{ ran += $4; inventory = $6 } END { print ran + 0, inventory + 0 }')"
+vectors_ran="${vectors_counted% *}"
+vectors_inventory="${vectors_counted#* }"
+if [[ "${vectors_inventory}" == 0 || "${vectors_ran}" != "${vectors_inventory}" ]]; then
+  echo "delegated-lane: the runtime vectors executed ${vectors_ran} delegated cases of an inventory of ${vectors_inventory} (0: no function reported its delegated cases)" >&2
+  exit 1
+fi
+echo "delegated-lane: the runtime vectors executed ${vectors_ran} of ${vectors_inventory} delegated cases"
 
 # What this lane did *not* run. A green run above covers the delegated cgroup cases and nothing
 # about project quotas: the real-quota cases need an ext4/XFS filesystem mounted with project

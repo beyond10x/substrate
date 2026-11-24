@@ -33,6 +33,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   first run that names a workspace that does not exist is a refused operation recorded under
   its operation id; a `--workspace` word that is not one path segment is refused before
   anything is sent, as `workspace renew` and `session signal` refuse it.
+- A confined exec or session start on the host driver holds whatever the processes its
+  confinement backend forks do during the start, one that ends before the start returns
+  included. The forked child joins the exec's cgroup itself before it executes the backend, so
+  every process the backend forks is born inside it and the driver moves none. The backend's own
+  start is charged to the run's memory and process bounds; joining and then executing the
+  backend was measured at 262144 to 565248 bytes. A child that cannot join does not execute: a
+  join the kernel refuses is `exec.spawn-failed`, and a `cgroup.procs` the driver cannot open is
+  `exec.cgroup-write-failed`. The driver raises no `exec.process-tree-failed`. No route or
+  schema changes.
 
 ## [0.26.0] — 2026-11-23
 

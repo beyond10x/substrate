@@ -155,7 +155,107 @@ for the header of each object of the baseline three times: in each check, and wh
 the store. What the Git library walks for those headers is bounded by the inode limit, and the
 reading of the chains by the entries of the fetched pack: neither by the number of places a
 tree is named in, nor by how deep the pack stores an object. Reading an object whole applies
-each entry it is stored behind: at most 4,095 of them, none of more bytes than the byte limit.
+each entry it is stored behind: at most 4,095 of them, none of more bytes than the byte limit,
+and for the whole baseline no more bytes than the next rule admits.
+
+**The work and the memory of a create follow its byte limit.** Amendment of 2026-11-24
+(`story:git-create-work-and-memory-follow-its-limits`). It changes no route, no schema and no
+refusal code. Each bound below is a multiple of the byte limit the create applies, the requested
+storage limit, else 2 GiB. A create over one of them is refused `workspace.git-storage-limit`,
+and the workspace is proved absent, as for every failure before the rename.
+
+- **Whole reads.** Reading an object whole inflates every entry the object is stored behind and
+  makes the object of each, one after the other, and keeps none of them for the next read. The
+  reading of the chains therefore also reads two numbers of each entry: the bytes the entry
+  inflates to, from its header, and, for an entry stored behind another, the bytes of the
+  object it makes, from the first bytes of the entry. It inflates no more of an entry than
+  those. It keeps eight more bytes for each entry, eighteen in all: the bytes a whole read of
+  the entry inflates and makes, its own and those of every entry it is stored behind. The
+  check adds that number for the commit, for each tree and for each file object, once for each
+  place the baseline names it. A baseline for which the sum is more than 64 times the byte
+  limit is refused. The check adds a tree's number before it reads the tree, so it ends before
+  the read that would take it over the bound, and before any file object is read. After that
+  check, how often a create reads an object whole follows the places the baseline names it in
+  and nothing the pack states: a file object is read once when it is checked out and once when
+  the store is written.
+- **The table of entries.** While a pack arrives the fetch keeps one item of 64 bytes for each
+  entry. The table grows with the entries that arrive: before the first entry it is reserved
+  for no more than 8,192 items, whatever number the pack states. Its items take no more bytes
+  than the byte limit. A pack that states more entries than that is refused before its first
+  entry is read, and a pack that brings more is refused at the entry that would be over. At
+  2 GiB that is 33,554,432 entries.
+- **Objects that wait.** When the fetch computes the ids, an object that other entries are
+  stored behind is held until each of them has been made, so what is held at once follows how
+  the entries of the pack branch. The fetch counts the bytes reserved for each object it holds
+  this way and holds no more than the byte limit: the object that would take it over
+  ends the fetch. Beside them each of its two threads holds what the rule of object sizes
+  admits for the one entry it works on.
+- **What the fetch makes.** When it computes the ids the fetch inflates each entry once and
+  makes the object of each entry stored behind another once. It counts those bytes before it
+  allocates for them and ends before they come to more than 64 times the byte limit.
+
+The first bound is held where the chains are read and the baseline is checked
+(`crates/substrate-host/src/git/store`). The other three are held in `gix-pack`, the crate in
+which the fetch indexes a pack. It takes the byte limit as the most it allocates for one object
+(`gitoxide.objects.allocLimit`) and refuses each of the three with the error it has for an
+allocation over that limit, which the create already names `workspace.git-storage-limit`.
+
+**What the bounds refuse of an ordinary source.** A byte limit can be no smaller
+than the files of the baseline and the fetched pack together; the figures here are multiples of
+that sum. Measured on 2026-11-24 on a fetch of depth 50 of five repositories and of one
+generated history of 1,000 files and 50 commits (1,022 to 16,703 places, 2.2 MB to 114 MB of
+baseline objects, 2,096 to 20,431 entries): whole reads 0.8 to 14.4 against the bound 64, the
+table 0.003 to 0.07 against 1, the objects that wait at most 0.11 against 1, and what the
+fetch makes 1.3 to 3.1 against 64. With a byte limit as small as that sum, the bounds refuse:
+
+- a baseline of which a whole read of each object inflates and makes, on average by bytes,
+  more than 64 times the object: one stored behind 63 entries that each make an object of its
+  size;
+- a fetch with fewer than 64 bytes of byte limit for each entry of its pack: many files of a
+  few bytes with a long history;
+- a pack in which more than the byte limit waits at once. Versions of a file stored
+  one behind the other in a line hold two of them at once. Stored as a tree, with more than
+  one entry behind each level, they hold one for each level: for a file of a tenth of the byte
+  limit that is a tree more than 10 levels deep;
+- a fetched history whose entries inflate to and make more than 64 times the byte limit: about
+  sixty versions of every object of the baseline, each stored behind another.
+
+A larger requested storage limit admits each of them.
+
+**The copy of `gix-pack`.** The repository carries the crate as `vendor/gix-pack-0.74.2`: the
+published source of the version `gix` 0.87.1 resolves, with the three bounds, selected by
+`[patch.crates-io]` as `vendor/axum-0.8.9` is. The change is about 100 added lines in three
+files (`src/cache/delta/tree.rs`, `src/index/write/mod.rs` and
+`src/cache/delta/traverse/resolve.rs`). It adds two counters the threads of the fetch share,
+no thread and no lock, and changes no public item of the crate. It is kept this way:
+
+- `vendor/gix-pack-0.74.2/README.substrate.md` states the change file by file, the three
+  multiples, and the checksum of the published crate the copy was made from. The crate's
+  licence files stay in the copy.
+- The workspace names `gix` by its exact version. A `[patch.crates-io]` entry replaces only the
+  version it has, and cargo builds the published crate with no more than a warning when the two
+  differ. `cargo xtask check-packages` therefore refuses a `[patch.crates-io]` entry that
+  `Cargo.lock` does not resolve to.
+- The cases below run the fetch of a create, so they fail with a `gix-pack` that does not hold
+  the three bounds, whichever version it is.
+- An update of `gix` takes the published source of the `gix-pack` it resolves as
+  `vendor/gix-pack-<version>`, makes the change in it again and runs the cases. The copy is
+  removed with the update whose `gix-pack` passes them unchanged.
+
+**What an ordinary create pays.** The reading of the chains keeps eighteen bytes for each
+entry of the fetched pack, eight of them for this bound, and inflates the first bytes of each
+entry stored behind another: for the six fetched packs above, no more than 0.02 s of processor
+time. The fetch adds to two counters for each entry, and its table grows with the entries.
+Indexing those six packs with the three bounds took 0.05 s to 2.6 s of processor time and
+4 MB to 48 MB of peak resident memory.
+
+**How it is proved.** One case for each of the four bounds, against a source served on
+loopback: a pack within every other bound and over that one. The create is refused
+`workspace.git-storage-limit`, the workspace is proved absent, and the memory of the test
+process stays under a bound the case states: its peak resident memory, and for the table of
+entries its peak address space, because a reservation that is never written is no resident
+memory. Each case runs under 5 s. The cases of a create that the host crate already has run
+against the copy unchanged.
 
 Decided: comparing the worktree by kept stat facts instead of hashing each tracked file (ADR
 0051's manifest) is not part of this step. The observation hashes as before.

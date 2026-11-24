@@ -489,7 +489,12 @@ programs started in a working directory beneath the workspace and beneath a decl
 absent and a symlinked one refused `exec.workdir-missing` before dispatch, and an aperture list
 refused `exec.aperture-undeclared` for an undeclared name, run with two apertures each reporting its
 `listen` address, and refused `exec.aperture-host-listed-twice` for `localhost` listed second
-(`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
+(`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Each
+lane spans five test functions of that binary, so that none outlasts the 60 s test budget: the
+journey, the two exec-retention cases (delegated only), the adopted workspace and writable Git roots.
+Each starts a daemon of its own and asserts its own count (`LaneCases`); the file does not compile
+unless the counts sum to the two totals, and `scripts/delegated-lane.sh` refuses a run whose
+functions did not report the whole delegated inventory. Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
 unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`
 runs that lane plus the host, host-process (`--test processes`), public-SDK and disposable-MCP delegated cases, and needs no privilege** — it asks
