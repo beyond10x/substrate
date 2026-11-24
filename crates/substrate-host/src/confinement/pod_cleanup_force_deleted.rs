@@ -59,7 +59,7 @@ async fn follow(cluster: &Arc<Cluster>, api: Arc<Api>, kill: bool) -> (Phase, Op
     let task = tokio::spawn(monitor(
         Arc::clone(&api),
         Arc::clone(&run),
-        sender,
+        (sender, EndCell::new()),
         Instant::now() + Duration::from_mins(10),
         PodTrace::default(),
     ));
@@ -260,21 +260,42 @@ async fn a_kill_whose_pod_shows_its_container_terminated_releases_the_policy() {
 /// Design 36 D7, the `pod` row: the monitor's own stop past the deadline ends the run with
 /// `WallTime`. The monitor is handed a give-up instant already past, so its first read of the
 /// running Pod asks for the deletion; the kubelet then writes the container terminated and removes
-/// the Pod, as it does for a deletion it was asked for.
+/// the Pod, as it does for a deletion it was asked for. Design 36 D20, the `pod` row: the monitor
+/// then writes the run's one `run_ended`, naming that limit, with no `observe` or `wait` called.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_monitors_stop_past_the_deadline_names_the_wall_time_limit() {
     let cluster = cluster(Watch::Terminated);
     let api = Arc::new(start(&cluster));
     let (run, sender) = tracked(RUN);
+    let (written, mut run_ended) = tokio::sync::mpsc::unbounded_channel();
+    let admitted = crate::confinement::admission(
+        &proof(),
+        &ConfinementProfile {
+            image: Some(format!("registry.invalid/run@sha256:{}", "a".repeat(64))),
+            audit: Some(crate::confinement::AuditSink::new(
+                move |record: &crate::confinement::AuditRecord| {
+                    let value = serde_json::to_value(record).expect("a record");
+                    if value["event"] == "run_ended" {
+                        let _ = written.send(value);
+                    }
+                },
+            )),
+            ..ConfinementProfile::default()
+        },
+        |_| Ok(()),
+    )
+    .expect("admitted");
+    let end = EndCell::new();
     let task = tokio::spawn(monitor(
         Arc::clone(&api),
         Arc::clone(&run),
-        sender,
+        (sender, end.clone()),
         Instant::now()
             .checked_sub(Duration::from_secs(1))
             .expect("an instant in the past"),
         PodTrace::default(),
     ));
+    end.hand_record(admitted.audit_start(&run.id, "/bin/sleep"));
     let began = Instant::now();
     while cluster.pod_deletes.load(Ordering::SeqCst) == 0 {
         assert!(
@@ -302,4 +323,166 @@ async fn the_monitors_stop_past_the_deadline_names_the_wall_time_limit() {
         Some(RunLimit::WallTime),
         "{observation:?}"
     );
+    let record = tokio::time::timeout(Duration::from_secs(5), run_ended.recv())
+        .await
+        .expect("the monitor wrote run_ended")
+        .expect("the sink lives");
+    assert_eq!(record["run"], RUN, "{record}");
+    assert_eq!(record["adapter"], "pod", "{record}");
+    assert_eq!(record["profile"], admitted.id().as_str(), "{record}");
+    assert_eq!(record["state"], "ended", "{record}");
+    assert_eq!(record["limit"], "wall_time", "{record}");
+    assert_eq!(
+        record["exit"],
+        serde_json::json!({"signal": Signal::Kill.number()}),
+        "{record}"
+    );
+    assert!(run_ended.try_recv().is_err(), "a second run_ended");
+}
+
+/// A `pod` profile admitted with a sink that sends every `run_ended` it receives.
+fn admitted_with_a_sink() -> (
+    crate::confinement::AdmittedProfile,
+    std::sync::mpsc::Receiver<serde_json::Value>,
+) {
+    let (written, run_ended) = std::sync::mpsc::channel();
+    let written = parking_lot::Mutex::new(written);
+    let admitted = crate::confinement::admission(
+        &proof(),
+        &ConfinementProfile {
+            image: Some(format!("registry.invalid/run@sha256:{}", "a".repeat(64))),
+            audit: Some(crate::confinement::AuditSink::new(
+                move |record: &crate::confinement::AuditRecord| {
+                    let value = serde_json::to_value(record).expect("a record");
+                    if value["event"] == "run_ended" {
+                        let _ = written.lock().send(value);
+                    }
+                },
+            )),
+            ..ConfinementProfile::default()
+        },
+        |_| Ok(()),
+    )
+    .expect("admitted");
+    (admitted, run_ended)
+}
+
+/// A run's monitor side, as `monitor` builds it.
+fn monitor_side(sender: watch::Sender<Phase>, end: &EndCell) -> Ending {
+    Ending {
+        phase: sender,
+        end: end.clone(),
+        published: false,
+    }
+}
+
+fn exited_0() -> Phase {
+    Phase::Ended(
+        RunExit {
+            code: Some(0),
+            signal: None,
+        },
+        Some(0),
+    )
+}
+
+fn current_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+}
+
+/// Design 36 D17, D20 and D22: `start`'s value first, then the publication. `publish` hands the
+/// ended record to its thread before it returns, so a current-thread runtime dropped right after
+/// `publish` returned, with no further poll, has the run's `run_ended` in the sink with
+/// `state: ended`, never `unknown`; a second publication writes nothing.
+#[test]
+fn a_runtime_dropped_right_after_publish_has_the_ended_record_in_the_sink() {
+    let (run, sender) = tracked(RUN);
+    let (admitted, run_ended) = admitted_with_a_sink();
+    let end = EndCell::new();
+    let mut ending = monitor_side(sender, &end);
+    end.hand_record(admitted.audit_start(&run.id, "/bin/true"));
+    let runtime = current_thread();
+    runtime.block_on(async {
+        ending.publish(&run, exited_0());
+        ending.publish(&run, Phase::Unknown);
+    });
+    drop(runtime);
+    let record = run_ended
+        .try_recv()
+        .expect("run_ended is in the sink once the runtime's drop returned");
+    assert_eq!(record["run"], RUN, "{record}");
+    assert_eq!(record["state"], "ended", "{record}");
+    assert_eq!(record["exit"], serde_json::json!({"code": 0}), "{record}");
+    assert!(run_ended.try_recv().is_err(), "a second run_ended");
+}
+
+/// Design 36 D17, D20 and D22: the publication first, then `start`'s value, as where `start`'s
+/// thread is held past the monitor's first poll. The value finds the ended observation and goes
+/// to its thread before `hand_record` returns, so a current-thread runtime dropped right after,
+/// with no further poll, has `run_ended` in the sink with `state: ended` and the adapter's
+/// observation; a second publication writes nothing.
+#[test]
+fn a_value_handed_after_publish_then_a_runtime_dropped_records_the_ended_run() {
+    let (run, sender) = tracked(RUN);
+    let (admitted, run_ended) = admitted_with_a_sink();
+    let end = EndCell::new();
+    let mut ending = monitor_side(sender, &end);
+    let runtime = current_thread();
+    runtime.block_on(async {
+        ending.publish(&run, exited_0());
+        end.hand_record(admitted.audit_start(&run.id, "/bin/true"));
+        ending.publish(&run, Phase::Unknown);
+    });
+    drop(runtime);
+    let record = run_ended
+        .try_recv()
+        .expect("run_ended is in the sink once the runtime's drop returned");
+    assert_eq!(record["run"], RUN, "{record}");
+    assert_eq!(record["adapter"], "pod", "{record}");
+    assert_eq!(record["state"], "ended", "{record}");
+    assert_eq!(record["exit"], serde_json::json!({"code": 0}), "{record}");
+    assert_eq!(record["memory_oom_kills"], 0, "{record}");
+    assert!(run_ended.try_recv().is_err(), "a second run_ended");
+}
+
+/// Design 36 D17: a publication whose `start` never hands a value, as a start that failed once it
+/// spawned the monitor, writes nothing, and nothing when the cell goes.
+#[test]
+fn a_publication_whose_start_never_hands_a_value_writes_nothing() {
+    let (run, sender) = tracked(RUN);
+    let (admitted, run_ended) = admitted_with_a_sink();
+    let end = EndCell::new();
+    let mut ending = monitor_side(sender, &end);
+    let runtime = current_thread();
+    runtime.block_on(async {
+        ending.publish(&run, exited_0());
+        ending.publish(&run, Phase::Unknown);
+    });
+    drop((ending, end, runtime));
+    assert!(run_ended.try_recv().is_err(), "a run_ended without a start");
+    drop(admitted);
+}
+
+/// Design 36 D22: a value handed to a monitor that is dropped before it published, as by a
+/// runtime dropped while the run runs, writes `unknown` once the cell goes.
+#[test]
+fn a_handed_value_whose_monitor_never_publishes_writes_unknown_when_the_cell_goes() {
+    let (run, sender) = tracked(RUN);
+    let (admitted, run_ended) = admitted_with_a_sink();
+    let end = EndCell::new();
+    let ending = monitor_side(sender, &end);
+    end.hand_record(admitted.audit_start(&run.id, "/bin/true"));
+    drop(end);
+    assert!(
+        run_ended.try_recv().is_err(),
+        "written while the monitor lives"
+    );
+    drop(ending);
+    let record = run_ended
+        .try_recv()
+        .expect("run_ended once the cell's last holder went");
+    assert_eq!(record["state"], "unknown", "{record}");
 }

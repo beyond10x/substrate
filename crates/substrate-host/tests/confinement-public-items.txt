@@ -135,6 +135,7 @@ confinement/mod.rs: enum AuditRecord > ProfileAdmitted {profile: ProfileId, adap
 confinement/mod.rs: enum AuditRecord > ProfileRefused {adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, code: &'static str, #[serde(skip_serializing_if = "Option::is_none")] family: Option<ContractFamily>, #[serde(skip_serializing_if = "Option::is_none")] fact: Option<Fact>, #[serde(skip_serializing_if = "Option::is_none")] field: Option<ReservedField>},
 confinement/mod.rs: enum AuditRecord > RunStarted {run: RunId, profile: ProfileId, adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, #[serde(skip_serializing_if = "Option::is_none")] declared_insecure: Option<String>, program: String},
 confinement/mod.rs: enum AuditRecord > PrivateTmpdirLeft {run: RunId, profile: ProfileId, adapter: AdapterName, path: String, error: String},
+confinement/mod.rs: enum AuditRecord > #[non_exhaustive] RunEnded {run: RunId, profile: ProfileId, adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, #[serde(skip_serializing_if = "Option::is_none")] declared_insecure: Option<String>, state: RunState, #[serde(skip_serializing_if = "Option::is_none")] exit: Option<RunExit>, #[serde(skip_serializing_if = "Option::is_none")] limit: Option<RunLimit>, #[serde(skip_serializing_if = "Option::is_none")] memory_oom_kills: Option<u64>, #[serde(skip_serializing_if = "Option::is_none")] process_limit_hits: Option<u64>},
 confinement/mod.rs: #[derive(Clone)] pub struct AuditSink(Arc<dyn Fn(&AuditRecord) + Send + Sync>);
 confinement/mod.rs: impl AuditSink > pub fn new(sink: impl Fn(&AuditRecord) + Send + Sync + 'static) -> Self
 confinement/mod.rs: impl AuditSink > pub fn record(&self, record: &AuditRecord)
@@ -150,6 +151,9 @@ confinement/mod.rs: impl AdmittedProfile > pub fn declared_insecure(&self) -> bo
 confinement/mod.rs: impl AdmittedProfile > pub fn insecure_reason(&self) -> Option<&str>
 confinement/mod.rs: impl AdmittedProfile > pub fn profile(&self) -> &ConfinementProfile
 confinement/mod.rs: impl AdmittedProfile > pub fn record(&self) -> AuditRecord
+confinement/mod.rs: impl Drop for EndWrite
+confinement/mod.rs: impl Drop for EndWriting
+confinement/mod.rs: impl Drop for RunEndRecord
 confinement/mod.rs: #[derive(Debug, Clone)] pub struct Command
 confinement/mod.rs: struct Command > pub argv: Vec<String>,
 confinement/mod.rs: struct Command > pub env: BTreeMap<String, String>,
@@ -158,13 +162,13 @@ confinement/mod.rs: struct RenderedCommand > pub program: PathBuf,
 confinement/mod.rs: struct RenderedCommand > pub args: Vec<String>,
 confinement/mod.rs: #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)] #[serde(transparent)] pub struct RunId(String);
 confinement/mod.rs: impl RunId > pub fn as_str(&self) -> &str
-confinement/mod.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum RunState
+confinement/mod.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)] #[serde(rename_all = "snake_case")] pub enum RunState
 confinement/mod.rs: enum RunState > Running,
 confinement/mod.rs: enum RunState > Ended,
 confinement/mod.rs: enum RunState > Unknown,
-confinement/mod.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub struct RunExit
-confinement/mod.rs: struct RunExit > pub code: Option<i32>,
-confinement/mod.rs: struct RunExit > pub signal: Option<i32>,
+confinement/mod.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)] pub struct RunExit
+confinement/mod.rs: struct RunExit > #[serde(skip_serializing_if = "Option::is_none")] pub code: Option<i32>,
+confinement/mod.rs: struct RunExit > #[serde(skip_serializing_if = "Option::is_none")] pub signal: Option<i32>,
 confinement/mod.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)] #[serde(rename_all = "snake_case")] #[non_exhaustive] pub enum RunLimit
 confinement/mod.rs: enum RunLimit > Memory,
 confinement/mod.rs: enum RunLimit > CpuTime,
@@ -180,6 +184,7 @@ confinement/mod.rs: struct RunObservation > pub state: RunState,
 confinement/mod.rs: struct RunObservation > pub exit: Option<RunExit>,
 confinement/mod.rs: struct RunObservation > pub limit: Option<RunLimit>,
 confinement/mod.rs: struct RunObservation > pub memory_oom_kills: Option<u64>,
+confinement/mod.rs: struct RunObservation > pub process_limit_hits: Option<u64>,
 confinement/mod.rs: impl RunObservation > pub fn new(run: RunId, adapter: AdapterName, state: RunState) -> Self
 confinement/mod.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub struct RunOutput
 confinement/mod.rs: struct RunOutput > pub stdout: Vec<u8>,

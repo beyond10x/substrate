@@ -2104,6 +2104,19 @@ impl ProcessRuntime {
             .is_some_and(|execution| execution.pipe_backpressure.load(Ordering::Acquire))
     }
 
+    /// The process creations exec `id`'s process bound refused so far, read from its cgroup's
+    /// `pids.events` at this moment: what the `linux` adapter's `observe` reports for a running
+    /// run (design 36 D13). `None` for an exec not tracked or without a cgroup, for a cgroup that
+    /// is gone, and where the counter cannot be read; never an error.
+    pub(crate) fn running_process_limit_hits(&self, id: &str) -> Option<u64> {
+        let name = self.execution(id).ok()?.observation.lock().cgroup.clone()?;
+        let root = self.config.cgroup_root.as_deref()?;
+        Cgroup::existing(root, &name)
+            .ok()?
+            .process_limit_hits()
+            .ok()
+    }
+
     fn execution(&self, id: &str) -> Result<Arc<Execution>, DriverError> {
         self.executions
             .lock()
@@ -4709,17 +4722,36 @@ impl Cgroup {
         read_named_counter(&self.path.join("memory.events"), "oom_kill")
     }
 
+    /// The kernel's own count of process creations this cgroup's `pids.max` refused, read on its
+    /// own (design 36 D10). Like the OOM count, it is a fact of the run, not a measurement.
+    fn process_limit_hits(&self) -> Result<u64, DriverError> {
+        let path = self.path.join("pids.events");
+        let contents = std::fs::read_to_string(&path).map_err(|error| {
+            DriverError::failed(
+                "exec.metrics-read-failed",
+                format!("cgroup metric {}: {error}", path.display()),
+            )
+        })?;
+        pids_events_max(&contents).ok_or_else(|| {
+            DriverError::failed(
+                "exec.metrics-read-failed",
+                format!("cgroup metric {} omitted max", path.display()),
+            )
+        })
+    }
+
     /// What this cgroup holds once the exec's leader exited, read once before the cgroup is
-    /// removed (design 36 D9). A measured exec's count is its terminal sample's, `terminal`;
-    /// every other exec, and one whose sample failed, reads the counter on its own. A counter
+    /// removed (design 36 D9). A measured exec's counts are its terminal sample's, `terminal`;
+    /// every other exec, and one whose sample failed, reads each counter on its own. A counter
     /// that cannot be read is `None`.
     fn end_of_run(&self, terminal: Option<&Result<ResourceUsage, DriverError>>) -> EndOfRun {
-        let memory_oom_kills = match terminal {
-            Some(Ok(usage)) => Some(usage.memory_oom_kills),
-            _ => self.memory_oom_kills().ok(),
+        let (memory_oom_kills, process_limit_hits) = match terminal {
+            Some(Ok(usage)) => (Some(usage.memory_oom_kills), Some(usage.process_limit_hits)),
+            _ => (self.memory_oom_kills().ok(), self.process_limit_hits().ok()),
         };
         EndOfRun {
             memory_oom_kills,
+            process_limit_hits,
             output_stall_after_exit: false,
             egress_ceiling_reached: false,
         }
@@ -4747,7 +4779,7 @@ impl Cgroup {
         let memory_peak = read_decimal_counter(&self.path.join("memory.peak"))?;
         let processes_current = read_decimal_counter(&self.path.join("pids.current"))?;
         let processes_peak = read_decimal_counter(&self.path.join("pids.peak"))?;
-        let process_limit_hits = read_named_counter(&self.path.join("pids.events"), "max")?;
+        let process_limit_hits = self.process_limit_hits()?;
         let memory_oom_kills = self.memory_oom_kills()?;
         // Block I/O is read only where this cgroup has the io controller; elsewhere both counters
         // are absent, never zero (ADR 0032). A listed controller whose `io.stat` cannot be read
@@ -4937,6 +4969,21 @@ pub(crate) fn read_decimal_counter(path: &Path) -> Result<u64, DriverError> {
                 format!("cgroup metric {} is not an integer", path.display()),
             )
         })
+}
+
+/// The count of a cgroup's `pids.events` text `contents`: the number of its `max` line (design 36
+/// D10). The one reader of that file for the host driver and for `systemd`. A line counts only
+/// in the kernel's form, `max`, one space and a decimal `u64`, ended by `\n` or by the end of the
+/// text; anything else on that line, around it or in the number gives no line, and a text
+/// without such a line gives `None`: absent, never zero (invariant 3).
+pub(crate) fn pids_events_max(contents: &str) -> Option<u64> {
+    contents.split('\n').find_map(|line| {
+        let digits = line.strip_prefix("max ")?;
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
+    })
 }
 
 fn read_named_counter(path: &Path, key: &str) -> Result<u64, DriverError> {
@@ -5177,6 +5224,129 @@ mod tests {
         assert_eq!(cgroup.end_of_run(Some(&failed)).memory_oom_kills, Some(0));
         std::fs::remove_file(directory.path().join("memory.events")).unwrap();
         assert_eq!(cgroup.end_of_run(Some(&failed)).memory_oom_kills, None);
+    }
+
+    /// Design 36 D9, D10: the end-of-run read takes the process creations the bound refused from
+    /// the cgroup's `pids.events` `max` for an exec that asked for no measurements, and an
+    /// unreadable count is absent, never zero: a missing file and a file without the `max` key
+    /// are both `None`.
+    #[test]
+    fn the_end_of_run_reads_the_refused_process_creations_and_leaves_an_unreadable_count_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu memory pids");
+        assert_eq!(cgroup.end_of_run(None).process_limit_hits, Some(0));
+        std::fs::write(directory.path().join("pids.events"), "max 13\n").unwrap();
+        assert_eq!(cgroup.end_of_run(None).process_limit_hits, Some(13));
+        std::fs::write(directory.path().join("pids.events"), "maximum 13\n").unwrap();
+        assert_eq!(cgroup.end_of_run(None).process_limit_hits, None);
+        std::fs::remove_file(directory.path().join("pids.events")).unwrap();
+        assert_eq!(cgroup.end_of_run(None).process_limit_hits, None);
+    }
+
+    /// Design 36 D9, D10: the end-of-run read of `pids.events` is the number of the `max` line
+    /// wherever the line stands, up to `u64::MAX`, where the line is `max`, one space and the
+    /// decimal number, ended by `\n` or the end of the file. Any other form of that line, an empty
+    /// file, a value past `u64` and a negative or signed value are absent, never zero, and never
+    /// the number of another line. The rows are the same as those of the `systemd` reader's case
+    /// (`pids_events_max` is the one parser of both).
+    #[test]
+    fn the_end_of_run_count_is_the_max_lines_number_and_absent_where_malformed() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu memory pids");
+        let events = directory.path().join("pids.events");
+        for (contents, expected) in [
+            ("max 3\n", Some(3)),
+            ("other 9\nmax 3\n", Some(3)),
+            ("max 3\nother 9\n", Some(3)),
+            ("max 3", Some(3)),
+            ("max 03\n", Some(3)),
+            ("max 18446744073709551615\n", Some(u64::MAX)),
+            ("max 3   \n", None),
+            ("  max\t3\n", None),
+            ("max\t3\n", None),
+            (" max 3\n", None),
+            ("max  3\n", None),
+            ("max 3\r\n", None),
+            ("max +3\n", None),
+            ("", None),
+            ("\n", None),
+            ("max\n", None),
+            ("max \n", None),
+            ("max -1\n", None),
+            ("max 18446744073709551616\n", None),
+            ("max 3x\n", None),
+            ("max.imp 3\n", None),
+            ("pids 3\n", None),
+            ("other 9\n", None),
+        ] {
+            std::fs::write(&events, contents).unwrap();
+            assert_eq!(
+                cgroup.end_of_run(None).process_limit_hits,
+                expected,
+                "{contents:?}"
+            );
+        }
+    }
+
+    /// Design 36 D9: a measured exec's end-of-run count of refused creations is the one its
+    /// terminal usage sample read; a sample that failed falls back to reading the counter on
+    /// its own.
+    #[test]
+    fn a_measured_end_of_run_takes_the_refused_creations_of_its_terminal_sample() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu memory pids");
+        let mut usage = cgroup
+            .resource_usage(true, Instant::now())
+            .expect("usage is observed");
+        usage.process_limit_hits = 5;
+        assert_eq!(
+            cgroup.end_of_run(Some(&Ok(usage))).process_limit_hits,
+            Some(5)
+        );
+        let failed = Err(crate::DriverError::failed(
+            "exec.metrics-read-failed",
+            "gone",
+        ));
+        assert_eq!(cgroup.end_of_run(Some(&failed)).process_limit_hits, Some(0));
+        std::fs::remove_file(directory.path().join("pids.events")).unwrap();
+        assert_eq!(cgroup.end_of_run(Some(&failed)).process_limit_hits, None);
+    }
+
+    /// Design 36 D13: the count of a running exec is read from its cgroup at the moment it is
+    /// asked for; a counter that cannot be read, a cgroup that is gone and an exec that is not
+    /// tracked are `None`, and none of them is an error.
+    #[test]
+    fn a_running_execs_refused_creations_are_read_at_that_moment_and_absent_where_unreadable() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(root.path().join("workspaces"));
+        let cgroup_root = root.path().join("cgroups");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        let cgroup = cgroup_root.join("substrate-ex_count");
+        config.cgroup_root = Some(cgroup_root);
+        let runtime = ProcessRuntime::new(config, unproven_capability()).expect("runtime");
+        // Made after the runtime's construction, which reconciles what it finds under its root.
+        std::fs::create_dir(&cgroup).expect("cgroup");
+        std::fs::write(cgroup.join("cgroup.procs"), b"").expect("cgroup.procs");
+        let mut observation = running_observation("ex_count");
+        observation.cgroup = Some("substrate-ex_count".to_owned());
+        runtime.executions.lock().insert(
+            "ex_count".to_owned(),
+            std::sync::Arc::new(Execution::new(
+                observation,
+                None,
+                std::time::Instant::now(),
+                None,
+            )),
+        );
+        std::fs::write(cgroup.join("pids.events"), "max 0\n").expect("pids.events");
+        assert_eq!(runtime.running_process_limit_hits("ex_count"), Some(0));
+        std::fs::write(cgroup.join("pids.events"), "max 7\n").expect("pids.events");
+        assert_eq!(runtime.running_process_limit_hits("ex_count"), Some(7));
+        std::fs::remove_file(cgroup.join("pids.events")).expect("removed");
+        assert_eq!(runtime.running_process_limit_hits("ex_count"), None);
+        std::fs::remove_dir_all(&cgroup).expect("cgroup removed");
+        assert_eq!(runtime.running_process_limit_hits("ex_count"), None);
+        assert_eq!(runtime.running_process_limit_hits("ex_untracked"), None);
     }
 
     /// ADR 0032: with the io controller the record is unchanged from 0.17.0.

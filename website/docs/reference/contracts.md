@@ -62,7 +62,7 @@ A refusal names the first missing family in this order.
 | `network_egress` | `network: Egress`, and `network: Isolated` on an adapter that proves `host_network` |
 | `network_ingress` | no adapter serves it; `ingress_routes` is reserved |
 | `limits` | `process_bounds` and `io_bounds` |
-| `audit` | an `audit` sink for admission, refusal and start records |
+| `audit` | an `audit` sink for admission, refusal, start and end records |
 
 Every adapter's declared set in the specification holds `process_run`, `process_watch`,
 `output_read`, `wait`, `workspace` and

@@ -298,7 +298,7 @@ async fn a_confined_run_writes_its_workspace_and_reports_how_it_ended() {
     let adapter = macos();
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::create_dir(workspace.path().join("sub")).expect("workdir");
-    let (sink, records) = recording();
+    let (sink, mut recorded) = support::recorded();
     let admitted = adapter
         .admit(&ConfinementProfile {
             workspace: Some(workspace.path().to_path_buf()),
@@ -323,6 +323,8 @@ async fn a_confined_run_writes_its_workspace_and_reports_how_it_ended() {
     assert_eq!(ended.adapter, AdapterName::Macos);
     assert_eq!(ended.declared_insecure, None);
     assert_eq!(ended.exit.and_then(|exit| exit.code), Some(3));
+    // Design 36 D14: `macos` reads no count of refused process creations.
+    assert_eq!(ended.process_limit_hits, None, "{ended:?}");
     let output = adapter.output(&run).await.expect("output");
     let sub = std::fs::canonicalize(workspace.path().join("sub")).expect("canonical");
     assert_eq!(
@@ -334,7 +336,43 @@ async fn a_confined_run_writes_its_workspace_and_reports_how_it_ended() {
         std::fs::read_to_string(workspace.path().join("marker")).expect("marker"),
         "done"
     );
-    assert_eq!(events(&records), ["profile_admitted", "run_started"]);
+    // Design 36 D20: the run's end task writes its end after it published it.
+    let record = recorded.run_ended("macos run").await;
+    assert!(record.get("process_limit_hits").is_none(), "{record}");
+    assert_eq!(
+        recorded.events(),
+        ["profile_admitted", "run_started", "run_ended"]
+    );
+}
+
+/// Design 36 § 8, story 3, the `macos` lane: a run that nobody observes or waits on puts one
+/// `run_ended` into its profile's sink, written by the run's end task (D20).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_macos_run_nobody_observes_writes_one_run_ended() {
+    const NAME: &str = "ESS confinement macos run ended";
+    let adapter = macos();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            workspace: Some(workspace.path().to_path_buf()),
+            ..ConfinementProfile::default()
+        },
+        &bash("exit 3", &[]),
+        ("macos", None),
+        support::RECORD_WAIT,
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(record["exit"], json!({"code": 3}), "{NAME}: {record}");
+    assert!(record.get("limit").is_none(), "{NAME}: {record}");
+    assert!(record.get("memory_oom_kills").is_none(), "{NAME}: {record}");
+    assert!(
+        record.get("process_limit_hits").is_none(),
+        "{NAME}: {record}"
+    );
+    println!("{NAME}: executed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

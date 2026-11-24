@@ -633,13 +633,14 @@ mod imp {
     ) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
         let hold = LinuxHold::take()?;
         let scope = process_scope(manager)?;
-        let inner = super::super::linux::open(request.with_cgroup_root(Some(scope.clone())))
-            .map_err(|error| match error {
-                ConfinementError::AdapterUnserved { detail, .. } => {
-                    unserved(format!("linux in {}: {detail}", scope.display()))
-                }
-                other => other,
-            })?;
+        let inner =
+            super::super::linux::open_adapter(request.with_cgroup_root(Some(scope.clone())))
+                .map_err(|error| match error {
+                    ConfinementError::AdapterUnserved { detail, .. } => {
+                        unserved(format!("linux in {}: {detail}", scope.display()))
+                    }
+                    other => other,
+                })?;
         let proved = inner.facts();
         if !proved.serves(&ContractFamily::Limits) || !proved.proves(&Fact::WholeTreeKill) {
             return Err(unserved(format!(
@@ -656,7 +657,7 @@ mod imp {
 
     struct SystemdLinux {
         facts: AdapterFacts,
-        inner: Arc<dyn ConfinementAdapter>,
+        inner: Arc<super::super::linux::LinuxAdapter>,
         _hold: LinuxHold,
     }
 
@@ -710,7 +711,18 @@ mod imp {
             let started: Result<RunId, ConfinementError> = async {
                 let inner = self.inner_admission(admitted, true)?;
                 let run = self.inner.start(&inner, command).await?;
-                admitted.audit_start(&run, &command.argv[0]);
+                let end = admitted.audit_start(&run, &command.argv[0]);
+                // The inner admission has no sink, so the inner `linux` writes nothing: this
+                // adapter's own task awaits the inner run's end and writes its `run_ended` with
+                // this profile and the relabelled observation (design 36 D20).
+                if !end.is_inert() {
+                    let ended = self.inner.ended_observation(&run);
+                    tokio::spawn(async move {
+                        if let Some(observation) = ended.await {
+                            end.write(Self::relabel(observation)).finished().await;
+                        }
+                    });
+                }
                 Ok(run)
             }
             .await;
@@ -806,14 +818,18 @@ mod imp {
     struct EndRead {
         limit: Option<RunLimit>,
         memory_oom_kills: Option<u64>,
+        /// `pids.events` `max` of the run's cgroup (design 36 D14). It names no limit (D12).
+        process_limit_hits: Option<u64>,
     }
 
     impl EndRead {
         /// Design 36 D7, in D4's order: the stall, an OOM kill in the run's cgroup, and the bound
-        /// the watch ended the run for.
+        /// the watch ended the run for. The count of refused creations is kept and names no
+        /// limit (D12).
         fn of(
             stall: Option<&Arc<LiveOutput>>,
             memory_oom_kills: Option<u64>,
+            process_limit_hits: Option<u64>,
             imposed: Option<RunLimit>,
         ) -> Self {
             let reached: Vec<RunLimit> = [
@@ -829,6 +845,7 @@ mod imp {
             Self {
                 limit: named_limit(&reached),
                 memory_oom_kills,
+                process_limit_hits,
             }
         }
     }
@@ -836,10 +853,25 @@ mod imp {
     /// `memory.events` `oom_kill` of a run's cgroup; `None` where it cannot be read (design 36
     /// D8: absent, never zero).
     fn oom_kills(cgroup: &Path) -> Option<u64> {
-        std::fs::read_to_string(cgroup.join("memory.events"))
+        named_counter(&cgroup.join("memory.events"), "oom_kill")
+    }
+
+    /// `pids.events` `max` of a run's cgroup (design 36 D10, D14), parsed by the host driver's
+    /// own reader of that file; `None` where it cannot be read: absent, never zero.
+    fn process_limit_hits(cgroup: &Path) -> Option<u64> {
+        std::fs::read_to_string(cgroup.join("pids.events"))
+            .ok()
+            .as_deref()
+            .and_then(crate::process::pids_events_max)
+    }
+
+    /// The value of the `key` line of the flat-keyed cgroup file `file`; `None` where the file,
+    /// the line or its number cannot be read.
+    fn named_counter(file: &Path, key: &str) -> Option<u64> {
+        std::fs::read_to_string(file)
             .ok()?
             .lines()
-            .find_map(|line| line.strip_prefix("oom_kill "))?
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix(' '))?
             .trim()
             .parse()
             .ok()
@@ -1175,20 +1207,27 @@ mod imp {
         }
 
         fn observation(run: &LocalRun) -> RunObservation {
-            let (state, exit, end) = match *run.phase.borrow() {
+            Self::observation_of(&run.id, run.reason.as_deref(), *run.phase.borrow())
+        }
+
+        /// The observation of a run in `phase`: what `observe` and `wait` return, and what the
+        /// run's end task writes as `run_ended` (design 36 D15).
+        fn observation_of(id: &RunId, reason: Option<&str>, phase: Phase) -> RunObservation {
+            let (state, exit, end) = match phase {
                 Phase::Running => (RunState::Running, None, EndRead::default()),
                 Phase::Ended(exit, end) => (RunState::Ended, Some(exit), end),
                 Phase::Unknown(end) => (RunState::Unknown, None, end),
             };
             RunObservation {
-                run: run.id.clone(),
+                run: id.clone(),
                 adapter: AdapterName::Systemd,
                 inner: Some(InnerAdapter::Local),
-                declared_insecure: run.reason.clone(),
+                declared_insecure: reason.map(str::to_owned),
                 state,
                 exit,
                 limit: end.limit,
                 memory_oom_kills: end.memory_oom_kills,
+                process_limit_hits: end.process_limit_hits,
             }
         }
 
@@ -1344,7 +1383,13 @@ mod imp {
 
         async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
             let run = self.run(run)?;
-            Ok(Self::observation(&run))
+            let mut observation = Self::observation(&run);
+            if observation.state == RunState::Running {
+                // Read at this moment from the run's cgroup; gone or unreadable is absent
+                // (design 36 D13).
+                observation.process_limit_hits = process_limit_hits(&run.cgroup);
+            }
+            Ok(observation)
         }
 
         async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
@@ -1484,9 +1529,16 @@ mod imp {
             let imposed = Arc::new(Mutex::new(None));
             let watched = Arc::clone(&imposed);
             let stall = live.clone();
+            let reason = admitted.insecure_reason().map(str::to_owned);
+            // The run's `run_ended` reaches its end task once `audit_start` made it (design 36
+            // D17).
+            let (hand_end, end_record) = tokio::sync::oneshot::channel();
+            let (end_id, end_reason) = (id.clone(), reason.clone());
             tokio::spawn(async move {
                 let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
                 *exited.lock() = true;
+                // As the leader left it, before its tree is killed (design 36 § 3, D14).
+                let refused = process_limit_hits(&tree);
                 let deadline = tokio::time::Instant::now() + TREE_DRAIN;
                 // Nothing of the tree outlives its leader: neither its cgroup nor, while the
                 // unreaped leader still holds the group's id, its process group.
@@ -1512,8 +1564,12 @@ mod imp {
                 if let Some(writer) = ending.as_ref().and_then(std::sync::Weak::upgrade) {
                     writer.end().await;
                 }
-                let end = EndRead::of(stall.as_ref(), memory_oom_kills, *imposed.lock());
-                let _ = phase.send(Phase::at_end(ended.ok().filter(|_| drained), end));
+                let end = EndRead::of(stall.as_ref(), memory_oom_kills, refused, *imposed.lock());
+                let ended = Phase::at_end(ended.ok().filter(|_| drained), end);
+                let _ = phase.send(ended);
+                // After the end is published, so neither `wait` nor `observe` waits for it (D20).
+                let observation = Self::observation_of(&end_id, end_reason.as_deref(), ended);
+                super::super::write_run_end(end_record, observation).await;
             });
             Self::watch(
                 cgroup.clone(),
@@ -1526,14 +1582,14 @@ mod imp {
             self.runs.lock().push(Arc::new(LocalRun {
                 id: id.clone(),
                 leader,
-                reason: admitted.insecure_reason().map(str::to_owned),
+                reason,
                 cgroup,
                 phase: observed,
                 captured,
                 stdin: writer,
                 live,
             }));
-            admitted.audit_start(&id, &command.argv[0]);
+            let _ = hand_end.send(admitted.audit_start(&id, &command.argv[0]));
             Ok(id)
         }
     }
@@ -1781,7 +1837,7 @@ mod imp {
             *leader.exited.lock() = true;
             // The drain outlasts the deadline; then the end task reads `imposed` and publishes.
             tokio::time::sleep(Duration::from_millis(250)).await;
-            let end = EndRead::of(None, Some(0), *imposed.lock());
+            let end = EndRead::of(None, Some(0), Some(0), *imposed.lock());
             let _ = phase.send(Phase::at_end(
                 Some(std::process::ExitStatus::from_raw(0)),
                 end,
@@ -1818,7 +1874,7 @@ mod imp {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert_eq!(
-                EndRead::of(None, Some(0), *imposed.lock()).limit,
+                EndRead::of(None, Some(0), Some(0), *imposed.lock()).limit,
                 None,
                 "a run the embedder ended names a limit"
             );
@@ -1881,9 +1937,10 @@ mod imp {
             );
         }
 
-        /// Rule (D4, D8): of an OOM kill in the run's cgroup and the bound the watch imposed,
+        /// Rule (D4, D8, D12): of an OOM kill in the run's cgroup and the bound the watch imposed,
         /// memory is named; with no OOM kill the imposed bound; an unreadable counter is absent,
-        /// never zero, and names no memory limit.
+        /// never zero, and names no memory limit. Refused process creations are kept as read and
+        /// name no limit.
         #[test]
         fn the_end_read_names_memory_before_the_imposed_bound_and_keeps_an_unread_count_absent() {
             for (kills, imposed, limit) in [
@@ -1896,9 +1953,12 @@ mod imp {
                 (Some(0), None, None),
                 (None, None, None),
             ] {
-                let end = EndRead::of(None, kills, imposed);
-                assert_eq!(end.limit, limit, "{kills:?} {imposed:?}");
-                assert_eq!(end.memory_oom_kills, kills, "{kills:?} {imposed:?}");
+                for refused in [None, Some(0), Some(5)] {
+                    let end = EndRead::of(None, kills, refused, imposed);
+                    assert_eq!(end.limit, limit, "{kills:?} {refused:?} {imposed:?}");
+                    assert_eq!(end.memory_oom_kills, kills, "{kills:?} {imposed:?}");
+                    assert_eq!(end.process_limit_hits, refused, "{kills:?} {imposed:?}");
+                }
             }
         }
 
@@ -1917,6 +1977,65 @@ mod imp {
             std::fs::remove_file(&events).expect("removed");
             assert_eq!(oom_kills(cgroup.path()), None);
             assert_eq!(oom_kills(&cgroup.path().join("gone")), None);
+        }
+
+        /// Rule (design 36 D10, D14): the run cgroup's count of refused process creations is
+        /// `pids.events` `max`; a file without it, an unparsable value and a removed cgroup are
+        /// absent, never zero.
+        #[test]
+        fn the_run_cgroups_refused_creations_are_its_pids_max_events_and_absent_where_unreadable() {
+            let cgroup = tempfile::tempdir().expect("cgroup");
+            let events = cgroup.path().join("pids.events");
+            std::fs::write(&events, "max 0\n").expect("events");
+            assert_eq!(process_limit_hits(cgroup.path()), Some(0));
+            std::fs::write(&events, "max 12\n").expect("events");
+            assert_eq!(process_limit_hits(cgroup.path()), Some(12));
+            std::fs::write(&events, "maximum 12\n").expect("events");
+            assert_eq!(process_limit_hits(cgroup.path()), None);
+            std::fs::write(&events, "max many\n").expect("events");
+            assert_eq!(process_limit_hits(cgroup.path()), None);
+            std::fs::remove_file(&events).expect("removed");
+            assert_eq!(process_limit_hits(cgroup.path()), None);
+            assert_eq!(process_limit_hits(&cgroup.path().join("gone")), None);
+        }
+
+        /// Design 36 D10, D14: the run cgroup's count is the number of the `max` line wherever
+        /// the line stands, up to `u64::MAX`, where the line is `max`, one space and the decimal
+        /// number, ended by `\n` or the end of the file. Any other form of that line, an empty
+        /// file, a value past `u64` and a negative or signed value are absent, never zero. The
+        /// rows are the same as those of the host driver's end-of-run case.
+        #[test]
+        fn the_run_cgroups_count_is_the_max_lines_number_and_absent_where_malformed() {
+            let cgroup = tempfile::tempdir().expect("cgroup");
+            let events = cgroup.path().join("pids.events");
+            for (contents, expected) in [
+                ("max 3\n", Some(3)),
+                ("other 9\nmax 3\n", Some(3)),
+                ("max 3\nother 9\n", Some(3)),
+                ("max 3", Some(3)),
+                ("max 03\n", Some(3)),
+                ("max 18446744073709551615\n", Some(u64::MAX)),
+                ("max 3   \n", None),
+                ("  max\t3\n", None),
+                ("max\t3\n", None),
+                (" max 3\n", None),
+                ("max  3\n", None),
+                ("max 3\r\n", None),
+                ("max +3\n", None),
+                ("", None),
+                ("\n", None),
+                ("max\n", None),
+                ("max \n", None),
+                ("max -1\n", None),
+                ("max 18446744073709551616\n", None),
+                ("max 3x\n", None),
+                ("max.imp 3\n", None),
+                ("pids 3\n", None),
+                ("other 9\n", None),
+            ] {
+                std::fs::write(&events, contents).expect("events");
+                assert_eq!(process_limit_hits(cgroup.path()), expected, "{contents:?}");
+            }
         }
     }
 }

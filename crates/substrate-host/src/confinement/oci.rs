@@ -853,13 +853,19 @@ impl OciAdapter {
     }
 
     fn observation(run: &OciRun) -> RunObservation {
-        let (state, exit, limit) = match *run.phase.borrow() {
+        Self::observation_of(&run.id, *run.phase.borrow())
+    }
+
+    /// The observation of a run in `phase`: what `observe` and `wait` return, and what the
+    /// run's monitor writes as `run_ended` (design 36 D15).
+    fn observation_of(id: &RunId, phase: Phase) -> RunObservation {
+        let (state, exit, limit) = match phase {
             Phase::Running => (RunState::Running, None, None),
             Phase::Ended(exit, limit) => (RunState::Ended, Some(exit), limit),
             Phase::Unknown(limit) => (RunState::Unknown, None, limit),
         };
         RunObservation {
-            run: run.id.clone(),
+            run: id.clone(),
             adapter: AdapterName::Oci,
             inner: None,
             declared_insecure: None,
@@ -868,6 +874,9 @@ impl OciAdapter {
             limit,
             // The runtime's state holds a flag, not a count (design 36 D8).
             memory_oom_kills: None,
+            // It passes `--pids-limit`; the state it reads holds no count of refused creations
+            // (design 36 D14).
+            process_limit_hits: None,
         }
     }
 
@@ -1313,13 +1322,15 @@ impl OciAdapter {
         }
         let writer = stdin::child_writer(mode, child.stdin.take());
         let (phase, observed) = watch::channel(Phase::Running);
+        // The run's `run_ended` reaches its monitor once `audit_start` made it (design 36 D17).
+        let (hand_end, end_record) = tokio::sync::oneshot::channel();
         tokio::spawn(monitor(
             program,
             id.clone(),
             child,
             readers,
             bounds.timeout,
-            phase,
+            (phase, end_record),
             writer.as_ref().map(Arc::downgrade),
             live.clone(),
             client_ended,
@@ -1332,7 +1343,7 @@ impl OciAdapter {
             live,
             stopped,
         }));
-        admitted.audit_start(&id, &command.argv[0]);
+        let _ = hand_end.send(admitted.audit_start(&id, &command.argv[0]));
         Ok(id)
     }
 }
@@ -1487,7 +1498,8 @@ async fn create(
 
 /// Watches one started run to its end: its timeout stops live delivery and kills the container,
 /// then the output is drained, the container's state read and the container removed, and the
-/// run's standard input ended, before the phase is published.
+/// run's standard input ended, before the phase is published; then the run's `run_ended` is
+/// written (design 36 D20).
 #[allow(clippy::too_many_arguments)] // The run's client, readers, bound and every end it closes.
 async fn monitor(
     program: PathBuf,
@@ -1495,7 +1507,10 @@ async fn monitor(
     mut child: tokio::process::Child,
     readers: [Option<tokio::task::JoinHandle<()>>; 2],
     timeout: Duration,
-    phase: watch::Sender<Phase>,
+    (phase, end_record): (
+        watch::Sender<Phase>,
+        tokio::sync::oneshot::Receiver<super::RunEndRecord>,
+    ),
     // The run record owns the writer; the monitor only reaches it, so dropping the adapter drops
     // the client's pipe and the container reads end of file.
     writer: Option<std::sync::Weak<StdinWriter>>,
@@ -1552,12 +1567,14 @@ async fn monitor(
     // The stall ended the run only where it came before the client returned (design 36 D5).
     let stalled = live::stall_limit(live.as_ref()).is_some();
     let limit = oci_limit(stalled, deadline_fired, state.as_ref());
-    let _ = phase.send(match (ended, state) {
+    let ended = match (ended, state) {
         (Some(Ok(_)), Some(state)) if removed && !state.running => state
             .exit()
             .map_or(Phase::Unknown(limit), |exit| Phase::Ended(exit, limit)),
         _ => Phase::Unknown(limit),
-    });
+    };
+    let _ = phase.send(ended);
+    super::write_run_end(end_record, OciAdapter::observation_of(&run, ended)).await;
 }
 
 /// Waits until the runtime reports the container started; `false` when the client ended first

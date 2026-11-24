@@ -185,6 +185,17 @@ pub(crate) fn open(request: LinuxRequest) -> Result<Arc<dyn ConfinementAdapter>,
 #[cfg(target_os = "linux")]
 pub use imp::proof;
 
+/// The adapter itself, for `systemd` around `linux`, whose task awaits the end of a run of it
+/// (design 36 D20).
+#[cfg(target_os = "linux")]
+pub(crate) use imp::LinuxAdapter;
+
+/// [`open`], returning the adapter itself.
+#[cfg(target_os = "linux")]
+pub(crate) fn open_adapter(request: LinuxRequest) -> Result<Arc<LinuxAdapter>, ConfinementError> {
+    imp::open_adapter(request)
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use std::collections::{BTreeSet, HashMap};
@@ -228,6 +239,12 @@ mod imp {
     pub(super) fn open(
         request: LinuxRequest,
     ) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
+        Ok(open_adapter(request)?)
+    }
+
+    pub(super) fn open_adapter(
+        request: LinuxRequest,
+    ) -> Result<Arc<LinuxAdapter>, ConfinementError> {
         let driver = HostDriver::open(request.config).map_err(|error| {
             if error.code == PLATFORM_UNSERVED {
                 ConfinementError::AdapterUnserved {
@@ -611,12 +628,42 @@ mod imp {
                             }
                         });
                     }
-                    admitted.audit_start(&run, &command.argv[0]);
+                    let end = admitted.audit_start(&run, &command.argv[0]);
+                    // A task of its own per run that has a sink, and none without (design 36
+                    // D19, D20): it is spawned after `run_started`, so it holds the value itself.
+                    if !end.is_inert() {
+                        let ended = self.ended_observation(&run);
+                        tokio::spawn(async move {
+                            // An exec the driver no longer tracks leaves the value unwritten,
+                            // and its drop writes `unknown` (D22).
+                            if let Some(observation) = ended.await {
+                                end.write(observation).finished().await;
+                            }
+                        });
+                    }
                     Ok(run)
                 }
                 DispatchOutcome::NotDispatched(error)
                 | DispatchOutcome::ContainedAbsent(error)
                 | DispatchOutcome::OutcomeUnknown(error) => Err(ConfinementError::Driver(error)),
+            }
+        }
+
+        /// The run's end as its own observation reads it, once the driver published the exec's
+        /// end (design 36 D20): it awaits `ProcessRuntime::wait_ended` and observes the exec once.
+        /// `None` for an exec the driver does not track. The future holds the driver, not the
+        /// adapter, so dropping the adapter loses no record (D21).
+        pub(crate) fn ended_observation(
+            &self,
+            run: &RunId,
+        ) -> impl std::future::Future<Output = Option<RunObservation>> + Send + use<> {
+            let driver = Arc::clone(&self.driver);
+            let run = run.clone();
+            async move {
+                driver.processes.wait_ended(run.as_str()).await;
+                let observed = driver.observe_exec(run.as_str()).await.ok()?;
+                let observation = Self::observation(&run, &observed);
+                (observation.state != RunState::Running).then_some(observation)
             }
         }
 
@@ -646,6 +693,8 @@ mod imp {
                     )
                 },
                 memory_oom_kills: observed.end_of_run.and_then(|end| end.memory_oom_kills),
+                // The ended count; `observe` reads a running run's own (design 36 D13).
+                process_limit_hits: observed.end_of_run.and_then(|end| end.process_limit_hits),
             }
         }
     }
@@ -822,8 +871,12 @@ mod imp {
 
         async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
             let observed = self.driver.observe_exec(run.as_str()).await?;
-            let observation = Self::observation(run, &observed);
-            if observation.state != RunState::Running {
+            let mut observation = Self::observation(run, &observed);
+            if observation.state == RunState::Running {
+                // Read at this moment, here and not in `wait`'s loop (design 36 D13).
+                observation.process_limit_hits =
+                    self.driver.running_process_limit_hits(run.as_str());
+            } else {
                 self.ended(run).await;
             }
             Ok(observation)
@@ -933,6 +986,7 @@ mod imp {
         fn end(after_exit: bool, oom_kills: u64, egress: bool) -> crate::EndOfRun {
             crate::EndOfRun {
                 memory_oom_kills: Some(oom_kills),
+                process_limit_hits: Some(0),
                 output_stall_after_exit: after_exit,
                 egress_ceiling_reached: egress,
             }
@@ -1367,6 +1421,129 @@ mod imp {
                 "a fact an entry names is never proved"
             );
             assert_eq!(own.withheld, entries);
+        }
+
+        /// Design 36 D12 on `linux` in the gate's test step: a count of refused process
+        /// creations above zero names no limit and changes none, for every code the driver
+        /// writes on an ended exec, with and without a stall after the exit.
+        #[test]
+        fn a_count_of_refused_creations_names_no_limit_on_linux() {
+            let with = |hits: Option<u64>, after_exit: bool, oom: u64, egress: bool| {
+                let mut end = end(after_exit, oom, egress);
+                end.process_limit_hits = hits;
+                end
+            };
+            for code in [
+                Some(substrate_wire::SESSION_OUTPUT_BACKPRESSURE),
+                Some("exec.aperture-byte-limit"),
+                Some("exec.memory-limit"),
+                Some("exec.cpu-limit"),
+                Some("exec.timeout"),
+                Some("exec.metrics-unavailable"),
+                Some(substrate_wire::SESSION_OUTPUT_LIMIT),
+                None,
+            ] {
+                for (after_exit, oom, egress) in [
+                    (false, 0, false),
+                    (true, 0, false),
+                    (true, 1, false),
+                    (true, 0, true),
+                ] {
+                    let counted = ended_limit(code, Some(with(Some(9), after_exit, oom, egress)));
+                    for hits in [None, Some(0)] {
+                        assert_eq!(
+                            counted,
+                            ended_limit(code, Some(with(hits, after_exit, oom, egress))),
+                            "{code:?} {after_exit} {oom} {egress}: a count of 9 changed the limit"
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                ended_limit(None, Some(with(Some(9), false, 0, false))),
+                None
+            );
+        }
+
+        /// An exec observation in `state`, its end read as `end_of_run`, with `refusal`.
+        fn exec_observation(
+            state: ExecState,
+            refusal: Option<&str>,
+            end_of_run: Option<crate::EndOfRun>,
+        ) -> crate::ExecObservation {
+            crate::ExecObservation {
+                resource: substrate_wire::Exec {
+                    unrecorded_output: None,
+                    id: "ex_count".to_owned(),
+                    kind: substrate_wire::ExecKind::Exec,
+                    workspace: "ws_test".to_owned(),
+                    state,
+                    observed_at: chrono::Utc::now(),
+                    requested: ConfinementRequest {
+                        requires: None,
+                        capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+                        network: NetworkMode::None,
+                        aperture: None,
+                        apertures: Vec::new(),
+                        profile: SandboxProfile::Workspace,
+                        required: true,
+                    },
+                    applied: None,
+                    exit: (state != ExecState::Running).then_some(substrate_wire::ExecExit {
+                        code: None,
+                        signal: Some(Signal::Kill),
+                    }),
+                    usage: None,
+                    lease: None,
+                    refusal: refusal.map(|code| substrate_wire::ExecRefusal {
+                        class: substrate_wire::ErrorClass::Exhausted,
+                        code: code.to_owned(),
+                        message: "bound".to_owned(),
+                    }),
+                },
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                stdout_kept: None,
+                stderr_kept: None,
+                output_complete: state != ExecState::Running,
+                cgroup: Some("substrate-ex_count".to_owned()),
+                leader_pid: None,
+                end_of_run,
+            }
+        }
+
+        /// Design 36 D9, D12, D14 on `linux` in the gate's test step: the ended observation
+        /// (which `wait`, `observe` and `run_ended` all take) carries the count the driver read
+        /// at the end, unchanged; the wall-time bound that ended the run is the limit it names;
+        /// an end without a count, or no end read, is absent, never zero; and the observation
+        /// function itself reads nothing for a running exec.
+        #[test]
+        fn the_ended_linux_observation_carries_the_drivers_end_of_run_count() {
+            let run = RunId::new("ex_count".to_owned());
+            let mut read = end(false, 0, false);
+            read.process_limit_hits = Some(7);
+            let ended = LinuxAdapter::observation(
+                &run,
+                &exec_observation(ExecState::Cancelled, Some("exec.timeout"), Some(read)),
+            );
+            assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+            assert_eq!(ended.limit, Some(RunLimit::WallTime), "{ended:?}");
+            assert_eq!(ended.process_limit_hits, Some(7), "{ended:?}");
+            read.process_limit_hits = None;
+            let unread = LinuxAdapter::observation(
+                &run,
+                &exec_observation(ExecState::Exited, None, Some(read)),
+            );
+            assert_eq!(unread.process_limit_hits, None, "{unread:?}");
+            let rebuilt =
+                LinuxAdapter::observation(&run, &exec_observation(ExecState::Exited, None, None));
+            assert_eq!(rebuilt.process_limit_hits, None, "{rebuilt:?}");
+            let running =
+                LinuxAdapter::observation(&run, &exec_observation(ExecState::Running, None, None));
+            assert_eq!(running.state, RunState::Running, "{running:?}");
+            assert_eq!(running.process_limit_hits, None, "{running:?}");
         }
     }
 }

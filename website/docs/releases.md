@@ -96,6 +96,75 @@ A release that moves the contract bundle needs its SDK clients upgraded with the
   kill count, read before the cgroup is removed, and absent when it cannot be read. The host
   driver's `ExecObservation` carries it in the new `end_of_run` member (`EndOfRun`), read for
   every exec whether or not it asked for measurements.
+- `AuditRecord::RunEnded`, written as `"event": "run_ended"` (design 36, story 3): every run an
+  admitted profile with an audit sink starts puts exactly one record of its end into that sink,
+  after its `run_started`, whether or not anyone observes or waits on the run, and also when the
+  adapter was dropped first. It names the run, the profile, the adapter and its inner adapter,
+  the reason a `local` profile is declared insecure, the state (`ended`, or `unknown` where the
+  end could not be established), the exit, the limit that ended the run and the run cgroup's OOM
+  kill count; an absent member is omitted. The record is written once the run's end is published,
+  on a thread of its own named `substrate-run-ended`, so a sink may receive it after `wait`
+  returned, and a sink that blocks or panics on it delays neither `wait`, nor another run, nor
+  another record, whatever the size of the runtime's blocking pool, on a current-thread runtime
+  and with no runtime; a sink that panics is contained where the consumer is built with
+  `panic = "unwind"`. The thread enters the runtime current when the run's end was handed to it,
+  so a sink that reaches the runtime on `run_started` reaches it on `run_ended`. The run's end
+  task waits on a channel until the sink returned; a runtime that drops the task before that
+  joins the record's thread, so once a runtime's drop returned, the `run_ended` of every run that
+  ended under it is in the sink, and a sink that never returns holds that drop. A sink is a
+  synchronous call: it may hand work to the runtime it finds current (a spawn, a channel send)
+  and must not wait on that runtime (`Handle::block_on`, a blocking wait for a task, a timer or
+  I/O of it), because once nothing drives that runtime (on a current-thread runtime once its
+  `block_on` returned, or once its drop began) nothing drives that wait, the sink does not return
+  and the drop does not return. On `pod`, `start` and the run's monitor meet in one cell: the
+  side that comes second, the publication of the run's end or `start` handing over its value,
+  hands the ended record to its thread before it returns, so in either order a runtime dropped
+  right after cannot record that run `unknown`. Where the system refuses the thread, the record
+  goes to the runtime's blocking pool, or, with no runtime or where that pool is shutting down,
+  is written on the calling thread; on every path it is written once and a panicking sink is
+  contained. An end task dropped before the run ended, such as at runtime shutdown, writes
+  `state: unknown` on the dropping thread, and nothing from a thread that is panicking. A
+  profile without a sink starts no task and no thread for it. `observe`, `wait` and every other
+  call write no record. Held by thirteen unit cases of the record, its one-shot value, its
+  thread and the end task's guard, five `pod` unit cases (the monitor's deadline, the value
+  handed before and after the publication with a runtime dropped right after, a publication
+  without a value, and a value whose monitor never published), fourteen cases of
+  `ess_confinement_local` (among them a sink that blocks on a one-thread blocking pool, a sink
+  that panics, a sink that reaches the runtime, a sink that spawns and sends while its runtime
+  drops, a runtime dropped while the run runs, a runtime dropped after the run ended under a
+  sink that takes 500 ms, the limit the observation names,
+  `limit_a_sink_that_waits_on_its_runtime_holds_that_runtimes_drop`, which holds that a sink
+  waiting 200 ms on its current-thread runtime's timer still holds that runtime's drop 1 s after
+  it began, and its counterpart, where the runtime still drives that timer and the drop returns)
+  and lane cases on `linux`, `systemd` around both inner adapters, `oci`,
+  `pod` and `macos` (`ESS confinement … run ended`, the delegated ones required by name in
+  `scripts/delegated-lane.sh`). The `oci` case runs in the gate's test step; its start and its
+  record share what is left of 50 s after the adapter opened.
+- `RunObservation.process_limit_hits` and the same member of `run_ended` (design 36, story 2):
+  the number of process creations a process bound refused, the `max` counter of `pids.events` in
+  the run's cgroup. Where the cgroup has no `pids.events.local`, the kernel counts there every
+  creation refused for a process of the cgroup, also by the bound of a cgroup above it, so
+  `systemd` runs whose run cgroups share a bound above them each count what that bound refused;
+  where it has that file and the cgroup2 mount has no `pids_localevents`, it counts the hits of
+  the cgroup's own bound and of any bound beneath it. `linux` and `systemd` report it: on an
+  ended run the count read once the leader exited and before the cgroup is removed, and on
+  `observe` of a running run the count at that moment, which between the end's read and the end
+  of the tree's kill can be higher than the ended count; `0` says the counter was read and
+  nothing was refused. A `pids.events` whose `max` line is not `max`, one space and a decimal
+  number gives an absent count. `oci`, `pod`,
+  `local` and `macos` leave it absent, and so does a read that failed, which never fails
+  `observe`. A hit ends no run and names no limit: a run that hits its process bound and then its
+  timeout names `wall_time` and a count above zero. The host driver reads the counter for every
+  exec, measured or not, into the new `EndOfRun::process_limit_hits`. Held by unit cases of the
+  one parser of `pids.events`, which the driver's read and the `systemd` read share (the same 23
+  texts through each read), of the driver's read, of the record, of the `linux` observation that
+  carries the driver's ended count and of a count that names no limit, by
+  `ess_confinement_local` (absent on the observation and on the record), and by lane cases on
+  `linux` and `systemd` around `local` (`ESS confinement … process limit hits …`), on `oci`,
+  `pod` and `macos` (absent on the ended observation and on the record), and by
+  `consumer_surface`'s run held to
+  an allow-list and a deny-list that hits its process bound and then its timeout, which
+  `scripts/delegated-lane.sh` requires by name.
 
 ### Changed in 0.27.0
 
@@ -116,6 +185,8 @@ A release that moves the contract bundle needs its SDK clients upgraded with the
   names every variant needs a wildcard arm (`_ => …`); a `match` that has one, an `if let` or
   `matches!` on one variant, and building a variant compile unchanged. A struct expression of the
   host driver's `ExecObservation` names `end_of_run`.
+- `RunState` and `RunExit` implement `Serialize`: a state as its snake-case name, an exit as an
+  object whose absent `code` or `signal` is omitted.
 - The host driver records an exec's end by these rules where two ends are ready at once: a child
   that exited before its deadline is never recorded timed out (the exit is taken first, and the
   `oci` adapter takes its runtime client's return first in the same way), and a run past both its
