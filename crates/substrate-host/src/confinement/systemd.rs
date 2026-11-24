@@ -165,8 +165,8 @@ mod imp {
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
         ConfinementProfile, ContractFamily, FACT_ORDER, FAMILY_ORDER, Fact, InnerAdapter,
-        OutputEvent, ProcessBounds, RenderedCommand, RunExit, RunId, RunObservation, RunOutput,
-        RunState,
+        OutputEvent, ProcessBounds, RenderedCommand, RunExit, RunId, RunLimit, RunObservation,
+        RunOutput, RunState, named_limit,
     };
     use super::{
         InnerRequest, SESSION_BUS_ENV, SYSTEMD_MAX_TRACKED_RUNS, SYSTEMD_OUTPUT_LIMIT_BYTES,
@@ -778,9 +778,71 @@ mod imp {
     #[derive(Debug, Clone, Copy)]
     enum Phase {
         Running,
-        Ended(RunExit),
+        Ended(RunExit, EndRead),
         /// The leader ended, and the tree did not leave its cgroup in time.
-        Unknown,
+        Unknown(EndRead),
+    }
+
+    impl Phase {
+        /// The phase of an ended leader: `Ended` with its status, or `Unknown` where its wait
+        /// failed or its tree did not drain (`None`).
+        fn at_end(status: Option<std::process::ExitStatus>, end: EndRead) -> Self {
+            match status {
+                Some(status) => Self::Ended(
+                    RunExit {
+                        code: status.code(),
+                        signal: status.signal(),
+                    },
+                    end,
+                ),
+                None => Self::Unknown(end),
+            }
+        }
+    }
+
+    /// What the run's end task read of the run's end beside its exit, before it removed the
+    /// run's cgroup (design 36 D7, D8).
+    #[derive(Debug, Clone, Copy, Default)]
+    struct EndRead {
+        limit: Option<RunLimit>,
+        memory_oom_kills: Option<u64>,
+    }
+
+    impl EndRead {
+        /// Design 36 D7, in D4's order: the stall, an OOM kill in the run's cgroup, and the bound
+        /// the watch ended the run for.
+        fn of(
+            stall: Option<&Arc<LiveOutput>>,
+            memory_oom_kills: Option<u64>,
+            imposed: Option<RunLimit>,
+        ) -> Self {
+            let reached: Vec<RunLimit> = [
+                live::stall_limit(stall),
+                memory_oom_kills
+                    .is_some_and(|kills| kills > 0)
+                    .then_some(RunLimit::Memory),
+                imposed,
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            Self {
+                limit: named_limit(&reached),
+                memory_oom_kills,
+            }
+        }
+    }
+
+    /// `memory.events` `oom_kill` of a run's cgroup; `None` where it cannot be read (design 36
+    /// D8: absent, never zero).
+    fn oom_kills(cgroup: &Path) -> Option<u64> {
+        std::fs::read_to_string(cgroup.join("memory.events"))
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("oom_kill "))?
+            .trim()
+            .parse()
+            .ok()
     }
 
     struct LocalRun {
@@ -915,17 +977,70 @@ mod imp {
         /// Set, under this lock, after the leader exited and before it is reaped: while it is
         /// false the leader's pid still names this run's process group.
         exited: Arc<Mutex<bool>>,
+        /// Set under `exited`'s lock when the embedder's `KILL` ends the run, before the signal:
+        /// the watch, which decides under the same lock, then imposes nothing.
+        stopped: Arc<AtomicBool>,
     }
 
     impl Leader {
-        /// `KILL` to the leader and its process group, unless it has exited; held across `kill`,
-        /// so the run's task cannot reap the leader meanwhile and the pid cannot name another
-        /// process.
-        fn kill(&self) {
+        fn new(pid: i32) -> Self {
+            Self {
+                pid,
+                exited: Arc::new(Mutex::new(false)),
+                stopped: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        /// The embedder's `KILL`: the run's tree through `cgroup.kill` and the leader's group,
+        /// recorded first under the lock the watch decides under, so the run names no limit. The
+        /// lock is held across `kill`, as in every end below, so the run's task cannot reap the
+        /// leader meanwhile and the pid cannot name another process.
+        fn stop(&self, cgroup: &Path) -> std::io::Result<()> {
             let exited = self.exited.lock();
+            self.stopped.store(true, Ordering::Release);
+            let killed = kill_tree(cgroup);
             if !*exited {
                 kill_group(self.pid);
             }
+            killed
+        }
+
+        /// The stall's end ([`live::Kill`]): the tree and the leader's group, as `stop` ends
+        /// them. Answers whether the leader had neither exited nor been stopped by the embedder,
+        /// decided under the lock `stop` records under, so the stall ended the run (D1, D5).
+        fn end_stalled(&self, cgroup: &Path) -> bool {
+            let exited = self.exited.lock();
+            let running = !*exited
+                && !self.stopped.load(Ordering::Acquire)
+                && !live::exited_unreaped(self.pid);
+            let _ = kill_tree(cgroup);
+            if !*exited {
+                kill_group(self.pid);
+            }
+            running
+        }
+
+        /// The watch's end for `limit` (design 36 D7): decided under the lock, and only while the
+        /// leader has neither exited, by itself or its unreaped exit, nor been stopped by the
+        /// embedder. Then `limit` is recorded in `imposed` before live delivery stops and the
+        /// tree and the leader's group are killed.
+        fn impose(
+            &self,
+            limit: RunLimit,
+            imposed: &Mutex<Option<RunLimit>>,
+            live: Option<&Arc<LiveOutput>>,
+            cgroup: &Path,
+        ) {
+            let exited = self.exited.lock();
+            if *exited || self.stopped.load(Ordering::Acquire) || live::exited_unreaped(self.pid) {
+                return;
+            }
+            *imposed.lock() = Some(limit);
+            if let Some(live) = live {
+                live.close();
+            }
+            let _ = kill_tree(cgroup);
+            kill_group(self.pid);
         }
     }
 
@@ -1060,10 +1175,10 @@ mod imp {
         }
 
         fn observation(run: &LocalRun) -> RunObservation {
-            let (state, exit) = match *run.phase.borrow() {
-                Phase::Running => (RunState::Running, None),
-                Phase::Ended(exit) => (RunState::Ended, Some(exit)),
-                Phase::Unknown => (RunState::Unknown, None),
+            let (state, exit, end) = match *run.phase.borrow() {
+                Phase::Running => (RunState::Running, None, EndRead::default()),
+                Phase::Ended(exit, end) => (RunState::Ended, Some(exit), end),
+                Phase::Unknown(end) => (RunState::Unknown, None, end),
             };
             RunObservation {
                 run: run.id.clone(),
@@ -1072,7 +1187,8 @@ mod imp {
                 declared_insecure: run.reason.clone(),
                 state,
                 exit,
-                memory_oom_kills: None,
+                limit: end.limit,
+                memory_oom_kills: end.memory_oom_kills,
             }
         }
 
@@ -1146,14 +1262,19 @@ mod imp {
             Ok(())
         }
 
-        /// Ends the tree, its cgroup and its leader's process group, at the run's timeout or once
-        /// its cumulative CPU passes its budget: an imposed end, which stops live delivery first.
+        /// Ends the tree, its cgroup and its leader's process group, once its cumulative CPU
+        /// passes its budget or at the run's timeout: an imposed end, which stops live delivery
+        /// first. The bound it ends the run for is written to `imposed` before the kill, and only
+        /// while the leader has not exited and the embedder has not stopped it
+        /// ([`Leader::impose`]); the CPU budget is asked first, so a tick in which both are true
+        /// names `CpuTime` (design 36 D4).
         fn watch(
             cgroup: PathBuf,
             leader: Leader,
             bounds: ProcessBounds,
             mut phase: watch::Receiver<Phase>,
             live: Option<Arc<LiveOutput>>,
+            imposed: Arc<Mutex<Option<RunLimit>>>,
         ) {
             let deadline = Instant::now() + Duration::from_millis(bounds.timeout_ms);
             let budget = bounds.cpu_millis.saturating_mul(1_000);
@@ -1167,14 +1288,17 @@ mod imp {
                     if stop.is_ok() {
                         return;
                     }
-                    if Instant::now() >= deadline
-                        || cpu_usage_micros(&cgroup).is_some_and(|used| used >= budget)
-                    {
-                        if let Some(live) = &live {
-                            live.close();
-                        }
-                        let _ = kill_tree(&cgroup);
-                        leader.kill();
+                    let reached = if cpu_usage_micros(&cgroup).is_some_and(|used| used >= budget) {
+                        Some(RunLimit::CpuTime)
+                    } else if Instant::now() >= deadline {
+                        Some(RunLimit::WallTime)
+                    } else {
+                        None
+                    };
+                    // A leader that exited, or that the embedder stopped, is not ended by a
+                    // bound: the watch then records nothing and leaves the end to the end task.
+                    if let Some(limit) = reached {
+                        leader.impose(limit, &imposed, live.as_ref(), &cgroup);
                         return;
                     }
                 }
@@ -1249,9 +1373,7 @@ mod imp {
                 if let Some(live) = &run.live {
                     live.close();
                 }
-                let killed = kill_tree(&run.cgroup);
-                run.leader.kill();
-                return killed.map_err(|error| {
+                return run.leader.stop(&run.cgroup).map_err(|error| {
                     DriverError::failed("exec.signal-failed", format!("systemd kill: {error}"))
                         .into()
                 });
@@ -1343,19 +1465,13 @@ mod imp {
                 output_limit,
             )));
             let (phase, observed) = watch::channel(Phase::Running);
-            let leader = Leader {
-                pid,
-                exited: Arc::new(Mutex::new(false)),
-            };
+            let leader = Leader::new(pid);
             // A stall ends the run as `signal(Kill)` does: the whole tree and the leader's group.
             let (live, [stdout_feed, stderr_feed]) =
                 live::open(admitted.profile().output_delivery, || {
                     let cgroup = cgroup.clone();
                     let leader = leader.clone();
-                    Box::new(move || {
-                        let _ = kill_tree(&cgroup);
-                        leader.kill();
-                    })
+                    Box::new(move || leader.end_stalled(&cgroup))
                 });
             let stdout = child.stdout.take().map(|stream| {
                 tokio::spawn(drain(stream, Arc::clone(&captured), true, stdout_feed))
@@ -1365,6 +1481,9 @@ mod imp {
             });
             let exited = Arc::clone(&leader.exited);
             let tree = cgroup.clone();
+            let imposed = Arc::new(Mutex::new(None));
+            let watched = Arc::clone(&imposed);
+            let stall = live.clone();
             tokio::spawn(async move {
                 let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
                 *exited.lock() = true;
@@ -1386,18 +1505,15 @@ mod imp {
                         closed = false;
                     }
                 }
+                // Read before `drain_tree` removes the cgroup it lives in (design 36 D8).
+                let memory_oom_kills = oom_kills(&tree);
                 let drained = drain_tree(&tree, deadline).await && closed;
                 // The run's end, for its standard input too (design 32 § 2).
                 if let Some(writer) = ending.as_ref().and_then(std::sync::Weak::upgrade) {
                     writer.end().await;
                 }
-                let _ = phase.send(match ended {
-                    Ok(status) if drained => Phase::Ended(RunExit {
-                        code: status.code(),
-                        signal: status.signal(),
-                    }),
-                    _ => Phase::Unknown,
-                });
+                let end = EndRead::of(stall.as_ref(), memory_oom_kills, *imposed.lock());
+                let _ = phase.send(Phase::at_end(ended.ok().filter(|_| drained), end));
             });
             Self::watch(
                 cgroup.clone(),
@@ -1405,6 +1521,7 @@ mod imp {
                 bounds,
                 observed.clone(),
                 live.clone(),
+                watched,
             );
             self.runs.lock().push(Arc::new(LocalRun {
                 id: id.clone(),
@@ -1610,6 +1727,196 @@ mod imp {
             // Nothing at or above the root is read.
             std::fs::write(root.path().join("io.max"), "1\n").expect("root");
             assert!(enclosing_bound(root.path(), &leaf, "io.max").is_err());
+        }
+    }
+
+    /// Design 36, story 1, on `systemd` around `local`: the limit a run names is one the watch
+    /// imposed to end it, recorded before its kill (D7), in D4's order (`EndRead::of`). A
+    /// directory written as files stands for the run's cgroup; no case needs a delegated scope.
+    #[cfg(test)]
+    mod limit_tests {
+        use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+
+        use super::*;
+
+        /// A run's cgroup as files: `cpu.stat` at `usage_usec`. The watch's kill writes
+        /// `cgroup.kill` as a plain file.
+        fn cgroup_at(usage_usec: u64) -> tempfile::TempDir {
+            let cgroup = tempfile::tempdir().expect("cgroup");
+            std::fs::write(
+                cgroup.path().join("cpu.stat"),
+                format!("usage_usec {usage_usec}\n"),
+            )
+            .expect("cpu.stat");
+            cgroup
+        }
+
+        /// Rule: a run whose leader exited on its own before its deadline names no limit, also
+        /// when the deadline passes while the end task still drains the tree and has not
+        /// published the end. The leader exits 100 ms into a 200 ms deadline; the end is read
+        /// and published 250 ms later.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_run_whose_leader_exited_before_its_deadline_names_no_limit_while_its_tree_drains()
+         {
+            let cgroup = cgroup_at(0);
+            // Never signalled: by the time the watch fires the leader reads exited.
+            let leader = Leader::new(i32::MAX);
+            let (phase, observed) = watch::channel(Phase::Running);
+            let imposed = Arc::new(Mutex::new(None));
+            SystemdLocal::watch(
+                cgroup.path().to_path_buf(),
+                leader.clone(),
+                ProcessBounds {
+                    timeout_ms: 200,
+                    processes: 8,
+                    memory_bytes: 64 << 20,
+                    cpu_millis: 60_000,
+                },
+                observed,
+                None,
+                Arc::clone(&imposed),
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // What the end task does once `await_exit_unreaped` returned.
+            *leader.exited.lock() = true;
+            // The drain outlasts the deadline; then the end task reads `imposed` and publishes.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let end = EndRead::of(None, Some(0), *imposed.lock());
+            let _ = phase.send(Phase::at_end(
+                Some(std::process::ExitStatus::from_raw(0)),
+                end,
+            ));
+            assert_eq!(
+                end.limit, None,
+                "a run whose leader exited 0 before its deadline names a limit"
+            );
+        }
+
+        /// Rule: a run the embedder's `KILL` ended names no limit, also when its deadline passes
+        /// before the end task has read the end. The embedder stops the run; the watch's 1 ms
+        /// deadline passes 100 ms before the end is read.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_run_the_embedder_stopped_names_no_limit_when_its_deadline_passes_after() {
+            let cgroup = cgroup_at(0);
+            // No such process group: the stop's signals reach nothing.
+            let leader = Leader::new(i32::MAX);
+            leader.stop(cgroup.path()).expect("cgroup.kill written");
+            let (_phase, observed) = watch::channel(Phase::Running);
+            let imposed = Arc::new(Mutex::new(None));
+            SystemdLocal::watch(
+                cgroup.path().to_path_buf(),
+                leader,
+                ProcessBounds {
+                    timeout_ms: 1,
+                    processes: 8,
+                    memory_bytes: 64 << 20,
+                    cpu_millis: 60_000,
+                },
+                observed,
+                None,
+                Arc::clone(&imposed),
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                EndRead::of(None, Some(0), *imposed.lock()).limit,
+                None,
+                "a run the embedder ended names a limit"
+            );
+        }
+
+        /// Rule (D1, D5): a stall's kill that takes the leader's lock after the embedder's `KILL`
+        /// answers that it ended nothing, so the run names no `OutputStall`. The stall closed the
+        /// queue; the embedder's `KILL` then ran in full (`signal`: its `close` finds the queue
+        /// closed, then `Leader::stop`); then the stall's kill takes the lock. The stand-in pid
+        /// names no child, so `exited_unreaped` answers `false`, as it does for a leader whose
+        /// `SIGKILL` the kernel has not acted on yet.
+        #[test]
+        fn a_stalls_kill_after_the_embedders_kill_answers_that_it_ended_nothing() {
+            let cgroup = cgroup_at(0);
+            let leader = Leader::new(i32::MAX);
+            leader.stop(cgroup.path()).expect("cgroup.kill written");
+            assert!(
+                !leader.end_stalled(cgroup.path()),
+                "a stall's kill after the embedder stopped the run answers that it ended the run, \
+                 so the run names `OutputStall`"
+            );
+        }
+
+        /// Rule (D4, D7): one tick in which the CPU budget and the deadline are both passed
+        /// names `CpuTime`, and the record is written before the kill reaches the run.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_tick_past_both_the_cpu_budget_and_the_deadline_records_cpu_time_before_the_kill()
+        {
+            let cgroup = cgroup_at(5_000_000);
+            let mut child = std::process::Command::new("/bin/sh")
+                .args(["-c", "exec sleep 30"])
+                .process_group(0)
+                .spawn()
+                .expect("a leader");
+            let leader = Leader::new(i32::try_from(child.id()).expect("pid"));
+            let (_phase, observed) = watch::channel(Phase::Running);
+            let imposed = Arc::new(Mutex::new(None));
+            SystemdLocal::watch(
+                cgroup.path().to_path_buf(),
+                leader,
+                ProcessBounds {
+                    timeout_ms: 1,
+                    processes: 8,
+                    memory_bytes: 64 << 20,
+                    cpu_millis: 1,
+                },
+                observed,
+                None,
+                Arc::clone(&imposed),
+            );
+            let status = tokio::task::spawn_blocking(move || child.wait())
+                .await
+                .expect("joined")
+                .expect("waited");
+            assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+            assert_eq!(*imposed.lock(), Some(RunLimit::CpuTime));
+            assert_eq!(
+                std::fs::read_to_string(cgroup.path().join("cgroup.kill")).expect("killed"),
+                "1"
+            );
+        }
+
+        /// Rule (D4, D8): of an OOM kill in the run's cgroup and the bound the watch imposed,
+        /// memory is named; with no OOM kill the imposed bound; an unreadable counter is absent,
+        /// never zero, and names no memory limit.
+        #[test]
+        fn the_end_read_names_memory_before_the_imposed_bound_and_keeps_an_unread_count_absent() {
+            for (kills, imposed, limit) in [
+                (Some(1), Some(RunLimit::WallTime), Some(RunLimit::Memory)),
+                (Some(2), Some(RunLimit::CpuTime), Some(RunLimit::Memory)),
+                (Some(1), None, Some(RunLimit::Memory)),
+                (Some(0), Some(RunLimit::CpuTime), Some(RunLimit::CpuTime)),
+                (Some(0), Some(RunLimit::WallTime), Some(RunLimit::WallTime)),
+                (None, Some(RunLimit::WallTime), Some(RunLimit::WallTime)),
+                (Some(0), None, None),
+                (None, None, None),
+            ] {
+                let end = EndRead::of(None, kills, imposed);
+                assert_eq!(end.limit, limit, "{kills:?} {imposed:?}");
+                assert_eq!(end.memory_oom_kills, kills, "{kills:?} {imposed:?}");
+            }
+        }
+
+        /// Rule (D8): the end-of-run count reads `oom_kill` and never `oom_group_kill`; a file
+        /// without it, an unparsable value and a removed cgroup are absent, never zero.
+        #[test]
+        fn the_run_cgroups_oom_count_is_its_own_oom_kill_and_absent_where_unreadable() {
+            let cgroup = tempfile::tempdir().expect("cgroup");
+            let events = cgroup.path().join("memory.events");
+            std::fs::write(&events, "oom_group_kill 7\noom 3\noom_kill 2\n").expect("events");
+            assert_eq!(oom_kills(cgroup.path()), Some(2));
+            std::fs::write(&events, "oom_group_kill 7\noom 3\n").expect("events");
+            assert_eq!(oom_kills(cgroup.path()), None);
+            std::fs::write(&events, "oom_kill many\n").expect("events");
+            assert_eq!(oom_kills(cgroup.path()), None);
+            std::fs::remove_file(&events).expect("removed");
+            assert_eq!(oom_kills(cgroup.path()), None);
+            assert_eq!(oom_kills(&cgroup.path().join("gone")), None);
         }
     }
 }

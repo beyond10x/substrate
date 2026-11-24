@@ -13,7 +13,7 @@ use substrate_wire::Signal;
 
 use super::{
     AdapterName, AdmittedProfile, Api, Command, ConfinementError, PodAdapter, PodRequest, PodRun,
-    PodTiming, RunId,
+    PodTiming, RunId, StopOrigin,
 };
 
 /// What `pod.rs` names of `b10x-substrate-kubernetes-client`.
@@ -48,6 +48,7 @@ pub(super) async fn request_stop(
     _run: &PodRun,
     _signal: Signal,
     _grace_seconds: u64,
+    _origin: StopOrigin,
 ) -> Result<(), String> {
     match api.client {}
 }

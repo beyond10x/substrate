@@ -130,7 +130,7 @@ confinement/mod.rs: enum ConfinementError > ExecDeniedPathsExceeded {adapter: Ad
 confinement/mod.rs: enum ConfinementError > Driver(#[from] DriverError),
 confinement/mod.rs: impl ConfinementError > pub fn code(&self) -> &'static str
 confinement/mod.rs: impl ConfinementError > pub fn status(&self) -> u16
-confinement/mod.rs: #[derive(Debug, Clone, PartialEq, Serialize)] #[serde(tag = "event", rename_all = "snake_case")] pub enum AuditRecord
+confinement/mod.rs: #[derive(Debug, Clone, PartialEq, Serialize)] #[serde(tag = "event", rename_all = "snake_case")] #[non_exhaustive] pub enum AuditRecord
 confinement/mod.rs: enum AuditRecord > ProfileAdmitted {profile: ProfileId, adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, families: Vec<ContractFamily>, facts: Vec<Fact>, declared_insecure: bool, #[serde(skip_serializing_if = "Option::is_none")] local_reason: Option<String>},
 confinement/mod.rs: enum AuditRecord > ProfileRefused {adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, code: &'static str, #[serde(skip_serializing_if = "Option::is_none")] family: Option<ContractFamily>, #[serde(skip_serializing_if = "Option::is_none")] fact: Option<Fact>, #[serde(skip_serializing_if = "Option::is_none")] field: Option<ReservedField>},
 confinement/mod.rs: enum AuditRecord > RunStarted {run: RunId, profile: ProfileId, adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, #[serde(skip_serializing_if = "Option::is_none")] declared_insecure: Option<String>, program: String},
@@ -165,14 +165,22 @@ confinement/mod.rs: enum RunState > Unknown,
 confinement/mod.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub struct RunExit
 confinement/mod.rs: struct RunExit > pub code: Option<i32>,
 confinement/mod.rs: struct RunExit > pub signal: Option<i32>,
-confinement/mod.rs: #[derive(Debug, Clone, PartialEq)] pub struct RunObservation
+confinement/mod.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)] #[serde(rename_all = "snake_case")] #[non_exhaustive] pub enum RunLimit
+confinement/mod.rs: enum RunLimit > Memory,
+confinement/mod.rs: enum RunLimit > CpuTime,
+confinement/mod.rs: enum RunLimit > WallTime,
+confinement/mod.rs: enum RunLimit > EgressBytes,
+confinement/mod.rs: enum RunLimit > OutputStall,
+confinement/mod.rs: #[derive(Debug, Clone, PartialEq)] #[non_exhaustive] pub struct RunObservation
 confinement/mod.rs: struct RunObservation > pub run: RunId,
 confinement/mod.rs: struct RunObservation > pub adapter: AdapterName,
 confinement/mod.rs: struct RunObservation > pub inner: Option<InnerAdapter>,
 confinement/mod.rs: struct RunObservation > pub declared_insecure: Option<String>,
 confinement/mod.rs: struct RunObservation > pub state: RunState,
 confinement/mod.rs: struct RunObservation > pub exit: Option<RunExit>,
+confinement/mod.rs: struct RunObservation > pub limit: Option<RunLimit>,
 confinement/mod.rs: struct RunObservation > pub memory_oom_kills: Option<u64>,
+confinement/mod.rs: impl RunObservation > pub fn new(run: RunId, adapter: AdapterName, state: RunState) -> Self
 confinement/mod.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub struct RunOutput
 confinement/mod.rs: struct RunOutput > pub stdout: Vec<u8>,
 confinement/mod.rs: struct RunOutput > pub stderr: Vec<u8>,

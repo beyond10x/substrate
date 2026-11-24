@@ -204,7 +204,7 @@ mod imp {
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
         ConfinementProfile, ContractFamily, Fact, KeptOutput, Network, OutputEvent, ProcessBounds,
-        RenderedCommand, RunExit, RunId, RunObservation, RunOutput, RunState, StdinMode,
+        RenderedCommand, RunExit, RunId, RunLimit, RunObservation, RunOutput, RunState, StdinMode,
     };
     use super::{ExecListProof, LinuxRequest};
     use crate::process::ExecLists;
@@ -637,8 +637,50 @@ mod imp {
                     code: exit.code.map(i32::from),
                     signal: exit.signal.map(Signal::number),
                 }),
-                memory_oom_kills: None,
+                limit: if state == RunState::Running {
+                    None
+                } else {
+                    ended_limit(
+                        exec.refusal.as_ref().map(|refusal| refusal.code.as_str()),
+                        observed.end_of_run,
+                    )
+                },
+                memory_oom_kills: observed.end_of_run.and_then(|end| end.memory_oom_kills),
             }
+        }
+    }
+
+    /// The limit that ended an exec: the one its refusal code names, except a stall the driver
+    /// flagged after the child exited on its own, which ended nothing and whose refusal stays on
+    /// the record (design 36 D5). Such an exec names what ended it, in D4's order: the aperture
+    /// ceiling the driver reached, then memory where the OOM count is above zero; else none.
+    fn ended_limit(code: Option<&str>, end: Option<crate::EndOfRun>) -> Option<RunLimit> {
+        match (limit_named_by(code), end) {
+            (Some(RunLimit::OutputStall), Some(end)) if end.output_stall_after_exit => {
+                if end.egress_ceiling_reached {
+                    Some(RunLimit::EgressBytes)
+                } else if end.memory_oom_kills.is_some_and(|kills| kills > 0) {
+                    Some(RunLimit::Memory)
+                } else {
+                    None
+                }
+            }
+            (limit, _) => limit,
+        }
+    }
+
+    /// The limit the host driver named on an ended exec, by its refusal code (design 36 D6). The
+    /// driver decided which bound ended the exec, from its own timer, its CPU reading, its relay's
+    /// counters and the cgroup's OOM count; this repeats none of it. Every other code, a code a
+    /// later driver adds among them, and no refusal are `None`.
+    fn limit_named_by(code: Option<&str>) -> Option<RunLimit> {
+        match code? {
+            substrate_wire::SESSION_OUTPUT_BACKPRESSURE => Some(RunLimit::OutputStall),
+            "exec.aperture-byte-limit" => Some(RunLimit::EgressBytes),
+            "exec.memory-limit" => Some(RunLimit::Memory),
+            "exec.cpu-limit" => Some(RunLimit::CpuTime),
+            "exec.timeout" => Some(RunLimit::WallTime),
+            _ => None,
         }
     }
 
@@ -859,6 +901,95 @@ mod imp {
     mod tests {
         use super::*;
         use substrate_wire::WorkspaceAccess;
+
+        /// Design 36 D6, row by row: the five codes by which the driver names a bound that ended
+        /// an exec map to their limit; every other code it writes on an ended exec, a code no
+        /// driver writes and no refusal map to none.
+        #[test]
+        fn the_refusal_code_of_an_ended_exec_names_its_limit_and_no_other_code_does() {
+            for (code, limit) in [
+                (
+                    Some(substrate_wire::SESSION_OUTPUT_BACKPRESSURE),
+                    Some(RunLimit::OutputStall),
+                ),
+                (
+                    Some("exec.aperture-byte-limit"),
+                    Some(RunLimit::EgressBytes),
+                ),
+                (Some("exec.memory-limit"), Some(RunLimit::Memory)),
+                (Some("exec.cpu-limit"), Some(RunLimit::CpuTime)),
+                (Some("exec.timeout"), Some(RunLimit::WallTime)),
+                (Some("exec.metrics-unavailable"), None),
+                (Some(substrate_wire::SESSION_OUTPUT_LIMIT), None),
+                (Some(substrate_wire::WORKDIR_REFUSALS[2].code), None),
+                (Some("exec.some-later-bound"), None),
+                (None, None),
+            ] {
+                assert_eq!(limit_named_by(code), limit, "{code:?}");
+            }
+        }
+
+        /// The end the driver read: the OOM count, the stall's mark and the ceiling.
+        fn end(after_exit: bool, oom_kills: u64, egress: bool) -> crate::EndOfRun {
+            crate::EndOfRun {
+                memory_oom_kills: Some(oom_kills),
+                output_stall_after_exit: after_exit,
+                egress_ceiling_reached: egress,
+            }
+        }
+
+        const STALL: Option<&str> = Some(substrate_wire::SESSION_OUTPUT_BACKPRESSURE);
+
+        /// Design 36 D5: the stall the driver records as `session.output-backpressure` names
+        /// `OutputStall` where it came before the child's exit, also beside an OOM kill (D4), and
+        /// names no limit where it came after the program's own exit. A stall after the exit
+        /// always leaves that code on the record, so no other code comes with the mark.
+        #[test]
+        fn a_stall_after_the_childs_exit_names_no_limit_and_one_before_names_the_stall() {
+            assert_eq!(
+                ended_limit(STALL, Some(end(false, 0, false))),
+                Some(RunLimit::OutputStall)
+            );
+            assert_eq!(ended_limit(STALL, None), Some(RunLimit::OutputStall));
+            assert_eq!(ended_limit(STALL, Some(end(true, 0, false))), None);
+            assert_eq!(
+                ended_limit(STALL, Some(end(false, 1, false))),
+                Some(RunLimit::OutputStall)
+            );
+        }
+
+        /// Design 36 D1, D4, D5: an exec the OOM kill ended, whose unread output then stalled
+        /// after its exit. The driver's record carries `session.output-backpressure`
+        /// (`record_pipe_backpressure` replaces any refusal, and `record_resource_bound` then
+        /// writes none), its end the OOM count and the stall's mark. The stall ended nothing; the
+        /// OOM kill ended the run, so `Memory` is named.
+        #[test]
+        fn an_exec_the_oom_kill_ended_whose_output_stalled_after_its_exit_names_memory() {
+            assert_eq!(
+                ended_limit(STALL, Some(end(true, 1, false))),
+                Some(RunLimit::Memory),
+                "an exec the OOM kill ended, whose output stalled after its exit, names no memory \
+                 limit"
+            );
+        }
+
+        /// Design 36 D4, D5: an exec an aperture's byte ceiling ended, whose unread output then
+        /// stalled after its exit, names `EgressBytes`; with an OOM kill as well, egress bytes
+        /// come first. The record carries `session.output-backpressure` in both.
+        #[test]
+        fn an_exec_the_aperture_ceiling_ended_whose_output_stalled_after_its_exit_names_egress_bytes()
+         {
+            assert_eq!(
+                ended_limit(STALL, Some(end(true, 0, true))),
+                Some(RunLimit::EgressBytes),
+                "an exec the aperture ceiling ended names no egress limit"
+            );
+            assert_eq!(
+                ended_limit(STALL, Some(end(true, 1, true))),
+                Some(RunLimit::EgressBytes),
+                "egress bytes are not named before memory"
+            );
+        }
 
         fn scoped() -> ConfinementProfile {
             ConfinementProfile {

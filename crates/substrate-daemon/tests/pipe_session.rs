@@ -302,6 +302,7 @@ impl Driver for PipeFixtureDriver {
             output_complete: false,
             cgroup: Some(format!("fixture-{id}")),
             leader_pid: Some(1234),
+            end_of_run: None,
         };
         self.pipes.lock().expect("pipe fixture lock").insert(
             id.to_owned(),

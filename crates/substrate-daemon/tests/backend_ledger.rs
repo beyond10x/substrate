@@ -282,6 +282,7 @@ impl Driver for Fixture {
                 output_complete: false,
                 cgroup: Some(pod_name(id)),
                 leader_pid: None,
+                end_of_run: None,
             });
         }
         DispatchOutcome::OutcomeUnknown(DriverError::failed(

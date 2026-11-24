@@ -52,7 +52,7 @@ use super::local::LOCAL_POLICY_ENV;
 use super::{
     AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
     ConfinementProfile, ContractFamily, Fact, KeptOutput, ProcessBounds, RenderedCommand, RunExit,
-    RunId, RunObservation, RunOutput, RunState, image_is_pinned,
+    RunId, RunLimit, RunObservation, RunOutput, RunState, image_is_pinned,
 };
 use crate::DriverError;
 
@@ -1216,11 +1216,21 @@ struct Captured {
     error: Option<String>,
 }
 
-/// A deletion of the run's Pod the adapter asked for: the signal the run ends with, and when.
+/// A deletion of the run's Pod the adapter asked for: the signal the run ends with, when, and on
+/// whose behalf.
 #[derive(Debug, Clone, Copy)]
 struct Stop {
     signal: Signal,
     at: Instant,
+    origin: StopOrigin,
+}
+
+/// Who asked for a [`Stop`]: an embedder's `signal`, which names no limit, or the monitor past
+/// the run's deadline, which names `WallTime` (design 36 D7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopOrigin {
+    Embedder,
+    Deadline,
 }
 
 struct PodRun {
@@ -1234,6 +1244,9 @@ struct PodRun {
     /// Whether the run's task is done with the Pod: the API confirmed it gone after the adapter's
     /// removal and answered whether its container stopped, so the task asks nothing more of it.
     pod_gone: AtomicBool,
+    /// The limit the run's task observed when it saw the run end or lost it (design 36 D7),
+    /// written before it publishes the end.
+    limit: Mutex<Option<RunLimit>>,
 }
 
 /// The `pod` adapter, opened against one cluster and one namespace.
@@ -1272,6 +1285,11 @@ impl PodAdapter {
             declared_insecure: None,
             state,
             exit,
+            limit: if state == RunState::Running {
+                None
+            } else {
+                *run.limit.lock()
+            },
             memory_oom_kills,
         }
     }
@@ -1380,6 +1398,7 @@ impl PodAdapter {
             started: AtomicBool::new(false),
             stop: Mutex::new(None),
             pod_gone: AtomicBool::new(false),
+            limit: Mutex::new(None),
         });
         let wall = Duration::from_secs(resolved.deadline_seconds);
         tokio::spawn(monitor(
@@ -1506,6 +1525,7 @@ async fn request_stop(
     run: &PodRun,
     signal: Signal,
     grace_seconds: u64,
+    origin: StopOrigin,
 ) -> Result<(), String> {
     let first = {
         let mut stop = run.stop.lock();
@@ -1513,6 +1533,7 @@ async fn request_stop(
         stop.get_or_insert(Stop {
             signal,
             at: Instant::now(),
+            origin,
         });
         first
     };
@@ -1568,6 +1589,38 @@ fn ended(pod: &Value, force: bool) -> Option<(RunExit, Option<u64>)> {
     Some((exit, Some(kills)))
 }
 
+/// The limit that ended a `pod` run (design 36 D7), from the last Pod the API showed and the
+/// adapter's own stop, in D4's order: memory, where the container's `terminated.reason` is
+/// `OOMKilled` and its exit is a signal or a code above 128, whoever stopped the run, so a main
+/// process that itself exits with a code above 128 after a child's OOM kill names `Memory`, and one
+/// that exits with 128 or less names none; wall time, where the Pod's
+/// `status.reason` is `DeadlineExceeded` or the stop was the monitor's past the deadline. CPU is a
+/// rate and ends no run, and the run has no aperture and no live output. An embedder's stop and an
+/// exit code alone name nothing.
+#[cfg(feature = "kubernetes")]
+fn pod_limit(pod: Option<&Value>, stop: Option<Stop>) -> Option<RunLimit> {
+    let memory = pod.is_some_and(|pod| {
+        let terminated = &container(pod)["terminated"];
+        terminated["reason"] == "OOMKilled"
+            && (terminated["signal"]
+                .as_i64()
+                .is_some_and(|signal| signal != 0)
+                || terminated["exitCode"]
+                    .as_i64()
+                    .is_some_and(|code| code > 128))
+    });
+    let deadline = pod.is_some_and(|pod| pod["status"]["reason"] == "DeadlineExceeded")
+        || stop.is_some_and(|stop| stop.origin == StopOrigin::Deadline);
+    let reached: Vec<RunLimit> = [
+        memory.then_some(RunLimit::Memory),
+        deadline.then_some(RunLimit::WallTime),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    super::named_limit(&reached)
+}
+
 /// Follows one run until the API shows its container ended, or the run is lost, then removes the
 /// Pod and, once the Pod is confirmed gone and the API shows its container stopped
 /// ([`pod_end`]), its policy.
@@ -1606,6 +1659,7 @@ async fn monitor(
                     run.started.store(true, Ordering::SeqCst);
                 }
                 if let Some((exit, kills)) = ended(&pod, terminal_polls >= TERMINAL_POLLS) {
+                    *run.limit.lock() = pod_limit(Some(&pod), stop);
                     capture(&api, &run).await;
                     break Phase::Ended(stopped(exit), kills);
                 }
@@ -1614,11 +1668,21 @@ async fn monitor(
                 }
                 match stop {
                     // The kubelet has not confirmed the container stopped: it may still run.
-                    Some(stop) if stop.at.elapsed() >= STOP_CONFIRM => break Phase::Unknown,
+                    Some(stop) if stop.at.elapsed() >= STOP_CONFIRM => {
+                        *run.limit.lock() = pod_limit(None, Some(stop));
+                        break Phase::Unknown;
+                    }
                     None if Instant::now() >= give_up => {
                         capture(&api, &run).await;
                         // A failed deletion is asked for again at the next poll.
-                        let _ = request_stop(&api, &run, Signal::Kill, KILL_GRACE_SECONDS).await;
+                        let _ = request_stop(
+                            &api,
+                            &run,
+                            Signal::Kill,
+                            KILL_GRACE_SECONDS,
+                            StopOrigin::Deadline,
+                        )
+                        .await;
                     }
                     _ => {}
                 }
@@ -1627,6 +1691,7 @@ async fn monitor(
             // stopped, unless someone force-deleted the Pod first, which `pod_end` tells below.
             // Gone otherwise: deleted by someone else, which the adapter cannot account for.
             Ok(None) => {
+                *run.limit.lock() = pod_limit(None, stop);
                 break match stop {
                     Some(_) => Phase::Ended(
                         stopped(RunExit {
@@ -1640,6 +1705,7 @@ async fn monitor(
             }
             Err(_) => {
                 if answered.elapsed() >= api.unreachable_limit {
+                    *run.limit.lock() = pod_limit(None, stop);
                     break Phase::Unknown;
                 }
             }
@@ -1831,7 +1897,7 @@ impl ConfinementAdapter for PodAdapter {
             return Ok(());
         }
         capture(&self.api, &run).await;
-        request_stop(&self.api, &run, signal, grace)
+        request_stop(&self.api, &run, signal, grace, StopOrigin::Embedder)
             .await
             .map_err(|error| api_failed(&error))
     }
@@ -1863,6 +1929,84 @@ mod tests {
     #[test]
     fn the_unit_profile_is_admitted() {
         check_profile(&settings(), &profile()).expect("admitted");
+    }
+
+    /// Design 36 D7, the `pod` row: the container's `OOMKilled` names `Memory` only with an exit
+    /// by a signal or a code above 128; the Pod's `DeadlineExceeded` and the monitor's own stop
+    /// past the deadline name `WallTime`; an embedder's stop names nothing; memory wins over the
+    /// deadline (D4). An exit code of 137 alone names nothing.
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn a_pod_run_names_memory_or_its_deadline_and_nothing_from_an_exit_alone() {
+        let pod = |reason: Option<&str>, terminated: Value| {
+            json!({"status": {
+                "reason": reason,
+                "containerStatuses": [{"name": CONTAINER, "state": {"terminated": terminated}}],
+            }})
+        };
+        let stop = |origin| Stop {
+            signal: Signal::Kill,
+            at: Instant::now(),
+            origin,
+        };
+        let oom = json!({"exitCode": 137, "reason": "OOMKilled"});
+        let error = json!({"exitCode": 137, "reason": "Error"});
+        for (pod, stop, limit) in [
+            (Some(pod(None, oom.clone())), None, Some(RunLimit::Memory)),
+            (
+                Some(pod(
+                    None,
+                    json!({"exitCode": 0, "signal": 9, "reason": "OOMKilled"}),
+                )),
+                None,
+                Some(RunLimit::Memory),
+            ),
+            (
+                Some(pod(None, json!({"exitCode": 1, "reason": "OOMKilled"}))),
+                None,
+                None,
+            ),
+            (
+                Some(pod(None, json!({"exitCode": 128, "reason": "OOMKilled"}))),
+                None,
+                None,
+            ),
+            (Some(pod(None, error.clone())), None, None),
+            (
+                Some(pod(Some("DeadlineExceeded"), error.clone())),
+                None,
+                Some(RunLimit::WallTime),
+            ),
+            (
+                Some(pod(Some("DeadlineExceeded"), oom.clone())),
+                None,
+                Some(RunLimit::Memory),
+            ),
+            (
+                Some(pod(None, error.clone())),
+                Some(stop(StopOrigin::Deadline)),
+                Some(RunLimit::WallTime),
+            ),
+            (
+                None,
+                Some(stop(StopOrigin::Deadline)),
+                Some(RunLimit::WallTime),
+            ),
+            (
+                Some(pod(None, error.clone())),
+                Some(stop(StopOrigin::Embedder)),
+                None,
+            ),
+            (None, Some(stop(StopOrigin::Embedder)), None),
+            (None, None, None),
+        ] {
+            assert_eq!(
+                pod_limit(pod.as_ref(), stop),
+                limit,
+                "{pod:?} {:?}",
+                stop.map(|stop| stop.origin)
+            );
+        }
     }
 
     // A8: the workspace is an `emptyDir` the adapter creates, so a narrower one is refused.

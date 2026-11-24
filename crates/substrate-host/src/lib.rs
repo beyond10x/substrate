@@ -95,7 +95,7 @@ pub use aperture::EgressAperture;
 pub use backend::{
     BackendKind, BackendLedger, BackendName, BackendRecord, BackendRole, UidBinding,
 };
-pub use observation::{ExecObservation, PipeFrame, PipeStream};
+pub use observation::{EndOfRun, ExecObservation, PipeFrame, PipeStream};
 use output_retention::OutputRetention;
 // The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
 // is: a client names these, and never `host_process::HostProcessSupervisor`.

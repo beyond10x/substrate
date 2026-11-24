@@ -578,6 +578,44 @@ async fn a_local_run_ends_on_a_signal() {
         .expect("the run ends after a kill")
         .expect("waited");
     assert_eq!(ended.exit.as_ref().and_then(|exit| exit.signal), Some(9));
+    // Design 36 D7: an embedder's own signal names no limit on any adapter.
+    assert_eq!(ended.limit, None, "{ended:?}");
+}
+
+/// Design 36 § 8, story 1: `local` serves no `limits` family, so a run that exits 0 names no
+/// limit and reports no OOM count, on the ended observation and on a later `observe` (D7, D8).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_run_that_exits_0_names_no_limit_and_no_oom_count() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(
+            &admitted,
+            &Command {
+                argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+                env: BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert_eq!(ended.limit, None, "{ended:?}");
+    assert_eq!(ended.memory_oom_kills, None, "{ended:?}");
+    let observed = adapter.observe(&run).await.expect("observed");
+    assert_eq!(observed.limit, None, "{observed:?}");
+    assert_eq!(observed.memory_oom_kills, None, "{observed:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1210,6 +1248,45 @@ async fn local_live_output_never_read_stalls_and_ends_the_run() {
     )
     .await;
     assert!(!streams[0].is_empty(), "the one queued chunk was delivered");
+}
+
+/// Design 36 D1, D5: a limit is a bound the adapter imposed to end the run, and an output stall
+/// names one only where it came before the leader's exit. This run's live output is never read;
+/// its second chunk waits for the one queue slot, and the program writes its third into the pipe
+/// and exits 0 about 0.2 s after its start, before that chunk has waited out the 1 s stall
+/// deadline. The run ended on its own, by its own exit 0, so it names no limit; the stall is still
+/// reported.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_run_that_exits_0_before_its_unread_output_stalls_names_no_limit() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let adapter = local();
+    let admitted = adapter
+        .admit(&support::live(&recorded(workspace.path()), 1))
+        .expect("a live profile is admitted");
+    let began = std::time::Instant::now();
+    let run = adapter
+        .start(
+            &admitted,
+            &support::sh("printf one; sleep 0.1; printf two; sleep 0.1; printf three; exit 0"),
+        )
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    println!("the run was observed ended after {:?}", began.elapsed());
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    assert_eq!(
+        ended.exit.as_ref().and_then(|exit| exit.code),
+        Some(0),
+        "the program ran to its own exit 0: {ended:?}"
+    );
+    assert_eq!(
+        ended.limit, None,
+        "a run that exited 0 on its own names a limit: {ended:?}"
+    );
+    assert!(adapter.output_stalled(&run), "the stall is reported");
 }
 
 // T6.

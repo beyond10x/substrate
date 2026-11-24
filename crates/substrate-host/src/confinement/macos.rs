@@ -75,6 +75,7 @@ use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -459,6 +460,8 @@ struct MacosRun {
     /// before the leader is reaped: while it is false the leader is at least a zombie, so its pid
     /// still names this run's process group.
     reaped: Arc<Mutex<bool>>,
+    /// Set under `reaped`'s lock by the embedder's `KILL`, before it is sent (design 36 D1).
+    stopped: Arc<AtomicBool>,
     /// The run's standard input, when its profile asked for a pipe (design 32).
     stdin: Option<Arc<StdinWriter>>,
     /// The run's live output, when its profile asked for it (design 32).
@@ -532,6 +535,12 @@ impl MacosAdapter {
             declared_insecure: None,
             state,
             exit,
+            // No `limits` family: only the stall the adapter imposed (design 36 D7).
+            limit: if state == RunState::Running {
+                None
+            } else {
+                live::stall_limit(run.live.as_ref())
+            },
             memory_oom_kills: None,
         }
     }
@@ -974,9 +983,10 @@ impl MacosAdapter {
         )));
         let (phase, observed) = watch::channel(Phase::Running);
         let reaped = Arc::new(Mutex::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
         let (live, [stdout_feed, stderr_feed]) =
             live::open(admitted.profile().output_delivery, || {
-                live::group_kill(pid, Arc::clone(&reaped))
+                live::group_kill(pid, Arc::clone(&reaped), Arc::clone(&stopped))
             });
         let stdout = child
             .stdout
@@ -1031,6 +1041,7 @@ impl MacosAdapter {
             phase: observed,
             captured,
             reaped,
+            stopped,
             stdin: writer,
             live,
         }));
@@ -1189,25 +1200,9 @@ impl ConfinementAdapter for MacosAdapter {
         {
             live.close();
         }
-        // Held across `kill`: the run's task cannot reap the leader meanwhile, so the group id
-        // cannot have been reused by another process. Until it is reaped the run is `Running`,
-        // and the signal goes to every member of the group, the leader exited or not.
-        let reaped = run.reaped.lock();
-        if *reaped {
-            return Ok(());
-        }
-        // SAFETY: `kill` with a negative pid signals one process group; no memory is involved.
-        if unsafe { libc::kill(-run.pid, signal.number()) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(DriverError::failed(
-                    "exec.signal-failed",
-                    format!("macos signal: {error}"),
-                )
-                .into());
-            }
-        }
-        Ok(())
+        // Until the leader is reaped the run is `Running`, and the signal goes to every member
+        // of the group, the leader exited or not.
+        live::group_signal(run.pid, &run.reaped, &run.stopped, signal, "macos")
     }
 
     async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {

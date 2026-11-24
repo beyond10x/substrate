@@ -45,13 +45,16 @@ fn cluster(watch: Watch) -> Arc<Cluster> {
 struct Released {
     monitor: bool,
     phase: Phase,
+    /// The limit the run's observation names once the task ended (design 36 D7).
+    limit: Option<RunLimit>,
     open_sweep: bool,
     deferred_sweep: bool,
 }
 
 /// The run's task follows `RUN`, running on its node, until the Pod reads gone; with `kill`, the
-/// adapter asked for its deletion first. Returns once the task ends.
-async fn follow(cluster: &Arc<Cluster>, api: Arc<Api>, kill: bool) -> Phase {
+/// adapter asked for its deletion first. Returns the phase and the observation's limit once the
+/// task ends.
+async fn follow(cluster: &Arc<Cluster>, api: Arc<Api>, kill: bool) -> (Phase, Option<RunLimit>) {
     let (run, sender) = tracked(RUN);
     let task = tokio::spawn(monitor(
         Arc::clone(&api),
@@ -70,15 +73,22 @@ async fn follow(cluster: &Arc<Cluster>, api: Arc<Api>, kill: bool) -> Phase {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     if kill {
-        request_stop(&api, &run, Signal::Kill, KILL_GRACE_SECONDS)
-            .await
-            .expect("the deletion is asked for");
+        request_stop(
+            &api,
+            &run,
+            Signal::Kill,
+            KILL_GRACE_SECONDS,
+            StopOrigin::Embedder,
+        )
+        .await
+        .expect("the deletion is asked for");
     }
     // The Pod is gone: removed by its kubelet, or force-deleted by someone else.
     cluster.pod_gone.store(true, Ordering::SeqCst);
     let finished = tokio::time::timeout(Duration::from_secs(30), task).await;
     assert!(finished.is_ok(), "the run's task did not end");
-    *run.phase.borrow()
+    let phase = *run.phase.borrow();
+    (phase, PodAdapter::observation(&run).limit)
 }
 
 /// The open sweep's orphan and a policy the deferred sweep saw the Pod of, each read gone.
@@ -122,13 +132,14 @@ async fn released(watch: Watch, kill: bool) -> (Arc<Cluster>, Released) {
 /// [`released`], against a fake the case prepared.
 async fn released_by(cluster: Arc<Cluster>, kill: bool) -> (Arc<Cluster>, Released) {
     let api = Arc::new(start(&cluster));
-    let ((open_sweep, deferred_sweep), phase) = tokio::join!(
+    let ((open_sweep, deferred_sweep), (phase, limit)) = tokio::join!(
         sweeps(&api, &cluster),
         follow(&cluster, Arc::clone(&api), kill)
     );
     let released = Released {
         monitor: policy_deleted(&cluster, RUN),
         phase,
+        limit,
         open_sweep,
         deferred_sweep,
     };
@@ -239,5 +250,56 @@ async fn a_kill_whose_pod_shows_its_container_terminated_releases_the_policy() {
     assert!(
         released.deferred_sweep,
         "the deferred sweep kept the policy"
+    );
+    assert_eq!(
+        released.limit, None,
+        "design 36 D7: an embedder's own kill names no limit"
+    );
+}
+
+/// Design 36 D7, the `pod` row: the monitor's own stop past the deadline ends the run with
+/// `WallTime`. The monitor is handed a give-up instant already past, so its first read of the
+/// running Pod asks for the deletion; the kubelet then writes the container terminated and removes
+/// the Pod, as it does for a deletion it was asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_monitors_stop_past_the_deadline_names_the_wall_time_limit() {
+    let cluster = cluster(Watch::Terminated);
+    let api = Arc::new(start(&cluster));
+    let (run, sender) = tracked(RUN);
+    let task = tokio::spawn(monitor(
+        Arc::clone(&api),
+        Arc::clone(&run),
+        sender,
+        Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("an instant in the past"),
+        PodTrace::default(),
+    ));
+    let began = Instant::now();
+    while cluster.pod_deletes.load(Ordering::SeqCst) == 0 {
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "the monitor never asked for the Pod's deletion past its give-up instant"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        matches!(*run.stop.lock(), Some(stop) if stop.origin == StopOrigin::Deadline),
+        "the deletion was not recorded as the monitor's own"
+    );
+    cluster.pod_gone.store(true, Ordering::SeqCst);
+    let finished = tokio::time::timeout(Duration::from_secs(30), task).await;
+    assert!(finished.is_ok(), "the run's task did not end");
+    let observation = PodAdapter::observation(&run);
+    assert_eq!(observation.state, RunState::Ended, "{observation:?}");
+    assert_eq!(
+        observation.exit.and_then(|exit| exit.signal),
+        Some(Signal::Kill.number()),
+        "{observation:?}"
+    );
+    assert_eq!(
+        observation.limit,
+        Some(RunLimit::WallTime),
+        "{observation:?}"
     );
 }

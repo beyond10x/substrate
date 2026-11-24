@@ -215,6 +215,7 @@ impl VectorDriver {
             output_complete: true,
             cgroup: Some("substrate/vector".to_owned()),
             leader_pid: None,
+            end_of_run: None,
         }
     }
 }
