@@ -290,7 +290,11 @@ this way:
   takes no abbreviation of the flag in an alias). An alias may name any command, a built-in
   one included, and what an aliased command builds is outside this rule but for the
   configuration it passes. A `.cargo` directory holding both names, a link included, is
-  refused: cargo reads `config` alone. The rule holds in every directory the walk enters, a
+  refused: cargo reads `config` alone. A file system that compares names without letter case,
+  as macOS does, lets cargo read `.Cargo/config.toml` or `.cargo/CONFIG`, so the walk takes
+  the directory and both file names without regard to ASCII letter case, holds each file so
+  found like the exact names, and refuses a directory holding more than one such file across
+  the spellings, naming every file as spelled. The rule holds in every directory the walk enters, a
   fixture that is a workspace of its own included: a test that builds a fixture offline from
   its own `vendor` writes the source replacement into the copy it runs. Each refusal names
   the file and the key or entry, and what to do. Outside the check are configuration outside

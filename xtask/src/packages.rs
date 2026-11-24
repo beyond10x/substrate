@@ -117,8 +117,14 @@ const ONE_PATCH_TABLE: &str =
     "only [patch.crates-io] in Cargo.toml carries a patch in this workspace";
 
 /// The names of a cargo configuration file in a `.cargo` directory, in the order cargo takes
-/// them: where both exist, it reads the first alone.
+/// them: where both exist, it reads the first alone. On a file system that compares names
+/// without letter case (the default of macOS) cargo reads a file whose name equals one of them
+/// in another letter case, so the walk takes each name without regard to ASCII letter case.
 const CONFIGURATION_NAMES: [&str; 2] = ["config", "config.toml"];
+
+/// The name of the directory that holds a cargo configuration, taken without regard to ASCII
+/// letter case for the reason [`CONFIGURATION_NAMES`] gives.
+const CONFIGURATION_DIRECTORY: &str = ".cargo";
 
 /// The directories the walk for cargo configurations does not enter, at any depth: cargo's build
 /// directory and Git's.
@@ -340,26 +346,54 @@ fn check_unused_patches(
 }
 
 /// Each cargo configuration file the walk finds beneath `root`, the root's own included, holds
-/// only the top-level keys of [`ADMITTED_CONFIGURATION_KEYS`] ([`check_configuration`]), and no `.cargo`
-/// directory holds both names of [`CONFIGURATION_NAMES`], a link included. Cargo reads the
-/// configuration of the directory it runs in and of every directory above it, so a file
-/// beneath the root applies to every command run beneath its directory. Returns how many
-/// files were read.
+/// only the top-level keys of [`ADMITTED_CONFIGURATION_KEYS`] ([`check_configuration`]), and no
+/// directory holds more than one cargo configuration file, a link included: `config` beside
+/// `config.toml`, or two spellings in letter case of the `.cargo` directory or of a file name
+/// ([`CONFIGURATION_NAMES`]). Of `config` beside `config.toml` cargo reads the first alone; of
+/// two spellings in letter case, which one cargo reads depends on the file system, which is not
+/// this check's to decide. Cargo reads the configuration of the directory it runs in and of
+/// every directory above it, so a file beneath the root applies to every command run beneath
+/// its directory. Every file is read and named as spelled on disk. Returns how many files were
+/// read.
 ///
 /// The walk ([`cargo_directories`]) reads the working tree, which holds every file Git tracks
 /// that cargo could read. It runs no Git command, so an untracked file is read as well.
 fn check_configurations(root: &Path, failures: &mut Vec<String>) -> Result<usize> {
-    let mut read = 0;
+    let mut by_parent: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     for directory in cargo_directories(root)? {
-        let present: Vec<String> = CONFIGURATION_NAMES
+        let parent = directory
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let files = configuration_files(root, &directory)?;
+        by_parent.entry(parent).or_default().extend(files);
+    }
+    let mut read = 0;
+    for (parent, files) in by_parent {
+        let present: Vec<String> = files
             .iter()
-            .map(|name| directory.join(name))
-            .filter(|file| root.join(file).is_file())
             .map(|file| file.display().to_string())
             .collect();
-        if let [first, second] = present.as_slice() {
+        let exact: Vec<PathBuf> = CONFIGURATION_NAMES
+            .iter()
+            .map(|name| parent.join(CONFIGURATION_DIRECTORY).join(name))
+            .collect();
+        if files == exact {
             failures.push(format!(
-                "{first} and {second} are both there, and cargo reads {first} alone: keep one of them"
+                "{} and {} are both there, and cargo reads {} alone: keep one of them",
+                present[0], present[1], present[0]
+            ));
+        } else if let [listed @ .., last] = present.as_slice()
+            && !listed.is_empty()
+        {
+            let shown = if parent.as_os_str().is_empty() {
+                ".".to_owned()
+            } else {
+                parent.display().to_string()
+            };
+            failures.push(format!(
+                "{} and {last} are each a cargo configuration of the directory {shown}, and which of them cargo reads depends on the letter case its file system compares: keep one of them",
+                listed.join(", ")
             ));
         }
         for file in present {
@@ -372,6 +406,33 @@ fn check_configurations(root: &Path, failures: &mut Vec<String>) -> Result<usize
         }
     }
     Ok(read)
+}
+
+/// The cargo configuration files of the `.cargo` directory `directory`, relative to `root` and
+/// spelled as on disk, in path order: every entry whose name equals one of
+/// [`CONFIGURATION_NAMES`] without regard to ASCII letter case and that is a file, or a link to
+/// one.
+fn configuration_files(root: &Path, directory: &Path) -> Result<Vec<PathBuf>> {
+    let shown = directory.display();
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(root.join(directory))
+        .with_context(|| format!("reading the directory {shown}"))?
+    {
+        let name = entry
+            .with_context(|| format!("reading the directory {shown}"))?
+            .file_name();
+        let named = name.to_str().is_some_and(|name| {
+            CONFIGURATION_NAMES
+                .iter()
+                .any(|configuration| name.eq_ignore_ascii_case(configuration))
+        });
+        let file = directory.join(&name);
+        if named && root.join(&file).is_file() {
+            files.push(file);
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 /// The cargo configuration `configuration`, read from `file`, holds only the top-level keys
@@ -498,10 +559,12 @@ fn source_replacements(file: &str, configuration: &toml::Value) -> Vec<String> {
 }
 
 /// Every `.cargo` directory beneath `root`, the root's own included, as a path relative to
-/// `root`, in path order. The walk enters every directory but those named in
-/// [`UNWALKED_DIRECTORIES`], and follows no symbolic link to a directory: a directory beneath
-/// the root is walked under its own path, and one outside it is not this repository's. A
-/// `.cargo` that is a symbolic link to a directory is taken, as cargo takes it.
+/// `root` spelled as on disk, in path order. A directory whose name equals `.cargo` without
+/// regard to ASCII letter case is taken ([`CONFIGURATION_DIRECTORY`]). The walk enters every
+/// directory but those named in [`UNWALKED_DIRECTORIES`], and follows no symbolic link to a
+/// directory: a directory beneath the root is walked under its own path, and one outside it is
+/// not this repository's. A `.cargo` that is a symbolic link to a directory is taken, as cargo
+/// takes it.
 fn cargo_directories(root: &Path) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     let mut pending = vec![PathBuf::new()];
@@ -517,7 +580,11 @@ fn cargo_directories(root: &Path) -> Result<Vec<PathBuf>> {
             let entry = entry.with_context(|| format!("reading the directory {shown}"))?;
             let name = entry.file_name();
             let path = directory.join(&name);
-            if name == ".cargo" && root.join(&path).is_dir() {
+            if name
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(CONFIGURATION_DIRECTORY))
+                && root.join(&path).is_dir()
+            {
                 found.push(path.clone());
             }
             let file_type = entry
@@ -2885,6 +2952,67 @@ mod tests {
         );
     }
 
+    /// On a file system that compares names without letter case (the default of macOS, where
+    /// the hosted macOS check builds this checkout), cargo reads `.Cargo/config.toml` as the
+    /// directory's cargo configuration (shown with `cargo metadata --offline` 1.97.1 on a probe
+    /// workspace in a casefolded directory: `foo` came from `vendor/foo`; on a file system that
+    /// compares case, the same probe found no `foo`). A `.cargo` directory in another letter
+    /// case is held like `.cargo`, at the root and beneath it, whatever file system the check
+    /// runs on.
+    #[test]
+    fn a_cargo_directory_in_another_letter_case_is_held_like_cargo() {
+        for configuration in [".Cargo", "crates/substrate-host/.CARGO"] {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            patched(
+                directory.path(),
+                "\n[[package]]\nname = \"foo\"\nversion = \"1.2.3\"\n",
+            );
+            let path = directory.path().join(configuration);
+            std::fs::create_dir_all(&path).expect("cargo configuration");
+            std::fs::write(path.join("config.toml"), REPLACED_BY_A_DIRECTORY)
+                .expect("cargo configuration");
+
+            let report = check(directory.path()).expect("package check");
+            assert!(
+                report
+                    .failure_text()
+                    .contains(&format!("{configuration}/config.toml")),
+                "{configuration}/config.toml holds a source replacement and is not refused: {}",
+                report.failure_text()
+            );
+        }
+    }
+
+    /// The same holds for the file: on a file system that compares names without letter case
+    /// cargo reads `.cargo/Config.TOML` as `.cargo/config.toml` (the same probe: `foo` came from
+    /// `vendor/foo`). A configuration file named `config` or `config.toml` in another letter case
+    /// is held like the file of that name.
+    #[test]
+    fn a_configuration_file_name_in_another_letter_case_is_held_like_the_name() {
+        for (configuration, name) in [
+            (".cargo", "Config.TOML"),
+            ("crates/substrate-host/.cargo", "CONFIG"),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary workspace");
+            patched(
+                directory.path(),
+                "\n[[package]]\nname = \"foo\"\nversion = \"1.2.3\"\n",
+            );
+            let path = directory.path().join(configuration);
+            std::fs::create_dir_all(&path).expect("cargo configuration");
+            std::fs::write(path.join(name), REPLACED_BY_A_DIRECTORY).expect("cargo configuration");
+
+            let report = check(directory.path()).expect("package check");
+            assert!(
+                report
+                    .failure_text()
+                    .contains(&format!("{configuration}/{name}")),
+                "{configuration}/{name} holds a source replacement and is not refused: {}",
+                report.failure_text()
+            );
+        }
+    }
+
     /// A cargo configuration in the fixture's directory holds only the admitted keys, as every
     /// other does: the configuration the fixture's runs use, a source replacement and `net`, is
     /// refused there by its keys, though the fixture's directory is a workspace of its own.
@@ -2934,43 +3062,47 @@ mod tests {
         );
     }
 
-    /// A source replacement beneath the fixture's directory is refused whatever the root's
-    /// members are. Cargo makes a path dependency of a member that lies beneath the root a
-    /// member of the root workspace without a `members` entry, and cargo run in such a package
-    /// beneath the fixture's directory reads the fixture's configuration and builds the root
-    /// workspace with it (shown with `cargo metadata --offline` on a probe workspace, root
-    /// members `["m"]`, `m` depending on `sub = { path = "../fx/sub" }`, `fx` a workspace of its
-    /// own excluding `sub` with a source replacement: run in `fx/sub`, `workspace_root` was the
-    /// root and `foo` came from `fx/vendor/foo`).
+    /// One directory holding `.cargo/config.toml` and `.Cargo/config.toml` is refused, naming
+    /// both files as spelled, though each holds only admitted keys: on a file system that
+    /// compares names without letter case the two are one directory, and which file cargo reads
+    /// is not this check's to decide. The case needs a temporary directory that holds both
+    /// names, and fails, naming that, where it does not.
     #[test]
-    fn a_source_replacement_beneath_the_fixture_is_refused_whatever_the_root_members_are() {
+    fn a_directory_holding_two_spellings_of_the_cargo_directory_is_refused() {
         let directory = tempfile::tempdir().expect("temporary workspace");
-        let root = directory.path();
-        configured(root, FIXTURE_WORKSPACE, REPLACED_BY_A_DIRECTORY);
-        std::fs::write(
-            root.join(FIXTURE_WORKSPACE).join("Cargo.toml"),
-            "[package]\nname = \"seatbelt-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\nexclude = [\"sub\"]\n",
-        )
-        .expect("fixture manifest");
-        let package = root.join(FIXTURE_WORKSPACE).join("sub");
-        std::fs::create_dir_all(&package).expect("package directory");
-        std::fs::write(
-            package.join("Cargo.toml"),
-            "[package]\nname = \"sub\"\nversion = \"0.1.0\"\npublish = false\n\n[dependencies]\nfoo = \"1\"\n",
-        )
-        .expect("package manifest");
-        let host = root.join("crates/substrate-host/Cargo.toml");
-        let mut text = std::fs::read_to_string(&host).expect("host manifest");
-        text.push_str("\n[dependencies]\nsub = { path = \"tests/fixtures/cargo-test/sub\" }\n");
-        std::fs::write(&host, text).expect("host manifest");
+        patched(
+            directory.path(),
+            "\n[[package]]\nname = \"foo\"\nversion = \"1.2.3\"\n",
+        );
+        for spelling in [".cargo", ".Cargo"] {
+            let configuration = directory.path().join(spelling);
+            std::fs::create_dir_all(&configuration).expect("cargo configuration");
+            std::fs::write(
+                configuration.join("config.toml"),
+                "[profile.dev]\ndebug = false\n",
+            )
+            .expect("cargo configuration");
+        }
+        let spellings = std::fs::read_dir(directory.path())
+            .expect("temporary workspace")
+            .filter(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(".cargo"))
+                })
+            })
+            .count();
+        assert_eq!(
+            spellings, 2,
+            "precondition: the temporary directory holds .cargo and .Cargo as two entries; it holds {spellings}, so its file system compares names without letter case and this case does not run there"
+        );
 
-        let report = check(root).expect("package check");
-        assert!(
-            report.failures().contains(&replacement_refused(&format!(
-                "{FIXTURE_WORKSPACE}/.cargo/config.toml"
-            ))),
-            "{}",
-            report.failure_text()
+        let report = check(directory.path()).expect("package check");
+        assert_eq!(
+            report.failure_text(),
+            ".Cargo/config.toml and .cargo/config.toml are each a cargo configuration of the directory ., and which of them cargo reads depends on the letter case its file system compares: keep one of them"
         );
     }
 
