@@ -510,8 +510,9 @@ and each story's `CHANGELOG.md` entry names the break.
 
 The host driver's `EndOfRun` (D9) is public and `#[non_exhaustive]`, so a field it gains breaks
 no consumer outside this crate. Story 1 gives it two public fields beside `memory_oom_kills`:
-`output_stall_after_exit` and `egress_ceiling_reached` (D5). Nothing in `src/confinement/` names
-`EndOfRun` or `ExecObservation`, so neither is in that list, and it does not change for them.
+`output_stall_after_exit` and `egress_ceiling_reached` (D5). No public item of the
+confinement module names `EndOfRun` or `ExecObservation`, so neither is in that list, and it does
+not change for them.
 
 ## 8. How it is proved
 
