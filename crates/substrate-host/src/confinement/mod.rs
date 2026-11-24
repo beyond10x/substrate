@@ -458,8 +458,8 @@ impl AuditRecord {
 /// runtime on `run_started` reaches it on `run_ended`; a sink that spawns onto that runtime once
 /// it shut down gets Tokio's behaviour for that, a task dropped unrun, and the record itself is
 /// still written. Where the system refuses the thread, the call goes to the runtime's blocking
-/// pool, or, where no runtime is current or its pool does not take it, to the run's end task's
-/// own thread. The run's end task ends once the call returned; a runtime that drops the task
+/// pool, or, where no runtime is current or its pool is shutting down, to the thread that hands
+/// the record over. The run's end task ends once the call returned; a runtime that drops the task
 /// before that waits for the call, so `run_ended` is in the sink when the runtime's drop
 /// returned, and a sink that never returns holds that drop. Where the run's end task is dropped
 /// before the run ended, as when its runtime shuts down, the record is written with
@@ -468,11 +468,12 @@ impl AuditRecord {
 ///
 /// A sink is a synchronous call. It may hand work to the runtime it finds current (a spawn, a
 /// channel send) and must not wait on that runtime (`Handle::block_on`, a blocking wait for a
-/// task, a timer or I/O of it): on `run_ended`, once the runtime's drop has begun nothing drives
-/// that wait, so the sink does not return and the drop does not return. The other records are
-/// called on the caller's thread, which is inside the runtime where the caller is async; there
-/// Tokio panics on `Handle::block_on`, and on a current-thread runtime only `Runtime::block_on`
-/// drives its timers and I/O.
+/// task, a timer or I/O of it): on `run_ended`, once nothing drives that runtime (on a
+/// current-thread runtime once its `block_on` returned, or once its drop began) nothing drives
+/// that wait either, so the sink does not return and the runtime's drop does not return. The
+/// other records are called on the caller's thread, which is inside the runtime where the caller
+/// is async; there Tokio panics on `Handle::block_on`, and on a current-thread runtime only
+/// `Runtime::block_on` drives its timers and I/O.
 #[derive(Clone)]
 pub struct AuditSink(Arc<dyn Fn(&AuditRecord) + Send + Sync>);
 
@@ -824,9 +825,9 @@ fn deliver(write: EndWrite) -> EndWriting {
 /// [`deliver`] with the thread's creation passed in. The thread enters the runtime current at
 /// the call, where there is one, so a sink reaches the runtime on `run_ended` as it does on
 /// `run_started`. Where the system refuses the thread, the record is not lost: it goes to the
-/// current runtime's blocking pool, and where no runtime is current, or that pool does not take
-/// it, it is written on the calling thread before the call returns. On every path it is written
-/// once and a sink that panics is contained.
+/// current runtime's blocking pool, and where no runtime is current, or that pool is shutting
+/// down and drops the job, it is written on the calling thread before the call returns. On every
+/// path it is written once and a sink that panics is contained.
 fn deliver_with(
     mut write: EndWrite,
     spawn_thread: impl FnOnce(EndJob) -> std::io::Result<std::thread::JoinHandle<()>>,
@@ -856,8 +857,10 @@ fn deliver_with(
     );
     if let Some(runtime) = runtime {
         let job = take_and_write(&slot);
-        // A pool that cannot start a thread panics; one that is shutting down drops the job
-        // unrun. Either way the job no longer holds the slot, and the drop below writes.
+        // A pool that is shutting down drops the job unrun, and the drop below writes. A pool
+        // that cannot start a thread keeps the job queued and panics; the panic is contained,
+        // and a thread of the pool writes the record once one is free, or the runtime's
+        // shutdown drops the job and writes it on that thread.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             drop(runtime.spawn_blocking(job));
         }));
