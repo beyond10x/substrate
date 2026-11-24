@@ -59,18 +59,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   so a sink that reaches the runtime on `run_started` reaches it on `run_ended`. The run's end
   task waits on a channel until the sink returned; a runtime that drops the task before that
   joins the record's thread, so once a runtime's drop returned, the `run_ended` of every run that
-  ended under it is in the sink, and a sink that never returns holds that drop. Where the system
-  refuses the thread, the record goes to the runtime's blocking pool, or, with no runtime or
-  where that pool does not take it, is written on the calling thread; on every path it is written
-  once and a panicking sink is contained. An end task dropped before the run ended, such as at
-  runtime shutdown, writes `state: unknown` on the dropping thread, and nothing from a thread
-  that is panicking. A profile without a sink starts no task and no thread for it. `observe`,
-  `wait` and every other call write no record. Held by twelve unit cases of the record, its
-  one-shot value, its thread and the end task's guard, the `pod` monitor's deadline case, eleven
-  cases of `ess_confinement_local` (among them a sink that blocks on a one-thread blocking pool,
-  a sink that panics, a sink that reaches the runtime, a runtime dropped while the run runs, a
-  runtime dropped after the run ended under a sink that takes 500 ms, and the limit the
-  observation names) and lane cases on `linux`, `systemd` around both inner adapters, `oci`,
+  ended under it is in the sink, and a sink that never returns holds that drop. A sink is a
+  synchronous call: it may hand work to the runtime it finds current (a spawn, a channel send)
+  and must not wait on that runtime (`Handle::block_on`, a blocking wait for a task, a timer or
+  I/O of it), because once the runtime's drop has begun nothing drives that wait, the sink does
+  not return and the drop does not return. `pod` hands the ended record to its thread before its
+  publication returns, so a runtime dropped right after cannot record that run `unknown`. Where
+  the system refuses the thread, the record goes to the runtime's blocking pool, or, with no
+  runtime or where that pool does not take it, is written on the calling thread; on every path
+  it is written once and a panicking sink is contained. An end task dropped before the run
+  ended, such as at runtime shutdown, writes `state: unknown` on the dropping thread, and
+  nothing from a thread that is panicking. A profile without a sink starts no task and no thread
+  for it. `observe`, `wait` and every other call write no record. Held by thirteen unit cases of
+  the record, its one-shot value, its thread and the end task's guard, two `pod` unit cases (the
+  monitor's deadline, and a runtime dropped right after the publication), twelve cases of
+  `ess_confinement_local` (among them a sink that blocks on a one-thread blocking pool, a sink
+  that panics, a sink that reaches the runtime, a runtime dropped while the run runs, a runtime
+  dropped after the run ended under a sink that takes 500 ms, the limit the observation names,
+  and `limit_a_sink_that_waits_on_its_runtime_holds_that_runtimes_drop`, which holds that a sink
+  waiting 200 ms on its current-thread runtime's timer still holds that runtime's drop 1 s after
+  it began) and lane cases on `linux`, `systemd` around both inner adapters, `oci`,
   `pod` and `macos` (`ESS confinement … run ended`, the delegated ones required by name in
   `scripts/delegated-lane.sh`). The `oci` case runs in the gate's test step; its start and its
   record share what is left of 50 s after the adapter opened.

@@ -465,6 +465,14 @@ impl AuditRecord {
 /// before the run ended, as when its runtime shuts down, the record is written with
 /// `state: unknown` on the thread that drops the task, and not from a thread that is panicking
 /// (D22).
+///
+/// A sink is a synchronous call. It may hand work to the runtime it finds current (a spawn, a
+/// channel send) and must not wait on that runtime (`Handle::block_on`, a blocking wait for a
+/// task, a timer or I/O of it): on `run_ended`, once the runtime's drop has begun nothing drives
+/// that wait, so the sink does not return and the drop does not return. The other records are
+/// called on the caller's thread, which is inside the runtime where the caller is async; there
+/// Tokio panics on `Handle::block_on`, and on a current-thread runtime only `Runtime::block_on`
+/// drives its timers and I/O.
 #[derive(Clone)]
 pub struct AuditSink(Arc<dyn Fn(&AuditRecord) + Send + Sync>);
 
@@ -1872,6 +1880,23 @@ mod tests {
         calls
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the record's thread still writes");
+    }
+
+    /// Design 36 D20, amended 2026-11-24: the guard's drop returns once the record is in the
+    /// sink, whatever the sink still has to do when the guard is dropped. The sink takes 300 ms
+    /// before it records, so a drop that does not wait for the record's thread returns first.
+    #[test]
+    fn an_end_writing_dropped_waits_for_a_sink_that_is_still_writing() {
+        let (called, calls) = std::sync::mpsc::channel::<()>();
+        let called = parking_lot::Mutex::new(called);
+        let slow = AuditSink::new(move |_: &AuditRecord| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let _ = called.lock().send(());
+        });
+        drop(deliver(end_write(slow)));
+        calls
+            .try_recv()
+            .expect("the record is in the sink once the guard's drop returned");
     }
 
     /// Design 36 D17: an end task whose start failed after it was spawned gets no value, and

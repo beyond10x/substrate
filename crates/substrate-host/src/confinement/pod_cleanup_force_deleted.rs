@@ -344,3 +344,62 @@ async fn the_monitors_stop_past_the_deadline_names_the_wall_time_limit() {
     );
     assert!(run_ended.try_recv().is_err(), "a second run_ended");
 }
+
+/// Design 36 D20 and D22: `publish` hands the ended record to its thread before it returns, so
+/// a current-thread runtime dropped right after `publish` returned, with no further poll, has
+/// the run's `run_ended` in the sink with `state: ended`, never `unknown`; a second publication
+/// writes nothing.
+#[test]
+fn a_runtime_dropped_right_after_publish_has_the_ended_record_in_the_sink() {
+    let (run, sender) = tracked(RUN);
+    let (written, run_ended) = std::sync::mpsc::channel();
+    let written = parking_lot::Mutex::new(written);
+    let admitted = crate::confinement::admission(
+        &proof(),
+        &ConfinementProfile {
+            image: Some(format!("registry.invalid/run@sha256:{}", "a".repeat(64))),
+            audit: Some(crate::confinement::AuditSink::new(
+                move |record: &crate::confinement::AuditRecord| {
+                    let value = serde_json::to_value(record).expect("a record");
+                    if value["event"] == "run_ended" {
+                        let _ = written.lock().send(value);
+                    }
+                },
+            )),
+            ..ConfinementProfile::default()
+        },
+        |_| Ok(()),
+    )
+    .expect("admitted");
+    let (hand_end, end_record) = tokio::sync::oneshot::channel();
+    let mut ending = Ending {
+        phase: sender,
+        record: Some(end_record),
+    };
+    assert!(
+        hand_end
+            .send(admitted.audit_start(&run.id, "/bin/true"))
+            .is_ok(),
+        "the monitor takes the run's end record"
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let exit = RunExit {
+        code: Some(0),
+        signal: None,
+    };
+    runtime.block_on(async {
+        ending.publish(&run, Phase::Ended(exit, Some(0)));
+        ending.publish(&run, Phase::Unknown);
+    });
+    drop(runtime);
+    let record = run_ended
+        .try_recv()
+        .expect("run_ended is in the sink once the runtime's drop returned");
+    assert_eq!(record["run"], RUN, "{record}");
+    assert_eq!(record["state"], "ended", "{record}");
+    assert_eq!(record["exit"], serde_json::json!({"code": 0}), "{record}");
+    assert!(run_ended.try_recv().is_err(), "a second run_ended");
+}

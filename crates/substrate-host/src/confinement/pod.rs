@@ -1640,14 +1640,30 @@ struct Ending {
 #[cfg(feature = "kubernetes")]
 impl Ending {
     /// Publishes the run's end, its output sealed first, and the first time writes its
-    /// `run_ended` from the adapter's observation (design 36 D18, D20), on a task of its own
-    /// that awaits the write, so a sink that blocks never holds the Pod's or its policy's
-    /// removal. A later publication repeats `Unknown` and writes nothing.
+    /// `run_ended` from the adapter's observation (design 36 D18, D20): the record's thread has
+    /// the ended record before this returns, and only the wait for the write runs on a task of
+    /// its own, so a sink that blocks never holds the Pod's or its policy's removal, and a
+    /// runtime that drops that task joins the record's thread. A later publication repeats
+    /// `Unknown` and writes nothing.
     fn publish(&mut self, run: &PodRun, ended: Phase) {
         seal(run);
         self.phase.send_replace(ended);
-        if let Some(receiver) = self.record.take() {
-            tokio::spawn(super::write_run_end(receiver, PodAdapter::observation(run)));
+        let Some(mut receiver) = self.record.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(record) if record.is_inert() => {}
+            Ok(record) => {
+                tokio::spawn(record.write(PodAdapter::observation(run)).finished());
+            }
+            // `start` hands the value over right after it spawned this monitor, which waits a
+            // poll first; only a start whose thread was held past that poll gets here, and the
+            // value is written once it arrives.
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                tokio::spawn(super::write_run_end(receiver, PodAdapter::observation(run)));
+            }
+            // A start that failed after it spawned the monitor: no `run_started`, no `run_ended`.
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {}
         }
     }
 }

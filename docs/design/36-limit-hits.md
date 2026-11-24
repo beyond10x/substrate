@@ -434,8 +434,26 @@ record shares no bounded resource with any run's exit detection or `wait`.
   guard dropped by a thread that is panicking does not join: the record's thread is already
   running and still writes while the process lives, and a panic is never held by a sink. A sink
   that never returns holds the runtime's drop, as a started blocking-pool job does. `pod`, whose
-  monitor goes on to remove the Pod and its policy after it published the end, awaits the write
-  on a task of its own. Amended 2026-11-24 with the change that built the record.
+  monitor goes on to remove the Pod and its policy after it published the end, hands the ended
+  record to its thread before the publication returns and awaits the write on a task of its
+  own; a runtime that drops that task joins the thread like any other. Only where `start`'s
+  thread was held past the monitor's first poll between spawning it and handing it the value of
+  D16 does that task take the value and write. Amended 2026-11-24 with the change that built the
+  record.
+- A sink is a synchronous call. It may hand work to the runtime it finds current (a spawn, a
+  channel send) and must not wait on that runtime (`Handle::block_on`, a blocking wait for a
+  task, a timer or I/O of it). Once the runtime's drop has begun nothing drives such a wait: the
+  sink does not return, the guard's join does not return, and the runtime's drop does not
+  return. This is the case above of a sink that never returns, reached by a sink that waits on
+  the runtime that waits for it; `limit_a_sink_that_waits_on_its_runtime_holds_that_runtimes_drop`
+  holds it on a current-thread runtime with a 200 ms timer: 1 s after the drop began it has not
+  returned and the record is not in the sink. The other records are called on the caller's
+  thread, inside the runtime where the caller is async. Tokio 1.53.1 (`runtime/handle.rs`, the
+  documentation of `Handle::block_on`, lines 248 to 253 and 263 to 269) says that on a
+  current-thread runtime only `Runtime::block_on` drives the I/O and timer drivers, so timers and
+  I/O do not work under `Handle::block_on` unless another thread is in `Runtime::block_on`, and
+  that `Handle::block_on` panics when it is called from an asynchronous context. Amended
+  2026-11-24 with the change that built the record.
 - `Runtime::shutdown_timeout` and `Runtime::shutdown_background` bound that wait only where the
   task is dropped on a worker of a multi-thread runtime: those workers are threads of the
   blocking pool (Tokio 1.53, `runtime/scheduler/multi_thread/worker.rs`, `spawn_blocking(move ||
@@ -470,7 +488,9 @@ thread that drops the task. It says what `RunState::Unknown` means: the adapter 
 the run. Nothing is written from a thread that is panicking, and a sink that panics on this
 record is contained (amended 2026-11-24 with the change that built the record). A run that ended
 before the task was dropped is D20's: its record is written on its own thread, which the dropped
-task joins. A process that exits or is killed
+task joins; on `pod` the publication hands the ended record to that thread before it returns, so
+a runtime that drops the waiting task right after cannot turn it into `unknown`. A process that
+exits or is killed
 writes nothing; a consumer that must account for that pairs `run_started` with `run_ended` in
 its own store. Listed as Q5.
 
@@ -757,7 +777,9 @@ this tree:
   (read in Tokio 1.53, `Runtime`'s `Drop`; not run on the multi-thread flavour). What holds by
   the guard of D20: the runtime's drop returns after the record's thread wrote; a thread whose
   guard was dropped by a panicking thread, or that `shutdown_timeout` or `shutdown_background`
-  left behind, writes only while the process lives.
+  left behind, writes only while the process lives; the runtime's drop returns only once the sink
+  returned, so a sink that waits on that runtime holds it (measured on a current-thread runtime
+  by the `limit_` case of D20; read, not run, for a multi-thread runtime's drop).
 - That the digest in the header of a generated projection covers comments of the YAML (D25).
 - That the Kubernetes API exposes no counter of refused process creations for a Pod. What was
   read: the adapter reads none.
@@ -781,7 +803,9 @@ this tree:
   the epic's boundaries.
 - Limits summed over several runs, `rate_bounds`, a block I/O bound: the epic's boundaries.
 - A bound on how long the sink may hold its thread, on how many such threads a sink that never
-  returns may leave behind, and on how long such a sink may hold a runtime's drop (D20).
+  returns may leave behind, and on how long such a sink may hold a runtime's drop (D20). A sink
+  that waits on the runtime it finds current is such a sink once that runtime's drop has begun;
+  the design states it as a rule for the sink and holds it as a limit, and detects nothing.
 - A constructor or builder for `AuditRecord::RunEnded` for a consumer that tests its own sink.
 
 ## 14. Not read
