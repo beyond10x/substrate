@@ -2419,6 +2419,37 @@ async fn crossing_the_control_rate_with_a_ping_is_answered_in_the_published_voca
     );
 }
 
+/// What the attachment did after a resize frame, read for at most 5 s: the first frame it sent,
+/// that it closed, or that the window reached the driver with no frame before it. An accepted
+/// resize has no answer in the published server vocabulary, so the window reaching the driver
+/// ends the wait; a refusal arrives as a frame while the driver holds no window.
+async fn frame_or_applied_window(
+    harness: &Harness,
+    socket: &mut WebSocketClient,
+    exec_id: &str,
+) -> String {
+    let applied = async {
+        while harness.resizes(exec_id).is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        answered = tokio::time::timeout(Duration::from_secs(5), socket.next_frame()) => {
+            match answered {
+                Err(_deadline) => "no frame at all, and the attachment stayed open".to_owned(),
+                Ok(None) => "the connection closed with no frame at all".to_owned(),
+                Ok(Some(frame)) if frame.opcode == 0x1 => {
+                    String::from_utf8_lossy(&frame.payload).into_owned()
+                }
+                Ok(Some(frame)) => format!("opcode {:#x}", frame.opcode),
+            }
+        }
+        () = applied => {
+            "no frame, the window reached the driver, and the attachment stayed open".to_owned()
+        }
+    }
+}
+
 /// A frame the published pty vocabulary admits is not "outside the closed pty vocabulary".
 ///
 /// JSON Schema 2020-12 defines `"type": "integer"` as "any number with a zero fractional part", so
@@ -2453,14 +2484,7 @@ async fn a_resize_whose_axes_have_a_zero_fractional_part_is_inside_the_published
     // server vocabulary — `output`, `exit`, `protocol-error` and nothing else — so waiting for a
     // frame and unwrapping it made the case unreachable once the frame stopped being refused. The
     // deadline is now one more thing `described` can report; every assertion below is unchanged.
-    let described = match tokio::time::timeout(Duration::from_secs(5), socket.next_frame()).await {
-        Err(_deadline) => "no frame at all, and the attachment stayed open".to_owned(),
-        Ok(None) => "the connection closed with no frame at all".to_owned(),
-        Ok(Some(frame)) if frame.opcode == 0x1 => {
-            format!("{}", String::from_utf8_lossy(&frame.payload))
-        }
-        Ok(Some(frame)) => format!("opcode {:#x}", frame.opcode),
-    };
+    let described = frame_or_applied_window(&harness, &mut socket, &exec_id).await;
     assert_eq!(
         harness.resizes(&exec_id),
         vec![substrate_wire::PtyWindow {
@@ -2511,14 +2535,7 @@ async fn a_client_sequence_with_a_zero_fractional_part_is_inside_the_published_v
         .await;
     let frame = "{\"kind\":\"resize\",\"sequence\":1.0,\"window\":{\"columns\":132,\"rows\":43}}";
     socket.send_text(frame.as_bytes()).await;
-    let described = match tokio::time::timeout(Duration::from_secs(5), socket.next_frame()).await {
-        Err(_deadline) => "no frame at all, and the attachment stayed open".to_owned(),
-        Ok(None) => "the connection closed with no frame at all".to_owned(),
-        Ok(Some(frame)) if frame.opcode == 0x1 => {
-            String::from_utf8_lossy(&frame.payload).into_owned()
-        }
-        Ok(Some(frame)) => format!("opcode {:#x}", frame.opcode),
-    };
+    let described = frame_or_applied_window(&harness, &mut socket, &exec_id).await;
     assert_eq!(
         harness.resizes(&exec_id),
         vec![substrate_wire::PtyWindow {

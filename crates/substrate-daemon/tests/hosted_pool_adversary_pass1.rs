@@ -395,6 +395,8 @@ impl Daemon {
         self.try_stream().await.expect("connect to TLS daemon")
     }
 
+    /// Ends the daemon with `SIGTERM`. The daemon waits up to 5 s for its open TLS connections
+    /// to end, so a caller drops its client streams first.
     async fn stop(mut self) {
         let pid = i32::try_from(self.child.id().expect("daemon pid")).expect("pid fits");
         kill(Pid::from_raw(pid), Signal::SIGTERM).expect("signal daemon");
@@ -457,7 +459,13 @@ async fn adversary_idle_connection_older_than_the_idle_timeout_is_closed() {
     let mut https = daemon.stream().await;
     assert_eq!(hosted_status(&mut https).await, "200");
     assert_eq!(script.accepts(), 1);
-    tokio::time::sleep(Duration::from_millis(31_500)).await;
+    drop(https);
+    // The reaper closes the connection 30 s after it went idle; the case reads the count once
+    // it is 0, or at 31.5 s.
+    let deadline = Instant::now() + Duration::from_millis(31_500);
+    while script.open() != 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let still_open = script.open();
     assert_eq!(
         still_open, 0,
@@ -473,6 +481,7 @@ async fn adversary_idle_connection_older_than_the_idle_timeout_is_closed() {
         2,
         "an idle connection older than 30 s was used"
     );
+    drop(https);
     daemon.stop().await;
     task.abort();
 }
@@ -511,6 +520,7 @@ async fn adversary_idle_pool_holds_at_most_eight_and_never_shares() {
         "{} idle Identity connections held, ADR 0040 bounds them at 8",
         script.open()
     );
+    drop(kept);
     daemon.stop().await;
     task.abort();
 }
@@ -529,6 +539,7 @@ async fn adversary_connection_identity_closed_while_idle_is_replaced() {
     assert_eq!(hosted_status(&mut https).await, "200");
     assert_eq!(script.accepts(), 2);
     assert_eq!(script.resolutions(), 2);
+    drop(https);
     daemon.stop().await;
     task.abort();
 }
@@ -556,6 +567,7 @@ async fn adversary_retry_never_resends_a_request_identity_received() {
         "two hosted requests (second answered {second}) reached Identity as {resolutions} \
          resolutions: the retry re-sent a request Identity had already received"
     );
+    drop(https);
     daemon.stop().await;
     task.abort();
 }
@@ -581,6 +593,7 @@ async fn adversary_leftover_response_bytes_never_answer_a_later_resolution() {
         "a revoked credential was admitted from bytes left over on a pooled connection"
     );
     assert_eq!(script.resolutions(), 2);
+    drop(https);
     daemon.stop().await;
     task.abort();
 }
@@ -611,6 +624,7 @@ async fn adversary_http10_is_not_pooled_and_chunked_is() {
         2,
         "a chunked clean 200's connection was not reused"
     );
+    drop(https);
     daemon.stop().await;
     task.abort();
 }
@@ -643,6 +657,7 @@ async fn adversary_oversized_or_short_body_is_not_pooled() {
         "a short Content-Length connection was reused"
     );
     assert_eq!(script.resolutions(), 4);
+    drop(https);
     daemon.stop().await;
     task.abort();
 }
@@ -675,6 +690,7 @@ async fn adversary_deadline_holds_across_the_retry() {
         elapsed < Duration::from_millis(5_800),
         "the retry ran past the 5 s deadline: {elapsed:?}"
     );
+    drop(https);
     daemon.stop().await;
     task.abort();
 }
