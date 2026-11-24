@@ -2293,6 +2293,10 @@ exit 0
 
     const NEVER: u32 = 1_000_000;
 
+    /// A runtime client that returns at once. `/bin/sh` is on Linux and on macOS; `/bin/true`
+    /// is not on macOS.
+    const RETURNS_AT_ONCE: &[&str] = &["/bin/sh", "-c", "exit 0"];
+
     /// Runs `monitor` against [`STAND_IN_RUNTIME`] with `argv` as the runtime client, and returns
     /// the published observation, the number of state reads and the time to the publication.
     async fn monitored(
@@ -2361,7 +2365,7 @@ exit 0
     #[tokio::test(flavor = "multi_thread")]
     async fn an_embedders_kill_is_read_once() {
         let (ended, reads, elapsed) =
-            monitored(NEVER, true, Duration::from_mins(1), &["/bin/true"]).await;
+            monitored(NEVER, true, Duration::from_mins(1), RETURNS_AT_ONCE).await;
         assert_eq!(reads, 1, "{ended:?} after {elapsed:?}");
         assert_eq!(ended.state, RunState::Ended, "{ended:?}");
         assert_eq!(ended.exit, KILLED, "{ended:?}");
@@ -2389,7 +2393,7 @@ exit 0
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unexplained_kill_reads_a_late_flag_and_names_memory() {
         let (ended, reads, elapsed) =
-            monitored(3, false, Duration::from_mins(1), &["/bin/true"]).await;
+            monitored(3, false, Duration::from_mins(1), RETURNS_AT_ONCE).await;
         assert_eq!(reads, 3, "{ended:?} after {elapsed:?}");
         assert!(elapsed >= STARTED_POLL * 2, "{elapsed:?}");
         assert_eq!(ended.state, RunState::Ended, "{ended:?}");
@@ -2402,7 +2406,7 @@ exit 0
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unexplained_kill_without_a_flag_is_read_every_50_ms_for_a_second() {
         let (ended, reads, elapsed) =
-            monitored(NEVER, false, Duration::from_mins(1), &["/bin/true"]).await;
+            monitored(NEVER, false, Duration::from_mins(1), RETURNS_AT_ONCE).await;
         assert!(elapsed >= OOM_FLAG_WAIT, "{elapsed:?}");
         // The first read, then one every 50 ms at most while the second lasts.
         let most =
