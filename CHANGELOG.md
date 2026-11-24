@@ -91,6 +91,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   not deflate grew the peak by 3.98 to 4.18 times the limit; that figure is printed and not
   held. A create of
   1,000 files with 50 commits of history is served. No route, schema or refusal code changes.
+- `cargo xtask check-packages` holds a rule for replacing a package: only `[patch.crates-io]`
+  in the root `Cargo.toml` carries a patch, and the check refuses by name, with the file, the
+  key or entry, and what to do: another key under `[patch]` (an index URL in any spelling, a
+  registry name, a Git URL) and `[replace]` in `Cargo.toml`; an entry `Cargo.lock` lists under
+  `[[patch.unused]]`; two entries that patch one package name; and an entry with neither a
+  `path` nor a `git` source. Each entry of `[patch.crates-io]` is held to the lock file, a Git
+  entry to its reference. A cargo configuration beneath the root holds only the top-level keys
+  `alias` and `profile`, and an alias is a string or an array of strings with no `--config` or
+  `--config=<value>` token; a `.cargo` directory holding both `config` and `config.toml`, a
+  link included, is refused. One named exception: the configuration of the fixture workspace
+  `crates/substrate-host/tests/fixtures/cargo-test` holds only `net` and `source`, while the
+  check tests on every run that the directory is a workspace of its own, that no root member is
+  it or lies beneath it, and that the root manifest names no path with `..`, no absolute path
+  and no glob. Outside the check are configuration outside the repository (a file above the
+  root, `CARGO_HOME`, `--config` on a command line or in a script or workflow, `CARGO_*`
+  variables), files beneath a directory named `target` or `.git`, and what `profile` sets.
+  Held by 28 cases of `xtask/src/packages.rs` on throwaway workspaces; on this tree the check
+  reads the two entries and the two cargo configurations and passes.
 
 ## [0.26.0] — 2026-11-23
 

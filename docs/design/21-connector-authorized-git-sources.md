@@ -272,11 +272,36 @@ this way:
   differ. `cargo xtask check-packages` therefore refuses a `[patch.crates-io]` entry that
   `Cargo.lock` does not resolve to, and a lock that holds a second package of an entry's name
   from any source, whatever its version: the registry, a `sparse+` registry, a Git source or
-  another path. A dependent of that second package would not build the entry's source. The
-  check reads every table cargo applies to crates.io, `[patch.crates-io]` and the one keyed by
-  the URL of its index, in `Cargo.toml` and in `.cargo/config.toml` or `.cargo/config`, and
-  holds a Git entry to the one package of its reference: the same repository at another
-  revision is a second package.
+  another path. A dependent of that second package would not build the entry's source. A Git
+  entry is held to the one package of its reference: the same repository at another revision
+  is a second package. Only `[patch.crates-io]` in the root `Cargo.toml` carries a patch.
+  The check refuses by name:
+  - another key under `[patch]` (an index URL in any spelling, a registry name, a Git URL)
+    and `[replace]` in `Cargo.toml`;
+  - an entry `Cargo.lock` lists under `[[patch.unused]]`;
+  - two entries that patch one package name, a renamed entry counted by its `package`;
+  - an entry with neither a `path` nor a `git` source.
+
+  A cargo configuration beneath the root (`.cargo/config.toml` or `.cargo/config`, found by
+  a walk that enters every directory but those named `target` and `.git`) holds only the
+  top-level keys `alias` and `profile`; every other key is refused by its name, `patch`,
+  `paths` and a replacing `source` in forms that name their entries. An alias is a string
+  or an array of strings and holds no `--config` or `--config=<value>` token (cargo 1.97.1
+  takes no abbreviation of the flag in an alias). An alias may name any command, a built-in
+  one included, and what an aliased command builds is outside this rule but for the
+  configuration it passes. A `.cargo` directory holding both names, a link included, is
+  refused: cargo reads `config` alone. One named exception: the configuration of
+  `crates/substrate-host/tests/fixtures/cargo-test` holds only `net` and `source`, so it
+  may replace a source, while the check tests on every run that the directory's
+  `Cargo.toml` has a `[workspace]` table, that no root member is the directory or lies
+  beneath it, that the directory is not a member's `src` or beneath one, and that the root
+  manifest's `members`, `default-members` and `exclude` name no path with `..`, no absolute
+  path and no glob; where one of these fails, the file is held to `alias` and `profile` like
+  any other. Each refusal names the file and the key or entry, and what to do. Outside the
+  check are configuration outside the repository (a file above the root, `CARGO_HOME`,
+  `--config` on a command line or in a script or workflow, `CARGO_*` variables), files
+  beneath a directory named `target` or `.git`, and what `profile` sets, which changes how a
+  package is compiled, not where it comes from.
 - The cases below run the fetch of a create, so they fail with a `gix-pack` that does not hold
   the four counts, whichever version it is.
 - An update of `gix` takes the published source of the `gix-pack` it resolves as
