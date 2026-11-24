@@ -38,7 +38,7 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 13
+revision: 14
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:43Z", actor: "human:timo", revision: 12, decided_on: {"recorded":{"review_outcome":3}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:43Z", actor: "human:timo", revision: 13, decided_on: {"recorded":{"review_outcome":3}}, correlation: "run-governance-first-slice-accepted"}
@@ -80,8 +80,9 @@ carries the same number. An adapter that does not read the counter leaves both a
      on the wire;
    - one row per adapter: `linux` and `systemd` read `pids.events`; `oci` and `pod` state what
      their runtime exposes or report the field absent.
-2. `spec/confinement/confinement.yaml` states the field and a scenario;
-   `cargo xtask check-ess` regenerates the suite.
+2. `spec/confinement/confinement.yaml` records the field as `UNMAPPED` with its reason (design 36
+   D25): the model has no run, so no scenario can reach the bound;
+   `cargo xtask check-ess` regenerates the committed projections.
 3. `linux` and `systemd` report the count; the other adapters as their design row says.
 
 ## Acceptance
