@@ -1158,12 +1158,19 @@ pub struct RunObservation {
     /// Processes of the run the kernel's OOM killer ended, once the run has ended; `None` where
     /// the adapter does not observe it (absent, never zero: invariant 3).
     pub memory_oom_kills: Option<u64>,
-    /// Process creations the run's process bound refused: the `max` counter of `pids.events` in
-    /// the run's cgroup (design 36 § 3). A running run carries the count at the moment of the
-    /// observation, an ended one the count once its leader exited. `Some(0)`: read, and nothing
-    /// was refused. `None` where the adapter does not read it or the read failed (invariant 3):
-    /// `linux` and `systemd` read it, `oci`, `pod`, `local` and `macos` do not (design 36 D14).
-    /// A hit ends no run and sets no `limit`.
+    /// Process creations refused by a process bound: the `max` counter of `pids.events` in the
+    /// run's cgroup (design 36 § 3). Where the cgroup has no `pids.events.local`, the kernel
+    /// counts there every creation refused for a process of the cgroup, also by the bound of a
+    /// cgroup above it, so `systemd` runs whose run cgroups share a bound above them each count
+    /// what that bound refused; where it has that file and the cgroup2 mount has no
+    /// `pids_localevents`, it counts the hits of the cgroup's own bound and of any bound beneath
+    /// it (design 36 D10). A running run carries the count at the moment of the observation, an
+    /// ended one the count once its leader exited; a running observation made between that read
+    /// and the end of the tree's kill can carry a higher count, because a process left in the
+    /// tree can still be refused (design 36 D13). `Some(0)`: read, and nothing was refused.
+    /// `None` where the adapter does not read it or the read failed (invariant 3): `linux` and
+    /// `systemd` read it, `oci`, `pod`, `local` and `macos` do not (design 36 D14). A hit ends no
+    /// run and sets no `limit`.
     pub process_limit_hits: Option<u64>,
 }
 

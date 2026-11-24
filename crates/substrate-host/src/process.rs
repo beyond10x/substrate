@@ -4717,7 +4717,19 @@ impl Cgroup {
     /// The kernel's own count of process creations this cgroup's `pids.max` refused, read on its
     /// own (design 36 D10). Like the OOM count, it is a fact of the run, not a measurement.
     fn process_limit_hits(&self) -> Result<u64, DriverError> {
-        read_named_counter(&self.path.join("pids.events"), "max")
+        let path = self.path.join("pids.events");
+        let contents = std::fs::read_to_string(&path).map_err(|error| {
+            DriverError::failed(
+                "exec.metrics-read-failed",
+                format!("cgroup metric {}: {error}", path.display()),
+            )
+        })?;
+        pids_events_max(&contents).ok_or_else(|| {
+            DriverError::failed(
+                "exec.metrics-read-failed",
+                format!("cgroup metric {} omitted max", path.display()),
+            )
+        })
     }
 
     /// What this cgroup holds once the exec's leader exited, read once before the cgroup is
@@ -4949,6 +4961,21 @@ pub(crate) fn read_decimal_counter(path: &Path) -> Result<u64, DriverError> {
                 format!("cgroup metric {} is not an integer", path.display()),
             )
         })
+}
+
+/// The count of a cgroup's `pids.events` text `contents`: the number of its `max` line (design 36
+/// D10). The one reader of that file for the host driver and for `systemd`. A line counts only
+/// in the kernel's form, `max`, one space and a decimal `u64`, ended by `\n` or by the end of the
+/// text; anything else on that line, around it or in the number gives no line, and a text
+/// without such a line gives `None`: absent, never zero (invariant 3).
+pub(crate) fn pids_events_max(contents: &str) -> Option<u64> {
+    contents.split('\n').find_map(|line| {
+        let digits = line.strip_prefix("max ")?;
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
+    })
 }
 
 fn read_named_counter(path: &Path, key: &str) -> Result<u64, DriverError> {
@@ -5193,6 +5220,51 @@ mod tests {
         assert_eq!(cgroup.end_of_run(None).process_limit_hits, None);
         std::fs::remove_file(directory.path().join("pids.events")).unwrap();
         assert_eq!(cgroup.end_of_run(None).process_limit_hits, None);
+    }
+
+    /// Design 36 D9, D10: the end-of-run read of `pids.events` is the number of the `max` line
+    /// wherever the line stands, up to `u64::MAX`, where the line is `max`, one space and the
+    /// decimal number, ended by `\n` or the end of the file. Any other form of that line, an empty
+    /// file, a value past `u64` and a negative or signed value are absent, never zero, and never
+    /// the number of another line. The rows are the same as those of the `systemd` reader's case
+    /// (`pids_events_max` is the one parser of both).
+    #[test]
+    fn the_end_of_run_count_is_the_max_lines_number_and_absent_where_malformed() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu memory pids");
+        let events = directory.path().join("pids.events");
+        for (contents, expected) in [
+            ("max 3\n", Some(3)),
+            ("other 9\nmax 3\n", Some(3)),
+            ("max 3\nother 9\n", Some(3)),
+            ("max 3", Some(3)),
+            ("max 03\n", Some(3)),
+            ("max 18446744073709551615\n", Some(u64::MAX)),
+            ("max 3   \n", None),
+            ("  max\t3\n", None),
+            ("max\t3\n", None),
+            (" max 3\n", None),
+            ("max  3\n", None),
+            ("max 3\r\n", None),
+            ("max +3\n", None),
+            ("", None),
+            ("\n", None),
+            ("max\n", None),
+            ("max \n", None),
+            ("max -1\n", None),
+            ("max 18446744073709551616\n", None),
+            ("max 3x\n", None),
+            ("max.imp 3\n", None),
+            ("pids 3\n", None),
+            ("other 9\n", None),
+        ] {
+            std::fs::write(&events, contents).unwrap();
+            assert_eq!(
+                cgroup.end_of_run(None).process_limit_hits,
+                expected,
+                "{contents:?}"
+            );
+        }
     }
 
     /// Design 36 D9: a measured exec's end-of-run count of refused creations is the one its

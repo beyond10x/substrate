@@ -46,8 +46,12 @@ pub struct EndOfRun {
     /// `memory.events` `oom_kill`. `None` where the counter could not be read: absent, never
     /// zero (invariant 3).
     pub memory_oom_kills: Option<u64>,
-    /// `pids.events` `max`: the process creations the exec's process bound refused (design 36
-    /// § 3). `None` where the counter could not be read: absent, never zero (invariant 3).
+    /// `pids.events` `max` of the exec's cgroup, read once the leader exited (design 36 § 3).
+    /// Where the cgroup has no `pids.events.local`, the kernel counts there every creation
+    /// refused for a process of the cgroup, also by the bound of a cgroup above it; where it has
+    /// that file and the cgroup2 mount has no `pids_localevents`, the hits of the cgroup's own
+    /// bound and of any bound beneath it (design 36 D10). `None` where the counter could not be
+    /// read: absent, never zero (invariant 3).
     pub process_limit_hits: Option<u64>,
     /// The live output queue stalled after the child had exited on its own: the record still
     /// carries `session.output-backpressure`, and the stall ended nothing (design 36 D5).

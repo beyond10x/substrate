@@ -968,6 +968,11 @@ async fn a_pod_run_nobody_observes_writes_one_run_ended() {
     assert_eq!(record["state"], "ended", "{NAME}: {record}");
     assert_eq!(record["exit"], json!({"code": 3}), "{NAME}: {record}");
     assert_eq!(record["memory_oom_kills"], 0, "{NAME}: {record}");
+    // Design 36 D14: `pod` reads no count of refused creations.
+    assert!(
+        record.get("process_limit_hits").is_none(),
+        "{NAME}: {record}"
+    );
     assert!(record.get("limit").is_none(), "{NAME}: {record}");
     println!("{NAME}: executed");
 }
@@ -1004,6 +1009,8 @@ async fn a_run_writes_its_workspace_reports_its_output_and_leaves_nothing_after_
     assert_eq!(ended.adapter, AdapterName::Pod);
     assert_eq!(ended.declared_insecure, None);
     assert_eq!(ended.memory_oom_kills, Some(0), "{ended:?}");
+    // Design 36 D14: `pod` reads no count of refused creations.
+    assert_eq!(ended.process_limit_hits, None, "{ended:?}");
     // Design 36 D7: a run that exited by itself names no limit.
     assert_eq!(ended.limit, None, "{ended:?}");
     assert_eq!(ended.exit.and_then(|exit| exit.code), Some(3));
@@ -1062,6 +1069,7 @@ async fn a_run_over_its_memory_bound_is_oom_killed_and_leaves_nothing() {
         "{exit:?}"
     );
     assert_eq!(ended.memory_oom_kills, Some(1), "{ended:?}");
+    assert_eq!(ended.process_limit_hits, None, "{ended:?}");
     // Design 36 D7, the `pod` row: `OOMKilled` with an exit by a signal or above 128.
     assert_eq!(
         ended.limit,

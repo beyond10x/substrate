@@ -495,6 +495,11 @@ async fn delegated_lane_runs_every_need_on_an_adapter_not_declared_insecure() {
 /// The governed run's script: the denied program fails, `xargs` then tries to keep 16 `sleep`
 /// processes running, one per line of `sixteen`, and the shell replaces itself with a `sleep`
 /// that outlives the run's timeout.
+///
+/// The case assumes three processes of the run's cgroup before `xargs` under the profile's bound
+/// of four: bubblewrap's monitor, its init and the shell (`env` and the exec gate replace
+/// themselves). A change to that tree changes what this run does under the bound; the
+/// assertions on its output and its count name the assumption when they fail.
 const GOVERNED: &str = "/workspace/bin/denied 2>/dev/null; echo \"denied $?\"; \
                         xargs -P 16 -n 1 sleep < sixteen 2>/dev/null; echo tried; exec sleep 30";
 
@@ -600,7 +605,8 @@ async fn delegated_lane_a_governed_run_names_its_timeout_and_counts_its_refused_
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         "denied 126\ntried\n",
-        "{NAME}: stderr {:?}",
+        "{NAME}: the case assumes three processes before `xargs` under a bound of four; stderr \
+         {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(ended.state, RunState::Ended, "{NAME}: {ended:?}");
@@ -608,7 +614,12 @@ async fn delegated_lane_a_governed_run_names_its_timeout_and_counts_its_refused_
     let hits = ended
         .process_limit_hits
         .filter(|hits| *hits > 0)
-        .unwrap_or_else(|| panic!("{NAME}: no refused creation counted: {ended:?}"));
+        .unwrap_or_else(|| {
+            panic!(
+                "{NAME}: no refused creation counted; the case assumes three processes before \
+                 `xargs` under a bound of four: {ended:?}"
+            )
+        });
     let record = tokio::time::timeout(std::time::Duration::from_secs(5), ended_records.recv())
         .await
         .expect("run_ended reaches the sink")

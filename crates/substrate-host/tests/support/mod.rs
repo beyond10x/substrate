@@ -1671,6 +1671,12 @@ pub const PROCESS_BOUND: u32 = 4;
 /// bound of [`PROCESS_BOUND`] refuses creations. The shell then writes `tried` and replaces
 /// itself with a `sleep` that outlives the run's timeout: it starts nothing more, and the run
 /// ends at its timeout. The paths are relative to the run's working directory, its workspace.
+///
+/// The `linux` case assumes three processes of the run's cgroup before `xargs` under a bound of
+/// four: bubblewrap's monitor, its init and the shell (`env` and the exec gate replace
+/// themselves). Around `local`, `systemd`'s run cgroup holds the shell alone before `xargs`. A
+/// change to either tree changes what this run does under the bound; the wait for `tried` names
+/// the assumption when it fails.
 pub const OVER_THE_PROCESS_BOUND: &str =
     "xargs -P 16 -n 1 sleep < sixteen 2>/dev/null; : > tried; exec sleep 30";
 
@@ -1714,7 +1720,11 @@ pub async fn over_the_process_bound(
     while !tried.exists() {
         if std::time::Instant::now() >= deadline {
             let observed = adapter.observe(&run).await;
-            panic!("{name}: the run wrote no `tried` within 10 s: {observed:?}");
+            panic!(
+                "{name}: the run wrote no `tried` within 10 s; the case assumes three processes \
+                 before `xargs` under a bound of four on `linux`, the shell alone around \
+                 `local`: {observed:?}"
+            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }

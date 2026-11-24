@@ -1109,6 +1109,11 @@ async fn an_oci_run_nobody_observes_writes_one_run_ended() {
     );
     assert!(record.get("limit").is_none(), "{NAME}: {record}");
     assert!(record.get("memory_oom_kills").is_none(), "{NAME}: {record}");
+    // Design 36 D14: `oci` reads no count of refused creations.
+    assert!(
+        record.get("process_limit_hits").is_none(),
+        "{NAME}: {record}"
+    );
     println!("{NAME}: executed");
 }
 
@@ -1227,6 +1232,8 @@ async fn an_oci_run_is_removed_after_its_timeout() {
         "{ended:?}"
     );
     assert_eq!(ended.memory_oom_kills, None, "{ended:?}");
+    // Design 36 D14: nor a count of refused creations.
+    assert_eq!(ended.process_limit_hits, None, "{ended:?}");
     assert_eq!(
         containers(&runtime, run.as_str()),
         "",
@@ -1290,6 +1297,7 @@ async fn an_oci_run_over_its_memory_bound_names_the_memory_limit() {
         "{NAME}: {ended:?}"
     );
     assert_eq!(ended.memory_oom_kills, None, "{NAME}: {ended:?}");
+    assert_eq!(ended.process_limit_hits, None, "{NAME}: {ended:?}");
     assert_eq!(
         containers(&runtime, run.as_str()),
         "",

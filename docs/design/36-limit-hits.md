@@ -284,6 +284,13 @@ of this section; it is a usage figure and belongs to `story:run-observation-carr
 Reason. The requirement asks for the hit. The counter is the kernel's own count of it and needs
 no sampling. The wire already names the same counter `process_limit_hits`.
 
+What the kernel counts in it depends on the kernel. Where the cgroup has no `pids.events.local`,
+it counts every creation refused for a process of this cgroup, also one a bound of a cgroup above
+it refused. Where it has that file, and the cgroup2 mount has no `pids_localevents` option, it
+counts the hits of this cgroup's bound and of the bound of any cgroup beneath it. For `systemd`
+this means that on a kernel without `pids.events.local`, runs whose run cgroups share a bound
+above them each count a creation that shared bound refused for one of their processes.
+
 **D11. `RunObservation` gains `process_limit_hits: Option<u64>`.** `Some(0)` says the adapter
 read the counter and nothing was refused. `None` says the adapter does not read it or could not
 (invariant 3).
@@ -302,6 +309,9 @@ polls `observe`. `wait` and the ended observation carry the final value. Listed 
   (`WAIT_POLL`) and does not call it.
 - The ended value is `end_of_run.process_limit_hits` (D9).
 - A read that fails gives `None` for that observation; it does not fail `observe`.
+- A running `observe` made after the end's read and before the kill of the tree is complete can
+  read a higher count than the ended observation carries, because a process left in the tree can
+  still be refused. The ended observation's count is the one read once the leader exited.
 
 **D14. Which adapters report it.**
 
@@ -721,6 +731,17 @@ Nothing was built or run for this document. Beyond that, these claims rest on kn
 this tree:
 
 - That `memory.events` `oom_kill` and `pids.events` `max` only grow over the life of a cgroup.
+- What `pids.events` `max` counts (D10). Read: the kernel's `cgroup-v2.rst`, which says that
+  without `pids_localevents` the counter "represents any pids.max enforcemnt across cgroup's
+  subtree" and that the option restores the v1-like count of local fork failures, and a host
+  whose cgroups have `pids.events.local` and whose cgroup2 mount has no `pids_localevents`. Read
+  too: `kernel/cgroup/pids.c` of Linux 6.12. Its `pids_event` counts `max` in the cgroup whose
+  bound was exceeded and in every cgroup above it, so a cgroup counts no creation that a bound
+  above it refused; under `CGRP_ROOT_PIDS_LOCAL_EVENTS` it counts instead in the cgroup of the
+  process refused, whichever bound refused it, and `__pids_events_show` prints `max %lld\n`. The
+  count on a kernel without `pids.events.local` is taken to be that second form, which the
+  document calls v1-like. The source of such a kernel was not read, and neither was which
+  kernel release added the file.
 - That an OOM kill in a cgroup with `memory.oom.group` 1 ends every process in it. The host
   driver's test `an_exec_that_crosses_its_memory_bound_leaves_no_process_in_its_cgroup` holds it
   for `linux`; it was read, not run.

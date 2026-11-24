@@ -856,10 +856,13 @@ mod imp {
         named_counter(&cgroup.join("memory.events"), "oom_kill")
     }
 
-    /// `pids.events` `max` of a run's cgroup: the process creations its `pids.max` refused;
-    /// `None` where it cannot be read (design 36 D10, D14: absent, never zero).
+    /// `pids.events` `max` of a run's cgroup (design 36 D10, D14), parsed by the host driver's
+    /// own reader of that file; `None` where it cannot be read: absent, never zero.
     fn process_limit_hits(cgroup: &Path) -> Option<u64> {
-        named_counter(&cgroup.join("pids.events"), "max")
+        std::fs::read_to_string(cgroup.join("pids.events"))
+            .ok()
+            .as_deref()
+            .and_then(crate::process::pids_events_max)
     }
 
     /// The value of the `key` line of the flat-keyed cgroup file `file`; `None` where the file,
@@ -1994,6 +1997,45 @@ mod imp {
             std::fs::remove_file(&events).expect("removed");
             assert_eq!(process_limit_hits(cgroup.path()), None);
             assert_eq!(process_limit_hits(&cgroup.path().join("gone")), None);
+        }
+
+        /// Design 36 D10, D14: the run cgroup's count is the number of the `max` line wherever
+        /// the line stands, up to `u64::MAX`, where the line is `max`, one space and the decimal
+        /// number, ended by `\n` or the end of the file. Any other form of that line, an empty
+        /// file, a value past `u64` and a negative or signed value are absent, never zero. The
+        /// rows are the same as those of the host driver's end-of-run case.
+        #[test]
+        fn the_run_cgroups_count_is_the_max_lines_number_and_absent_where_malformed() {
+            let cgroup = tempfile::tempdir().expect("cgroup");
+            let events = cgroup.path().join("pids.events");
+            for (contents, expected) in [
+                ("max 3\n", Some(3)),
+                ("other 9\nmax 3\n", Some(3)),
+                ("max 3\nother 9\n", Some(3)),
+                ("max 3", Some(3)),
+                ("max 03\n", Some(3)),
+                ("max 18446744073709551615\n", Some(u64::MAX)),
+                ("max 3   \n", None),
+                ("  max\t3\n", None),
+                ("max\t3\n", None),
+                (" max 3\n", None),
+                ("max  3\n", None),
+                ("max 3\r\n", None),
+                ("max +3\n", None),
+                ("", None),
+                ("\n", None),
+                ("max\n", None),
+                ("max \n", None),
+                ("max -1\n", None),
+                ("max 18446744073709551616\n", None),
+                ("max 3x\n", None),
+                ("max.imp 3\n", None),
+                ("pids 3\n", None),
+                ("other 9\n", None),
+            ] {
+                std::fs::write(&events, contents).expect("events");
+                assert_eq!(process_limit_hits(cgroup.path()), expected, "{contents:?}");
+            }
         }
     }
 }

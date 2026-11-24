@@ -75,17 +75,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `scripts/delegated-lane.sh`). The `oci` case runs in the gate's test step; its start and its
   record share what is left of 50 s after the adapter opened.
 - `RunObservation.process_limit_hits` and the same member of `run_ended` (design 36, story 2):
-  the number of process creations the run's process bound refused, the `max` counter of
-  `pids.events` in the run's cgroup. `linux` and `systemd` report it: on an ended run the count
-  read once the leader exited and before the cgroup is removed, and on `observe` of a running run
-  the count at that moment; `0` says the counter was read and nothing was refused. `oci`, `pod`,
+  the number of process creations a process bound refused, the `max` counter of `pids.events` in
+  the run's cgroup. Where the cgroup has no `pids.events.local`, the kernel counts there every
+  creation refused for a process of the cgroup, also by the bound of a cgroup above it, so
+  `systemd` runs whose run cgroups share a bound above them each count what that bound refused;
+  where it has that file and the cgroup2 mount has no `pids_localevents`, it counts the hits of
+  the cgroup's own bound and of any bound beneath it. `linux` and `systemd` report it: on an
+  ended run the count read once the leader exited and before the cgroup is removed, and on
+  `observe` of a running run the count at that moment, which between the end's read and the end
+  of the tree's kill can be higher than the ended count; `0` says the counter was read and
+  nothing was refused. A `pids.events` whose `max` line is not `max`, one space and a decimal
+  number gives an absent count. `oci`, `pod`,
   `local` and `macos` leave it absent, and so does a read that failed, which never fails
   `observe`. A hit ends no run and names no limit: a run that hits its process bound and then its
   timeout names `wall_time` and a count above zero. The host driver reads the counter for every
   exec, measured or not, into the new `EndOfRun::process_limit_hits`. Held by unit cases of the
-  driver's read, of the `systemd` read and of the record, by `ess_confinement_local` (absent on
-  the observation and on the record), and by lane cases on `linux` and `systemd` around `local`
-  (`ESS confinement … process limit hits …`), on `macos`, and by `consumer_surface`'s run held to
+  one parser of `pids.events`, which the driver's read and the `systemd` read share (the same 23
+  texts through each read), of the driver's read, of the record, of the `linux` observation that
+  carries the driver's ended count and of a count that names no limit, by
+  `ess_confinement_local` (absent on the observation and on the record), and by lane cases on
+  `linux` and `systemd` around `local` (`ESS confinement … process limit hits …`), on `oci`,
+  `pod` and `macos` (absent on the ended observation and on the record), and by
+  `consumer_surface`'s run held to
   an allow-list and a deny-list that hits its process bound and then its timeout, which
   `scripts/delegated-lane.sh` requires by name.
 

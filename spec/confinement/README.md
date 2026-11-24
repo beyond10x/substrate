@@ -144,7 +144,9 @@ commands has at least one scenario among the 74 authored. All 79 scenarios pass 
 - The audit record of a refusal (`ProfileRefused`): an adapter-test obligation, above.
 - The limit that ended a run, its OOM and process-limit counts, and the `run_ended` audit record
   ([design 36](../../docs/design/36-limit-hits.md) D25): the model has no run entity, so the
-  per-adapter rows of design 36 and each adapter lane's cases hold them.
+  per-adapter rows of design 36 and the adapters' lane cases hold them. The process-limit count
+  has cases on `local`, `linux`, `systemd` around `local`, `oci`, `pod` and `macos`; none runs
+  `systemd` around `linux` past its process bound.
 - What an image beside `local`, `linux`, `macos` or `systemd` means. The model ignores it.
 - The shape of an ingress route and a rate bound. Any value is refused.
 - An `oci` or `pod` profile with no image is refused as unpinned. This fails closed, and no source
