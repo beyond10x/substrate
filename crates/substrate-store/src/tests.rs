@@ -1000,6 +1000,31 @@ fn the_default_reserve_is_the_published_result_bound() {
     );
 }
 
+/// The least success-result reserve a store opens with is 383 bytes: the least terminal headroom
+/// (454 bytes) less what a terminal success adds around its result. Bundle `0.28.0`'s vectors of
+/// `operation.result-limit` state it as their machine's `operation.result-max-json-bytes`, and
+/// `cargo xtask check-bundle` holds them to the same literal (`LEAST_RESERVE` in
+/// `xtask/src/bundle/result_bound.rs`), which does not depend on this crate. A store one byte
+/// under the least headroom does not open.
+#[test]
+fn the_least_success_result_reserve_is_383_bytes() {
+    let least = StoreConfig {
+        operation_terminal_headroom_bytes: StoreConfig::minimum_terminal_headroom_bytes(),
+        ..StoreConfig::default()
+    };
+    assert_eq!(least.success_result_json_bytes(), 383);
+    let directory = tempfile::tempdir().expect("temporary store");
+    Store::open_with_config(directory.path().join("least.db"), least).expect("opens at the least");
+    let under = StoreConfig {
+        operation_terminal_headroom_bytes: StoreConfig::minimum_terminal_headroom_bytes() - 1,
+        ..StoreConfig::default()
+    };
+    assert!(matches!(
+        Store::open_with_config(directory.path().join("under.db"), under),
+        Err(StoreError::OperationTerminalHeadroomBelowUnrecorded { .. })
+    ));
+}
+
 /// `success_result_json_bytes` is exact against the row accounting: a success result of that
 /// many bytes of JSON, completed at the longest `terminal_at` for the resource the acceptance
 /// named, is recorded and replays. One byte more is not recorded and not cut: the row ends

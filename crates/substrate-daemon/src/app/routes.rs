@@ -257,11 +257,13 @@ async fn machine_get(
     if !query_is_empty(raw_query.as_deref()) {
         return schema_invalid(&request_id, None, "query");
     }
-    // ADR 0053 decision 4: the fact is the reserve this daemon's ledger decides every start
-    // against, whatever the driver states, so the bound a client reads is the bound it is held to.
-    let mut machine = app.driver.machine();
-    machine.facts.operation_result_max_json_bytes = app.store.success_result_json_bytes();
-    success(StatusCode::OK, Success::observed(request_id, machine))
+    // The snapshot as the driver digested it: no fact changes here, so its digest covers every
+    // fact a client reads. The daemon serves only a snapshot whose result bound is its ledger's
+    // reserve (`runtime::require_one_result_bound`, ADR 0053 decision 4, amendment of 2026-11-24).
+    success(
+        StatusCode::OK,
+        Success::observed(request_id, app.driver.machine()),
+    )
 }
 
 async fn operation_get(

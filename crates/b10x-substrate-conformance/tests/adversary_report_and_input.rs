@@ -24,7 +24,7 @@ const RUNNER: &str = env!("CARGO_BIN_EXE_b10x-substrate-conformance");
 const SCHEMA: &str = include_str!("../schema/remote-conformance-report.v1.schema.json");
 const SERVER_NAME: &str = "substrate.test";
 const PINNED_CONTRACT: &str = "substrate-wire/0.28.0";
-const PINNED_SHA256: &str = "a9354f3ecca4e029f7cf8054f0230a25a2eca76d270bd66ad1172d33a5cb7280";
+const PINNED_SHA256: &str = "2cf0b0bd5a96600f4fbc02d2f98c3c76d839e3926399535487bc41f29e219e78";
 const PRINTF: &str = "/usr/bin/printf";
 const BOUND: Duration = Duration::from_secs(90);
 

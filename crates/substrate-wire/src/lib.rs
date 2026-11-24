@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "v1";
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
 pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.28.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "a9354f3ecca4e029f7cf8054f0230a25a2eca76d270bd66ad1172d33a5cb7280";
+    "2cf0b0bd5a96600f4fbc02d2f98c3c76d839e3926399535487bc41f29e219e78";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 /// Most characters of `old_text` and `new_text` in a v2 file edit and of `text` in a line-patch
 /// edit: the `maxLength` their input schemas publish, which JSON Schema counts in characters, not

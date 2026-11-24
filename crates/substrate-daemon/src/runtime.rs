@@ -761,6 +761,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         delegated_context,
         private_host_paths,
     );
+    require_one_result_bound(&app.driver.machine().facts, &app.store)?;
     Arc::get_mut(&mut app)
         .context("configure capture policy before sharing the application")?
         .allow_unrecorded_sessions = config.allow_unrecorded_sessions;
@@ -972,6 +973,25 @@ fn check_kubernetes_selection(config: &DaemonConfig) -> anyhow::Result<()> {
         bail!(
             "config.driver-conflict: {field} is a host driver setting, and the kubernetes driver \
              reads none"
+        );
+    }
+    Ok(())
+}
+
+/// The snapshot a daemon publishes states the reserve its ledger decides every start against
+/// (ADR 0053 decision 4, amendment of 2026-11-24). The daemon publishes the driver's snapshot as
+/// the driver digested it, so the two are one figure before it serves: a daemon whose driver states
+/// another figure than its store reserves does not start, and the error names both.
+fn require_one_result_bound(
+    facts: &substrate_wire::CapabilityFacts,
+    store: &Store,
+) -> anyhow::Result<()> {
+    let published = facts.operation_result_max_json_bytes;
+    let reserved = store.success_result_json_bytes();
+    if published != reserved {
+        bail!(
+            "the driver's capability snapshot states operation.result-max-json-bytes {published}, \
+             and the ledger reserves {reserved} bytes for a success result"
         );
     }
     Ok(())
@@ -2229,6 +2249,38 @@ impl Drop for MaintenanceTasks {
 
 #[cfg(test)]
 mod tests {
+    /// A daemon serves only a driver snapshot that states the reserve its ledger decides every
+    /// start against (ADR 0053 decision 4, amendment of 2026-11-24): the host driver's probe and a
+    /// store as shipped state one figure, the wire constant, and a snapshot that states another
+    /// figure than the ledger's is refused with both named.
+    #[test]
+    fn a_daemon_serves_only_a_snapshot_that_states_its_ledger_reserve() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let driver = super::HostDriver::open(super::HostConfig::minimum(
+            directory.path().join("workspaces"),
+        ))
+        .expect("host driver");
+        let store = super::Store::open(":memory:").expect("state store");
+        let shipped = substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES;
+        assert_eq!(store.success_result_json_bytes(), shipped);
+        super::require_one_result_bound(
+            &substrate_host::Driver::machine(driver.as_ref()).facts,
+            &store,
+        )
+        .expect("the shipped driver and store state one figure");
+        let mut lowered = substrate_host::Driver::machine(driver.as_ref()).facts;
+        lowered.operation_result_max_json_bytes = shipped - 1;
+        let refused = super::require_one_result_bound(&lowered, &store)
+            .expect_err("a snapshot stating another figure is refused");
+        assert!(
+            refused.to_string().contains(&format!(
+                "operation.result-max-json-bytes {}, and the ledger reserves {shipped}",
+                shipped - 1
+            )),
+            "{refused}"
+        );
+    }
+
     fn aperture(name: &str, port: u16) -> EgressAperture {
         EgressAperture {
             name: name.to_owned(),

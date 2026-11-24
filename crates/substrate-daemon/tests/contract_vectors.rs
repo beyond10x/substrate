@@ -14,7 +14,12 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use substrate_daemon::{App, Authority, Identity, router};
 use substrate_host::WorkspaceDestroyProgress;
+use substrate_host::host_process::{HostProcessStarted, LogTail};
 use substrate_host::{DispatchOutcome, Driver, DriverError, DriverErrorClass, ExecObservation};
+use substrate_host::{
+    HostProcessEnd, HostProcessObservation, HostProcessSpec, LogStreamSelection, ProcessLogs,
+    ProcessSupervisor, Reattached, StopCause,
+};
 use substrate_store::{
     EventCursorError, ExecWrite, LeaseClock, NewOperation, Reservation, Scope, Store, StoreConfig,
     StoredExec, WorkspaceDestroyReservation,
@@ -23,8 +28,8 @@ use substrate_wire::{
     AppliedConfinement, AppliedFilesystem, AppliedNetwork, CapabilitySnapshot, ConfinementRequest,
     Exec, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState, FileAbsence,
     FileObservation, FileReadQuery, FileReadResult, HostDriverKind, NetworkMode, OutputSlice,
-    PipeSessionStartInput, SandboxProfile, Workspace, WorkspaceCreateInput, WorkspaceKind,
-    WorkspaceState,
+    PipeSessionStartInput, ProcessOwner, ProcessRecord, SandboxProfile, Workspace,
+    WorkspaceCreateInput, WorkspaceKind, WorkspaceState,
 };
 use tempfile::TempDir;
 use tokio::sync::Notify;
@@ -921,34 +926,173 @@ async fn confinement_requires_vectors_refuse_exactly_before_dispatch() {
 /// with, at least: the vectors stay refused when the headroom moves by a few bytes.
 const RESULT_BOUND_MARGIN: u64 = 64;
 
-/// A store whose ledger reserves the least a store opens with
-/// (`StoreConfig::minimum_terminal_headroom_bytes`).
-fn least_reserve() -> StoreConfig {
+/// The fact a `0.28.0` result-bound vector's machine states its reserve with.
+const RESULT_BOUND_FACT: &str = "operation.result-max-json-bytes";
+
+/// The five `0.28.0` vectors of `operation.result-limit`.
+const RESULT_BOUND_VECTORS: [&str; 5] = [
+    "exec-start-result-over-the-ledger-bound-is-refused",
+    "session-start-result-over-the-ledger-bound-is-refused",
+    "process-start-result-over-the-ledger-bound-is-refused",
+    "file-write-result-over-the-ledger-bound-is-refused",
+    "file-delete-result-over-the-ledger-bound-is-refused",
+];
+
+/// The least success-result reserve a store opens with: its success-result figure at
+/// `StoreConfig::minimum_terminal_headroom_bytes`, under which no store opens.
+fn least_reserve() -> u64 {
     StoreConfig {
         operation_terminal_headroom_bytes: StoreConfig::minimum_terminal_headroom_bytes(),
         ..StoreConfig::default()
     }
+    .success_result_json_bytes()
 }
 
-/// `widest` exceeds the least reserve by [`RESULT_BOUND_MARGIN`] bytes or more.
-fn assert_over_the_least_reserve(name: &str, widest: usize) {
-    let reserve = least_reserve().success_result_json_bytes();
-    let widest = u64::try_from(widest).expect("u64");
+/// The reserve `vector`'s machine states.
+fn stated_reserve(name: &str, vector: &Value) -> u64 {
+    vector["setup"][0]["state"]["facts"][RESULT_BOUND_FACT]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{name}: the machine states {RESULT_BOUND_FACT}"))
+}
+
+/// The widest result `vector`'s request can lead to, by the wire crate's width function for its
+/// kind (ADR 0053 decision 6).
+fn widest_result(name: &str, vector: &Value) -> u64 {
+    let input = vector["action"]["request"]["body"]["input"].clone();
+    let widest = match vector["action"]["operation"].as_str().expect("operation") {
+        "exec.start" => Exec::widest_json_bytes(
+            &serde_json::from_value::<ExecStartInput>(input).expect("exec input"),
+        ),
+        "session.start" => Exec::widest_json_bytes(
+            &serde_json::from_value::<PipeSessionStartInput>(input)
+                .expect("session input")
+                .exec,
+        ),
+        "process.start" => {
+            let texts = |member: &str| -> Vec<String> {
+                input[member]
+                    .as_array()
+                    .expect(member)
+                    .iter()
+                    .map(|item| item.as_str().expect(member).to_owned())
+                    .collect()
+            };
+            let env_names: Vec<String> = input["env"]
+                .as_object()
+                .expect("env")
+                .keys()
+                .cloned()
+                .collect();
+            ProcessRecord::widest_json_bytes(
+                &texts("argv"),
+                input["cwd"].as_str().expect("cwd"),
+                &env_names,
+                &serde_json::from_value::<ProcessOwner>(input["owner"].clone()).expect("owner"),
+                input["reason"].as_str().expect("reason"),
+            )
+        }
+        "workspace.file.write" => {
+            let (workspace, file) = v1_file_address(vector);
+            FileObservation::widest_json_bytes(&workspace, &file)
+        }
+        "workspace.file.delete" => {
+            let (workspace, file) = v1_file_address(vector);
+            FileAbsence::widest_json_bytes(&workspace, &file)
+        }
+        other => panic!("{name}: {other} is not a decided kind"),
+    };
+    u64::try_from(widest).expect("u64")
+}
+
+/// `vector`'s widest result exceeds the reserve its machine states by [`RESULT_BOUND_MARGIN`]
+/// bytes or more.
+fn assert_over_the_stated_reserve(name: &str, vector: &Value) {
+    let reserve = stated_reserve(name, vector);
+    let widest = widest_result(name, vector);
     assert!(
         widest >= reserve + RESULT_BOUND_MARGIN,
         "{name}: the widest result is {widest} bytes, under {RESULT_BOUND_MARGIN} bytes over the \
-         least reserve {reserve}"
+         stated reserve {reserve}"
     );
 }
 
-/// A daemon at the least reserve whose machine is the one `vector`'s setup declares, with the
-/// vector's workspace stored.
-fn result_bound_harness(name: &str, vector: &Value) -> Harness {
+/// A host-process driver that starts nothing and counts every call: the result-bound vector of a
+/// process start is refused before it is reached.
+#[derive(Default)]
+struct RefusingSupervisor {
+    calls: AtomicUsize,
+}
+
+impl RefusingSupervisor {
+    fn refused(&self) -> DriverError {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        DriverError::not_found()
+    }
+}
+
+impl ProcessLogs for RefusingSupervisor {
+    fn log_tail(
+        &self,
+        _id: &str,
+        _selection: LogStreamSelection,
+        _max_bytes: u64,
+    ) -> Result<LogTail, DriverError> {
+        Err(self.refused())
+    }
+}
+
+impl ProcessSupervisor for RefusingSupervisor {
+    fn start(
+        self: Arc<Self>,
+        _id: &str,
+        _spec: &HostProcessSpec,
+    ) -> Result<HostProcessStarted, DriverError> {
+        Err(self.refused())
+    }
+
+    fn reattach(self: Arc<Self>, _id: &str) -> Result<Reattached, DriverError> {
+        Err(self.refused())
+    }
+
+    fn begin_stop(&self, _id: &str, _cause: StopCause) -> Result<(), DriverError> {
+        Err(self.refused())
+    }
+
+    fn ended(&self, _id: &str) -> Result<Option<HostProcessEnd>, DriverError> {
+        Err(self.refused())
+    }
+
+    fn observe(&self, _id: &str) -> Result<HostProcessObservation, DriverError> {
+        Err(self.refused())
+    }
+
+    fn forget(&self, _id: &str) -> Result<(), DriverError> {
+        Err(self.refused())
+    }
+}
+
+/// A daemon on the machine `vector`'s setup states, with the vector's workspace stored: its
+/// ledger reserves the figure the machine states, which is the least reserve a store opens with;
+/// its driver publishes the machine's facts; a `process-host` setup gives it a host-process driver
+/// and the daemon uid it names; a `host-path` setup is on the host as stated. Before it is
+/// returned, `GET /v1/machine` answers the reserve the vector's machine states.
+async fn result_bound_daemon(name: &str, vector: &Value) -> (Harness, Arc<RefusingSupervisor>) {
     let machine = &vector["setup"][0];
     assert_eq!(machine["kind"], "machine", "{name}");
     assert_eq!(machine["state"]["snapshot"], SNAPSHOT, "{name}");
-    let harness = Harness::open_custom(
+    let reserve = stated_reserve(name, vector);
+    assert_eq!(
+        reserve,
         least_reserve(),
+        "{name}: the machine states the least reserve a store opens with"
+    );
+    let shipped = StoreConfig::default();
+    let around = shipped.operation_terminal_headroom_bytes - shipped.success_result_json_bytes();
+    let mut harness = Harness::open_custom(
+        StoreConfig {
+            operation_terminal_headroom_bytes: reserve + around,
+            ..StoreConfig::default()
+        },
         "snap_vector",
         None,
         false,
@@ -957,14 +1101,62 @@ fn result_bound_harness(name: &str, vector: &Value) -> Harness {
         None,
         None,
     );
+    assert_eq!(harness.store.success_result_json_bytes(), reserve, "{name}");
     *harness.driver.machine_facts.lock().expect("machine facts") =
         Some(serde_json::from_value(machine["state"]["facts"].clone()).expect("declared facts"));
     seed_workspace(&harness.store);
-    harness
+    let supervisor = Arc::new(RefusingSupervisor::default());
+    for setup in vector["setup"].as_array().expect("setup").iter().skip(1) {
+        let state = &setup["state"];
+        match setup["kind"].as_str().expect("setup kind") {
+            "process-host" => {
+                let app = Arc::get_mut(&mut harness.app).expect("unshared application");
+                app.host_process_uid =
+                    u32::try_from(state["daemon_uid"].as_u64().expect("uid")).expect("a uid");
+                assert_eq!(state["delegated_cgroup"], "usable", "{name}");
+                app.host_processes = Some(Arc::clone(&supervisor) as Arc<dyn ProcessSupervisor>);
+            }
+            "host-path" => {
+                assert_eq!(state["entry"], "directory", "{name}");
+                let path = state["path"].as_str().expect("host path");
+                assert!(
+                    std::fs::symlink_metadata(path).is_ok_and(|entry| entry.is_dir()),
+                    "{name}: {path} is a directory on this host, as the setup states"
+                );
+            }
+            other => panic!("{name}: no setup of kind {other} is provided"),
+        }
+    }
+    let probe = json!({
+        "action": {
+            "kind": "http",
+            "request": {
+                "method": "GET",
+                "path": "/v1/machine",
+                "query": {},
+                "headers": { "x-request-id": "req_result_bound_setup_machine" },
+            },
+        },
+        "context": vector["context"].clone(),
+    });
+    let answered = harness.execute(&probe).await;
+    assert_eq!(answered["status"], 200, "{name}: {answered}");
+    assert_eq!(
+        answered["body"]["result"]["facts"][RESULT_BOUND_FACT],
+        json!(reserve),
+        "{name}: the daemon publishes the reserve the vector's machine states"
+    );
+    (harness, supervisor)
 }
 
-/// `vector` is answered exactly, recorded refused as one new row, and no driver is called.
-async fn assert_refused_before_dispatch(name: &str, harness: &Harness, vector: &Value) {
+/// `vector`, as it is written, is answered exactly, recorded refused as one new row, and no
+/// driver is called: neither the workspace driver nor the host-process driver.
+async fn assert_refused_before_dispatch(
+    name: &str,
+    harness: &Harness,
+    supervisor: &RefusingSupervisor,
+    vector: &Value,
+) {
     let rows_before = operation_rows(harness);
     assert_exact_http(&harness.execute(vector).await, vector);
     let operation = vector["action"]["request"]["body"]["op"]
@@ -996,6 +1188,7 @@ async fn assert_refused_before_dispatch(name: &str, harness: &Harness, vector: &
         0,
         "{name}"
     );
+    assert_eq!(supervisor.calls.load(Ordering::SeqCst), 0, "{name}");
 }
 
 /// The workspace and the file a v1 file vector addresses.
@@ -1027,45 +1220,40 @@ fn host_files(harness: &Harness) -> PathBuf {
 }
 
 /// Bundle `0.28.0`'s refusals of a start whose widest result the ledger cannot record (ADR 0053
-/// decision 11), against a daemon whose ledger reserves the least a store opens with and whose
-/// machine is the one each vector's setup declares: each request is answered exactly, recorded
-/// refused as one new row, and never dispatched. The host-process vector runs in
-/// `tests/processes.rs`, whose daemon serves host processes.
+/// decision 11), each on the machine its setup states (`result_bound_daemon`): each request, as
+/// the vector writes it, is answered exactly, recorded refused as one new row, and never
+/// dispatched: no exec, session or host process is started.
 #[tokio::test(flavor = "multi_thread")]
 async fn result_bound_vectors_refuse_exactly_before_dispatch() {
     for name in [
         "exec-start-result-over-the-ledger-bound-is-refused",
         "session-start-result-over-the-ledger-bound-is-refused",
+        "process-start-result-over-the-ledger-bound-is-refused",
     ] {
         let vector = bundle_vector("0.28.0", "http", name);
-        let input = vector["action"]["request"]["body"]["input"].clone();
-        let widest = if name.starts_with("session") {
-            let session: PipeSessionStartInput =
-                serde_json::from_value(input).expect("session input");
-            Exec::widest_json_bytes(&session.exec)
-        } else {
-            Exec::widest_json_bytes(
-                &serde_json::from_value::<ExecStartInput>(input).expect("input"),
-            )
-        };
-        assert_over_the_least_reserve(name, widest);
-        let harness = result_bound_harness(name, &vector);
-        assert_refused_before_dispatch(name, &harness, &vector).await;
+        assert_over_the_stated_reserve(name, &vector);
+        let (harness, supervisor) = result_bound_daemon(name, &vector).await;
+        assert_refused_before_dispatch(name, &harness, &supervisor, &vector).await;
+        let records: i64 = rusqlite::Connection::open(harness.directory.path().join("state.db"))
+            .expect("ledger")
+            .query_row("SELECT count(*) FROM host_processes", [], |row| row.get(0))
+            .expect("host-process records");
+        assert_eq!(records, 0, "{name}: no host-process record exists");
     }
 }
 
 /// Bundle `0.28.0`'s v1 file write whose widest observation the ledger cannot record (ADR 0053
-/// decision 11), against a daemon at the least reserve: answered exactly, recorded refused as one
-/// new row, no driver called, and no file on the host.
+/// decision 11), on the machine its setup states: answered exactly, recorded refused as one new
+/// row, no driver called, and no file on the host.
 #[tokio::test(flavor = "multi_thread")]
 async fn result_bound_file_write_vector_refuses_exactly_and_writes_nothing() {
     let name = "file-write-result-over-the-ledger-bound-is-refused";
     let vector = bundle_vector("0.28.0", "http", name);
-    let (workspace, file) = v1_file_address(&vector);
-    assert_over_the_least_reserve(name, FileObservation::widest_json_bytes(&workspace, &file));
-    let harness = result_bound_harness(name, &vector);
+    let (_, file) = v1_file_address(&vector);
+    assert_over_the_stated_reserve(name, &vector);
+    let (harness, supervisor) = result_bound_daemon(name, &vector).await;
     let root = host_files(&harness);
-    assert_refused_before_dispatch(name, &harness, &vector).await;
+    assert_refused_before_dispatch(name, &harness, &supervisor, &vector).await;
     assert!(
         std::fs::symlink_metadata(root.join(&file)).is_err(),
         "the file is not on the host"
@@ -1078,20 +1266,20 @@ async fn result_bound_file_write_vector_refuses_exactly_and_writes_nothing() {
 }
 
 /// Bundle `0.28.0`'s v1 file delete whose widest absence the ledger cannot record (ADR 0053
-/// decision 11), against a daemon at the least reserve: answered exactly, recorded refused as one
-/// new row, no driver called, and the file on the host unchanged.
+/// decision 11), on the machine its setup states: answered exactly, recorded refused as one new
+/// row, no driver called, and the file on the host unchanged.
 #[tokio::test(flavor = "multi_thread")]
 async fn result_bound_file_delete_vector_refuses_exactly_and_deletes_nothing() {
     let name = "file-delete-result-over-the-ledger-bound-is-refused";
     let vector = bundle_vector("0.28.0", "http", name);
-    let (workspace, file) = v1_file_address(&vector);
-    assert_over_the_least_reserve(name, FileAbsence::widest_json_bytes(&workspace, &file));
-    let harness = result_bound_harness(name, &vector);
+    let (_, file) = v1_file_address(&vector);
+    assert_over_the_stated_reserve(name, &vector);
+    let (harness, supervisor) = result_bound_daemon(name, &vector).await;
     let root = host_files(&harness);
     let seeded = root.join(&file);
     std::fs::create_dir_all(seeded.parent().expect("a parent")).expect("seed directories");
     std::fs::write(&seeded, b"seeded").expect("seed file");
-    assert_refused_before_dispatch(name, &harness, &vector).await;
+    assert_refused_before_dispatch(name, &harness, &supervisor, &vector).await;
     assert_eq!(
         std::fs::read(&seeded).expect("the seeded file is on the host"),
         b"seeded"
@@ -1147,6 +1335,45 @@ async fn result_unrecorded_vector_reads_its_row_exactly() {
         .expect("complete the row unrecorded");
     assert_exact_http(&harness.execute(&vector).await, &vector);
     assert_eq!(harness.driver.dispatch_count.load(Ordering::SeqCst), 0);
+}
+
+/// A `0.28.0` result-bound vector runs on the machine its setup states (ADR 0053 decisions 4 and
+/// 11): on the daemon that executes it, `GET /v1/machine` answers the setup's
+/// `operation.result-max-json-bytes`, so the figure the vector's machine publishes is the figure
+/// the daemon decides the vector's request against: the reserve of its ledger, the least a store
+/// opens with (383 bytes, which `cargo xtask check-bundle 0.28.0` holds each vector to).
+#[tokio::test(flavor = "multi_thread")]
+async fn result_bound_vectors_run_on_the_machine_their_setup_states() {
+    const FACT: &str = RESULT_BOUND_FACT;
+    assert_eq!(least_reserve(), 383);
+    for name in RESULT_BOUND_VECTORS {
+        let vector = bundle_vector("0.28.0", "http", name);
+        let (harness, _supervisor) = result_bound_daemon(name, &vector).await;
+        assert_eq!(
+            harness.store.success_result_json_bytes(),
+            least_reserve(),
+            "{name}"
+        );
+        let probe = json!({
+            "action": {
+                "kind": "http",
+                "request": {
+                    "method": "GET",
+                    "path": "/v1/machine",
+                    "query": {},
+                    "headers": { "x-request-id": "req_result_bound_setup_machine" },
+                },
+            },
+            "context": vector["context"].clone(),
+        });
+        let answered = harness.execute(&probe).await;
+        assert_eq!(answered["status"], 200, "{name}: {answered}");
+        assert_eq!(
+            answered["body"]["result"]["facts"][FACT], vector["setup"][0]["state"]["facts"][FACT],
+            "{name}: the machine the daemon publishes while it executes the vector states {FACT} \
+             as the vector's setup does"
+        );
+    }
 }
 
 fn operation_rows(harness: &Harness) -> i64 {

@@ -78,7 +78,8 @@ what it means for a result type that has no member to cut.
      `StoreConfig::default().success_result_json_bytes()` to it.
    - The fact `operation.result-max-json-bytes`, required, `const` 524217, beside the four
      `operation.ledger-*` facts in `schemas/capability.json`, filled by
-     `CapabilityFacts::default` and the host driver's probe as they are.
+     `CapabilityFacts::default` and the host driver's probe as they are. The amendment of
+     2026-11-24 below states what the daemon publishes and what the snapshot's digest covers.
    - *An operator cannot set the reserve.* The daemon opens its state with
      `Store::open_with_event_retention` (`crates/substrate-daemon/src/runtime.rs`), which takes
      the default headroom. No daemon flag, `HostConfig` member or chart value names it; only
@@ -381,3 +382,44 @@ that execute the new vectors; which lane can run each was not read.
 4. **The v1 file routes' code** is `operation.result-limit` (decision 10). On v1,
    `workspace.write-limit` names a file limit only; its meaning does not widen without a new
    name.
+
+## Amendment, 2026-11-24: the published figure is the store's, and the snapshot's digest covers it
+
+Decision 4 says the fact is filled by `CapabilityFacts::default` and the host driver's probe. This
+amendment states what the daemon publishes and how the figure a client reads, the figure the
+snapshot's digest covers and the figure a start is decided against are one.
+
+1. **The daemon publishes the driver's snapshot as the driver digested it.** `GET /v1/machine`
+   changes no fact of it, so the digest a client names in `sandbox.capability_snapshot` covers
+   every fact it read, `operation.result-max-json-bytes` among them. Held by
+   `the_published_snapshot_digest_covers_the_published_result_bound` in
+   `crates/substrate-daemon/tests/http/result_bound.rs`: over a lowered reserve, the digest
+   recomputed from the published machine alone is the published one, and a start naming it is
+   admitted and dispatched.
+2. **The daemon serves only a snapshot that states its store's figure.** At startup it compares
+   the snapshot's `operation.result-max-json-bytes` with `Store::success_result_json_bytes`, the
+   figure decision 4's last bullet decides every start against, and does not serve when the two
+   differ, naming both (`require_one_result_bound` in `crates/substrate-daemon/src/runtime.rs`,
+   case `a_daemon_serves_only_a_snapshot_that_states_its_ledger_reserve`). So the figure a daemon
+   publishes is its store's figure.
+3. **As shipped the figures are one, `OPERATION_RESULT_MAX_JSON_BYTES`.** `CapabilityFacts::default`
+   and the host driver's probe state the constant, the namespace driver's snapshot takes the
+   default, and the store's default reserve is the constant
+   (`the_default_reserve_is_the_published_result_bound`). Nothing sets another figure: the rest of
+   decision 4 stands.
+4. **The lower value of decision 11 is the least reserve a store opens with, 383 bytes**: the
+   least terminal headroom of decision 8 (454 bytes) less the 71 bytes a terminal success adds
+   around its result. No store opens lower, so no daemon can hold a lower figure. The machine of
+   each of the five refusal vectors of bundle `0.28.0` states 383, and
+   `cargo xtask check-bundle 0.28.0` holds each to it (`LEAST_RESERVE` in
+   `xtask/src/bundle/result_bound.rs`) and each request's widest result to a figure over it; the
+   store case `the_least_success_result_reserve_is_383_bytes` holds the same literal. The daemon's
+   runner opens each vector's daemon at the figure its machine states, requires that figure to be
+   the store's least reserve, reads it back from `GET /v1/machine` before it sends the request,
+   and sends the request as the vector writes it. The host-process vector starts in `/`, which
+   its `host-path` setup states as a directory and every host has.
+5. **Every resource id the daemon mints is one the store accepts.** The `Authority` trait states
+   that an id it mints for a workspace, an exec, a session, a snapshot or a host process is at
+   most `MAX_RESOURCE_ID_CHARS` (32) bytes, the bound decision 8's store holds a resource to;
+   `every_resource_id_the_system_authority_mints_is_within_the_store_bound` holds
+   `SystemAuthority` to it for each of the five.

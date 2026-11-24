@@ -145,6 +145,15 @@ pub(crate) enum SessionTransport {
     HostedTls { exporter: [u8; 32] },
 }
 
+/// The daemon's clock and the identifiers it mints.
+///
+/// Every resource id an implementation mints (`workspace_id`, `exec_id`, `session_id`,
+/// `snapshot_id` and `process_id`) is at most [`substrate_wire::MAX_RESOURCE_ID_CHARS`] (32)
+/// bytes: the store accepts an operation, and a terminal update of one, only with a resource of at
+/// most that many (`StoreError::OperationResourceTooLong`, ADR 0053 decision 8), so a longer id
+/// would leave its operation refused by the store rather than by a published rule.
+/// `every_resource_id_the_system_authority_mints_is_within_the_store_bound` holds
+/// [`SystemAuthority`] to it for each of the five.
 pub trait Authority: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
     fn request_id(&self) -> String;

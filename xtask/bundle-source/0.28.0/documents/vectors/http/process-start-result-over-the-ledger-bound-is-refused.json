@@ -11,7 +11,7 @@
             "--port",
             "5173"
           ],
-          "cwd": "/srv/checkout",
+          "cwd": "/",
           "env": {
             "PATH": "/usr/bin:/bin",
             "PORT": "5173"
@@ -144,7 +144,7 @@
           "operation.ledger-global-max-rows": 1000000,
           "operation.ledger-subject-max-bytes": 536870912,
           "operation.ledger-subject-max-rows": 100000,
-          "operation.result-max-json-bytes": 64,
+          "operation.result-max-json-bytes": 383,
           "snapshot.provenance-events": 1024,
           "workspace.atomic-replace": true,
           "workspace.guarded-io": true,
@@ -169,10 +169,10 @@
     },
     {
       "kind": "host-path",
-      "name": "checkout",
+      "name": "host-root",
       "state": {
         "entry": "directory",
-        "path": "/srv/checkout"
+        "path": "/"
       }
     }
   ]

@@ -26,14 +26,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (500, `failed`), the coverage requirement `security.bounds.result`, and published lengths on
   the five minted identifiers (32), an exec refusal's `code` (128) and the process record's
   `argv` items, `cwd` and `env_names` items. Six vectors publish them, each executed against
-  the daemon: the five refusals at the least reserve a store opens with, each request's widest
-  result at least 64 bytes over it, answered exactly, recorded refused and nothing dispatched or
-  changed on the host; and the row that ended `operation.result-unrecorded`, which names its
+  the daemon: the five refusals on a machine that states the least reserve a store opens with
+  (383 bytes), each run as written on a daemon whose ledger reserves that figure and whose
+  `GET /v1/machine` answers it, each request's widest result 144 to 25,240 bytes over it,
+  answered exactly, recorded refused and nothing dispatched or changed on the host; and the row that ended `operation.result-unrecorded`, which names its
   operation as every such row the daemon writes does, read exactly. And
   `cargo xtask check-bundle 0.28.0` holds each value to its wire constant
   (`xtask/src/bundle/result_bound.rs`). The daemon, the SDK and the conformance runner advertise
   `substrate-wire/0.28.0` (inner `bundle.json` sha256
-  `a9354f3ecca4e029f7cf8054f0230a25a2eca76d270bd66ad1172d33a5cb7280`). A client that
+  `2cf0b0bd5a96600f4fbc02d2f98c3c76d839e3926399535487bc41f29e219e78`). A client that
   validates a capability snapshot against a bundle's schema needs the schema of `0.28.0`.
 - A start of an exec, a session or a host process, and a v1 file write or delete, whose widest
   success result exceeds what the operation ledger reserves for one is refused
@@ -42,7 +43,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the same operation id replays the refusal. A request another published code refuses keeps
   that code. Every capability snapshot states the reserve as `operation.result-max-json-bytes`,
   the figure the daemon decides against: `OPERATION_RESULT_MAX_JSON_BYTES` (524,217) for the
-  ledger as shipped (ADR 0053 decisions 1 to 5 and 10).
+  ledger as shipped (ADR 0053 decisions 1 to 5 and 10). The daemon publishes the driver's
+  snapshot unchanged, so its digest covers that fact, and does not start when the snapshot
+  states another figure than its ledger reserves (ADR 0053, amendment of 2026-11-24).
 
 ### Changed
 

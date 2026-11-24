@@ -45,11 +45,22 @@ struct CountingDriver {
     deletes: AtomicUsize,
     /// The `refusal.code` each started exec states, when a case sets one.
     refusal_code: Option<String>,
+    /// Whether the snapshot's digest is computed over what it states ([`snapshot_digest`]),
+    /// rather than [`SNAPSHOT`].
+    digested: bool,
+    /// The `operation.result-max-json-bytes` the snapshot states: the reserve of the ledger the
+    /// harness opens, as a daemon requires of its driver before it serves.
+    result_bytes: u64,
     last: Mutex<Option<Exec>>,
 }
 
 impl CountingDriver {
-    fn open(root: &std::path::Path, refusal_code: Option<String>) -> Arc<Self> {
+    fn open(
+        root: &std::path::Path,
+        refusal_code: Option<String>,
+        digested: bool,
+        result_bytes: u64,
+    ) -> Arc<Self> {
         Arc::new(Self {
             host: HostDriver::open(HostConfig::minimum(root)).expect("host driver"),
             starts: AtomicUsize::new(0),
@@ -57,6 +68,8 @@ impl CountingDriver {
             writes: AtomicUsize::new(0),
             deletes: AtomicUsize::new(0),
             refusal_code,
+            digested,
+            result_bytes,
             last: Mutex::new(None),
         })
     }
@@ -131,6 +144,11 @@ impl Driver for CountingDriver {
         capability.facts.exec_no_egress = Some(true);
         capability.facts.leases_explicit = Some(true);
         capability.facts.exec_output_limit_bytes = Some(1_048_576);
+        capability.facts.operation_result_max_json_bytes = self.result_bytes;
+        if self.digested {
+            capability.snapshot =
+                snapshot_digest(&serde_json::to_value(&capability).expect("snapshot JSON"));
+        }
         capability
     }
 
@@ -270,6 +288,22 @@ impl Driver for CountingDriver {
     fn discard_superseded_exec(&self, _id: &str) {}
 }
 
+/// The digest of a capability snapshot over every member a client reads but the digest itself,
+/// in the namespace driver's form (`crates/substrate-kubernetes/src/namespace/probe.rs`), so it is
+/// recomputed from a published machine alone.
+fn snapshot_digest(machine: &Value) -> String {
+    use sha2::{Digest as _, Sha256};
+    let material = serde_json::to_vec(&json!({
+        "driver": machine["driver"],
+        "driver_version": machine["driver_version"],
+        "config_generation": machine["config_generation"],
+        "valid_until": machine.get("valid_until"),
+        "facts": machine["facts"],
+    }))
+    .expect("snapshot material");
+    format!("sha256:{}", hex::encode(Sha256::digest(material)))
+}
+
 /// A workspace id of the length the daemon mints: `ws_` and a ULID.
 fn minted_workspace_id() -> String {
     format!("ws_{}", "0".repeat(26))
@@ -320,6 +354,16 @@ async fn harness(
     result_bytes: u64,
     refusal_code: Option<String>,
 ) -> (Harness, Arc<CountingDriver>, String) {
+    harness_with(result_bytes, refusal_code, false).await
+}
+
+/// [`harness`], with a driver whose snapshot digest is computed over what it states when
+/// `digested` is set.
+async fn harness_with(
+    result_bytes: u64,
+    refusal_code: Option<String>,
+    digested: bool,
+) -> (Harness, Arc<CountingDriver>, String) {
     let directory = tempfile::tempdir().expect("temporary harness");
     let store = Arc::new(
         Store::open_with_config(
@@ -332,7 +376,12 @@ async fn harness(
         .expect("state store"),
     );
     assert_eq!(store.success_result_json_bytes(), result_bytes);
-    let driver = CountingDriver::open(&directory.path().join("workspaces"), refusal_code);
+    let driver = CountingDriver::open(
+        &directory.path().join("workspaces"),
+        refusal_code,
+        digested,
+        result_bytes,
+    );
     let app = App::new(
         Arc::clone(&store),
         Arc::clone(&driver) as Arc<dyn Driver>,
@@ -717,6 +766,49 @@ async fn a_daemon_over_the_shipped_reserve_publishes_the_wire_constant() {
         machine["result"]["facts"]["operation.result-max-json-bytes"],
         json!(substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES)
     );
+}
+
+/// What the daemon publishes is what its snapshot digest covers (ADR 0053 decision 4, amendment
+/// of 2026-11-24): over a lowered reserve, the digest recomputed from the published machine alone
+/// is the published digest, the published fact is the reserve, and a start that names that digest
+/// is admitted under it and dispatched.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_published_snapshot_digest_covers_the_published_result_bound() {
+    let width = exec_width(&exec_input(&minted_workspace_id()));
+    let (harness, driver, workspace) = harness_with(width, None, true).await;
+    let (status, machine) = harness
+        .call(
+            "local:1000",
+            Method::GET,
+            "/v1/machine",
+            "req_result_bound_digest",
+            axum::body::Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{machine}");
+    let published = &machine["result"];
+    assert_eq!(
+        published["facts"]["operation.result-max-json-bytes"],
+        json!(width)
+    );
+    assert_eq!(
+        published["snapshot"],
+        json!(snapshot_digest(published)),
+        "the digest is computed over the facts as published"
+    );
+    let mut input = exec_input(&workspace);
+    input["sandbox"]["capability_snapshot"] = published["snapshot"].clone();
+    let (status, answered) = harness
+        .call(
+            "local:1000",
+            Method::POST,
+            "/v1/execs",
+            "req_result_bound_digest_start",
+            mutation("01JRESULTBOUNDDIGEST001", input),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{answered}");
+    assert_eq!(driver.starts.load(Ordering::SeqCst), 1);
 }
 
 /// A request another published code refuses keeps that code, though no result of it could fit

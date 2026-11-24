@@ -47,10 +47,10 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    required fact `operation.result-max-json-bytes`, `const` `OPERATION_RESULT_MAX_JSON_BYTES`
    (524,217), with the client's counting rule in its description; the refusal
    `operation.result-limit` (429) on the inputs of the exec, session and host-process starts and
-   the v1 file write and delete, published by one vector each on a machine that states a lower
-   value and executed against a daemon at the least reserve a store opens with
-   (`crates/substrate-daemon/tests/contract_vectors.rs`, the process start in
-   `tests/processes/result_bound.rs`); the error `operation.result-unrecorded` (500), published
+   the v1 file write and delete, published by one vector each on a machine that states the least
+   reserve a store opens with, 383 bytes (`LEAST_RESERVE`), and executed as written against a
+   daemon whose ledger reserves the figure the vector's machine states and whose
+   `GET /v1/machine` answers it (`crates/substrate-daemon/tests/contract_vectors.rs`); the error `operation.result-unrecorded` (500), published
    by one vector of a terminal row read through `operation.get`; the coverage requirement `security.bounds.result`; and a
    `maxLength` on the five minted identifiers, an exec refusal's `code` and the process record's
    `argv` items, `cwd` and `env_names` items. Each value is held to its wire constant by

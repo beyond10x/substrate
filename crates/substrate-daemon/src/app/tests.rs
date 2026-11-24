@@ -2073,4 +2073,25 @@ fn the_session_input_bound_is_the_adapter_stdin_bound() {
     );
 }
 
+/// Every resource id the daemon's own authority mints is one the store accepts an operation
+/// with: at most `MAX_RESOURCE_ID_CHARS` bytes (ADR 0053 decision 8), for each of the five kinds.
+#[test]
+fn every_resource_id_the_system_authority_mints_is_within_the_store_bound() {
+    use super::service::{Authority as _, SystemAuthority};
+    let authority = SystemAuthority;
+    for (kind, id) in [
+        ("workspace", authority.workspace_id()),
+        ("exec", authority.exec_id()),
+        ("session", authority.session_id()),
+        ("snapshot", authority.snapshot_id()),
+        ("process", authority.process_id()),
+    ] {
+        assert!(
+            id.len() <= substrate_wire::MAX_RESOURCE_ID_CHARS,
+            "{kind}: {id} is {} bytes",
+            id.len()
+        );
+    }
+}
+
 mod review_replay_grant_cases;

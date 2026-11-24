@@ -3,7 +3,8 @@
 //!
 //! The bundle adds no route. It publishes the fact `operation.result-max-json-bytes` at
 //! `OPERATION_RESULT_MAX_JSON_BYTES`, the refusal `operation.result-limit` on the inputs of the
-//! five decided kinds with one vector each against a machine that states a lower value, the
+//! five decided kinds with one vector each against a machine that states the least reserve a
+//! store opens with ([`LEAST_RESERVE`]), the
 //! error `operation.result-unrecorded` with one vector of a completed row, a coverage
 //! requirement for the bound, and a `maxLength` on every result member a request does not set.
 //!
@@ -33,6 +34,17 @@ pub(super) const FACT: &str = "operation.result-max-json-bytes";
 const BESIDE: &str = "operation.ledger-subject-max-rows";
 /// The coverage requirement of the bound, beside `security.bounds.input`.
 pub(super) const REQUIREMENT: &str = "security.bounds.result";
+
+/// The least success-result reserve a store opens with, in bytes of compact JSON: the least
+/// terminal headroom, `StoreConfig::minimum_terminal_headroom_bytes` (35 + 8 + 379 + 32 = 454), less
+/// what a terminal success adds around its result (35 + 8 + 28 = 71), both in
+/// `crates/substrate-store/src/`. The machine of every vector of the refusal states it, because it
+/// is the lowest figure a daemon can hold and publish: no store opens lower. `xtask` does not
+/// depend on the store, so the figure is a literal here, and two cases hold it to the store: the
+/// store's `the_least_success_result_reserve_is_383_bytes`, and the daemon's
+/// `result_bound_vectors_run_on_the_machine_their_setup_states`, which opens each vector's daemon
+/// at the figure its machine states and requires the store's least reserve.
+pub(super) const LEAST_RESERVE: u64 = 383;
 
 /// The first bundle that publishes the bound; every later one keeps it.
 const FIRST: (u64, u64, u64) = (0, 28, 0);
@@ -377,7 +389,8 @@ fn is_refusal_vector(vector: &Value) -> bool {
     vector.pointer("/expected/response/body/error/code") == Some(&json!(RESULT_LIMIT.code))
 }
 
-/// Every vector's machine states the fact: at the bound, or, in a vector of the refusal, lower.
+/// Every vector's machine states the fact: at the bound, or, in a vector of the refusal, at
+/// [`LEAST_RESERVE`], the one lower figure a daemon can hold.
 fn check_machines(released: &Tree, failures: &mut Vec<String>) {
     let mut machines = 0;
     for (path, bytes) in released {
@@ -400,10 +413,10 @@ fn check_machines(released: &Tree, failures: &mut Vec<String>) {
             match stated.and_then(Value::as_u64) {
                 None => failures.push(format!("{path}: a machine does not state {FACT}")),
                 Some(value) if refusal => {
-                    if value == 0 || value >= wire::OPERATION_RESULT_MAX_JSON_BYTES {
+                    if value != LEAST_RESERVE {
                         failures.push(format!(
-                            "{path}: the machine of a {} vector states {FACT} {value}, not a value \
-                             lower than substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES",
+                            "{path}: the machine of a {} vector states {FACT} {value}, not the \
+                             least reserve a store opens with ({LEAST_RESERVE})",
                             RESULT_LIMIT.code
                         ));
                     }
@@ -702,10 +715,11 @@ fn check_refusal_vectors(released: &Tree, failures: &mut Vec<String>) {
             Err(error) => failures.push(format!("{path}: {error}")),
             Ok(widest) => {
                 let widest = widest as u64;
-                if widest <= lowered {
+                if widest <= lowered.max(LEAST_RESERVE) {
                     failures.push(format!(
                         "{path}: the widest result of the request is {widest} bytes, within the \
-                         machine's {FACT} {lowered}, so nothing is refused"
+                         machine's {FACT} {lowered} or the least reserve {LEAST_RESERVE}, so \
+                         nothing is refused"
                     ));
                 }
                 if widest > wire::OPERATION_RESULT_MAX_JSON_BYTES {
@@ -1043,12 +1057,26 @@ mod tests {
             &failures_of(&tree),
             "states operation.result-max-json-bytes 64, not",
         );
-        let tree = edited(EXEC, |vector| {
-            vector["setup"][0]["state"]["facts"]["operation.result-max-json-bytes"] =
-                json!(wire::OPERATION_RESULT_MAX_JSON_BYTES);
-        });
-        let failures = failures_of(&tree);
-        assert_reported(&failures, "not a value lower than");
+        // A refusal vector's machine states the least reserve a store opens with, and no other
+        // figure: not the bound, not a lower figure no store opens with, not one above the least.
+        for stated in [
+            wire::OPERATION_RESULT_MAX_JSON_BYTES,
+            64,
+            super::LEAST_RESERVE - 1,
+            super::LEAST_RESERVE + 1,
+        ] {
+            let tree = edited(EXEC, |vector| {
+                vector["setup"][0]["state"]["facts"]["operation.result-max-json-bytes"] =
+                    json!(stated);
+            });
+            assert_reported(
+                &failures_of(&tree),
+                &format!(
+                    "states operation.result-max-json-bytes {stated}, not the least reserve a \
+                     store opens with (383)"
+                ),
+            );
+        }
         let tree = edited(PROBE_PATH, |vector| {
             vector["expected"]["response"]["body"]["result"]["facts"]["operation.result-max-json-bytes"] =
                 json!(1);
@@ -1145,6 +1173,14 @@ mod tests {
                 json!(wire::OPERATION_RESULT_MAX_JSON_BYTES - 1);
         });
         assert_reported(&failures_of(&tree), "so nothing is refused");
+        // A request whose widest result is within the least reserve is refused by no daemon.
+        let tree = edited(FILE_DELETE, |vector| {
+            vector["action"]["request"]["path"] = json!("/v1/workspaces/ws_vector/files/notes.txt");
+        });
+        assert_reported(
+            &failures_of(&tree),
+            "within the machine's operation.result-max-json-bytes 383 or the least reserve 383",
+        );
         // A process record holds its argv as sent: 64 items of 4,096 six-byte characters.
         let tree = edited(PROCESS, |vector| {
             vector["action"]["request"]["body"]["input"]["argv"] =
