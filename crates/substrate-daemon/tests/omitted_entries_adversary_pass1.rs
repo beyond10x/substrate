@@ -35,7 +35,7 @@ impl Harness {
         let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
         let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
             .expect("host driver");
-        let app = App::new(store, driver, "dep_omitted_adversary");
+        let app = App::new(store, driver, "dep_omitted_adversary").expect("application");
         Self { directory, app }
     }
 

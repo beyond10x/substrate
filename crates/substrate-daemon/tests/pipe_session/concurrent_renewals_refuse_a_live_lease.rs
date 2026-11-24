@@ -141,7 +141,8 @@ async fn a_renewal_whose_clock_predates_a_concurrent_renewal_is_not_refused_as_e
         Arc::clone(&driver) as Arc<dyn Driver>,
         DEPLOYMENT,
         Arc::clone(&authority) as Arc<dyn Authority>,
-    );
+    )
+    .expect("application");
     let server = TestServer::spawn(Arc::clone(&app)).await;
     let harness = Harness {
         driver,

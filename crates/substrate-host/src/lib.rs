@@ -551,6 +551,14 @@ fn validate_writable_roots(roots: &[DeclaredWritableRoot]) -> Result<(), DriverE
                 root.name
             ));
         }
+        // ADR 0053 decision 7: the applied record states this path whole as `host_path`.
+        if root.path.as_os_str().len() > substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES {
+            return refuse(format!(
+                "Writable host root {} names a path longer than {} bytes.",
+                root.name,
+                substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES
+            ));
+        }
     }
     Ok(())
 }
@@ -2222,6 +2230,37 @@ mod tests {
             assert_eq!(error.class, super::DriverErrorClass::Refused);
             assert!(error.message.contains(needle), "{}", error.message);
         }
+    }
+
+    /// ADR 0053 decision 7: a declared writable root's path is recorded whole as the applied
+    /// `host_path`, bounded at `MAX_READ_ONLY_FILE_PATH_BYTES`; the driver's open refuses a path
+    /// one byte over it by name and admits one at it.
+    #[test]
+    fn a_writable_root_path_over_the_applied_record_bound_is_refused_before_open() {
+        let segment = format!("/{}", "a".repeat(99));
+        let at_bound = segment.repeat(40);
+        let over = format!("{}/{}", segment.repeat(39), "a".repeat(100));
+        assert_eq!(
+            at_bound.len(),
+            substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES
+        );
+        assert_eq!(
+            over.len(),
+            substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES + 1
+        );
+        let root = |path: &str| super::DeclaredWritableRoot {
+            name: "cache".to_owned(),
+            path: path.into(),
+        };
+        assert!(super::validate_writable_roots(&[root(&at_bound)]).is_ok());
+        let error = super::validate_writable_roots(&[root(&over)])
+            .expect_err("a path the applied record cannot state is refused");
+        assert_eq!(error.code, "config.writable-root-invalid");
+        assert_eq!(error.class, super::DriverErrorClass::Refused);
+        assert_eq!(
+            error.message,
+            "Writable host root cache names a path longer than 4000 bytes."
+        );
     }
 
     #[test]

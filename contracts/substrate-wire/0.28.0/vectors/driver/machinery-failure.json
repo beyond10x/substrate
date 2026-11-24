@@ -1,0 +1,55 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "workspace.write-file",
+      "path": "src/main.txt",
+      "workspace": "ws_vector"
+    },
+    "kind": "driver",
+    "port": "workspace"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "code": "workspace.driver-failed",
+      "status": "failed"
+    }
+  },
+  "id": "accepted-driver-failure-is-terminal",
+  "layer": "driver",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/operation_state",
+      "expected": "terminal",
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/original_target_intact",
+      "expected": true,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "fault",
+      "name": "atomic-rename-eio",
+      "state": {
+        "after_acceptance": true
+      }
+    }
+  ]
+}

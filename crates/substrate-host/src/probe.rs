@@ -172,6 +172,9 @@ pub(crate) fn probe_host(
         operation_ledger_subject_max_bytes: OPERATION_LEDGER_SUBJECT_MAX_BYTES,
         operation_ledger_global_max_rows: OPERATION_LEDGER_GLOBAL_MAX_ROWS,
         operation_ledger_global_max_bytes: OPERATION_LEDGER_GLOBAL_MAX_BYTES,
+        // ADR 0053 decision 4: the reserve the daemon opens its ledger with. The daemon publishes
+        // this figure unchanged and constructs no application whose ledger reserves another.
+        operation_result_max_json_bytes: substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES,
         leases_explicit: lease_clock.then_some(true),
         leases_clock_tolerance_ms: lease_clock.then_some(substrate_wire::LEASE_CLOCK_TOLERANCE_MS),
         workspace_guarded_io: workspace.then_some(true),

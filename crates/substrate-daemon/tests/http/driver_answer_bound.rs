@@ -30,11 +30,13 @@ use substrate_wire::{
 use super::{Harness, ledger_scope, mutation};
 
 /// A driver whose v2 file changes answer `diff_text` uncut and unmarked, for the workspace and
-/// path it was asked for, and count how often they were dispatched.
+/// path it was asked for, and count how often they were dispatched. Its snapshot states the
+/// success-result reserve of the ledger it is paired with, as every served snapshot does.
 struct AnsweringDriver {
     host: Arc<HostDriver>,
     diff_text: String,
     dispatched: AtomicUsize,
+    result_bytes: u64,
 }
 
 impl AnsweringDriver {
@@ -65,7 +67,9 @@ impl AnsweringDriver {
 #[async_trait]
 impl Driver for AnsweringDriver {
     fn machine(&self) -> CapabilitySnapshot {
-        self.host.machine()
+        let mut machine = self.host.machine();
+        machine.facts.operation_result_max_json_bytes = self.result_bytes;
+        machine
     }
 
     async fn shutdown(&self) -> Result<(), DriverError> {
@@ -244,12 +248,14 @@ async fn harness_answering(
             .expect("host driver"),
         diff_text: unbounded_diff_text(),
         dispatched: AtomicUsize::new(0),
+        result_bytes: store.success_result_json_bytes(),
     });
     let app = App::new(
         Arc::clone(&store),
         Arc::clone(&driver) as Arc<dyn Driver>,
         "dep_http_test",
-    );
+    )
+    .expect("application");
     let harness = Harness {
         directory,
         app,

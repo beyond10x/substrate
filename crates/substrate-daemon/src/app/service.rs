@@ -145,6 +145,15 @@ pub(crate) enum SessionTransport {
     HostedTls { exporter: [u8; 32] },
 }
 
+/// The daemon's clock and the identifiers it mints.
+///
+/// Every resource id an implementation mints (`workspace_id`, `exec_id`, `session_id`,
+/// `snapshot_id` and `process_id`) is at most [`substrate_wire::MAX_RESOURCE_ID_CHARS`] (32)
+/// bytes: the store accepts an operation, and a terminal update of one, only with a resource of at
+/// most that many (`StoreError::OperationResourceTooLong`, ADR 0053 decision 8), so a longer id
+/// would leave its operation refused by the store rather than by a published rule.
+/// `every_resource_id_the_system_authority_mints_is_within_the_store_bound` holds
+/// [`SystemAuthority`] to it for each of the five.
 pub trait Authority: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
     fn request_id(&self) -> String;
@@ -265,24 +274,60 @@ pub struct App {
     pub(super) refusal_before_record: ParkingMutex<Option<RefusalBeforeRecordHook>>,
 }
 
+/// Why an [`App`] is not constructed: its driver's capability snapshot states another
+/// `operation.result-max-json-bytes` than its ledger reserves for a success result (ADR 0053
+/// decision 4, amendment of 2026-11-24).
+///
+/// The daemon publishes the driver's snapshot as the driver digested it and decides every start
+/// against its ledger's reserve, so an application exists only where the two are one figure: the
+/// figure a client reads is the figure it is held to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResultBoundMismatch {
+    /// The figure the driver's snapshot states.
+    pub published: u64,
+    /// The figure the ledger reserves, `Store::success_result_json_bytes`.
+    pub reserved: u64,
+}
+
+impl std::fmt::Display for ResultBoundMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the driver's capability snapshot states operation.result-max-json-bytes {}, and the \
+             ledger reserves {} bytes for a success result",
+            self.published, self.reserved
+        )
+    }
+}
+
+impl std::error::Error for ResultBoundMismatch {}
+
 impl App {
     /// A harness's application: no daemon configuration, so no trust anchor and no private host
     /// path. The composition root uses [`Self::with_delegated_context`].
+    ///
+    /// # Errors
+    ///
+    /// [`ResultBoundMismatch`], as [`Self::with_delegated_context`].
     pub fn new(
         store: Arc<Store>,
         driver: Arc<dyn Driver>,
         deployment: impl Into<String>,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>, ResultBoundMismatch> {
         Self::with_authority(store, driver, deployment, Arc::new(SystemAuthority))
     }
 
     /// [`Self::new`] with the harness's own clock and identifiers.
+    ///
+    /// # Errors
+    ///
+    /// [`ResultBoundMismatch`], as [`Self::with_delegated_context`].
     pub fn with_authority(
         store: Arc<Store>,
         driver: Arc<dyn Driver>,
         deployment: impl Into<String>,
         authority: Arc<dyn Authority>,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>, ResultBoundMismatch> {
         Self::with_delegated_context(
             store,
             driver,
@@ -304,6 +349,12 @@ impl App {
     /// The private paths are an argument, not a field to set afterwards, so a composition root
     /// that leaves them out does not compile; a daemon's set is `PrivateHostPaths::of` its
     /// configuration, and nothing outside `crate::app` can build another.
+    ///
+    /// # Errors
+    ///
+    /// [`ResultBoundMismatch`] when `driver`'s snapshot states another
+    /// `operation.result-max-json-bytes` than `store` reserves for a success result. Nothing is
+    /// set on `store` before the comparison.
     pub fn with_delegated_context(
         store: Arc<Store>,
         driver: Arc<dyn Driver>,
@@ -311,7 +362,15 @@ impl App {
         authority: Arc<dyn Authority>,
         delegated_context: DelegatedContextPolicy,
         private_host_paths: PrivateHostPaths,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>, ResultBoundMismatch> {
+        let published = driver.machine().facts.operation_result_max_json_bytes;
+        let reserved = store.success_result_json_bytes();
+        if published != reserved {
+            return Err(ResultBoundMismatch {
+                published,
+                reserved,
+            });
+        }
         let restart_cutoff = authority.now();
         let host_process_run_id = format!("run_{}", Ulid::generate());
         store.set_host_process_run(host_process_run_id.clone());
@@ -321,7 +380,7 @@ impl App {
         let pipe_session_policy = PipeSessionPolicy::production();
         let effect_sink: Arc<dyn CommitEffectSink> = event_wakeups.clone();
         store.set_commit_effect_sink(effect_sink);
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             store,
             driver,
             deployment: deployment.into(),
@@ -363,7 +422,7 @@ impl App {
             telemetry: Arc::default(),
             #[cfg(test)]
             refusal_before_record: ParkingMutex::new(None),
-        })
+        }))
     }
 
     /// The `BackendLedger` port over this daemon's store and deployment, handed to a driver at

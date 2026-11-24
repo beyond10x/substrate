@@ -1384,7 +1384,7 @@ impl ProcessRuntime {
             Err(outcome) => {
                 // Created but not proven empty again: the group is this exec's to retry.
                 if matches!(outcome, DispatchOutcome::OutcomeUnknown(_)) {
-                    tracking.carry(cgroup_root, format!("substrate-{id}"));
+                    tracking.carry(cgroup_root, exec_cgroup_name(id));
                 }
                 return outcome;
             }
@@ -4439,6 +4439,14 @@ fn exec_cpu_quota(cpu_millis: u64, timeout_ms: u64, cores: u32) -> u64 {
         .clamp(1_000, ceiling)
 }
 
+/// The name of an exec's own cgroup beneath the configured cgroup root, which the applied record
+/// states as `applied.cgroup`. It is made of the exec id alone, never of the root, so it is at
+/// most `"substrate-".len() + MAX_RESOURCE_ID_CHARS` characters, within
+/// `MAX_APPLIED_CGROUP_CHARS` (ADR 0053 decision 7) whatever root the host is configured with.
+pub(crate) fn exec_cgroup_name(id: &str) -> String {
+    format!("substrate-{id}")
+}
+
 pub(crate) struct Cgroup {
     path: PathBuf,
     name: String,
@@ -4452,7 +4460,7 @@ impl Cgroup {
         input: &ExecStartInput,
         exec_cpu_cores: u32,
     ) -> Result<Self, DispatchOutcome<ExecObservation>> {
-        let name = format!("substrate-{id}");
+        let name = exec_cgroup_name(id);
         let path = root.join(&name);
         std::fs::create_dir(&path).map_err(|error| {
             DispatchOutcome::NotDispatched(DriverError::failed(
@@ -4933,6 +4941,19 @@ fn release_barrier(descriptor: &OwnedFd) -> Result<(), DriverError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod applied_cgroup_bound {
+    /// ADR 0053 decision 7: the applied cgroup of the widest exec id is within
+    /// `MAX_APPLIED_CGROUP_CHARS`, and it does not grow with the configured root.
+    #[test]
+    fn the_applied_cgroup_of_the_widest_exec_id_is_within_its_wire_bound() {
+        let widest = super::exec_cgroup_name(&"x".repeat(substrate_wire::MAX_RESOURCE_ID_CHARS));
+        assert_eq!(widest.chars().count(), 42);
+        assert!(widest.chars().count() <= substrate_wire::MAX_APPLIED_CGROUP_CHARS);
+        assert_eq!(super::exec_cgroup_name("ex_1"), "substrate-ex_1");
+    }
 }
 
 #[cfg(test)]

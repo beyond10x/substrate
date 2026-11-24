@@ -53,9 +53,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.27.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.28.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7";
+    "2cf0b0bd5a96600f4fbc02d2f98c3c76d839e3926399535487bc41f29e219e78";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2991,7 +2991,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.27.0/operations.json");
+            .join("contracts/substrate-wire/0.28.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -3356,6 +3356,12 @@ async fn check_http_journey(
     assert_eq!(status, 200);
     assert_eq!(machine["result"]["driver"], "host");
     assert_eq!(machine["result"]["facts"]["workspace.guarded-io"], true);
+    // Bundle 0.28.0 (ADR 0053 decision 4): the shipped daemon states the reserve its ledger opens
+    // with, the `const` the bundle publishes, pinned here rather than read from the wire crate.
+    assert_eq!(
+        machine["result"]["facts"]["operation.result-max-json-bytes"],
+        524_217
+    );
     let snapshot = text(&machine["result"]["snapshot"]);
     passed += 1;
 

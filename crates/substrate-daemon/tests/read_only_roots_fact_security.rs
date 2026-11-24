@@ -337,7 +337,8 @@ impl Harness {
             Arc::new(SystemAuthority),
             DelegatedContextPolicy::none(),
             PrivateHostPaths::of(&config).expect("the read set"),
-        );
+        )
+        .expect("application");
         Self {
             directory,
             driver,

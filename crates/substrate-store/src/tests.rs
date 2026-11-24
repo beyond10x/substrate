@@ -906,6 +906,11 @@ fn global_byte_and_max_row_boundaries_are_enforced() {
     );
 }
 
+/// A terminal update that needs more than the headroom its row was charged is rolled back: the
+/// row stays as it was and the usage does not move. A success result is held to the reserve and
+/// a row over it ends with `operation.result-unrecorded`, which the least headroom a store opens
+/// with holds; an error the caller completes with is not held to it, so an error past the
+/// headroom is the update this protects against.
 #[test]
 fn terminal_update_cannot_exceed_reserved_headroom_and_rolls_back() {
     let config = StoreConfig {
@@ -914,7 +919,7 @@ fn terminal_update_cannot_exceed_reserved_headroom_and_rolls_back() {
         operation_subject_max_bytes: 16 * 1024,
         operation_global_max_bytes: 32 * 1024,
         operation_max_row_bytes: 4 * 1024,
-        operation_terminal_headroom_bytes: 32,
+        operation_terminal_headroom_bytes: StoreConfig::minimum_terminal_headroom_bytes(),
         ..StoreConfig::default()
     };
     let store = Store::open_with_config(":memory:", config).expect("open store");
@@ -939,13 +944,20 @@ fn terminal_update_cannot_exceed_reserved_headroom_and_rolls_back() {
             |row| row.get(0),
         )
         .expect("usage before terminal");
-    let oversized = "x".repeat(1_024);
+    let oversized = ErrorDetail {
+        class: ErrorClass::Failed,
+        code: "workspace.create-failed".to_owned(),
+        message: "x".repeat(1_024),
+        retriable: false,
+        address: None,
+        operation: Some(accepted.operation.clone()),
+    };
     assert!(matches!(
-        store.complete_success(
+        store.complete_error(
             &accepted.scope,
             &accepted.operation,
             "2026-08-13T12:00:01Z",
-            200,
+            500,
             Some("ws_headroom"),
             &oversized,
         ),
@@ -988,10 +1000,36 @@ fn the_default_reserve_is_the_published_result_bound() {
     );
 }
 
+/// The least success-result reserve a store opens with is 383 bytes: the least terminal headroom
+/// (454 bytes) less what a terminal success adds around its result. Bundle `0.28.0`'s vectors of
+/// `operation.result-limit` state it as their machine's `operation.result-max-json-bytes`, and
+/// `cargo xtask check-bundle` holds them to the same literal (`LEAST_RESERVE` in
+/// `xtask/src/bundle/result_bound.rs`), which does not depend on this crate. A store one byte
+/// under the least headroom does not open.
+#[test]
+fn the_least_success_result_reserve_is_383_bytes() {
+    let least = StoreConfig {
+        operation_terminal_headroom_bytes: StoreConfig::minimum_terminal_headroom_bytes(),
+        ..StoreConfig::default()
+    };
+    assert_eq!(least.success_result_json_bytes(), 383);
+    let directory = tempfile::tempdir().expect("temporary store");
+    Store::open_with_config(directory.path().join("least.db"), least).expect("opens at the least");
+    let under = StoreConfig {
+        operation_terminal_headroom_bytes: StoreConfig::minimum_terminal_headroom_bytes() - 1,
+        ..StoreConfig::default()
+    };
+    assert!(matches!(
+        Store::open_with_config(directory.path().join("under.db"), under),
+        Err(StoreError::OperationTerminalHeadroomBelowUnrecorded { .. })
+    ));
+}
+
 /// `success_result_json_bytes` is exact against the row accounting: a success result of that
 /// many bytes of JSON, completed at the longest `terminal_at` for the resource the acceptance
-/// named, is recorded and replays, and one byte more is the headroom error with the row still
-/// accepted. A result held to the figure is never refused its completion for size.
+/// named, is recorded and replays. One byte more is not recorded and not cut: the row ends
+/// terminal with `operation.result-unrecorded` (ADR 0053 decision 8), names the resource, and
+/// replays that error. A completion never fails for size.
 #[test]
 fn a_success_result_at_the_stated_budget_completes_and_one_byte_more_does_not() {
     let config = StoreConfig {
@@ -1064,13 +1102,450 @@ fn a_success_result_at_the_stated_budget_completes_and_one_byte_more_does_not() 
                 Reservation::Replay(_)
             ));
         } else {
-            assert!(matches!(
-                completed,
-                Err(StoreError::OperationTerminalHeadroom(_))
-            ));
-            assert_eq!(record.state, OperationState::Accepted);
+            completed.expect("a result over the budget still ends its row");
+            assert_eq!(record.state, OperationState::Terminal);
+            assert_eq!(record.resource.as_deref(), Some("ws_budget"));
+            let unrecorded = OperationOutcome::Error {
+                error: crate::result_unrecorded(operation),
+            };
+            assert_eq!(record.outcome, Some(unrecorded.clone()));
+            let Reservation::Replay(answer) = store.reserve(&accepted).expect("replay") else {
+                panic!("the row replays");
+            };
+            assert_eq!(answer.status, crate::RESULT_UNRECORDED_STATUS);
+            assert_eq!(answer.outcome, unrecorded);
         }
     }
+}
+
+/// The error a row ends with when its result is not recorded is the one ADR 0053 decision 8
+/// names, and its widest form, for the longest operation id, is 379 bytes, the figure ADR 0053
+/// decision 8 states: it always fits the headroom.
+#[test]
+fn the_unrecorded_error_is_the_named_error_and_its_widest_outcome_is_379_bytes() {
+    let error = crate::result_unrecorded(&"0".repeat(substrate_wire::MAX_OPERATION_ID_CHARS));
+    assert_eq!(error.code, substrate_wire::OPERATION_RESULT_UNRECORDED);
+    assert_eq!(error.class, ErrorClass::Failed);
+    assert!(!error.retriable);
+    assert_eq!(error.address.as_deref(), Some("result"));
+    assert_eq!(
+        error.message,
+        "The operation took effect, but its result exceeds what the operation ledger can record. \
+         Read the resource."
+    );
+    assert_eq!(crate::RESULT_UNRECORDED_STATUS, 500);
+    let outcome = OperationOutcome::Error { error };
+    assert_eq!(
+        serde_json::to_string(&outcome).expect("outcome JSON").len(),
+        379
+    );
+    assert_eq!(crate::widest_unrecorded_outcome_json_bytes(), 379);
+}
+
+/// A store at the least terminal headroom with an operation of the widest id accepted without a
+/// resource, and that operation's over-reserve completion naming `resource`.
+fn least_headroom_completion(resource: &str) -> (Store, NewOperation, Result<(), StoreError>) {
+    let store = Store::open_with_config(
+        ":memory:",
+        StoreConfig {
+            operation_terminal_headroom_bytes: StoreConfig::minimum_terminal_headroom_bytes(),
+            ..StoreConfig::default()
+        },
+    )
+    .expect("a store at the least headroom opens");
+    let mut accepted = operation_named(
+        "local:1000",
+        &"0".repeat(substrate_wire::MAX_OPERATION_ID_CHARS),
+        "workspace.file.write",
+        resource,
+        &"e".repeat(64),
+    );
+    accepted.resource = None;
+    assert_eq!(
+        store.reserve(&accepted).expect("accept"),
+        Reservation::Accepted
+    );
+    let reserve = usize::try_from(store.success_result_json_bytes()).expect("usize");
+    let completed = store.complete_success(
+        &accepted.scope,
+        &accepted.operation,
+        "2026-11-24T12:34:56.123456789+00:00",
+        200,
+        Some(resource),
+        &"x".repeat(reserve - 1),
+    );
+    (store, accepted, completed)
+}
+
+/// The least terminal headroom a store opens with is what a row needs to end with the widest
+/// `operation.result-unrecorded` outcome: the longest `terminal_at`, the status charge, that
+/// outcome and the widest resource the terminal update names, 35 + 8 + 379 + 32 bytes. At it a
+/// completion over the reserve of an operation with the widest id, accepted without a resource,
+/// that names a resource of `MAX_RESOURCE_ID_CHARS` ends its row with the error.
+#[test]
+fn a_store_at_the_least_terminal_headroom_ends_an_over_reserve_completion_with_the_error() {
+    assert_eq!(
+        StoreConfig::minimum_terminal_headroom_bytes(),
+        35 + 8 + 379 + 32
+    );
+    let resource = format!(
+        "ws_{}",
+        "w".repeat(substrate_wire::MAX_RESOURCE_ID_CHARS - 3)
+    );
+    let (store, accepted, completed) = least_headroom_completion(&resource);
+    completed.expect("a completion over the reserve ends its row");
+    let record = store
+        .operation(&accepted.scope, &accepted.operation)
+        .expect("operation")
+        .expect("ledger row");
+    assert_eq!(record.state, OperationState::Terminal);
+    assert_eq!(record.resource.as_deref(), Some(resource.as_str()));
+    assert_eq!(
+        record.outcome,
+        Some(OperationOutcome::Error {
+            error: crate::result_unrecorded(&accepted.operation),
+        })
+    );
+}
+
+/// A terminal update that names a resource one byte over `MAX_RESOURCE_ID_CHARS` is refused by
+/// name, and the row stays accepted.
+#[test]
+fn a_terminal_update_naming_a_resource_one_byte_past_its_bound_is_refused_at_the_least_headroom() {
+    let resource = format!(
+        "ws_{}",
+        "w".repeat(substrate_wire::MAX_RESOURCE_ID_CHARS - 2)
+    );
+    let (store, accepted, completed) = least_headroom_completion(&resource);
+    assert!(
+        matches!(
+            completed,
+            Err(StoreError::OperationResourceTooLong { bytes, max })
+                if bytes == substrate_wire::MAX_RESOURCE_ID_CHARS + 1
+                    && max == substrate_wire::MAX_RESOURCE_ID_CHARS
+        ),
+        "{completed:?}"
+    );
+    let record = store
+        .operation(&accepted.scope, &accepted.operation)
+        .expect("operation")
+        .expect("ledger row");
+    assert_eq!(record.state, OperationState::Accepted);
+    assert_eq!(record.resource, None);
+}
+
+/// The store accepts an operation only with an id of the wire's operation-id form, at most
+/// `MAX_OPERATION_ID_CHARS` characters each of which the wire's rule admits, and with a resource
+/// of at most `MAX_RESOURCE_ID_CHARS` bytes; each refusal is named and writes no row.
+#[test]
+fn an_operation_is_accepted_only_with_ids_the_terminal_headroom_counts() {
+    use substrate_wire::{MAX_OPERATION_ID_CHARS, MAX_RESOURCE_ID_CHARS};
+    let store = Store::open(":memory:").expect("open store");
+    let at_bounds = operation_named(
+        "local:1000",
+        &"o".repeat(MAX_OPERATION_ID_CHARS),
+        "workspace.create",
+        &"r".repeat(MAX_RESOURCE_ID_CHARS),
+        &"1".repeat(64),
+    );
+    assert_eq!(
+        store.reserve(&at_bounds).expect("accept"),
+        Reservation::Accepted
+    );
+    for (index, operation) in [
+        "o".repeat(MAX_OPERATION_ID_CHARS + 1),
+        "01JOPERATIONID.DOTTED".to_owned(),
+        "01JOPERATIONID\"QUOTED".to_owned(),
+        "01JOPERATIONIDÜMLAUT".to_owned(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let refused = operation_named(
+            "local:1000",
+            &operation,
+            "workspace.create",
+            "ws_refused",
+            &format!("{index:0>64}"),
+        );
+        assert!(
+            matches!(
+                store.reserve(&refused),
+                Err(StoreError::OperationIdInvalid {
+                    max: MAX_OPERATION_ID_CHARS
+                })
+            ),
+            "{operation}"
+        );
+        assert!(
+            store
+                .operation(&refused.scope, &operation)
+                .expect("read")
+                .is_none()
+        );
+    }
+    let too_long = operation_named(
+        "local:1000",
+        "01JOPERATIONRESOURCE01",
+        "workspace.create",
+        &"r".repeat(MAX_RESOURCE_ID_CHARS + 1),
+        &"2".repeat(64),
+    );
+    assert!(matches!(
+        store.reserve(&too_long),
+        Err(StoreError::OperationResourceTooLong { bytes, max })
+            if bytes == MAX_RESOURCE_ID_CHARS + 1 && max == MAX_RESOURCE_ID_CHARS
+    ));
+    assert!(
+        store
+            .operation(&too_long.scope, &too_long.operation)
+            .expect("read")
+            .is_none()
+    );
+}
+
+/// A terminal headroom one byte under the least is refused when the store opens, by name, and
+/// the refusal states both figures.
+#[test]
+fn a_store_refuses_a_terminal_headroom_under_the_least_by_name() {
+    let required = StoreConfig::minimum_terminal_headroom_bytes();
+    let refused = Store::open_with_config(
+        ":memory:",
+        StoreConfig {
+            operation_terminal_headroom_bytes: required - 1,
+            ..StoreConfig::default()
+        },
+    );
+    let Err(error) = refused else {
+        panic!("a store under the least headroom opened");
+    };
+    assert!(
+        matches!(
+            error,
+            StoreError::OperationTerminalHeadroomBelowUnrecorded { configured, required: named }
+                if configured == required - 1 && named == required
+        ),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(&(required - 1).to_string())
+            && message.contains(&required.to_string())
+            && message.contains("operation.result-unrecorded"),
+        "{message}"
+    );
+}
+
+/// Each member another party sets is recorded at its wire bound and not one character past it
+/// (ADR 0053 decision 7, one case per row). A result with a member past its bound ends its row
+/// with `operation.result-unrecorded` though it fits the reserve, and nothing in it is cut.
+#[test]
+fn every_member_over_its_wire_bound_ends_the_row_unrecorded_and_at_its_bound_is_recorded() {
+    use serde_json::json;
+    use substrate_wire::{
+        MAX_APERTURE_DESTINATION_CHARS, MAX_APERTURE_LISTEN_CHARS, MAX_APERTURE_NAME_CHARS,
+        MAX_APPLIED_CGROUP_CHARS, MAX_EXEC_REFUSAL_CODE_CHARS, MAX_EXEC_REFUSAL_MESSAGE_CHARS,
+        MAX_EXEC_USAGE_CODE_CHARS, MAX_EXEC_USAGE_MESSAGE_CHARS, MAX_LEASE_ACTOR_CHARS,
+        MAX_LEASE_PRINCIPAL_CHARS, MAX_PROCESS_EXIT_SIGNAL_CHARS, MAX_READ_ONLY_FILE_PATH_BYTES,
+    };
+
+    // A character of two bytes: a bound in characters is not read as one in bytes.
+    fn text(chars: usize) -> String {
+        "é".repeat(chars)
+    }
+    let rows: [MemberRow; 12] = [
+        (
+            "applied.cgroup",
+            |n| json!({ "applied": { "cgroup": text(n) } }),
+            MAX_APPLIED_CGROUP_CHARS,
+        ),
+        (
+            "aperture name",
+            |n| json!({ "applied": { "network": [{ "name": text(n) }] } }),
+            MAX_APERTURE_NAME_CHARS,
+        ),
+        (
+            "aperture destination",
+            |n| json!({ "applied": { "network": { "destination": text(n) } } }),
+            MAX_APERTURE_DESTINATION_CHARS,
+        ),
+        (
+            "aperture listen",
+            |n| json!({ "applied": { "network": [{ "listen": text(n) }] } }),
+            MAX_APERTURE_LISTEN_CHARS,
+        ),
+        (
+            "writable root host_path, in bytes",
+            |n| json!({ "applied": { "writable_roots": [{ "host_path": "a".repeat(n) }] } }),
+            MAX_READ_ONLY_FILE_PATH_BYTES,
+        ),
+        (
+            "usage code",
+            |n| json!({ "usage": { "status": "unavailable", "code": text(n) } }),
+            MAX_EXEC_USAGE_CODE_CHARS,
+        ),
+        (
+            "usage message",
+            |n| json!({ "usage": { "status": "unavailable", "message": text(n) } }),
+            MAX_EXEC_USAGE_MESSAGE_CHARS,
+        ),
+        (
+            "refusal code",
+            |n| json!({ "refusal": { "code": text(n) } }),
+            MAX_EXEC_REFUSAL_CODE_CHARS,
+        ),
+        (
+            "refusal message",
+            |n| json!({ "refusal": { "message": text(n) } }),
+            MAX_EXEC_REFUSAL_MESSAGE_CHARS,
+        ),
+        (
+            "process exit signal",
+            |n| json!({ "exit": { "signal": text(n) } }),
+            MAX_PROCESS_EXIT_SIGNAL_CHARS,
+        ),
+        (
+            "lease actor",
+            |n| json!({ "lease": { "actor": text(n) } }),
+            MAX_LEASE_ACTOR_CHARS,
+        ),
+        (
+            "lease principal",
+            |n| json!({ "lease": { "principal": text(n) } }),
+            MAX_LEASE_PRINCIPAL_CHARS,
+        ),
+    ];
+    let store = Store::open(":memory:").expect("open store");
+    for (index, (row, result, bound)) in rows.iter().enumerate() {
+        assert_member_bound(&store, index, row, *result, *bound);
+    }
+}
+
+/// A row of decision 7: its name, a result with the member at a given width, and its bound.
+type MemberRow = (&'static str, fn(usize) -> serde_json::Value, usize);
+
+/// One row of decision 7: a result with the member at `bound` is recorded, and one with it at
+/// `bound + 1` ends the row with `operation.result-unrecorded`.
+fn assert_member_bound(
+    store: &Store,
+    index: usize,
+    row: &str,
+    result: fn(usize) -> serde_json::Value,
+    bound: usize,
+) {
+    {
+        for (chars, recorded) in [(bound, true), (bound + 1, false)] {
+            let accepted = operation_named(
+                "local:1000",
+                &format!("01JMEMBERBOUND{index:03}{}", u8::from(recorded)),
+                "workspace.file.edit-v2",
+                "ws_member",
+                &format!("{index:0>63}{}", u8::from(recorded)),
+            );
+            assert_eq!(
+                store.reserve(&accepted).expect("accept"),
+                Reservation::Accepted,
+                "{row}"
+            );
+            let value = result(chars);
+            store
+                .complete_success(
+                    &accepted.scope,
+                    &accepted.operation,
+                    "2026-11-24T12:00:01Z",
+                    200,
+                    Some("ws_member"),
+                    &value,
+                )
+                .unwrap_or_else(|error| panic!("{row}: {error}"));
+            let record = store
+                .operation(&accepted.scope, &accepted.operation)
+                .expect("operation")
+                .expect("ledger row");
+            assert_eq!(record.state, OperationState::Terminal, "{row}");
+            let expected = if recorded {
+                OperationOutcome::Success { result: value }
+            } else {
+                OperationOutcome::Error {
+                    error: crate::result_unrecorded(&accepted.operation),
+                }
+            };
+            assert_eq!(record.outcome, Some(expected), "{row} at {chars}");
+        }
+    }
+}
+
+/// An exec completion whose driver answer is not recorded ends its row with
+/// `operation.result-unrecorded`, the row names the exec, and the exec's own record is stored
+/// whole, the member past its bound included: nothing is cut and the run is not changed.
+#[test]
+fn an_exec_completion_not_recorded_stores_the_exec_whole_and_ends_the_row_with_the_error() {
+    let store = Store::open(":memory:").expect("open store");
+    let scope = scope("local:1000");
+    store
+        .put_workspace(&scope, "ws_unrecorded", &workspace("ws_unrecorded"))
+        .expect("seed workspace");
+    let start = operation_named(
+        "local:1000",
+        "01JUNRECORDEDEXEC000001",
+        "exec.start",
+        "ex_unrecorded",
+        &"5".repeat(64),
+    );
+    let accepted = exec("ex_unrecorded", "ws_unrecorded", ExecState::Accepted);
+    assert_eq!(
+        store
+            .reserve_exec_start(&start, &accepted, None, None)
+            .expect("reserve exec"),
+        Reservation::Accepted
+    );
+    let mut running = exec("ex_unrecorded", "ws_unrecorded", ExecState::Running);
+    running.resource.refusal = Some(substrate_wire::ExecRefusal {
+        class: ErrorClass::Exhausted,
+        code: "c".repeat(substrate_wire::MAX_EXEC_REFUSAL_CODE_CHARS + 1),
+        message: "A driver's refusal with a code past its bound.".to_owned(),
+    });
+    let write = store
+        .complete_exec(
+            &scope,
+            &start.operation,
+            "2026-11-24T12:00:01Z",
+            202,
+            &running.resource,
+            &[],
+            &[],
+            false,
+            false,
+            false,
+            None,
+            None,
+        )
+        .expect("the completion ends the row");
+    assert!(matches!(write, ExecWrite::PersistedExact(_)));
+    let record = store
+        .operation(&scope, &start.operation)
+        .expect("operation")
+        .expect("ledger row");
+    assert_eq!(record.state, OperationState::Terminal);
+    assert_eq!(record.resource.as_deref(), Some("ex_unrecorded"));
+    assert_eq!(
+        record.outcome,
+        Some(OperationOutcome::Error {
+            error: crate::result_unrecorded(&start.operation)
+        })
+    );
+    let stored = store
+        .exec(&scope, "ex_unrecorded")
+        .expect("exec read")
+        .expect("exec row");
+    assert_eq!(
+        stored.resource, running.resource,
+        "the exec is stored whole"
+    );
+    let Reservation::Replay(answer) = store.reserve(&start).expect("replay") else {
+        panic!("the row replays");
+    };
+    assert_eq!(answer.status, crate::RESULT_UNRECORDED_STATUS);
 }
 
 #[test]
@@ -5264,3 +5739,15 @@ fn schema_version_restores_the_ledger_busy_timeout() {
 
 #[path = "operations/review_replay_grant_cases.rs"]
 mod review_replay_grant_cases;
+
+#[path = "result_bound_adversary_cases.rs"]
+mod result_bound_adversary_cases;
+
+#[path = "result_bound_event_cases.rs"]
+mod result_bound_event_cases;
+
+#[path = "result_bound_completion_path_cases.rs"]
+mod result_bound_completion_path_cases;
+
+#[path = "result_bound_row_accounting_cases.rs"]
+mod result_bound_row_accounting_cases;

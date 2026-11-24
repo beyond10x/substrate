@@ -151,6 +151,14 @@ fn pin_git(
         return Err(crate::writable_root_own_workspace(workspace));
     }
     let host_path = git.root_path.join(root_name);
+    // ADR 0053 decision 7: the applied record states this path whole as `host_path`, so a path
+    // longer than its wire bound is refused before the open, never shortened.
+    if host_path.as_os_str().len() > substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES {
+        return Err(DriverError::failed(
+            "exec.spawn-failed",
+            GIT_HOST_PATH_OVER_BOUND,
+        ));
+    }
     let opened =
         crate::fs::pin_workspace_directory_beneath(git.root, &host_path).map_err(|error| {
             match error.code {
@@ -186,6 +194,11 @@ fn pin_git(
         mount: mount.to_owned(),
     })
 }
+
+/// The message of the failure a Git root answers when its host path is longer than the applied
+/// record's bound, `MAX_READ_ONLY_FILE_PATH_BYTES` (ADR 0053 decision 7).
+const GIT_HOST_PATH_OVER_BOUND: &str =
+    "A writable Git root's host path is longer than the applied record can state.";
 
 fn git_absent(workspace: &str) -> DriverError {
     DriverError::refused(
@@ -556,6 +569,48 @@ mod tests {
         let error = pin(&[], &[git("ws_checkout", "/srv/checkout")], None).unwrap_err();
         assert_eq!(error.code, substrate_wire::EXEC_WRITABLE_ROOTS_GIT_UNSERVED);
         assert!(error.message.contains("ws_checkout"));
+    }
+
+    /// ADR 0053 decision 7: a Git root's host path is the workspace root's path joined with its
+    /// root name, recorded whole as the applied `host_path`. At `MAX_READ_ONLY_FILE_PATH_BYTES`
+    /// the root is pinned (beneath the root's descriptor) and the whole path recorded; one byte
+    /// over it is refused before the open, by name.
+    #[cfg(feature = "git")]
+    #[test]
+    fn a_git_root_whose_host_path_is_over_the_applied_record_bound_is_refused_before_the_open() {
+        let workspaces = Workspaces::new();
+        let bindings = [binding("ws_checkout", "ws_checkout")];
+        let root_path_of = |bytes: usize| {
+            let mut path = format!("/{}", "a".repeat(99)).repeat(bytes / 100);
+            if !bytes.is_multiple_of(100) {
+                path.push('/');
+                path.push_str(&"b".repeat(bytes % 100 - 1));
+            }
+            assert_eq!(path.len(), bytes);
+            PathBuf::from(path)
+        };
+        let at_bound =
+            root_path_of(substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES - "/ws_checkout".len());
+        let mut roots = workspaces.roots(&bindings);
+        roots.root_path = &at_bound;
+        let pinned = pin(&[], &[git("ws_checkout", "/srv/checkout")], Some(&roots))
+            .expect("a host path at the bound is pinned");
+        let AppliedWritableRoot::Git { host_path, .. } = pinned[0].applied() else {
+            panic!("a Git root is applied as one");
+        };
+        assert_eq!(
+            host_path.len(),
+            substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES
+        );
+
+        let over =
+            root_path_of(substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES + 1 - "/ws_checkout".len());
+        roots.root_path = &over;
+        let error = pin(&[], &[git("ws_checkout", "/srv/checkout")], Some(&roots))
+            .expect_err("a host path over the bound is refused");
+        assert_eq!(error.code, "exec.spawn-failed");
+        assert_eq!(error.class, crate::DriverErrorClass::Failed);
+        assert_eq!(error.message, super::GIT_HOST_PATH_OVER_BOUND);
     }
 
     #[test]

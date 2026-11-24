@@ -1,4 +1,4 @@
-use crate::events::{append_event, commit_effect};
+use crate::events::{append_event, commit_effect, completion_effects};
 use crate::execs::{
     exec_recorded_absent, git_roots_admissible, is_terminal_exec_state, load_exec,
     mark_exec_unknown, record_exec_git_roots, upsert_exec, workspace_admissible,
@@ -10,6 +10,7 @@ use crate::operations::{
     operation_identity_full, refresh_nonterminal_operation_accounting,
     resource_partition_at_capacity,
 };
+use crate::result_bound::{CompletionEvent, append_completion_events, terminal_success};
 use crate::{
     LeaseClock, NewLease, NewOperation, OperationCapacity, Reservation, ResourceCapacity, Scope,
     Store, StoreError, StoredAnswer, StoredExec,
@@ -17,8 +18,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use substrate_wire::{
-    ErrorClass, ErrorDetail, Event, Exec, ExecState, LeaseState, OperationOutcome, PipeSession,
-    SessionAbsence, SessionAttachmentState, SessionKind, SessionState, Workspace,
+    ErrorClass, ErrorDetail, Event, Exec, ExecState, LeaseState, PipeSession, SessionAbsence,
+    SessionAttachmentState, SessionKind, SessionState, Workspace,
 };
 use subtle::ConstantTimeEq as _;
 
@@ -399,13 +400,16 @@ impl Store {
             absent: true,
             observed_at,
         };
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(&absence)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            &new.operation,
+            serde_json::to_value(&absence)?,
+            200,
+        );
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
-                 response_status = 200
+                 response_status = ?7
              WHERE deployment = ?1 AND subject = ?2 AND operation = ?3 AND state = 'accepted'",
             params![
                 new.scope.deployment,
@@ -414,6 +418,7 @@ impl Store {
                 observed_at.to_rfc3339(),
                 id,
                 serde_json::to_string(&outcome)?,
+                i64::from(status),
             ],
         )?;
         if changed != 1 {
@@ -433,25 +438,25 @@ impl Store {
             "DELETE FROM sessions WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
             params![new.scope.deployment, new.scope.subject, id],
         )?;
-        let retired = append_event(
+        let mut events = vec![accepted];
+        events.extend(append_completion_events(
             &transaction,
             self.event_retention,
             &new.scope,
-            id,
-            "session",
-            "session.retired",
-            &observed_at.to_rfc3339(),
-            &new.actor,
-            new.principal.as_deref(),
             &new.operation,
-            Some(serde_json::to_value(&absence)?),
-        )?;
+            &observed_at.to_rfc3339(),
+            (&new.actor, new.principal.as_deref()),
+            &outcome,
+            vec![CompletionEvent {
+                resource: id,
+                resource_kind: "session",
+                transition: "session.retired",
+                observation: Some(serde_json::to_value(&absence)?),
+            }],
+        )?);
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[
-            commit_effect(&new.scope, &accepted),
-            commit_effect(&new.scope, &retired),
-        ]);
+        self.report_committed(&completion_effects(&new.scope, &events));
         Ok(SessionRetireReservation::Retired(absence))
     }
 
@@ -505,9 +510,12 @@ impl Store {
             )?;
             (session.clone(), exec.clone())
         };
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(&session)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            operation,
+            serde_json::to_value(&session)?,
+            status,
+        );
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
@@ -529,22 +537,24 @@ impl Store {
         }
         finalize_operation_accounting(&transaction, self.config, scope, operation)?;
         let (actor, principal, _) = operation_identity_full(&transaction, scope, operation)?;
-        let event = append_event(
+        let events = append_completion_events(
             &transaction,
             self.event_retention,
             scope,
-            &session.id,
-            "session",
-            session_transition(session.state),
-            terminal_at,
-            &actor,
-            principal.as_deref(),
             operation,
-            Some(serde_json::to_value(&session)?),
+            terminal_at,
+            (&actor, principal.as_deref()),
+            &outcome,
+            vec![CompletionEvent {
+                resource: &session.id,
+                resource_kind: "session",
+                transition: session_transition(session.state),
+                observation: Some(serde_json::to_value(&session)?),
+            }],
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok((session, exec))
     }
 
@@ -571,9 +581,12 @@ impl Store {
         let _projection = project_session_from_exec(&transaction, scope, &authoritative.resource)?;
         let session = load_session(&transaction, scope, session_id)?
             .ok_or_else(|| StoreError::NotAccepted(operation.to_owned()))?;
-        let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(&session)?,
-        };
+        let (outcome, status) = terminal_success(
+            self.config,
+            operation,
+            serde_json::to_value(&session)?,
+            status,
+        );
         let changed = transaction.execute(
             "UPDATE operations
              SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
@@ -594,22 +607,24 @@ impl Store {
         }
         finalize_operation_accounting(&transaction, self.config, scope, operation)?;
         let (actor, principal) = operation_identity(&transaction, scope, operation)?;
-        let event = append_event(
+        let events = append_completion_events(
             &transaction,
             self.event_retention,
             scope,
-            session_id,
-            "session",
-            session_transition(session.state),
-            terminal_at,
-            &actor,
-            principal.as_deref(),
             operation,
-            Some(serde_json::to_value(&session)?),
+            terminal_at,
+            (&actor, principal.as_deref()),
+            &outcome,
+            vec![CompletionEvent {
+                resource: session_id,
+                resource_kind: "session",
+                transition: session_transition(session.state),
+                observation: Some(serde_json::to_value(&session)?),
+            }],
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&completion_effects(scope, &events));
         Ok(session)
     }
 

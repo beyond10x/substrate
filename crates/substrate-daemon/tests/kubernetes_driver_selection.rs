@@ -511,7 +511,7 @@ async fn every_adopt_on_a_namespace_machine_is_unserved_before_any_name_is_looke
     std::fs::create_dir_all(base.join("workspaces/project")).expect("operator directory");
     let store = Arc::new(Store::open(base.join("state.db")).expect("state store"));
     let host = HostDriver::open(HostConfig::minimum(base.join("workspaces"))).expect("host driver");
-    let host = App::new(Arc::clone(&store), host as Arc<dyn Driver>, "d");
+    let host = App::new(Arc::clone(&store), host as Arc<dyn Driver>, "d").expect("application");
     let held = adopt(&host, OWNER, "01JFXN0ADOPTHELD000000000", "project").await;
     assert_eq!(held.0, StatusCode::CREATED, "{}", held.1);
     let kubeconfig =
@@ -522,7 +522,8 @@ async fn every_adopt_on_a_namespace_machine_is_unserved_before_any_name_is_looke
         Arc::new(SystemAuthority),
     ));
     let namespace = NamespaceDriver::parse(&kubeconfig, "d", ledger).expect("the configuration");
-    let namespace = App::new(store, Arc::new(namespace) as Arc<dyn Driver>, "d");
+    let namespace =
+        App::new(store, Arc::new(namespace) as Arc<dyn Driver>, "d").expect("application");
     for (subject, operation, root_name, holder) in [
         (CALLER, "01JFXN0ADOPTFREE000000000", "free", "nobody"),
         (

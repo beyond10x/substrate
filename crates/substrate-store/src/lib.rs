@@ -17,6 +17,7 @@ mod leases;
 mod operations;
 mod process_events;
 mod recovery;
+mod result_bound;
 mod schema;
 mod sessions;
 mod snapshots;
@@ -48,6 +49,10 @@ pub use operations::{
 };
 pub use process_events::{ProcessStreamEvent, ProcessStreamEvents};
 pub use recovery::{RecoveryExec, RecoveryWorkspace};
+pub use result_bound::{
+    RESULT_UNRECORDED_MESSAGE, RESULT_UNRECORDED_STATUS, members_within_bounds, result_unrecorded,
+    widest_unrecorded_outcome_json_bytes,
+};
 pub use sessions::{
     NewSessionAuthority, SessionAttachmentClaim, SessionAuthorityLookup, SessionAuthorityMint,
     SessionRetireReservation,
@@ -195,6 +200,28 @@ pub enum StoreError {
     InvalidEventRetention,
     #[error("operation ledger configuration values must be nonzero and internally consistent")]
     InvalidStoreConfig,
+    /// ADR 0053 decision 8: a store whose terminal headroom cannot hold a row that ends with
+    /// `operation.result-unrecorded` does not open, since such a row could stay accepted.
+    #[error(
+        "operation terminal headroom of {configured} bytes is below the {required} bytes a row \
+         needs to end with operation.result-unrecorded"
+    )]
+    OperationTerminalHeadroomBelowUnrecorded { configured: u64, required: u64 },
+    /// ADR 0053 decision 8: an accepted operation's id is at most 128 characters of the wire's
+    /// operation-id alphabet, which is ASCII, so as many bytes, and its row can end with the
+    /// widest `operation.result-unrecorded` outcome. The wire's minimum of 16 characters is the
+    /// wire's rule and not the store's.
+    #[error(
+        "operation id is not accepted: at most {max} characters, each an ASCII letter, a digit, \
+         `_` or `-`"
+    )]
+    OperationIdInvalid { max: usize },
+    /// ADR 0053 decision 8: an accepted operation names a resource of at most `max` bytes, the
+    /// length of an identifier the daemon mints, which the least terminal headroom counts. It
+    /// refuses an acceptance, and a terminal update, which rolls back and leaves the row as it
+    /// was. A refused row is not held to it.
+    #[error("operation resource of {bytes} bytes is longer than {max} bytes")]
+    OperationResourceTooLong { bytes: usize, max: usize },
     #[error("operation ledger capacity is exhausted: {0:?}")]
     OperationCapacity(OperationCapacity),
     #[error("configured operation ledger capacity is below durable occupancy: {0:?}")]

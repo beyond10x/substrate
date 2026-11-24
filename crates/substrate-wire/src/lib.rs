@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.27.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.28.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7";
+    "2cf0b0bd5a96600f4fbc02d2f98c3c76d839e3926399535487bc41f29e219e78";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 /// Most characters of `old_text` and `new_text` in a v2 file edit and of `text` in a line-patch
 /// edit: the `maxLength` their input schemas publish, which JSON Schema counts in characters, not
@@ -439,6 +439,14 @@ pub const OPERATION_LEDGER_GLOBAL_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// `the_default_reserve_is_the_published_result_bound` in the store's tests holds the store's
 /// default reserve to this number.
 pub const OPERATION_RESULT_MAX_JSON_BYTES: u64 = 524_217;
+/// The refusal of a mutation no success result of which the operation ledger can record (ADR
+/// 0053 decision 1): class `exhausted`, HTTP 429, not retriable, address `result`. It is
+/// answered before the mutation's side effect.
+pub const OPERATION_RESULT_LIMIT: &str = "operation.result-limit";
+/// The error a completed operation ends with when its effect happened and its result is wider
+/// than the ledger records (ADR 0053 decision 8): class `failed`, HTTP 500, not retriable,
+/// address `result`. The resource's own record is stored whole.
+pub const OPERATION_RESULT_UNRECORDED: &str = "operation.result-unrecorded";
 pub const MIN_LEASE_TTL_MS: u64 = 1_000;
 pub const MAX_LEASE_TTL_MS: u64 = 86_400_000;
 pub const LEASE_CLOCK_TOLERANCE_MS: u64 = 30_000;
@@ -2890,6 +2898,9 @@ pub const PROCESS_ID_PREFIX: &str = "proc_";
 pub const MAX_PROCESS_ARGV_ITEMS: usize = 256;
 /// Most bytes of all `argv` items together (S1); beyond it, `process.argv-invalid`.
 pub const MAX_PROCESS_ARGV_BYTES: usize = 131_072;
+/// Most bytes of a start's `cwd` (S1), the `maxLength` the process record's `cwd` publishes from
+/// bundle `0.28.0`; beyond it, `process.cwd-invalid`, decided before any file-system call.
+pub const MAX_PROCESS_CWD_BYTES: usize = 4_096;
 /// Most `env` entries a start admits (S1); beyond it, `process.env-invalid`.
 pub const MAX_PROCESS_ENV_ITEMS: usize = 256;
 /// Most bytes of all `env` names and values together (S1); beyond it, `process.env-invalid`.
@@ -4096,6 +4107,16 @@ pub struct CapabilityFacts {
     pub operation_ledger_global_max_rows: u64,
     #[serde(rename = "operation.ledger-global-max-bytes")]
     pub operation_ledger_global_max_bytes: u64,
+    /// The bytes of compact JSON the operation ledger records for one success result, the figure
+    /// a start of an exec, a session or a host process and a v1 file write or delete is decided
+    /// against (ADR 0053 decision 4). Always stated, and required from bundle `0.28.0`. A machine
+    /// an earlier bundle states has no such member and reads with
+    /// [`OPERATION_RESULT_MAX_JSON_BYTES`], the figure every daemon of that source served.
+    #[serde(
+        rename = "operation.result-max-json-bytes",
+        default = "operation_result_max_json_bytes"
+    )]
+    pub operation_result_max_json_bytes: u64,
     #[serde(rename = "leases.explicit", skip_serializing_if = "Option::is_none")]
     pub leases_explicit: Option<bool>,
     #[serde(
@@ -4423,6 +4444,11 @@ pub struct CapabilityFacts {
     pub process_host: Option<bool>,
 }
 
+/// The value `operation.result-max-json-bytes` reads with from a machine that does not state it.
+const fn operation_result_max_json_bytes() -> u64 {
+    OPERATION_RESULT_MAX_JSON_BYTES
+}
+
 impl Default for CapabilityFacts {
     fn default() -> Self {
         Self {
@@ -4433,6 +4459,7 @@ impl Default for CapabilityFacts {
             operation_ledger_subject_max_bytes: OPERATION_LEDGER_SUBJECT_MAX_BYTES,
             operation_ledger_global_max_rows: OPERATION_LEDGER_GLOBAL_MAX_ROWS,
             operation_ledger_global_max_bytes: OPERATION_LEDGER_GLOBAL_MAX_BYTES,
+            operation_result_max_json_bytes: OPERATION_RESULT_MAX_JSON_BYTES,
             leases_explicit: None,
             leases_clock_tolerance_ms: None,
             workspace_guarded_io: None,
@@ -4843,16 +4870,21 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Whether `byte` is admitted in an operation identifier by [`validate_operation_id`]: an ASCII
+/// letter or digit, `_` or `-`. Each is one byte of JSON.
+#[must_use]
+pub const fn is_operation_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
 /// Validates a caller-minted operation identifier.
 ///
 /// # Errors
 ///
 /// Returns [`WireValidationError::InvalidOperationId`] when the identifier is out of bounds.
 pub fn validate_operation_id(value: &str) -> Result<(), WireValidationError> {
-    if (16..=128).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    if (16..=MAX_OPERATION_ID_CHARS).contains(&value.len())
+        && value.bytes().all(is_operation_id_byte)
     {
         Ok(())
     } else {
@@ -6733,8 +6765,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.27.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.27.0/bundle.json");
+        assert_eq!(version, "0.28.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.28.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
@@ -7344,6 +7376,9 @@ mod result_width_tests;
 
 #[cfg(test)]
 mod adversary_result_width_tests;
+
+#[cfg(test)]
+mod result_bound_fact_tests;
 
 #[cfg(test)]
 mod adoption_tests {

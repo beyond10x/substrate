@@ -1,0 +1,11 @@
+{
+  "$schema": "schemas/operation-registry.json",
+  "api_majors": [
+    1,
+    2
+  ],
+  "operations": {
+    "$routes": "registry"
+  },
+  "registry_format": "b10x.substrate-operation-registry.v2"
+}

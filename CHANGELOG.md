@@ -18,6 +18,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   JSON of the widest form that result is stored in (ADR 0053 decisions 4, 6 and 7). No answer of
   the daemon changes. Held by the wire crate's `result_width_tests` against the schemas of
   bundle `0.27.0`, and by `the_default_reserve_is_the_published_result_bound` in the store.
+- Contract bundle `substrate-wire/0.28.0` (predecessor `0.27.0`, adds no route, preserves its
+  45) publishes ADR 0053's result bound: the required fact `operation.result-max-json-bytes`
+  (524,217) with the client's counting rule in its description, the refusal
+  `operation.result-limit` (429, `exhausted`) on the inputs of the exec, session and
+  host-process starts and the v1 file write and delete, the error `operation.result-unrecorded`
+  (500, `failed`), the coverage requirement `security.bounds.result`, and published lengths on
+  the five minted identifiers (32), an exec refusal's `code` (128) and the process record's
+  `argv` items, `cwd` and `env_names` items. Six vectors publish them, each executed against
+  the daemon: the five refusals on a machine that states the least reserve a store opens with
+  (383 bytes), each run as written on a daemon whose ledger reserves that figure and whose
+  `GET /v1/machine` answers it, each request's widest result 144 to 25,240 bytes over it,
+  answered exactly, recorded refused and nothing dispatched or changed on the host; and the row that ended `operation.result-unrecorded`, which names its
+  operation as every such row the daemon writes does, read exactly. And
+  `cargo xtask check-bundle 0.28.0` holds each value to its wire constant
+  (`xtask/src/bundle/result_bound.rs`). The daemon, the SDK and the conformance runner advertise
+  `substrate-wire/0.28.0` (inner `bundle.json` sha256
+  `2cf0b0bd5a96600f4fbc02d2f98c3c76d839e3926399535487bc41f29e219e78`). A client that
+  validates a capability snapshot against a bundle's schema needs the schema of `0.28.0`.
+- A start of an exec, a session or a host process, and a v1 file write or delete, whose widest
+  success result exceeds what the operation ledger reserves for one is refused
+  `operation.result-limit` (429, `exhausted`, not retriable, address `result`) before any
+  driver is called: the row is recorded refused, no resource row and no lease is written, and
+  the same operation id replays the refusal. A request another published code refuses keeps
+  that code. Every capability snapshot states the reserve as `operation.result-max-json-bytes`,
+  the figure the daemon decides against: `OPERATION_RESULT_MAX_JSON_BYTES` (524,217) for the
+  ledger as shipped (ADR 0053 decisions 1 to 5 and 10). The daemon publishes the driver's
+  snapshot unchanged, so its digest covers that fact. No application is constructed over a
+  snapshot that states another figure than its ledger reserves: `App::new`,
+  `App::with_authority` and `App::with_delegated_context` return `ResultBoundMismatch` naming
+  both figures, and the daemon does not start with it (ADR 0053, amendment of 2026-11-24).
+
+### Changed
+
+- A completion whose result the operation ledger cannot record ends its row terminal with the
+  error `operation.result-unrecorded` (500, `failed`, not retriable, address `result`): the row
+  names the resource, the resource's own record is stored whole, nothing is cut, the run is not
+  ended, and the same operation id replays the error. A store opens only with a terminal
+  headroom of at least 454 bytes (`StoreConfig::minimum_terminal_headroom_bytes`: the longest
+  `terminal_at`, the status charge, that error's widest outcome and the widest resource id), and
+  accepts an operation only with an id of at most `MAX_OPERATION_ID_CHARS` characters of the
+  wire's operation-id alphabet and a resource of at most `MAX_RESOURCE_ID_CHARS` (ADR 0053
+  decision 8).
 
 ### Fixed
 

@@ -213,17 +213,7 @@ pub(crate) fn append_event(
     operation: &str,
     observation: Option<Value>,
 ) -> Result<Event, StoreError> {
-    // Sessions are implemented ahead of their event contract. Until a successor bundle owns a
-    // session branch, publish only the operation-ledger projection that 0.4 consumers can validate.
-    let transition = if resource_kind == "session" {
-        match transition {
-            "session.unknown" => "operation.unknown",
-            "session.cleanup-failed" => "operation.failed",
-            _ => "operation.terminal",
-        }
-    } else {
-        transition
-    };
+    let transition = published_transition(resource_kind, transition);
     let operation_transition = transition.starts_with("operation.");
     let observation = if operation_transition {
         serde_json::to_value(
@@ -289,6 +279,25 @@ pub(crate) fn append_control_event(
         },
         observation,
     )
+}
+
+/// The transition [`append_event`] publishes for `transition` of a resource of `resource_kind`.
+/// Sessions are implemented ahead of their event contract: until a successor bundle owns a
+/// session branch, a session's transition is published as the operation-ledger projection that
+/// 0.4 consumers can validate: `session.unknown` as `operation.unknown`,
+/// `session.cleanup-failed` as `operation.failed`, and every other transition of a session,
+/// `operation.accepted` among them, as `operation.terminal`. Every transition this publishes
+/// that starts `operation.` is the operation's own event and carries its record.
+pub(crate) fn published_transition<'a>(resource_kind: &str, transition: &'a str) -> &'a str {
+    if resource_kind == "session" {
+        match transition {
+            "session.unknown" => "operation.unknown",
+            "session.cleanup-failed" => "operation.failed",
+            _ => "operation.terminal",
+        }
+    } else {
+        transition
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -360,6 +369,14 @@ pub(crate) fn commit_effect(scope: &Scope, event: &Event) -> CommitEffect {
         generation: event.generation,
         through_seq: event.seq,
     }
+}
+
+/// The commit effect of each of `events`, in order.
+pub(crate) fn completion_effects(scope: &Scope, events: &[Event]) -> Vec<CommitEffect> {
+    events
+        .iter()
+        .map(|event| commit_effect(scope, event))
+        .collect()
 }
 
 pub(crate) fn event_cursor(source_scope: &str, generation: u64, sequence: u64) -> String {

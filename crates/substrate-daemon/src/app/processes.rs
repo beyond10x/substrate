@@ -78,8 +78,8 @@ use super::operations::{
     refuse_before_dispatch_response, replay, reservation_response,
 };
 use super::responses::{
-    failure, failure_detail, operation_ledger_capacity, outcome_unknown, query_is_empty,
-    request_id, schema_invalid, store_failure, success,
+    completed, failure, failure_detail, operation_ledger_capacity, outcome_unknown, query_is_empty,
+    request_id, schema_invalid, store_failure, success, within_result_reserve,
 };
 use super::service::bounded_blocking;
 use super::{App, Authority, Identity, SessionTransport};
@@ -1219,6 +1219,10 @@ fn plan_start(input: &ProcessStartInput) -> Result<StartPlan, (&'static str, &'s
         .as_option()
         .cloned()
         .ok_or((PROCESS_CWD_INVALID, "cwd"))?;
+    // The lexical bound first, so a `cwd` the record could not state reaches no file system.
+    if cwd.len() > substrate_wire::MAX_PROCESS_CWD_BYTES {
+        return Err((PROCESS_CWD_INVALID, "cwd"));
+    }
     HostProcessSpec::check_cwd(FsPath::new(&cwd)).map_err(|_| (PROCESS_CWD_INVALID, "cwd"))?;
     let env = input
         .env
@@ -1439,6 +1443,33 @@ pub(super) async fn process_start(
     let Some(ctx) = app.process_ctx() else {
         return refused(PROCESS_HOST_UNSERVED, "process.host").await;
     };
+    // ADR 0053 decision 1: after every published refusal, a start whose widest record the ledger
+    // cannot record is refused before anything is reserved or started.
+    let env_names: Vec<String> = plan.env.keys().cloned().collect();
+    let owner = substrate_wire::ProcessOwner {
+        name: plan.owner_name.clone(),
+        session: plan.owner_session.clone(),
+    };
+    let widest = substrate_wire::ProcessRecord::widest_json_bytes(
+        &plan.argv,
+        &plan.cwd,
+        &env_names,
+        &owner,
+        &plan.reason,
+    );
+    if let Err(response) = within_result_reserve(&app.store, &request_id, &mutation.op, widest) {
+        return refuse_before_dispatch_response(
+            &app,
+            &identity,
+            &request_id,
+            HOST_PROCESS_START_KIND,
+            "POST",
+            ADDRESS,
+            &mutation,
+            response,
+        )
+        .await;
+    }
     let scope = app.scope(&identity);
     let id = app.authority.process_id();
     let process = NewHostProcess {
@@ -1561,10 +1592,7 @@ pub(super) async fn process_start(
     {
         return store_failure(&request_id, Some(&operation), &error);
     }
-    success(
-        StatusCode::OK,
-        Success::mutation(request_id, operation, result),
-    )
+    completed(&ctx.store, StatusCode::OK, &request_id, &operation, result)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1759,10 +1787,9 @@ pub(super) async fn process_stop(
             // Bundle 0.20.0 vectors/http/process-stop.json: the answer is the record as recorded
             // `stopping`; the supervisor clock records the end.
             match ctx.accept_stop(&scope, &operation, &record).await {
-                Ok(result) => success(
-                    StatusCode::OK,
-                    Success::mutation(request_id, operation, result),
-                ),
+                Ok(result) => {
+                    completed(&ctx.store, StatusCode::OK, &request_id, &operation, result)
+                }
                 Err(error) => store_failure(&request_id, Some(&operation), &error),
             }
         }
@@ -1804,10 +1831,7 @@ pub(super) async fn process_stop(
             {
                 return store_failure(&request_id, Some(&operation), &error);
             }
-            success(
-                StatusCode::OK,
-                Success::mutation(request_id, operation, result),
-            )
+            completed(&ctx.store, StatusCode::OK, &request_id, &operation, result)
         }
         Ok(HostProcessStopReservation::Existing(reservation)) => {
             reservation_response(Ok(reservation), &request_id, &operation)
@@ -2044,10 +2068,7 @@ pub(super) async fn process_lease_renew(
     let (status, detail) = match renewed {
         Ok(HostProcessRenewal::Renewed(_)) => {
             if let Some(result) = answered {
-                return success(
-                    StatusCode::OK,
-                    Success::mutation(request_id, operation, result),
-                );
+                return completed(&app.store, StatusCode::OK, &request_id, &operation, result);
             }
             return outcome_unknown(&request_id, &operation);
         }
@@ -2184,6 +2205,27 @@ fn driver_selection(selection: ProcessLogStreamSelection) -> LogStreamSelection 
         "stdout" => LogStreamSelection::Stdout,
         "stderr" => LogStreamSelection::Stderr,
         _ => LogStreamSelection::Both,
+    }
+}
+
+#[cfg(test)]
+mod exit_signal_bound {
+    /// ADR 0053 decision 7: the `exit.signal` the daemon records for a process that the
+    /// supervisor reports ended by a signal is held at the driver port: every value the port can
+    /// hand over, named or not, is within `MAX_PROCESS_EXIT_SIGNAL_CHARS`.
+    #[test]
+    fn every_exit_signal_the_port_can_report_is_within_its_wire_bound() {
+        assert_eq!(super::signal_name(15), "SIGTERM");
+        assert_eq!(super::signal_name(i32::MIN), "-2147483648");
+        let widest = (1..=64)
+            .chain([0, -1, i32::MAX, i32::MIN])
+            .map(|signal| super::signal_name(signal).chars().count())
+            .max()
+            .expect("values");
+        assert!(
+            widest <= substrate_wire::MAX_PROCESS_EXIT_SIGNAL_CHARS,
+            "{widest}"
+        );
     }
 }
 

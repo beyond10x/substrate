@@ -33,7 +33,7 @@ impl Harness {
         let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
         let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
             .expect("host driver");
-        let app = App::new(Arc::clone(&store), driver, "dep_http_test");
+        let app = App::new(Arc::clone(&store), driver, "dep_http_test").expect("application");
         Self {
             directory,
             app,
@@ -1234,6 +1234,9 @@ mod file_change_ledger_review;
 
 #[path = "http/driver_answer_bound.rs"]
 mod driver_answer_bound;
+
+#[path = "http/result_bound.rs"]
+mod result_bound;
 
 #[path = "http/replacement_cleanup.rs"]
 mod replacement_cleanup;

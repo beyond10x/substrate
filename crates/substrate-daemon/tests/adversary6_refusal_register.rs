@@ -254,7 +254,7 @@ impl Harness {
             substrate_store::Store::open(directory.path().join("state.db")).expect("state store"),
         );
         let driver = RefusingDriver::open(&directory.path().join("workspaces"), refusal);
-        let app = App::new(store, driver as Arc<dyn Driver>, DEPLOYMENT);
+        let app = App::new(store, driver as Arc<dyn Driver>, DEPLOYMENT).expect("application");
         Self {
             _directory: directory,
             app,

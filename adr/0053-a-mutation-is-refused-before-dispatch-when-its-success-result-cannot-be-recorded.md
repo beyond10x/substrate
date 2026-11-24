@@ -78,7 +78,8 @@ what it means for a result type that has no member to cut.
      `StoreConfig::default().success_result_json_bytes()` to it.
    - The fact `operation.result-max-json-bytes`, required, `const` 524217, beside the four
      `operation.ledger-*` facts in `schemas/capability.json`, filled by
-     `CapabilityFacts::default` and the host driver's probe as they are.
+     `CapabilityFacts::default` and the host driver's probe as they are. The amendment of
+     2026-11-24 below states what the daemon publishes and what the snapshot's digest covers.
    - *An operator cannot set the reserve.* The daemon opens its state with
      `Store::open_with_event_retention` (`crates/substrate-daemon/src/runtime.rs`), which takes
      the default headroom. No daemon flag, `HostConfig` member or chart value names it; only
@@ -142,9 +143,9 @@ what it means for a result type that has no member to cut.
    | `applied.cgroup` | 512 characters | driver, from the cgroup root | at the driver's open |
    | applied aperture `destination`, `listen`, `name` | 64, 21, 64 | configuration | where an aperture is declared |
    | applied writable root `host_path` | `host-absolute-path`, 4,000 | configuration or the Git checkout | where a root is declared or materialized |
-   | `usage` unavailable `code`, `message` | 128, 2,048 | driver | at the daemon's driver port |
-   | `refusal.message` | 512 | driver | at the daemon's driver port |
-   | `refusal.code` | none in `0.27.0`; 128 from `0.28.0` | driver | at the daemon's driver port |
+   | `usage` unavailable `code`, `message` | 128, 2,048 | driver | at completion, by `members_within_bounds`: the record is stored whole and the row ends `operation.result-unrecorded` (decision 8) |
+   | `refusal.message` | 512 | driver | at completion, by `members_within_bounds`, as for `usage` |
+   | `refusal.code` | none in `0.27.0`; 128 from `0.28.0` | driver | at completion, by `members_within_bounds`, as for `usage` |
    | process `exit.signal` | 32 | supervisor | at the daemon's driver port |
    | `lease.actor`, `lease.principal` | 256 each | identity | at admission |
 
@@ -166,7 +167,27 @@ what it means for a result type that has no member to cut.
      operation id replays the same error;
    - the resource's own record is stored whole, and the run is neither ended nor changed
      because of it;
-   - the widest such outcome is 394 bytes, so it always fits.
+   - the widest such outcome is 379 bytes, so it always fits; the store test
+     `the_unrecorded_error_is_the_named_error_and_its_widest_outcome_is_379_bytes` holds that
+     figure as an equality. A store does not open with a terminal headroom under what a row
+     needs to end with it, the longest `terminal_at`, the status charge, that outcome and the
+     widest resource a terminal update names, `MAX_RESOURCE_ID_CHARS` bytes
+     (`StoreConfig::minimum_terminal_headroom_bytes`, 35 + 8 + 379 + 32 = 454 bytes), and names
+     the refusal `OperationTerminalHeadroomBelowUnrecorded`. Every figure is in the bytes the
+     row accounting charges. The store accepts an operation only with an id of at most
+     `MAX_OPERATION_ID_CHARS` characters of the wire's operation-id alphabet, which is ASCII, so
+     as many bytes (`OperationIdInvalid`), and a resource of at most `MAX_RESOURCE_ID_CHARS`
+     bytes (`OperationResourceTooLong`), the figures that outcome and that resource are counted
+     at. A terminal update that names a resource over the bound is refused
+     (`OperationResourceTooLong`) and the row stays accepted. The bound is for the operations
+     the store accepts and their terminal updates; a refused row names the resource the caller
+     named and reserves no headroom;
+   - the row writes the operation's `operation.failed` and the resource's own events exactly as
+     the recorded completion of the same path writes them (`append_completion_events` in
+     `crates/substrate-store/src/result_bound.rs`), so a reader that follows the resource's
+     events reads the same events whether the result was recorded or not. A session has no
+     event of its own: its recorded completion writes `operation.terminal`, and its unrecorded
+     one writes `operation.failed` alone.
 
    This is the honesty rule (invariant 3): the client is told by name that the effect happened
    and that the ledger does not hold the result. No member is shortened, no result is
@@ -302,8 +323,8 @@ so no client changes until it moves its pin. For a client of a daemon that adver
   decision 6, and a test module beside `file_text_bound_tests.rs`.
 - `crates/substrate-store`: the test that holds the default reserve to the constant.
 - `crates/substrate-daemon`: the decision of decision 3 on the five decided kinds, the measure
-  of decision 8 in every completion function, and the checks of decision 7 at the driver port
-  and at admission.
+  of decision 8 in every completion function, and the checks of decision 7 at completion, at
+  the driver port and at admission, each where its row names.
 - `crates/substrate-host`: the fact in the probe, and the bounds of decision 7 where the
   configuration is read.
 - `xtask`: `xtask/bundle-source/0.28.0/`, the rendered `contracts/substrate-wire/0.28.0/`,
@@ -361,3 +382,51 @@ that execute the new vectors; which lane can run each was not read.
 4. **The v1 file routes' code** is `operation.result-limit` (decision 10). On v1,
    `workspace.write-limit` names a file limit only; its meaning does not widen without a new
    name.
+
+## Amendment, 2026-11-24: the published figure is the store's, and the snapshot's digest covers it
+
+Decision 4 says the fact is filled by `CapabilityFacts::default` and the host driver's probe. This
+amendment states what the daemon publishes and how the figure a client reads, the figure the
+snapshot's digest covers and the figure a start is decided against are one.
+
+1. **The daemon publishes the driver's snapshot as the driver digested it.** `GET /v1/machine`
+   changes no fact of it, so the digest a client names in `sandbox.capability_snapshot` covers
+   every fact it read, `operation.result-max-json-bytes` among them. Held by
+   `the_published_snapshot_digest_covers_the_published_result_bound` in
+   `crates/substrate-daemon/tests/http/result_bound.rs`: over a lowered reserve, the digest
+   recomputed from the published machine alone is the published one, and a start naming it is
+   admitted and dispatched.
+2. **No application is constructed over a snapshot that states another figure than its
+   store.** Each public constructor of the daemon's application (`App::new`,
+   `App::with_authority`, `App::with_delegated_context`) compares the driver snapshot's
+   `operation.result-max-json-bytes` with `Store::success_result_json_bytes`, the figure decision
+   4's last bullet decides every start against, and returns `ResultBoundMismatch` naming both
+   when the two differ (`crates/substrate-daemon/src/app/service.rs`). The daemon's `serve` builds
+   its application this way and does not start with that error. Held by
+   `a_daemon_serves_only_a_snapshot_that_states_its_ledger_reserve` in
+   `crates/substrate-daemon/src/runtime.rs` (a ledger one byte under and one byte over the host
+   driver's figure, each refused) and by
+   `no_app_publishes_a_figure_its_ledger_does_not_decide_against` in
+   `crates/substrate-daemon/tests/http/result_bound.rs` (an application built from the library).
+   So the figure a daemon publishes is its store's figure.
+3. **As shipped the figures are one, `OPERATION_RESULT_MAX_JSON_BYTES`.** `CapabilityFacts::default`
+   and the host driver's probe state the constant, the namespace driver's snapshot takes the
+   default, and the store's default reserve is the constant
+   (`the_default_reserve_is_the_published_result_bound`). Nothing sets another figure: the rest of
+   decision 4 stands.
+4. **The lower value of decision 11 is the least reserve a store opens with, 383 bytes**: the
+   least terminal headroom of decision 8 (454 bytes) less the 71 bytes a terminal success adds
+   around its result. No store opens lower, so no daemon can hold a lower figure. The machine of
+   each of the five refusal vectors of bundle `0.28.0` states 383, and
+   `cargo xtask check-bundle 0.28.0` holds each to it (`LEAST_RESERVE` in
+   `xtask/src/bundle/result_bound.rs`) and each request's widest result to a figure over it; the
+   store case `the_least_success_result_reserve_is_383_bytes` holds the same literal. The daemon's
+   runner opens each vector's daemon at the figure its machine states, requires that figure to be
+   the store's least reserve, reads it back from `GET /v1/machine` before it sends the request,
+   and sends the request as the vector writes it. The host-process vector starts in `/`, which
+   its `host-path` setup states as a directory and every host has.
+5. **Every resource id the daemon mints is one the store accepts.** The `Authority` trait states
+   that an id it mints for a workspace, an exec, a session, a snapshot or a host process is at
+   most `MAX_RESOURCE_ID_CHARS` (32) bytes, the bound decision 8's store holds a resource to;
+   `every_resource_id_the_system_authority_mints_is_within_the_store_bound` holds
+   `SystemAuthority` to it for each of the five.

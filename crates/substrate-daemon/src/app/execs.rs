@@ -20,8 +20,9 @@ use super::operations::{
     reservation_response, stored_exec, stored_output, validate_exec_input,
 };
 use super::responses::{
-    failure, not_found, not_found_with_operation, operation_ledger_capacity, outcome_unknown,
-    query_is_empty, request_id, schema_invalid, store_failure, success,
+    completed, failure, not_found, not_found_with_operation, operation_ledger_capacity,
+    outcome_unknown, query_is_empty, request_id, schema_invalid, store_failure, success,
+    within_result_reserve,
 };
 use super::{App, Identity};
 
@@ -51,7 +52,18 @@ pub(super) async fn exec_start(
     };
     // Resolved once for this start, off the async worker, before the checks that compare with it.
     let private = app.private_paths_for(&mutation.input).await;
-    if let Err(response) = validate_exec_input(&app, &private, &mutation, &request_id) {
+    // ADR 0053 decision 1: after every published refusal of the input, before the workspace is
+    // admitted, an exec whose widest record the ledger cannot record is refused.
+    if let Err(response) =
+        validate_exec_input(&app, &private, &mutation, &request_id).and_then(|()| {
+            within_result_reserve(
+                &app.store,
+                &request_id,
+                &mutation.op,
+                Exec::widest_json_bytes(&mutation.input),
+            )
+        })
+    {
         return refuse_before_dispatch_response(
             &app,
             &identity,
@@ -335,10 +347,9 @@ pub(super) async fn exec_retire(
         }
         Ok(ExecRetireReservation::Capacity(_)) => operation_ledger_capacity(&request_id),
         Ok(ExecRetireReservation::Refused(answer)) => replay(&request_id, &operation, answer),
-        Ok(ExecRetireReservation::Retired(absence)) => success(
-            StatusCode::OK,
-            Success::mutation(request_id, operation, absence),
-        ),
+        Ok(ExecRetireReservation::Retired(absence)) => {
+            completed(&app.store, StatusCode::OK, &request_id, &operation, absence)
+        }
         Err(error) => store_failure(&request_id, Some(&operation), &error),
     }
 }
@@ -681,9 +692,12 @@ pub(super) async fn exec_lease_renew(
         })
         .await
     {
-        Ok(resource) => success(
+        Ok(resource) => completed(
+            &app.store,
             StatusCode::OK,
-            Success::mutation(request_id, operation, resource),
+            &request_id,
+            &operation,
+            resource,
         ),
         Err(error) => finish_lease_store_error(&app, &scope, &request_id, &operation, &error).await,
     }

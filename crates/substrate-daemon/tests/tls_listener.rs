@@ -879,7 +879,7 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert!(
         response
             .to_ascii_lowercase()
-            .contains("x-b10x-contract: substrate-wire/0.27.0"),
+            .contains("x-b10x-contract: substrate-wire/0.28.0"),
         "{response}"
     );
 
@@ -1465,7 +1465,7 @@ async fn development_static_bearer_refuses_non_loopback_binding() {
 /// `substrate_refusals_total`, plus one series per refusal code the wire crate names and `other`,
 /// plus the host daemon's one `substrate_adapter_info` series (ADR 0048 D7).
 /// `app::health::tests` pins the same number against the catalogue itself.
-const OPS_SERIES_MAXIMUM: usize = 585;
+const OPS_SERIES_MAXIMUM: usize = 587;
 
 struct OpsAnswer {
     status: u16,

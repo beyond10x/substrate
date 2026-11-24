@@ -26,8 +26,8 @@ use serde_json::{Value, json};
 const RUNNER: &str = env!("CARGO_BIN_EXE_b10x-substrate-conformance");
 const SCHEMA: &str = include_str!("../schema/remote-conformance-report.v1.schema.json");
 const SERVER_NAME: &str = "hostile.substrate.test";
-const CONTRACT: &str = "substrate-wire/0.27.0";
-const CONTRACT_SHA256: &str = "b55318e0570a116776839f2bf105f017737b642cbd71027d1fe5d20e785ff3b7";
+const CONTRACT: &str = "substrate-wire/0.28.0";
+const CONTRACT_SHA256: &str = "2cf0b0bd5a96600f4fbc02d2f98c3c76d839e3926399535487bc41f29e219e78";
 const ECHO: &str = "/bin/echo";
 const PREFIX: &str = "identity_access_v1_";
 /// The credential the token command prints: the bundle's format, a fixed 43-character body.

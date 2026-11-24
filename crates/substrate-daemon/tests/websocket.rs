@@ -35,7 +35,7 @@ impl Harness {
         let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
         let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
             .expect("host driver");
-        let app = App::new(Arc::clone(&store), driver, DEPLOYMENT);
+        let app = App::new(Arc::clone(&store), driver, DEPLOYMENT).expect("application");
         let server = TestServer::spawn(app).await;
         Self {
             _directory: directory,

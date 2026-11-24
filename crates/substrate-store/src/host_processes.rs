@@ -17,16 +17,15 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Duration, TimeZone as _, Utc};
 use rusqlite::{Connection, OptionalExtension as _, Row, TransactionBehavior, params};
-use substrate_wire::{
-    ErrorClass, ErrorDetail, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, OperationOutcome,
-};
+use substrate_wire::{ErrorClass, ErrorDetail, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS};
 
-use crate::events::{append_event, commit_effect};
+use crate::events::{commit_effect, completion_effects};
 use crate::operations::{
     existing_reservation, finalize_operation_accounting, insert_accepted_operation,
     insert_refused_operation, operation_identity,
 };
 use crate::process_events::{append_process_event, end_event};
+use crate::result_bound::{CompletionEvent, append_completion_events, terminal_success};
 use crate::{
     NewOperation, OperationCapacity, Reservation, Scope, Store, StoreError, StoredAnswer, to_i64,
     to_u64,
@@ -690,7 +689,7 @@ impl Store {
         )?;
         let record = reload(&transaction, scope, id)?;
         let result = result(&record)?;
-        let event = complete_renewal(
+        let mut events = complete_renewal(
             &transaction,
             self,
             scope,
@@ -712,7 +711,8 @@ impl Store {
         )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event), commit_effect(scope, &renewed)]);
+        events.push(renewed);
+        self.report_committed(&completion_effects(scope, &events));
         Ok(HostProcessRenewal::Renewed(Box::new(record)))
     }
 
@@ -1563,8 +1563,8 @@ fn complete_renewal(
     status: u16,
     id: &str,
     result: serde_json::Value,
-) -> Result<substrate_wire::Event, StoreError> {
-    let outcome = OperationOutcome::Success { result };
+) -> Result<Vec<substrate_wire::Event>, StoreError> {
+    let (outcome, status) = terminal_success(store.config, operation, result, status);
     let terminal_at = terminal_at.to_rfc3339();
     let changed = connection.execute(
         "UPDATE operations
@@ -1588,18 +1588,20 @@ fn complete_renewal(
     }
     finalize_operation_accounting(connection, store.config, scope, operation)?;
     let (actor, principal) = operation_identity(connection, scope, operation)?;
-    append_event(
+    append_completion_events(
         connection,
         store.event_retention,
         scope,
-        id,
-        "operation",
-        "operation.terminal",
-        &terminal_at,
-        &actor,
-        principal.as_deref(),
         operation,
-        None,
+        &terminal_at,
+        (&actor, principal.as_deref()),
+        &outcome,
+        vec![CompletionEvent {
+            resource: id,
+            resource_kind: "operation",
+            transition: "operation.terminal",
+            observation: None,
+        }],
     )
 }
 
