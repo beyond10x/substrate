@@ -88,13 +88,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   entry to its reference. A cargo configuration beneath the root holds only the top-level keys
   `alias` and `profile`, and an alias is a string or an array of strings with no `--config` or
   `--config=<value>` token; a `.cargo` directory holding both `config` and `config.toml`, a
-  link included, is refused. The rule holds in every directory the walk enters, a fixture that
+  link included, is refused. The `.cargo` directory and both file names are taken without
+  regard to ASCII letter case, as cargo reads them on a file system that compares names
+  without it (macOS), and a directory holding more than one such file across the spellings is
+  refused, naming every file. The rule holds in every directory the walk enters, a fixture that
   is a workspace of its own included: the macOS tests that build a fixture offline from its own
   `vendor` write the source replacement into the copy they run. Outside the check are
   configuration outside the repository (a file above the root, `CARGO_HOME`, `--config` on a
   command line or in a script or workflow, `CARGO_*` variables), files beneath a directory
-  named `target` or `.git`, and what `profile` sets. Held by 25 cases of
-  `xtask/src/packages.rs`: 24 on throwaway workspaces, and one that holds that this tree's
+  named `target` or `.git`, and what `profile` sets. Held by 27 cases of
+  `xtask/src/packages.rs`: 26 on throwaway workspaces, and one that holds that this tree's
   fixture directory has no `.cargo`. On this tree the check reads the two entries and the one
   cargo configuration, `.cargo/config.toml`, and passes.
 
