@@ -3602,6 +3602,8 @@ mod tests {
         /// install cannot fill the host's process table.
         struct ForkingNeighbour {
             stop: Arc<AtomicBool>,
+            /// Set by [`ForkingNeighbour::join`]: the children still holding are ended.
+            release: Arc<AtomicBool>,
             handle: Option<std::thread::JoinHandle<usize>>,
         }
 
@@ -3611,6 +3613,8 @@ mod tests {
             fn start(hold: Duration) -> Self {
                 let stop = Arc::new(AtomicBool::new(false));
                 let stopped = Arc::clone(&stop);
+                let release = Arc::new(AtomicBool::new(false));
+                let released = Arc::clone(&release);
                 let hold = libc::c_int::try_from(hold.as_millis()).expect("hold in milliseconds");
                 let handle = std::thread::spawn(move || {
                     let mut children = Vec::new();
@@ -3631,15 +3635,24 @@ mod tests {
                     }
                     for pid in &children {
                         let mut status = 0;
-                        // SAFETY: reaping a child this thread forked.
+                        // SAFETY: reaping a child this thread forked, and ending it first once
+                        // released. Only this thread reaps it, so its pid names it until then.
                         unsafe {
-                            libc::waitpid(*pid, &raw mut status, 0);
+                            while libc::waitpid(*pid, &raw mut status, libc::WNOHANG) == 0 {
+                                if released.load(Ordering::Acquire) {
+                                    libc::kill(*pid, libc::SIGKILL);
+                                    libc::waitpid(*pid, &raw mut status, 0);
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
                         }
                     }
                     children.len()
                 });
                 Self {
                     stop,
+                    release,
                     handle: Some(handle),
                 }
             }
@@ -3649,8 +3662,10 @@ mod tests {
                 self.stop.store(true, Ordering::Release);
             }
 
-            /// Waits for every child, and returns how many there were.
+            /// Ends every child, waits for each, and returns how many there were. A case joins
+            /// once it has read what it observed while the children held their copies.
             fn join(mut self) -> usize {
+                self.release.store(true, Ordering::Release);
                 self.stop();
                 self.handle
                     .take()
