@@ -1265,6 +1265,19 @@ request with
 not retry the direct push or loosen the ruleset; this is the ordinary path for every
 workstation-authored change, including release preparation.
 
+**Bot writes from the operator's workstation go through `b10x-gates`.** The rule has no end date:
+it is the owner's standing rule for every beyond10x repository (the operator's session,
+2026-11-24), whether or not `scripts/as-bot.sh` and `scripts/bot-gh.sh` can mint there. A commit,
+a merge and a push are `b10x-gates bot -- <git arguments>`, a `gh` write is
+`b10x-gates --repository beyond10x/substrate --policy <policy file> gh -- <gh arguments>`, and a
+pull-request merge is `b10x-gates … api --method PUT --path /repos/beyond10x/substrate/pulls/<n>/merge`.
+Where this file writes one of the two scripts for a write from that workstation, read that form.
+A refused `b10x-gates bot -- push` waits and is tried again, at most once in 10 minutes, and its
+refusal line goes to the operator's session; it is not replaced by API writes that make the same
+result another way (`git/refs`, `git/trees`, `git/commits`, `git/tags`, `contents/…`,
+`pulls/<n>/update-branch`). Merging a pull request through the API after green checks, and
+reads, are not such a replacement.
+
 **A pull request's branch must hold `main` before it merges.** A third ruleset on `main`
 (id 23511358, read on 2026-11-23 with `gh api repos/beyond10x/substrate/rules/branches/main`)
 requires the check `common / Security and privacy` with the strict policy: a branch behind `main`
