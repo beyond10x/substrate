@@ -118,6 +118,7 @@ fn observation(resource: Exec) -> ExecObservation {
         output_complete: false,
         cgroup: None,
         leader_pid: None,
+        end_of_run: None,
     }
 }
 
