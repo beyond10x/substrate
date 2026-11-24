@@ -739,9 +739,10 @@ async fn a_local_profile_without_a_sink_runs_as_before_and_writes_nothing() {
 }
 
 /// Design 36 D20: on a current-thread runtime, a sink that blocks on `run_ended` until the case
-/// releases it does not stop `wait` from returning: the sink holds a thread of the blocking pool,
-/// and the runtime's one worker goes on. `wait` returns and the sink is still held; a second
-/// run starts and ends meanwhile; the record is in the sink once it is released.
+/// releases it does not stop `wait` from returning: the sink holds the record's own thread, and
+/// the runtime's one worker goes on. `wait` returns and the sink is still held; a second run
+/// starts and ends meanwhile, and its record reaches the sink; the first record is in the sink
+/// once it is released.
 #[tokio::test]
 async fn a_sink_that_blocks_on_run_ended_does_not_stop_wait_on_a_current_thread_runtime() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -803,22 +804,19 @@ async fn a_sink_that_blocks_on_run_ended_does_not_stop_wait_on_a_current_thread_
         .expect("the second run's wait returns while the sink holds")
         .expect("waited");
     assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    // The second record reaches the sink while the first is held, the first once released.
+    let record = tokio::time::timeout(support::RECORD_WAIT, ended_runs.recv())
+        .await
+        .expect("the second run_ended while the first is held")
+        .expect("the sink lives");
+    assert_eq!(record, second.as_str());
     assert!(holding.load(Ordering::Acquire), "the sink let go early");
     release.send(()).expect("the sink waits");
-    // Both records reach the sink: the second while the first was held, the first once released.
-    let mut ended = Vec::new();
-    for _ in 0..2 {
-        ended.push(
-            tokio::time::timeout(support::RECORD_WAIT, ended_runs.recv())
-                .await
-                .expect("a run_ended record")
-                .expect("the sink lives"),
-        );
-    }
-    ended.sort_unstable();
-    let mut expected = vec![first.as_str().to_owned(), second.as_str().to_owned()];
-    expected.sort_unstable();
-    assert_eq!(ended, expected);
+    let record = tokio::time::timeout(support::RECORD_WAIT, ended_runs.recv())
+        .await
+        .expect("the first run_ended once released")
+        .expect("the sink lives");
+    assert_eq!(record, first.as_str());
 }
 
 /// Design 36 D21: dropping the adapter while its run runs neither ends the run nor loses its
@@ -853,6 +851,246 @@ async fn a_local_run_whose_adapter_was_dropped_writes_run_ended_when_it_ends() {
     assert_eq!(record["run"], run.as_str(), "{record}");
     assert_eq!(record["state"], "ended", "{record}");
     assert_eq!(record["exit"], serde_json::json!({"code": 4}), "{record}");
+}
+
+/// Design 36 D20, amended 2026-11-24: a sink that blocks on `run_ended` delays no other run,
+/// whatever the size of the runtime's blocking pool. Held on a current-thread runtime whose
+/// blocking pool has one thread, a size a consumer's runtime may set: while the first run's sink
+/// holds, a second run starts and its `wait` returns.
+#[test]
+fn a_sink_that_blocks_on_run_ended_delays_no_other_run_on_a_one_thread_blocking_pool() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("runtime");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (entered, mut sink_entered) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let blocked_once = AtomicBool::new(false);
+    let sink = AuditSink::new(move |record: &AuditRecord| {
+        let value = serde_json::to_value(record).expect("record");
+        if value["event"] == "run_ended" && !blocked_once.swap(true, Ordering::AcqRel) {
+            let _ = entered.send(());
+            // Bounded, so a case that fails ends rather than hangs.
+            let _ = released
+                .lock()
+                .recv_timeout(std::time::Duration::from_secs(10));
+        }
+    });
+    let (first_waited, second_waited) = runtime.block_on(async {
+        let adapter = local();
+        let admitted = adapter
+            .admit(&ConfinementProfile {
+                audit: Some(sink),
+                ..local_profile(workspace.path())
+            })
+            .expect("admitted");
+        let first = adapter
+            .start(&admitted, &support::sh("exit 0"))
+            .await
+            .expect("started");
+        let first_waited = tokio::time::timeout(support::RECORD_WAIT, adapter.wait(&first))
+            .await
+            .is_ok();
+        tokio::time::timeout(support::RECORD_WAIT, sink_entered.recv())
+            .await
+            .expect("the sink received run_ended")
+            .expect("the sink lives");
+        let second = adapter
+            .start(&admitted, &support::sh("exit 0"))
+            .await
+            .expect("a second run starts while the sink holds");
+        let second_waited =
+            tokio::time::timeout(std::time::Duration::from_secs(2), adapter.wait(&second))
+                .await
+                .is_ok();
+        let _ = release.send(());
+        let _ = tokio::time::timeout(support::RECORD_WAIT, adapter.wait(&second)).await;
+        (first_waited, second_waited)
+    });
+    assert!(first_waited, "the first run's wait returned");
+    assert!(
+        second_waited,
+        "a second run's wait did not return within 2 s while a sink held run_ended"
+    );
+}
+
+/// Design 36 D22: a run still running when its current-thread runtime is
+/// dropped gets exactly one `run_ended`, `state: unknown` with no exit, after its `run_started`,
+/// written while the runtime is dropped, and nothing more once the run ends after it.
+#[test]
+fn a_run_live_when_its_current_thread_runtime_is_dropped_writes_one_unknown_run_ended() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let records = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let kept = Arc::clone(&records);
+    let (ended, ended_records) = std::sync::mpsc::channel::<serde_json::Value>();
+    let sink = AuditSink::new(move |record: &AuditRecord| {
+        let value = serde_json::to_value(record).expect("record");
+        kept.lock().push(value.clone());
+        if value["event"] == "run_ended" {
+            let _ = ended.send(value);
+        }
+    });
+    // The run ends once `go` exists. The runtime's drop waits for the thread that waits on the
+    // run, so `go` is written once the record arrived, or after a bound, from a thread of its own.
+    let go = workspace.path().join("go");
+    let releaser = std::thread::spawn(move || {
+        let record = ended_records
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok();
+        std::fs::write(&go, b"").expect("go");
+        record
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let (adapter, run) = runtime.block_on(async {
+        let adapter = local();
+        let admitted = adapter
+            .admit(&ConfinementProfile {
+                audit: Some(sink),
+                ..local_profile(workspace.path())
+            })
+            .expect("admitted");
+        let run = adapter
+            .start(
+                &admitted,
+                &support::sh("while [ ! -e go ]; do sleep 0.02; done; exit 4"),
+            )
+            .await
+            .expect("started");
+        assert_eq!(
+            adapter.observe(&run).await.expect("observed").state,
+            RunState::Running
+        );
+        (adapter, run)
+    });
+    drop(runtime);
+    let record = releaser.join().expect("the releaser");
+    drop(adapter);
+    let record = record.expect("a run_ended was written while the runtime was dropped");
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "event": "run_ended", "run": run.as_str(), "profile": record["profile"].clone(),
+            "adapter": "local", "declared_insecure": REASON, "state": "unknown",
+        })
+    );
+    let events: Vec<_> = records
+        .lock()
+        .iter()
+        .map(|record| record["event"].as_str().expect("event").to_owned())
+        .collect();
+    assert_eq!(events, ["profile_admitted", "run_started", "run_ended"]);
+}
+
+/// Design 36 D20: a sink that panics on `run_ended` stops neither `wait` nor
+/// another run, and the next run's `run_ended` still reaches the sink.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sink_that_panics_on_run_ended_stops_neither_wait_nor_the_next_record() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (written, mut ended) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let panics_on = Arc::new(Mutex::new(None::<String>));
+    let target = Arc::clone(&panics_on);
+    let sink = AuditSink::new(move |record: &AuditRecord| {
+        let value = serde_json::to_value(record).expect("record");
+        if value["event"] != "run_ended" {
+            return;
+        }
+        let run = value["run"].as_str().expect("run").to_owned();
+        assert!(
+            target.lock().as_deref() != Some(run.as_str()),
+            "the sink panics on the first run's run_ended"
+        );
+        let _ = written.send(run);
+    });
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..local_profile(workspace.path())
+        })
+        .expect("admitted");
+    let first = adapter
+        .start(
+            &admitted,
+            &support::sh("while [ ! -e go ]; do sleep 0.02; done"),
+        )
+        .await
+        .expect("started");
+    *panics_on.lock() = Some(first.as_str().to_owned());
+    std::fs::write(workspace.path().join("go"), b"").expect("go");
+    let waited = tokio::time::timeout(support::RECORD_WAIT, adapter.wait(&first))
+        .await
+        .expect("wait returns")
+        .expect("waited");
+    assert_eq!(waited.state, RunState::Ended, "{waited:?}");
+    let second = adapter
+        .start(&admitted, &support::sh("exit 0"))
+        .await
+        .expect("a second run starts");
+    let waited = tokio::time::timeout(support::RECORD_WAIT, adapter.wait(&second))
+        .await
+        .expect("the second wait returns")
+        .expect("waited");
+    assert_eq!(waited.state, RunState::Ended, "{waited:?}");
+    let record = tokio::time::timeout(support::RECORD_WAIT, ended.recv())
+        .await
+        .expect("the second run_ended")
+        .expect("the sink lives");
+    assert_eq!(record, second.as_str());
+}
+
+/// Design 36 D15: a run's `run_ended` says what its observation says. A run its
+/// unread live output stalled names `output_stall` in both; a run that exits 0 before its unread
+/// output stalls names no limit in either (D5).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_run_ended_record_names_the_limit_its_observation_names() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    for (script, limit) in [
+        ("exec yes", Some("output_stall")),
+        (
+            "printf one; sleep 0.1; printf two; sleep 0.1; printf three; exit 0",
+            None,
+        ),
+    ] {
+        let (sink, mut recorded) = support::recorded();
+        let admitted = adapter
+            .admit(&ConfinementProfile {
+                audit: Some(sink),
+                ..support::live(&local_profile(workspace.path()), 1)
+            })
+            .expect("admitted");
+        let run = adapter
+            .start(&admitted, &support::sh(script))
+            .await
+            .expect("started");
+        let record = recorded.run_ended(script).await;
+        let observed = adapter.observe(&run).await.expect("observed");
+        assert_eq!(
+            observed
+                .limit
+                .map(|limit| serde_json::to_value(limit).expect("limit")),
+            limit.map(serde_json::Value::from),
+            "{script}: {observed:?}"
+        );
+        assert_eq!(
+            record.get("limit").cloned(),
+            limit.map(serde_json::Value::from),
+            "{script}: {record}"
+        );
+        assert_eq!(
+            record["exit"],
+            serde_json::to_value(observed.exit).expect("exit"),
+            "{script}: {record}"
+        );
+        assert_eq!(record["state"], "ended", "{script}: {record}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

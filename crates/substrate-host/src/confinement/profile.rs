@@ -159,7 +159,7 @@ pub struct ConfinementProfile {
     /// How output reaches the embedder (design 32). `Recorded`, the default, is the record only.
     pub output_delivery: OutputDelivery,
     pub secret_slots: Vec<SecretSlotRequest>,
-    /// Where admission, refusal and start records go (ADR 0109 decision 2).
+    /// Where admission, refusal, start and end records go (ADR 0109 decision 2, design 36 D15).
     pub audit: Option<AuditSink>,
     /// The image an `oci` or `pod` run uses, `name@sha256:<64 lowercase hex>`.
     pub image: Option<String>,

@@ -1088,8 +1088,11 @@ async fn an_oci_run_nobody_observes_writes_one_run_ended() {
             env: BTreeMap::new(),
         },
         ("oci", None),
-        // The monitor reads the container's state and removes it before it publishes the end.
-        Duration::from_mins(1),
+        // No polling: the monitor sees the end when the runtime client returns, then makes two
+        // runtime calls (inspect, remove) before it publishes the end and the record follows.
+        // The bound of the other run cases' `wait` on that publication, so this case fails by
+        // its own assertion well inside the test step's 60 s.
+        Duration::from_secs(30),
     )
     .await;
     assert_eq!(record["state"], "ended", "{NAME}: {record}");

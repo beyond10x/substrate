@@ -392,7 +392,10 @@ spawns no task for it.
 ### Which task calls the sink
 
 **D20. The run's end task writes the record, after it published the run's end, and the sink runs
-on the runtime's blocking pool.**
+on a thread of its own, one per record.** Amended 2026-11-24 with the change that built the
+record, in place of the runtime's blocking pool: `local`, `macos` and `systemd` around `local`
+detect each run's exit on that pool, whose size the consumer's runtime sets, and the write of a
+record shares no bounded resource with any run's exit detection or `wait`.
 
 | adapter | the task |
 |---|---|
@@ -404,9 +407,16 @@ on the runtime's blocking pool.**
   on a caller.
 - The end is published first. `wait` on the adapters with a phase channel returns from that
   channel; `wait` on `linux` polls the driver. Neither waits for the record.
-- The sink is called through `tokio::task::spawn_blocking`. A sink that blocks then holds one
-  thread of the blocking pool and no worker of the runtime, so it delays neither `wait` nor
-  another run, also on a current-thread runtime.
+- The sink is called on a thread started for the one record, named `substrate-run-ended`
+  (`std::thread::Builder`). A sink that blocks or panics then holds that thread only: no worker
+  of the runtime and no thread of its blocking pool, so it delays neither `wait`, nor another
+  run, nor another record, whatever the size of the pool, on a current-thread runtime and with no
+  runtime at all.
+- Where the system refuses the thread, the record is not dropped. It goes to the current
+  runtime's blocking pool, and only where no runtime is current, or that pool cannot take it
+  either, is it written on the calling thread, with a sink that panics there contained. A
+  warning names the refused thread. On that path a sink that blocks holds a thread of the pool,
+  or the calling thread, for as long as it blocks.
 - The consequence a consumer must know: `run_ended` may arrive after `wait` returned. A consumer
   that needs the record waits for its own sink. Listed as Q4.
 - `AuditSink`'s documentation gains the sentence for `run_ended`. The other records keep their
@@ -620,7 +630,7 @@ Every change also regenerates
 | D17 | `run_ended` follows `run_started`; the value reaches the end task after `audit_start` returned |
 | D18 | written for `Unknown` as well |
 | D19 | no sink: nothing written, no task added |
-| D20 | the end task writes after it published the end; the sink runs on the blocking pool (Q4) |
+| D20 | the end task writes after it published the end; the sink runs on a thread of its own per record (Q4; amended 2026-11-24) |
 | D21 | dropping an adapter neither ends a run nor loses its record |
 | D22 | a runtime that ends first: `run_ended` with `state: unknown` (Q5) |
 | D23 | a declared-insecure run's record carries its reason |
@@ -660,7 +670,8 @@ first consumer's session answered all five on 2026-11-24, each with A.
 
 **Q4. When the sink is called for `run_ended`.**
 
-- A (chosen): after the end is published, on the blocking pool. `wait` never waits for a sink.
+- A (chosen): after the end is published, on a thread of its own (D20, amended 2026-11-24; it
+  named the blocking pool). `wait` never waits for a sink.
   Cost: the record may arrive after `wait` returned; a consumer that reads its sink right after
   `wait` must wait for the record.
 - B: before the end is published, on the end task. After `wait` the record is in the sink. Cost:
@@ -692,7 +703,8 @@ this tree:
   137. `oci.rs` maps 129 to 192 to a signal, and, beside `OOMKilled`, any other status outside 0
   to 128 to signal 9; the `pod` rule of D7 takes a code above 128.
 - That a task dropped by a runtime shutdown runs the destructors of what it owns on the thread
-  that drops the runtime, and that a started `spawn_blocking` closure runs to its end.
+  that drops the runtime, and that a thread started for a record runs to its end while the
+  process lives.
 - That the digest in the header of a generated projection covers comments of the YAML (D25).
 - That the Kubernetes API exposes no counter of refused process creations for a Pod. What was
   read: the adapter reads none.
@@ -715,7 +727,8 @@ this tree:
 - A record of a denied execution or connection, a record at the moment of a hit, a wire event:
   the epic's boundaries.
 - Limits summed over several runs, `rate_bounds`, a block I/O bound: the epic's boundaries.
-- A bound on how long the sink may hold a thread of the blocking pool.
+- A bound on how long the sink may hold its thread, and on how many such threads a sink that
+  never returns may leave behind.
 - A constructor or builder for `AuditRecord::RunEnded` for a consumer that tests its own sink.
 
 ## 14. Not read
