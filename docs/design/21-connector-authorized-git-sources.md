@@ -272,7 +272,11 @@ this way:
   differ. `cargo xtask check-packages` therefore refuses a `[patch.crates-io]` entry that
   `Cargo.lock` does not resolve to, and a lock that holds a second package of an entry's name
   from any source, whatever its version: the registry, a `sparse+` registry, a Git source or
-  another path. A dependent of that second package would not build the entry's source.
+  another path. A dependent of that second package would not build the entry's source. The
+  check reads every table cargo applies to crates.io, `[patch.crates-io]` and the one keyed by
+  the URL of its index, in `Cargo.toml` and in `.cargo/config.toml` or `.cargo/config`, and
+  holds a Git entry to the one package of its reference: the same repository at another
+  revision is a second package.
 - The cases below run the fetch of a create, so they fail with a `gix-pack` that does not hold
   the four counts, whichever version it is.
 - An update of `gix` takes the published source of the `gix-pack` it resolves as

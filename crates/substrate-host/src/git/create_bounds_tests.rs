@@ -34,6 +34,9 @@ mod security_create_bounds_tests;
 #[path = "review2_create_bounds_tests.rs"]
 mod review2_create_bounds_tests;
 
+#[path = "adversary3_create_bounds_tests.rs"]
+mod adversary3_create_bounds_tests;
+
 const MEBIBYTE: u64 = 1024 * 1024;
 
 /// The most memory that may be resident at once in the process of a case, in kibibytes:
