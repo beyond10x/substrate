@@ -197,6 +197,12 @@ impl LocalAdapter {
             declared_insecure: run.reason.clone(),
             state,
             exit,
+            // No `limits` family: only the stall the adapter imposed (design 36 D7).
+            limit: if state == RunState::Running {
+                None
+            } else {
+                live::stall_limit(run.live.as_ref())
+            },
             memory_oom_kills: None,
         }
     }

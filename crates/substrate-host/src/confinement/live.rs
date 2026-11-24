@@ -324,6 +324,13 @@ pub(crate) fn open(
     }
 }
 
+/// `OutputStall` for a run whose live delivery stopped at the stall deadline, which ended the run
+/// (design 36 D5); `None` for a run that did not stall and for one without live output.
+pub(crate) fn stall_limit(live: Option<&Arc<LiveOutput>>) -> Option<super::RunLimit> {
+    live.is_some_and(|live| live.stalled())
+        .then_some(super::RunLimit::OutputStall)
+}
+
 /// The run's live queue, or `session.not-pipe` for a run admitted `Recorded`.
 pub(crate) fn live(live: Option<&Arc<LiveOutput>>) -> Result<&Arc<LiveOutput>, ConfinementError> {
     live.ok_or_else(not_live)

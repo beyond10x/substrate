@@ -7,6 +7,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `substrate_host::confinement::RunLimit` and `RunObservation.limit` (design 36, story 1): an
+  ended or unknown run names the one limit the adapter imposed to end it, `memory`, `cpu_time`,
+  `wall_time`, `egress_bytes` or `output_stall`, and a running run and a run that ended on its
+  own or on the embedder's signal name none. Where several were reached, the first of that order
+  is named. No adapter derives a limit from an exit code or a signal alone: `linux` maps the
+  driver's refusal code, `systemd` its own CPU and deadline watch and the run cgroup's OOM count,
+  `oci` the container's OOM flag beside a signal, its deadline and its stall, `pod` the
+  container's `OOMKilled` beside a signal and its deadline, and `local` and `macos` their stall
+  only. Held by unit cases of each adapter's mapping and by lane cases that end a run on each
+  bound (`ESS confinement linux limit …`, `ESS confinement systemd … limit…`, which
+  `scripts/delegated-lane.sh` requires by name, and the `oci` and `pod` lanes).
+- `RunObservation.memory_oom_kills` is reported by `linux` and `systemd`: the run cgroup's OOM
+  kill count, read before the cgroup is removed, and absent when it cannot be read. The host
+  driver's `ExecObservation` carries it in the new `end_of_run` member (`EndOfRun`), read for
+  every exec whether or not it asked for measurements.
+
+### Changed
+
+- `RunObservation` is `#[non_exhaustive]` and has a constructor,
+  `RunObservation::new(run, adapter, state)`, which leaves every optional member absent. A struct
+  expression `RunObservation { … }` outside `b10x-substrate-host` no longer compiles: write
+  `RunObservation::new(…)` and assign the fields it needs, which stay public. A pattern that
+  names every field needs `..`; one that has `..` and every field read compile unchanged.
+  `RunLimit` is `#[non_exhaustive]` too, so a `match` over it needs a wildcard arm. So is
+  `AuditRecord`: a `match` over it outside `b10x-substrate-host` that names every variant needs a
+  wildcard arm (`_ => …`); a `match` that has one, an `if let` or `matches!` on one variant, and
+  building a variant compile unchanged. A struct
+  expression of the host driver's `ExecObservation` names `end_of_run`.
+
 ### Fixed
 
 - A signal to an exec or a session of the host driver whose run has ended, and whose cgroup the

@@ -31,4 +31,18 @@ pub struct ExecObservation {
     pub output_complete: bool,
     pub cgroup: Option<String>,
     pub leader_pid: Option<u32>,
+    /// What the host driver read from the exec's own cgroup when the exec ended (design 36 D9).
+    /// `Some` only on an observation whose end the host driver recorded; `None` while the exec
+    /// runs, on an observation rebuilt from a stored record and on one another driver made.
+    pub end_of_run: Option<EndOfRun>,
+}
+
+/// What the host driver read from the exec's own cgroup when the exec ended, after its leader
+/// exited and before the cgroup was removed (design 36 D9). Host-internal: no wire member
+/// carries it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EndOfRun {
+    /// `memory.events` `oom_kill`. `None` where the counter could not be read: absent, never
+    /// zero (invariant 3).
+    pub memory_oom_kills: Option<u64>,
 }

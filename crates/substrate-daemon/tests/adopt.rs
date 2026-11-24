@@ -214,6 +214,7 @@ impl Driver for AdoptFixtureDriver {
             output_complete: true,
             cgroup: None,
             leader_pid: None,
+            end_of_run: None,
         };
         self.execs
             .lock()

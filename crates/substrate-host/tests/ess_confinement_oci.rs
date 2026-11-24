@@ -1122,6 +1122,8 @@ async fn an_oci_run_is_removed_after_a_kill() {
         Some(9),
         "{ended:?}"
     );
+    // Design 36 D7: an embedder's own kill names no limit.
+    assert_eq!(ended.limit, None, "{ended:?}");
     assert_eq!(
         containers(&runtime, run.as_str()),
         "",
@@ -1166,12 +1168,82 @@ async fn an_oci_run_is_removed_after_its_timeout() {
         Some(9),
         "{ended:?}"
     );
+    // Design 36 D7, D8: the monitor's own deadline names `WallTime`; `oci` reads no OOM count.
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::WallTime),
+        "{ended:?}"
+    );
+    assert_eq!(ended.memory_oom_kills, None, "{ended:?}");
     assert_eq!(
         containers(&runtime, run.as_str()),
         "",
         "the container remains"
     );
     println!("ESS confinement oci timeout: executed");
+}
+
+/// Design 36 § 8, story 1, the `oci` lane: a container whose one process grows past its memory
+/// bound is ended by the kernel, the runtime states `OOMKilled` and the main process ended by a
+/// signal, so the run names `Memory`; `oci` reads no OOM count (D8). Bounded at two seconds.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oci_run_over_its_memory_bound_names_the_memory_limit() {
+    const NAME: &str = "ESS confinement oci limit memory";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let adapter = open_lane(&runtime, Vec::new());
+    let (_dir, workspace) = canonical_tempdir();
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            image: Some(image()),
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 2_000,
+                processes: 8,
+                memory_bytes: 16 << 20,
+                cpu_millis: 2_000,
+            }),
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let began = Instant::now();
+    let run = adapter
+        .start(
+            &admitted,
+            &Command {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "grow=x; while : ; do grow=\"$grow$grow\"; done".into(),
+                ],
+                env: BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(Duration::from_mins(1), adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    println!("{NAME}: the run ended after {:?}", began.elapsed());
+    assert_eq!(ended.state, RunState::Ended, "{NAME}: {ended:?}");
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::Memory),
+        "{NAME}: {ended:?}"
+    );
+    assert_eq!(ended.memory_oom_kills, None, "{NAME}: {ended:?}");
+    assert_eq!(
+        containers(&runtime, run.as_str()),
+        "",
+        "the container remains"
+    );
+    println!("{NAME}: executed");
 }
 
 #[test]

@@ -75,7 +75,7 @@ use crate::output_retention::{Captured, drain};
 use super::{
     AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
     ConfinementProfile, ContractFamily, Fact, OutputEvent, ProcessBounds, RenderedCommand, RunExit,
-    RunId, RunObservation, RunOutput, RunState,
+    RunId, RunLimit, RunObservation, RunOutput, RunState, named_limit,
 };
 use crate::{DeclaredWritableRoot, DriverError};
 
@@ -715,11 +715,12 @@ fn create_failed(message: &str) -> ConfinementError {
     DriverError::failed("exec.spawn-failed", message).into()
 }
 
+/// A run's phase; an ended or unknown one carries the limit its monitor observed (design 36 D7).
 #[derive(Debug, Clone, Copy)]
 enum Phase {
     Running,
-    Ended(RunExit),
-    Unknown,
+    Ended(RunExit, Option<RunLimit>),
+    Unknown(Option<RunLimit>),
 }
 
 struct OciRun {
@@ -775,6 +776,26 @@ impl ContainerState {
     }
 }
 
+/// The limit that ended an `oci` run (design 36 D7), in D4's order: the stall of its live output;
+/// memory, where the runtime's state holds `OOMKilled` and the run's main process ended by a
+/// signal, so a container whose child was killed and whose main process exited by itself names
+/// none; the monitor's own deadline. `--cpus` is a rate and ends no run, and no aperture exists,
+/// so neither CPU time nor egress bytes is named. A signal alone names nothing.
+fn oci_limit(stalled: bool, deadline: bool, state: Option<&ContainerState>) -> Option<RunLimit> {
+    let memory = state.is_some_and(|state| {
+        state.oom_killed && state.exit().is_some_and(|exit| exit.signal.is_some())
+    });
+    let reached: Vec<RunLimit> = [
+        stalled.then_some(RunLimit::OutputStall),
+        memory.then_some(RunLimit::Memory),
+        deadline.then_some(RunLimit::WallTime),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    named_limit(&reached)
+}
+
 pub struct OciAdapter {
     facts: AdapterFacts,
     runtime: RuntimeProbe,
@@ -802,10 +823,10 @@ impl OciAdapter {
     }
 
     fn observation(run: &OciRun) -> RunObservation {
-        let (state, exit) = match *run.phase.borrow() {
-            Phase::Running => (RunState::Running, None),
-            Phase::Ended(exit) => (RunState::Ended, Some(exit)),
-            Phase::Unknown => (RunState::Unknown, None),
+        let (state, exit, limit) = match *run.phase.borrow() {
+            Phase::Running => (RunState::Running, None, None),
+            Phase::Ended(exit, limit) => (RunState::Ended, Some(exit), limit),
+            Phase::Unknown(limit) => (RunState::Unknown, None, limit),
         };
         RunObservation {
             run: run.id.clone(),
@@ -814,6 +835,8 @@ impl OciAdapter {
             declared_insecure: None,
             state,
             exit,
+            limit,
+            // The runtime's state holds a flag, not a count (design 36 D8).
             memory_oom_kills: None,
         }
     }
@@ -1449,6 +1472,8 @@ async fn monitor(
         status = child.wait() => Some(status),
         () = &mut deadline => None,
     };
+    // Recorded before the kill below: the run's end is then the deadline's (design 36 D7).
+    let deadline_fired = ended.is_none();
     if ended.is_none() {
         if let Some(live) = &live {
             live.close();
@@ -1482,11 +1507,13 @@ async fn monitor(
     if let Some(writer) = writer.as_ref().and_then(std::sync::Weak::upgrade) {
         writer.end().await;
     }
+    let stalled = live.as_ref().is_some_and(|live| live.stalled());
+    let limit = oci_limit(stalled, deadline_fired, state.as_ref());
     let _ = phase.send(match (ended, state) {
-        (Some(Ok(_)), Some(state)) if removed && !state.running => {
-            state.exit().map_or(Phase::Unknown, Phase::Ended)
-        }
-        _ => Phase::Unknown,
+        (Some(Ok(_)), Some(state)) if removed && !state.running => state
+            .exit()
+            .map_or(Phase::Unknown(limit), |exit| Phase::Ended(exit, limit)),
+        _ => Phase::Unknown(limit),
     });
 }
 
@@ -1962,6 +1989,47 @@ mod tests {
         )
         .expect("parsed");
         assert!(!never.started);
+    }
+
+    /// Design 36 D7, the `oci` row: the runtime's `OOMKilled` names `Memory` only when the run's
+    /// main process ended by a signal, the monitor's own deadline names `WallTime`, a stall wins
+    /// over both and memory over the deadline (D4). An exit by signal 9 alone names nothing.
+    #[test]
+    fn an_oci_run_names_memory_its_deadline_or_a_stall_and_nothing_from_a_signal_alone() {
+        let state = |code: i64, oom: bool| ContainerState {
+            started: true,
+            running: false,
+            oom_killed: oom,
+            exit_code: Some(code),
+        };
+        let oom = state(137, true);
+        let killed = state(137, false);
+        let exited = state(0, false);
+        for (stalled, deadline, state, limit) in [
+            (false, false, Some(&oom), Some(RunLimit::Memory)),
+            (
+                false,
+                false,
+                Some(&state(255, true)),
+                Some(RunLimit::Memory),
+            ),
+            (false, false, Some(&state(3, true)), None),
+            (false, false, Some(&state(0, true)), None),
+            (false, false, Some(&killed), None),
+            (false, false, Some(&exited), None),
+            (false, false, None, None),
+            (false, true, Some(&killed), Some(RunLimit::WallTime)),
+            (false, true, None, Some(RunLimit::WallTime)),
+            (false, true, Some(&oom), Some(RunLimit::Memory)),
+            (true, true, Some(&oom), Some(RunLimit::OutputStall)),
+            (true, false, Some(&killed), Some(RunLimit::OutputStall)),
+        ] {
+            assert_eq!(
+                oci_limit(stalled, deadline, state),
+                limit,
+                "stalled {stalled}, deadline {deadline}, {state:?}"
+            );
+        }
     }
 
     // A8: a read-only or scoped workspace is refused by name through the pure profile check,

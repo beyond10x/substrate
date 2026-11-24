@@ -165,8 +165,8 @@ mod imp {
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
         ConfinementProfile, ContractFamily, FACT_ORDER, FAMILY_ORDER, Fact, InnerAdapter,
-        OutputEvent, ProcessBounds, RenderedCommand, RunExit, RunId, RunObservation, RunOutput,
-        RunState,
+        OutputEvent, ProcessBounds, RenderedCommand, RunExit, RunId, RunLimit, RunObservation,
+        RunOutput, RunState, named_limit,
     };
     use super::{
         InnerRequest, SESSION_BUS_ENV, SYSTEMD_MAX_TRACKED_RUNS, SYSTEMD_OUTPUT_LIMIT_BYTES,
@@ -778,9 +778,71 @@ mod imp {
     #[derive(Debug, Clone, Copy)]
     enum Phase {
         Running,
-        Ended(RunExit),
+        Ended(RunExit, EndRead),
         /// The leader ended, and the tree did not leave its cgroup in time.
-        Unknown,
+        Unknown(EndRead),
+    }
+
+    impl Phase {
+        /// The phase of an ended leader: `Ended` with its status, or `Unknown` where its wait
+        /// failed or its tree did not drain (`None`).
+        fn at_end(status: Option<std::process::ExitStatus>, end: EndRead) -> Self {
+            match status {
+                Some(status) => Self::Ended(
+                    RunExit {
+                        code: status.code(),
+                        signal: status.signal(),
+                    },
+                    end,
+                ),
+                None => Self::Unknown(end),
+            }
+        }
+    }
+
+    /// What the run's end task read of the run's end beside its exit, before it removed the
+    /// run's cgroup (design 36 D7, D8).
+    #[derive(Debug, Clone, Copy, Default)]
+    struct EndRead {
+        limit: Option<RunLimit>,
+        memory_oom_kills: Option<u64>,
+    }
+
+    impl EndRead {
+        /// Design 36 D7, in D4's order: the stall, an OOM kill in the run's cgroup, and the bound
+        /// the watch ended the run for.
+        fn of(
+            stall: Option<&Arc<LiveOutput>>,
+            memory_oom_kills: Option<u64>,
+            imposed: Option<RunLimit>,
+        ) -> Self {
+            let reached: Vec<RunLimit> = [
+                live::stall_limit(stall),
+                memory_oom_kills
+                    .is_some_and(|kills| kills > 0)
+                    .then_some(RunLimit::Memory),
+                imposed,
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            Self {
+                limit: named_limit(&reached),
+                memory_oom_kills,
+            }
+        }
+    }
+
+    /// `memory.events` `oom_kill` of a run's cgroup; `None` where it cannot be read (design 36
+    /// D8: absent, never zero).
+    fn oom_kills(cgroup: &Path) -> Option<u64> {
+        std::fs::read_to_string(cgroup.join("memory.events"))
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("oom_kill "))?
+            .trim()
+            .parse()
+            .ok()
     }
 
     struct LocalRun {
@@ -1060,10 +1122,10 @@ mod imp {
         }
 
         fn observation(run: &LocalRun) -> RunObservation {
-            let (state, exit) = match *run.phase.borrow() {
-                Phase::Running => (RunState::Running, None),
-                Phase::Ended(exit) => (RunState::Ended, Some(exit)),
-                Phase::Unknown => (RunState::Unknown, None),
+            let (state, exit, end) = match *run.phase.borrow() {
+                Phase::Running => (RunState::Running, None, EndRead::default()),
+                Phase::Ended(exit, end) => (RunState::Ended, Some(exit), end),
+                Phase::Unknown(end) => (RunState::Unknown, None, end),
             };
             RunObservation {
                 run: run.id.clone(),
@@ -1072,7 +1134,8 @@ mod imp {
                 declared_insecure: run.reason.clone(),
                 state,
                 exit,
-                memory_oom_kills: None,
+                limit: end.limit,
+                memory_oom_kills: end.memory_oom_kills,
             }
         }
 
@@ -1146,14 +1209,17 @@ mod imp {
             Ok(())
         }
 
-        /// Ends the tree, its cgroup and its leader's process group, at the run's timeout or once
-        /// its cumulative CPU passes its budget: an imposed end, which stops live delivery first.
+        /// Ends the tree, its cgroup and its leader's process group, once its cumulative CPU
+        /// passes its budget or at the run's timeout: an imposed end, which stops live delivery
+        /// first. The bound it ends the run for is written to `imposed` before the kill; the CPU
+        /// budget is asked first, so a tick in which both are true names `CpuTime` (design 36 D4).
         fn watch(
             cgroup: PathBuf,
             leader: Leader,
             bounds: ProcessBounds,
             mut phase: watch::Receiver<Phase>,
             live: Option<Arc<LiveOutput>>,
+            imposed: Arc<Mutex<Option<RunLimit>>>,
         ) {
             let deadline = Instant::now() + Duration::from_millis(bounds.timeout_ms);
             let budget = bounds.cpu_millis.saturating_mul(1_000);
@@ -1167,9 +1233,15 @@ mod imp {
                     if stop.is_ok() {
                         return;
                     }
-                    if Instant::now() >= deadline
-                        || cpu_usage_micros(&cgroup).is_some_and(|used| used >= budget)
-                    {
+                    let reached = if cpu_usage_micros(&cgroup).is_some_and(|used| used >= budget) {
+                        Some(RunLimit::CpuTime)
+                    } else if Instant::now() >= deadline {
+                        Some(RunLimit::WallTime)
+                    } else {
+                        None
+                    };
+                    if let Some(limit) = reached {
+                        *imposed.lock() = Some(limit);
                         if let Some(live) = &live {
                             live.close();
                         }
@@ -1365,6 +1437,9 @@ mod imp {
             });
             let exited = Arc::clone(&leader.exited);
             let tree = cgroup.clone();
+            let imposed = Arc::new(Mutex::new(None));
+            let watched = Arc::clone(&imposed);
+            let stall = live.clone();
             tokio::spawn(async move {
                 let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
                 *exited.lock() = true;
@@ -1386,18 +1461,15 @@ mod imp {
                         closed = false;
                     }
                 }
+                // Read before `drain_tree` removes the cgroup it lives in (design 36 D8).
+                let memory_oom_kills = oom_kills(&tree);
                 let drained = drain_tree(&tree, deadline).await && closed;
                 // The run's end, for its standard input too (design 32 § 2).
                 if let Some(writer) = ending.as_ref().and_then(std::sync::Weak::upgrade) {
                     writer.end().await;
                 }
-                let _ = phase.send(match ended {
-                    Ok(status) if drained => Phase::Ended(RunExit {
-                        code: status.code(),
-                        signal: status.signal(),
-                    }),
-                    _ => Phase::Unknown,
-                });
+                let end = EndRead::of(stall.as_ref(), memory_oom_kills, *imposed.lock());
+                let _ = phase.send(Phase::at_end(ended.ok().filter(|_| drained), end));
             });
             Self::watch(
                 cgroup.clone(),
@@ -1405,6 +1477,7 @@ mod imp {
                 bounds,
                 observed.clone(),
                 live.clone(),
+                watched,
             );
             self.runs.lock().push(Arc::new(LocalRun {
                 id: id.clone(),

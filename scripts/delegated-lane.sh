@@ -197,6 +197,8 @@ require_executed sandbox_parity \
 # a program that is a link to a denied program and one directory under two names, the second in
 # the base view's form (`/usr/bin` listed, `/bin/id` denied) and from two declared roots. The
 # base view's form is absent, so refused here, on a host whose `/bin` is not a link to `/usr/bin`.
+# The `limit` lines are design 36's story 1: runs ended by their memory bound, their CPU budget
+# and their timeout name that limit, and a run that exits 0 names none.
 require_executed ess_confinement_linux \
   'ESS confinement linux scoped write: executed' \
   'ESS confinement linux scoped git: executed' \
@@ -262,8 +264,18 @@ require_executed ess_confinement_linux \
   'ESS confinement linux exec deny limit script: executed' \
   'ESS confinement linux exec deny limit replaced: executed' \
   'ESS confinement linux exec deny limit unreadable directory: executed' \
-  'ESS confinement linux exec deny probe held mount: executed'
+  'ESS confinement linux exec deny probe held mount: executed' \
+  'ESS confinement linux limit memory: executed' \
+  'ESS confinement linux limit cpu time: executed' \
+  'ESS confinement linux limit wall time: executed' \
+  'ESS confinement linux limit none: executed'
+# Design 36, story 1: the limit that ended a run, around `local` from the scope's own watch and
+# the run cgroup's OOM count, around `linux` from the driver.
 require_executed ess_confinement_systemd \
+  'ESS confinement systemd local limits memory: executed' \
+  'ESS confinement systemd local limits cpu time: executed' \
+  'ESS confinement systemd local limits wall time: executed' \
+  'ESS confinement systemd linux limit wall time: executed' \
   'ESS confinement systemd local scoped write: executed' \
   'ESS confinement systemd linux scoped write: executed' \
   'ESS confinement systemd local retention tail: executed' \

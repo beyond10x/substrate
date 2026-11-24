@@ -28,6 +28,7 @@ use tokio::sync::{Notify, mpsc};
 use crate::confinement::AdmittedProfile;
 use crate::environment::baseline_value;
 use crate::exec_gate::ExecGate;
+use crate::observation::EndOfRun;
 pub use crate::observation::{ExecObservation, PipeFrame, PipeStream};
 use crate::output_retention::{KeptOutput, OutputRetention, Retention, RetentionBuffer};
 use crate::{DispatchOutcome, DriverError, HostConfig};
@@ -1751,6 +1752,7 @@ impl ProcessRuntime {
             output_complete: false,
             cgroup: Some(cgroup.name().to_owned()),
             leader_pid: Some(leader_pid),
+            end_of_run: None,
         };
         let (pipe_sender, pipe) = if let Some(settings) = pipe_settings {
             let stdin = if terminal.is_some() {
@@ -3545,11 +3547,11 @@ async fn run_child(
         Ok::<_, DriverError>(usage)
     });
     let metrics_failed = terminal_usage.as_ref().is_some_and(Result::is_err);
-    // The same kernel counter for the run that asked for no measurements, read here because
-    // `reconcile_cgroup` below removes the directory it lives in. An unreadable counter is left
-    // at zero rather than raised into `exec.metrics-unavailable`: this run requested no counters,
-    // so their absence is not a broken promise, and the measured path above still reports its own.
-    let unmeasured_oom_kills = u64::from(!measured) * cgroup.memory_oom_kills().unwrap_or(0);
+    // The kernel's counters of every exec, measured or not, read here because `reconcile_cgroup`
+    // below removes the directory they live in (design 36 D9). An unreadable counter is absent in
+    // the record and is not raised into `exec.metrics-unavailable`: a run that requested no
+    // counters was promised none, and the measured path above still reports its own.
+    let end_of_run = cgroup.end_of_run(terminal_usage.as_ref());
     // Quiesce the whole run tree after the terminal counter sample. The shared mappings remain
     // owned by `apertures`, so killing and reaping the relays cannot invalidate them and no relay
     // can increment a counter after the observation is built.
@@ -3587,6 +3589,7 @@ async fn run_child(
     observation.stdout_kept = Some(stdout_kept);
     observation.stderr_kept = Some(stderr_kept);
     observation.output_complete = true;
+    observation.end_of_run = Some(end_of_run);
     observation.resource.observed_at = Utc::now();
     if let Some(usage) = terminal_usage {
         observation.resource.usage = Some(match usage {
@@ -3601,16 +3604,10 @@ async fn run_child(
     record_aperture(&mut observation, applied_apertures, aperture_exhausted);
     record_pipe_backpressure(&mut observation, &execution);
     record_terminal_output_bound(&mut observation, output_exhausted);
-    // Either source, because the client's measurement set decides what is *published*, never
-    // whether the execution's own ending is named (review finding 8).
-    let memory_exhausted = unmeasured_oom_kills > 0
-        || matches!(
-            observation.resource.usage,
-            Some(substrate_wire::ExecUsage::Observed(ResourceUsage {
-                memory_oom_kills: 1..,
-                ..
-            }))
-        );
+    // Read for every exec, because the client's measurement set decides what is *published*,
+    // never whether the execution's own ending is named (review finding 8). An unreadable
+    // counter names no memory limit.
+    let memory_exhausted = end_of_run.memory_oom_kills.is_some_and(|kills| kills > 0);
     record_resource_bound(
         &mut observation,
         timed_out,
@@ -4620,6 +4617,18 @@ impl Cgroup {
         read_named_counter(&self.path.join("memory.events"), "oom_kill")
     }
 
+    /// What this cgroup holds once the exec's leader exited, read once before the cgroup is
+    /// removed (design 36 D9). A measured exec's count is its terminal sample's, `terminal`;
+    /// every other exec, and one whose sample failed, reads the counter on its own. A counter
+    /// that cannot be read is `None`.
+    fn end_of_run(&self, terminal: Option<&Result<ResourceUsage, DriverError>>) -> EndOfRun {
+        let memory_oom_kills = match terminal {
+            Some(Ok(usage)) => Some(usage.memory_oom_kills),
+            _ => self.memory_oom_kills().ok(),
+        };
+        EndOfRun { memory_oom_kills }
+    }
+
     /// Whether the kernel enabled the io controller in this cgroup, which is what gives it an
     /// `io.stat`.
     fn has_io_controller(&self) -> Result<bool, DriverError> {
@@ -5018,6 +5027,49 @@ mod tests {
         }
     }
 
+    /// Design 36 D9: the end-of-run read takes the OOM count from the cgroup's `memory.events`
+    /// for an exec that asked for no measurements, and an unreadable counter is absent, never
+    /// zero: a missing file and a file without the `oom_kill` key are both `None`.
+    #[test]
+    fn the_end_of_run_reads_the_oom_count_and_leaves_an_unreadable_one_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu memory pids");
+        assert_eq!(cgroup.end_of_run(None).memory_oom_kills, Some(0));
+        std::fs::write(
+            directory.path().join("memory.events"),
+            "low 0\nhigh 0\nmax 4\noom 2\noom_kill 2\noom_group_kill 1\n",
+        )
+        .unwrap();
+        assert_eq!(cgroup.end_of_run(None).memory_oom_kills, Some(2));
+        std::fs::write(directory.path().join("memory.events"), "low 0\n").unwrap();
+        assert_eq!(cgroup.end_of_run(None).memory_oom_kills, None);
+        std::fs::remove_file(directory.path().join("memory.events")).unwrap();
+        assert_eq!(cgroup.end_of_run(None).memory_oom_kills, None);
+    }
+
+    /// Design 36 D9: a measured exec's end-of-run count is the one its terminal usage sample
+    /// read; a sample that failed falls back to reading the counter on its own.
+    #[test]
+    fn a_measured_end_of_run_takes_the_oom_count_of_its_terminal_sample() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu memory pids");
+        let mut usage = cgroup
+            .resource_usage(true, Instant::now())
+            .expect("usage is observed");
+        usage.memory_oom_kills = 3;
+        assert_eq!(
+            cgroup.end_of_run(Some(&Ok(usage))).memory_oom_kills,
+            Some(3)
+        );
+        let failed = Err(crate::DriverError::failed(
+            "exec.metrics-read-failed",
+            "gone",
+        ));
+        assert_eq!(cgroup.end_of_run(Some(&failed)).memory_oom_kills, Some(0));
+        std::fs::remove_file(directory.path().join("memory.events")).unwrap();
+        assert_eq!(cgroup.end_of_run(Some(&failed)).memory_oom_kills, None);
+    }
+
     /// ADR 0032: with the io controller the record is unchanged from 0.17.0.
     #[test]
     fn usage_with_the_io_controller_reports_block_io_counters() {
@@ -5144,6 +5196,7 @@ mod tests {
             output_complete: false,
             cgroup: None,
             leader_pid: None,
+            end_of_run: None,
         }
     }
 
@@ -8591,6 +8644,16 @@ mod tests {
             .expect("an OOM is named on the observation with no measurements requested");
         assert_eq!(refusal.code, "exec.memory-limit");
         assert_eq!(refusal.class, substrate_wire::ErrorClass::Exhausted);
+        // Design 36 D9: the count the driver read before it removed the cgroup reaches the
+        // observation, for an exec that asked for no measurements.
+        assert!(
+            observed
+                .end_of_run
+                .and_then(|end| end.memory_oom_kills)
+                .is_some_and(|kills| kills >= 1),
+            "the end-of-run OOM count: {:?}",
+            observed.end_of_run
+        );
     }
 
     /// The argv `ProcessRuntime::command` builds under `config`, for a read-write workspace.

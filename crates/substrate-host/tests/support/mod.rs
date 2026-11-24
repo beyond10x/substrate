@@ -1113,6 +1113,8 @@ pub async fn live_natural_end(
         .expect("the run ends")
         .expect("waited");
     assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    // Design 36 D1: a run no limit ended names none.
+    assert_eq!(ended.limit, None, "{name}: {ended:?}");
     let output = adapter.output(&run).await.expect("output");
     let (streams, losses) = delivered(&events);
     assert!(losses.is_empty(), "{name}: {losses:?}");
@@ -1145,10 +1147,16 @@ pub async fn live_stall(
         .expect("a live profile is admitted");
     let run = adapter.start(&admitted, command).await.expect("started");
     let began = std::time::Instant::now();
-    tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+    let ended = tokio::time::timeout(READ_WAIT, adapter.wait(&run))
         .await
         .expect("the stall ends the run")
         .expect("waited");
+    // Design 36 D5: the stall that ended the run is its limit.
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::OutputStall),
+        "{name}: {ended:?}"
+    );
     let took = began.elapsed();
     assert!(
         took >= std::time::Duration::from_secs(1),
@@ -1277,10 +1285,12 @@ pub async fn live_kill_is_a_prefix(
         .expect("killed");
     let mut events = vec![first];
     events.extend(read_events(adapter, &run).await);
-    tokio::time::timeout(READ_WAIT, adapter.wait(&run))
+    let ended = tokio::time::timeout(READ_WAIT, adapter.wait(&run))
         .await
         .expect("the kill ends the run")
         .expect("waited");
+    // Design 36 D7: an embedder's own kill names no limit.
+    assert_eq!(ended.limit, None, "{name}: {ended:?}");
     let (streams, losses) = delivered(&events);
     assert!(
         losses.is_empty(),

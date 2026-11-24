@@ -972,6 +972,8 @@ async fn a_run_writes_its_workspace_reports_its_output_and_leaves_nothing_after_
     assert_eq!(ended.adapter, AdapterName::Pod);
     assert_eq!(ended.declared_insecure, None);
     assert_eq!(ended.memory_oom_kills, Some(0), "{ended:?}");
+    // Design 36 D7: a run that exited by itself names no limit.
+    assert_eq!(ended.limit, None, "{ended:?}");
     assert_eq!(ended.exit.and_then(|exit| exit.code), Some(3));
     let output = adapter.output(&run).await.expect("output");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1026,6 +1028,12 @@ async fn a_run_over_its_memory_bound_is_oom_killed_and_leaves_nothing() {
         "{exit:?}"
     );
     assert_eq!(ended.memory_oom_kills, Some(1), "{ended:?}");
+    // Design 36 D7, the `pod` row: `OOMKilled` with an exit by a signal or above 128.
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::Memory),
+        "{ended:?}"
+    );
     assert_eq!(
         adapter
             .observe(&run)
@@ -1089,6 +1097,8 @@ async fn a_killed_run_ends_on_sigkill_and_leaves_nothing() {
         .expect("the run ends after a kill")
         .expect("waited");
     assert_eq!(ended.exit.and_then(|exit| exit.signal), Some(9));
+    // Design 36 D7: an embedder's own kill names no limit.
+    assert_eq!(ended.limit, None, "{ended:?}");
     let output = adapter.output(&run).await.expect("output");
     assert_eq!(output.stdout, b"started\n");
     assert_eq!(
@@ -1122,6 +1132,12 @@ async fn a_run_past_its_deadline_ends_and_leaves_nothing() {
     // `sleep 600` ended by its 5 s deadline, not by exiting.
     assert_ne!(ended.exit.and_then(|exit| exit.code), Some(0), "{ended:?}");
     println!("the deadline run ended {ended:?}");
+    // Design 36 D7, the `pod` row: the kubelet's `DeadlineExceeded` names `WallTime`.
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::WallTime),
+        "{ended:?}"
+    );
     assert_eq!(
         leftovers(&kubeconfig, &adapter.settings().namespace, run.as_str()),
         ""

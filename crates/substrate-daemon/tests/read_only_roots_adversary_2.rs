@@ -208,6 +208,7 @@ impl Driver for Fixture {
             output_complete: false,
             cgroup: None,
             leader_pid: None,
+            end_of_run: None,
         };
         self.execs
             .lock()

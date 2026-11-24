@@ -1539,6 +1539,7 @@ pub(super) fn observation_from_stored(stored: StoredExec) -> ExecObservation {
         output_complete: stored.output_complete,
         cgroup: stored.cgroup,
         leader_pid: stored.leader_pid,
+        end_of_run: None,
     }
 }
 

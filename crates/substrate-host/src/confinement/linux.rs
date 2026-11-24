@@ -204,7 +204,7 @@ mod imp {
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
         ConfinementProfile, ContractFamily, Fact, KeptOutput, Network, OutputEvent, ProcessBounds,
-        RenderedCommand, RunExit, RunId, RunObservation, RunOutput, RunState, StdinMode,
+        RenderedCommand, RunExit, RunId, RunLimit, RunObservation, RunOutput, RunState, StdinMode,
     };
     use super::{ExecListProof, LinuxRequest};
     use crate::process::ExecLists;
@@ -637,8 +637,28 @@ mod imp {
                     code: exit.code.map(i32::from),
                     signal: exit.signal.map(Signal::number),
                 }),
-                memory_oom_kills: None,
+                limit: if state == RunState::Running {
+                    None
+                } else {
+                    limit_named_by(exec.refusal.as_ref().map(|refusal| refusal.code.as_str()))
+                },
+                memory_oom_kills: observed.end_of_run.and_then(|end| end.memory_oom_kills),
             }
+        }
+    }
+
+    /// The limit the host driver named on an ended exec, by its refusal code (design 36 D6). The
+    /// driver decided which bound ended the exec, from its own timer, its CPU reading, its relay's
+    /// counters and the cgroup's OOM count; this repeats none of it. Every other code, a code a
+    /// later driver adds among them, and no refusal are `None`.
+    fn limit_named_by(code: Option<&str>) -> Option<RunLimit> {
+        match code? {
+            substrate_wire::SESSION_OUTPUT_BACKPRESSURE => Some(RunLimit::OutputStall),
+            "exec.aperture-byte-limit" => Some(RunLimit::EgressBytes),
+            "exec.memory-limit" => Some(RunLimit::Memory),
+            "exec.cpu-limit" => Some(RunLimit::CpuTime),
+            "exec.timeout" => Some(RunLimit::WallTime),
+            _ => None,
         }
     }
 
@@ -859,6 +879,33 @@ mod imp {
     mod tests {
         use super::*;
         use substrate_wire::WorkspaceAccess;
+
+        /// Design 36 D6, row by row: the five codes by which the driver names a bound that ended
+        /// an exec map to their limit; every other code it writes on an ended exec, a code no
+        /// driver writes and no refusal map to none.
+        #[test]
+        fn the_refusal_code_of_an_ended_exec_names_its_limit_and_no_other_code_does() {
+            for (code, limit) in [
+                (
+                    Some(substrate_wire::SESSION_OUTPUT_BACKPRESSURE),
+                    Some(RunLimit::OutputStall),
+                ),
+                (
+                    Some("exec.aperture-byte-limit"),
+                    Some(RunLimit::EgressBytes),
+                ),
+                (Some("exec.memory-limit"), Some(RunLimit::Memory)),
+                (Some("exec.cpu-limit"), Some(RunLimit::CpuTime)),
+                (Some("exec.timeout"), Some(RunLimit::WallTime)),
+                (Some("exec.metrics-unavailable"), None),
+                (Some(substrate_wire::SESSION_OUTPUT_LIMIT), None),
+                (Some(substrate_wire::WORKDIR_REFUSALS[2].code), None),
+                (Some("exec.some-later-bound"), None),
+                (None, None),
+            ] {
+                assert_eq!(limit_named_by(code), limit, "{code:?}");
+            }
+        }
 
         fn scoped() -> ConfinementProfile {
             ConfinementProfile {

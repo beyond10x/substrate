@@ -347,6 +347,7 @@ impl ConfinementError {
 /// `TMPDIR` a run left behind.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AuditRecord {
     ProfileAdmitted {
         profile: ProfileId,
@@ -783,8 +784,51 @@ pub struct RunExit {
     pub signal: Option<i32>,
 }
 
+/// A bound that ended a run (design 36 D1).
+///
+/// The process-count bound is no variant: the kernel refuses the creation and the run carries
+/// on. Nor is the output byte bound of [`IoBounds`]: it cuts the record and ends nothing
+/// (design 36 D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RunLimit {
+    /// `ProcessBounds.memory_bytes`: the kernel's OOM killer ended the run.
+    Memory,
+    /// `ProcessBounds.cpu_millis`: the run's cumulative CPU time reached its budget.
+    CpuTime,
+    /// `ProcessBounds.timeout_ms`: the run's deadline passed.
+    WallTime,
+    /// The byte ceiling of an egress aperture the run used.
+    EgressBytes,
+    /// The run's live output waited unread past the stall deadline.
+    OutputStall,
+}
+
+/// The order in which a limit is named where more than one is true at a run's end (design 36
+/// D4): the order in which the host driver names its refusal.
+const LIMIT_ORDER: [RunLimit; 5] = [
+    RunLimit::OutputStall,
+    RunLimit::EgressBytes,
+    RunLimit::Memory,
+    RunLimit::CpuTime,
+    RunLimit::WallTime,
+];
+
+/// Of the limits `reached` at a run's end, the one design 36 D4 names: the first of
+/// [`LIMIT_ORDER`]. `None` where none was reached.
+pub(crate) fn named_limit(reached: &[RunLimit]) -> Option<RunLimit> {
+    LIMIT_ORDER
+        .into_iter()
+        .find(|limit| reached.contains(limit))
+}
+
 /// One observation of a run. A declared-insecure run carries its reason in every one.
+///
+/// `#[non_exhaustive]`: outside this crate an observation is built with
+/// [`RunObservation::new`] and field assignments, and a pattern names `..` (design 36 D26).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RunObservation {
     pub run: RunId,
     pub adapter: AdapterName,
@@ -792,9 +836,33 @@ pub struct RunObservation {
     pub declared_insecure: Option<String>,
     pub state: RunState,
     pub exit: Option<RunExit>,
+    /// The bound that ended the run (design 36 D1, D2). `None` while the run runs, for a run no
+    /// limit ended, and where the adapter did not observe which limit ended it; each adapter's
+    /// module says which limits it observes. Also named on an `Unknown` run whose limit the
+    /// adapter observed before it lost sight of how the run ended. No adapter derives it from an
+    /// exit code or a signal alone.
+    pub limit: Option<RunLimit>,
     /// Processes of the run the kernel's OOM killer ended, once the run has ended; `None` where
     /// the adapter does not observe it (absent, never zero: invariant 3).
     pub memory_oom_kills: Option<u64>,
+}
+
+impl RunObservation {
+    /// An observation of `run` on `adapter` in `state`, with every optional member `None`. The
+    /// fields are public: a caller sets the ones it needs.
+    #[must_use]
+    pub fn new(run: RunId, adapter: AdapterName, state: RunState) -> Self {
+        Self {
+            run,
+            adapter,
+            inner: None,
+            declared_insecure: None,
+            state,
+            exit: None,
+            limit: None,
+            memory_oom_kills: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1025,6 +1093,64 @@ mod tests {
     use super::*;
 
     const REASON: &str = "the test admits a profile on purpose";
+
+    /// Design 36 D26: the constructor leaves every optional member absent, so an observation a
+    /// consumer builds names no limit and no count it did not set.
+    #[test]
+    fn a_new_observation_has_every_optional_member_absent() {
+        let observation = RunObservation::new(
+            RunId::new("run_new".to_owned()),
+            AdapterName::Local,
+            RunState::Ended,
+        );
+        assert_eq!(observation.run.as_str(), "run_new");
+        assert_eq!(observation.adapter, AdapterName::Local);
+        assert_eq!(observation.state, RunState::Ended);
+        assert_eq!(observation.inner, None);
+        assert_eq!(observation.declared_insecure, None);
+        assert_eq!(observation.exit, None);
+        assert_eq!(observation.limit, None);
+        assert_eq!(observation.memory_oom_kills, None);
+    }
+
+    /// Design 36 D4: of the limits true at a run's end the first of output stall, egress bytes,
+    /// memory, CPU time and wall time is named, whatever order the adapter found them in; none
+    /// true names none.
+    #[test]
+    fn of_several_limits_the_first_in_the_contract_order_is_named() {
+        let order = [
+            RunLimit::OutputStall,
+            RunLimit::EgressBytes,
+            RunLimit::Memory,
+            RunLimit::CpuTime,
+            RunLimit::WallTime,
+        ];
+        assert_eq!(named_limit(&[]), None);
+        for (index, first) in order.iter().enumerate() {
+            assert_eq!(named_limit(&[*first]), Some(*first));
+            for later in &order[index + 1..] {
+                assert_eq!(named_limit(&[*later, *first]), Some(*first), "{later:?}");
+                assert_eq!(named_limit(&[*first, *later]), Some(*first), "{later:?}");
+            }
+        }
+    }
+
+    /// Design 36 D1: the limit serializes as one snake-case word.
+    #[test]
+    fn a_limit_serializes_as_its_snake_case_name() {
+        for (limit, word) in [
+            (RunLimit::Memory, "memory"),
+            (RunLimit::CpuTime, "cpu_time"),
+            (RunLimit::WallTime, "wall_time"),
+            (RunLimit::EgressBytes, "egress_bytes"),
+            (RunLimit::OutputStall, "output_stall"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(limit).expect("serializes"),
+                serde_json::json!(word)
+            );
+        }
+    }
 
     /// The operator's label is the generated name, never a second spelling of it.
     #[test]
