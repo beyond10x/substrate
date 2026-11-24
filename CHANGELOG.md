@@ -88,15 +88,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   entry to its reference. A cargo configuration beneath the root holds only the top-level keys
   `alias` and `profile`, and an alias is a string or an array of strings with no `--config` or
   `--config=<value>` token; a `.cargo` directory holding both `config` and `config.toml`, a
-  link included, is refused. One named exception: the configuration of the fixture workspace
-  `crates/substrate-host/tests/fixtures/cargo-test` holds only `net` and `source`, while the
-  check tests on every run that the directory is a workspace of its own, that no root member is
-  it or lies beneath it, and that the root manifest names no path with `..`, no absolute path
-  and no glob. Outside the check are configuration outside the repository (a file above the
-  root, `CARGO_HOME`, `--config` on a command line or in a script or workflow, `CARGO_*`
-  variables), files beneath a directory named `target` or `.git`, and what `profile` sets.
-  Held by 28 cases of `xtask/src/packages.rs` on throwaway workspaces; on this tree the check
-  reads the two entries and the two cargo configurations and passes.
+  link included, is refused. The rule holds in every directory the walk enters, a fixture that
+  is a workspace of its own included: the macOS tests that build a fixture offline from its own
+  `vendor` write the source replacement into the copy they run. Outside the check are
+  configuration outside the repository (a file above the root, `CARGO_HOME`, `--config` on a
+  command line or in a script or workflow, `CARGO_*` variables), files beneath a directory
+  named `target` or `.git`, and what `profile` sets. Held by 25 cases of
+  `xtask/src/packages.rs`: 24 on throwaway workspaces, and one that holds that this tree's
+  fixture directory has no `.cargo`. On this tree the check reads the two entries and the one
+  cargo configuration, `.cargo/config.toml`, and passes.
 
 ## [0.26.0] — 2026-11-23
 

@@ -290,18 +290,14 @@ this way:
   takes no abbreviation of the flag in an alias). An alias may name any command, a built-in
   one included, and what an aliased command builds is outside this rule but for the
   configuration it passes. A `.cargo` directory holding both names, a link included, is
-  refused: cargo reads `config` alone. One named exception: the configuration of
-  `crates/substrate-host/tests/fixtures/cargo-test` holds only `net` and `source`, so it
-  may replace a source, while the check tests on every run that the directory's
-  `Cargo.toml` has a `[workspace]` table, that no root member is the directory or lies
-  beneath it, that the directory is not a member's `src` or beneath one, and that the root
-  manifest's `members`, `default-members` and `exclude` name no path with `..`, no absolute
-  path and no glob; where one of these fails, the file is held to `alias` and `profile` like
-  any other. Each refusal names the file and the key or entry, and what to do. Outside the
-  check are configuration outside the repository (a file above the root, `CARGO_HOME`,
-  `--config` on a command line or in a script or workflow, `CARGO_*` variables), files
-  beneath a directory named `target` or `.git`, and what `profile` sets, which changes how a
-  package is compiled, not where it comes from.
+  refused: cargo reads `config` alone. The rule holds in every directory the walk enters, a
+  fixture that is a workspace of its own included: a test that builds a fixture offline from
+  its own `vendor` writes the source replacement into the copy it runs. Each refusal names
+  the file and the key or entry, and what to do. Outside the check are configuration outside
+  the repository (a file above the root, `CARGO_HOME`, `--config` on a command line or in a
+  script or workflow, `CARGO_*` variables), files beneath a directory named `target` or
+  `.git`, and what `profile` sets, which changes how a package is compiled, not where it
+  comes from.
 - The cases below run the fetch of a create, so they fail with a `gix-pack` that does not hold
   the four counts, whichever version it is.
 - An update of `gix` takes the published source of the `gix-pack` it resolves as

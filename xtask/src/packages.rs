@@ -37,12 +37,11 @@ pub fn check(root: &Path) -> Result<Report> {
 
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; the host driver declares exactly the features git and kubernetes, both default; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature; Cargo.toml patches through [patch.crates-io] alone, with no other patch table and no [replace]; Cargo.lock resolves each of its {} entries, one entry to a name, lists none as unused and holds no second package of their names from any source; the {} cargo configurations beneath the root hold only the keys {}, with no alias passing {CONFIGURATION_FLAG}, and the one of {SOURCE_REPLACEMENT_EXCEPTION}, a workspace of its own, only the keys {}; not read: configuration outside the repository (a file above the root, CARGO_HOME, --config on a command line or in a script or workflow, CARGO_* variables) and files beneath a directory named target or .git; not judged: what profile sets, which changes how a package is compiled, not where it comes from",
+            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README; the host driver declares exactly the features git and kubernetes, both default; {manifests} manifests declare no Flux dependency, no beyond10x Git dependency and no non-dev edge enabling the Kubernetes client's fake feature; Cargo.toml patches through [patch.crates-io] alone, with no other patch table and no [replace]; Cargo.lock resolves each of its {} entries, one entry to a name, lists none as unused and holds no second package of their names from any source; the {} cargo configurations beneath the root hold only the keys {}, with no alias passing {CONFIGURATION_FLAG}; not read: configuration outside the repository (a file above the root, CARGO_HOME, --config on a command line or in a script or workflow, CARGO_* variables) and files beneath a directory named target or .git; not judged: what profile sets, which changes how a package is compiled, not where it comes from",
             packages.len(),
             patches.entries,
             patches.configurations,
-            ADMITTED_CONFIGURATION_KEYS.join(" and "),
-            ADMITTED_EXCEPTION_KEYS.join(" and ")
+            ADMITTED_CONFIGURATION_KEYS.join(" and ")
         )))
     } else {
         Ok(Report::failed(failures))
@@ -94,25 +93,13 @@ const CRATES_IO_SOURCE: &str = "crates-io";
 /// it resolves, because crates.io has checksums and a Git source has none.
 const CRATES_IO_SOURCE_KEYS: [&str; 4] = ["registry", "local-registry", "directory", "git"];
 
-/// The one directory beneath the root whose cargo configuration, `.cargo/config.toml`, may
-/// replace a source: the fixture workspace the Seatbelt cases run `cargo test` in
-/// (`crates/substrate-host/tests/seatbelt_adversary.rs`), which builds offline from its own
-/// `vendor`. The reason is that the directory is a workspace of its own, so cargo takes its
-/// `Cargo.toml` as the workspace of every command run there and its configuration applies to no
-/// build of this workspace. The check tests that reason on every run ([`a_workspace_of_its_own`]):
-/// where it does not hold, the file is held to [`ADMITTED_CONFIGURATION_KEYS`] like any other.
-/// Where it holds, the file holds only the keys of [`ADMITTED_EXCEPTION_KEYS`].
-const SOURCE_REPLACEMENT_EXCEPTION: &str = "crates/substrate-host/tests/fixtures/cargo-test";
-
 /// The top-level keys a cargo configuration beneath the root may hold, what the root's own
 /// `.cargo/config.toml` holds: `alias`, whose aliases [`check_aliases`] holds, and `profile`,
 /// which changes how a package is compiled, not where it comes from. Every other key is refused
-/// by its name.
+/// in every cargo configuration the walk finds ([`check_configuration`]). A fixture that needs a source
+/// replacement gets it written into the copy a test runs, as
+/// `crates/substrate-host/tests/seatbelt_adversary.rs` does.
 const ADMITTED_CONFIGURATION_KEYS: [&str; 2] = ["alias", "profile"];
-
-/// The top-level keys the configuration of [`SOURCE_REPLACEMENT_EXCEPTION`] may hold while
-/// the exception holds: what that file holds, `net` and `source`.
-const ADMITTED_EXCEPTION_KEYS: [&str; 2] = ["net", "source"];
 
 /// The flag by which a cargo command takes configuration, which an alias may not pass, as
 /// itself or as `--config=<value>`. Cargo takes no abbreviation of it in an alias: an offline
@@ -212,7 +199,7 @@ fn check_patches(root: &Path, failures: &mut Vec<String>) -> Result<PatchesRead>
         Err(error) if patches.is_empty() && error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).context("reading Cargo.lock"),
     };
-    let configurations = check_configurations(root, &manifest, failures)?;
+    let configurations = check_configurations(root, failures)?;
     let Some(lock) = lock else {
         return Ok(PatchesRead {
             entries: 0,
@@ -356,16 +343,12 @@ fn check_unused_patches(
 /// only the top-level keys of [`ADMITTED_CONFIGURATION_KEYS`] ([`check_configuration`]), and no `.cargo`
 /// directory holds both names of [`CONFIGURATION_NAMES`], a link included. Cargo reads the
 /// configuration of the directory it runs in and of every directory above it, so a file
-/// beneath the root applies to every command run beneath its directory. `manifest` is the
-/// root's `Cargo.toml`. Returns how many files were read.
+/// beneath the root applies to every command run beneath its directory. Returns how many
+/// files were read.
 ///
 /// The walk ([`cargo_directories`]) reads the working tree, which holds every file Git tracks
 /// that cargo could read. It runs no Git command, so an untracked file is read as well.
-fn check_configurations(
-    root: &Path,
-    manifest: &toml::Value,
-    failures: &mut Vec<String>,
-) -> Result<usize> {
+fn check_configurations(root: &Path, failures: &mut Vec<String>) -> Result<usize> {
     let mut read = 0;
     for directory in cargo_directories(root)? {
         let present: Vec<String> = CONFIGURATION_NAMES
@@ -385,31 +368,19 @@ fn check_configurations(
                 .with_context(|| format!("reading {file}"))?;
             let configuration: toml::Value =
                 toml::from_str(&text).with_context(|| format!("parsing {file}"))?;
-            let excepted = a_workspace_of_its_own(root, manifest, &file);
-            check_configuration(&file, &configuration, excepted, failures);
+            check_configuration(&file, &configuration, failures);
         }
     }
     Ok(read)
 }
 
 /// The cargo configuration `configuration`, read from `file`, holds only the top-level keys
-/// it is admitted: those of [`ADMITTED_EXCEPTION_KEYS`] where `excepted` (the file of
-/// [`SOURCE_REPLACEMENT_EXCEPTION`] while [`a_workspace_of_its_own`] holds), those of
-/// [`ADMITTED_CONFIGURATION_KEYS`] otherwise. Every other key is refused by its name in one
-/// form; `patch`, `paths` and a `source` that replaces one ([`source_replacements`]) are
-/// refused in forms of their own, which name their entries. The aliases of an admitted
-/// `alias` are held by [`check_aliases`].
-fn check_configuration(
-    file: &str,
-    configuration: &toml::Value,
-    excepted: bool,
-    failures: &mut Vec<String>,
-) {
-    let admitted: &[&str] = if excepted {
-        &ADMITTED_EXCEPTION_KEYS
-    } else {
-        &ADMITTED_CONFIGURATION_KEYS
-    };
+/// of [`ADMITTED_CONFIGURATION_KEYS`]. Every other key is refused by its name in one form;
+/// `patch`, `paths` and a `source` that replaces one ([`source_replacements`]) are refused in
+/// forms of their own, which name their entries. The aliases of `alias` are held by
+/// [`check_aliases`].
+fn check_configuration(file: &str, configuration: &toml::Value, failures: &mut Vec<String>) {
+    let admitted: &[&str] = &ADMITTED_CONFIGURATION_KEYS;
     for (key, value) in configuration.as_table().into_iter().flatten() {
         if admitted.contains(&key.as_str()) {
             if key == "alias" {
@@ -524,73 +495,6 @@ fn source_replacements(file: &str, configuration: &toml::Value) -> Vec<String> {
         }
     }
     refused
-}
-
-/// Whether `file` is the cargo configuration of [`SOURCE_REPLACEMENT_EXCEPTION`] and the reason
-/// for the exception holds. The check tests on every run that the directory's `Cargo.toml`
-/// has a `[workspace]` table; that the root workspace `manifest` names in `members`,
-/// `default-members` and `exclude` no path the comparison cannot place (one with a `..`
-/// component, an absolute one, a glob); that no member is the directory or lies beneath it;
-/// and that the directory is not a member's `src` and lies beneath none, a root `[package]`
-/// counting as the member at the root. Any other answer refuses the exception rather than
-/// placing the path.
-fn a_workspace_of_its_own(root: &Path, manifest: &toml::Value, file: &str) -> bool {
-    let directory = SOURCE_REPLACEMENT_EXCEPTION;
-    if file != format!("{directory}/.cargo/config.toml") {
-        return false;
-    }
-    let own = std::fs::read_to_string(root.join(directory).join("Cargo.toml"))
-        .ok()
-        .and_then(|text| toml::from_str::<toml::Value>(&text).ok());
-    if own
-        .as_ref()
-        .and_then(|own| own.get("workspace"))
-        .and_then(toml::Value::as_table)
-        .is_none()
-    {
-        return false;
-    }
-    let named = |key: &str| -> Vec<String> {
-        manifest
-            .get("workspace")
-            .and_then(|workspace| workspace.get(key))
-            .and_then(toml::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(toml::Value::as_str)
-            .map(|path| {
-                path.trim_start_matches("./")
-                    .trim_end_matches('/')
-                    .to_owned()
-            })
-            .collect()
-    };
-    let unplaced = |path: &String| {
-        path.starts_with('/')
-            || path.split('/').any(|component| component == "..")
-            || path.contains(['*', '?', '['])
-    };
-    let mut members = named("members");
-    if ["members", "default-members", "exclude"]
-        .into_iter()
-        .any(|key| named(key).iter().any(unplaced))
-    {
-        return false;
-    }
-    if manifest.get("package").is_some() {
-        members.push(String::new());
-    }
-    members.iter().all(|member| {
-        let source = if member.is_empty() {
-            "src".to_owned()
-        } else {
-            format!("{member}/src")
-        };
-        directory != member
-            && !member.starts_with(&format!("{directory}/"))
-            && directory != source
-            && !directory.starts_with(&format!("{source}/"))
-    })
 }
 
 /// Every `.cargo` directory beneath `root`, the root's own included, as a path relative to
@@ -2896,18 +2800,18 @@ mod tests {
         assert_eq!(report.failure_text(), "");
         assert!(
             report.summary().ends_with(
-                "Cargo.lock resolves each of its 1 entries, one entry to a name, lists none as unused and holds no second package of their names from any source; the 2 cargo configurations beneath the root hold only the keys alias and profile, with no alias passing --config, and the one of crates/substrate-host/tests/fixtures/cargo-test, a workspace of its own, only the keys net and source; not read: configuration outside the repository (a file above the root, CARGO_HOME, --config on a command line or in a script or workflow, CARGO_* variables) and files beneath a directory named target or .git; not judged: what profile sets, which changes how a package is compiled, not where it comes from"
+                "Cargo.lock resolves each of its 1 entries, one entry to a name, lists none as unused and holds no second package of their names from any source; the 2 cargo configurations beneath the root hold only the keys alias and profile, with no alias passing --config; not read: configuration outside the repository (a file above the root, CARGO_HOME, --config on a command line or in a script or workflow, CARGO_* variables) and files beneath a directory named target or .git; not judged: what profile sets, which changes how a package is compiled, not where it comes from"
             ),
             "{}",
             report.summary()
         );
     }
 
-    /// The directory of the fixture workspace that the source replacement exception names.
+    /// The directory of the fixture whose test runs build it offline from its own `vendor`.
     const FIXTURE_WORKSPACE: &str = "crates/substrate-host/tests/fixtures/cargo-test";
 
-    /// A source replacement of crates.io to a directory, as the fixture workspace's cargo
-    /// configuration writes it.
+    /// A source replacement of crates.io to a directory, as the tests that build the fixture
+    /// write it into the copy they run.
     const REPLACED_BY_A_DIRECTORY: &str = "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n";
 
     /// The refusal of `source.crates-io.replace-with` naming `vendored-sources` in `file`.
@@ -2924,18 +2828,6 @@ mod tests {
         let configuration = root.join(directory).join(".cargo");
         std::fs::create_dir_all(&configuration).expect("cargo configuration");
         std::fs::write(configuration.join("config.toml"), text).expect("cargo configuration");
-    }
-
-    /// Writes the fixture workspace's manifest, with a `[workspace]` table where `own` holds.
-    fn fixture_manifest(root: &Path, own: bool) {
-        let mut manifest =
-            "[package]\nname = \"seatbelt-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"
-                .to_owned();
-        if own {
-            manifest.push_str("\n[workspace]\n");
-        }
-        std::fs::write(root.join(FIXTURE_WORKSPACE).join("Cargo.toml"), manifest)
-            .expect("fixture manifest");
     }
 
     /// A source replacement in a cargo configuration replaces every package of that source
@@ -2993,76 +2885,92 @@ mod tests {
         );
     }
 
-    /// The fixture workspace's configuration replaces crates.io with its own `vendor`: its
-    /// directory is a workspace of its own, no member of the root's, so the configuration
-    /// applies to no build of this workspace and is accepted.
+    /// A cargo configuration in the fixture's directory holds only the admitted keys, as every
+    /// other does: the configuration the fixture's runs use, a source replacement and `net`, is
+    /// refused there by its keys, though the fixture's directory is a workspace of its own.
     #[test]
-    fn the_fixture_workspace_source_replacement_is_accepted() {
-        let directory = tempfile::tempdir().expect("temporary workspace");
-        configured(directory.path(), FIXTURE_WORKSPACE, REPLACED_BY_A_DIRECTORY);
-        fixture_manifest(directory.path(), true);
-
-        let report = check(directory.path()).expect("package check");
-        assert_eq!(report.failure_text(), "");
-    }
-
-    /// The exception holds only while the reason holds: without a `[workspace]` table in its
-    /// manifest the fixture's directory belongs to the root's workspace, and with the
-    /// directory listed as a member of the root's it is one, and either way the fixture's
-    /// configuration is refused like any other.
-    #[test]
-    fn the_fixture_source_replacement_is_refused_without_a_workspace_of_its_own() {
-        let refused = replacement_refused(&format!("{FIXTURE_WORKSPACE}/.cargo/config.toml"));
-
-        let directory = tempfile::tempdir().expect("temporary workspace");
-        configured(directory.path(), FIXTURE_WORKSPACE, REPLACED_BY_A_DIRECTORY);
-        fixture_manifest(directory.path(), false);
-        let report = check(directory.path()).expect("package check");
-        assert_eq!(report.failure_text(), refused);
-
-        let directory = tempfile::tempdir().expect("temporary workspace");
-        configured(directory.path(), FIXTURE_WORKSPACE, REPLACED_BY_A_DIRECTORY);
-        fixture_manifest(directory.path(), true);
-        let manifest = directory.path().join("Cargo.toml");
-        let text = std::fs::read_to_string(&manifest).expect("workspace manifest");
-        std::fs::write(
-            &manifest,
-            text.replacen(
-                "members = [",
-                &format!("members = [\"{FIXTURE_WORKSPACE}\", "),
-                1,
-            ),
-        )
-        .expect("workspace manifest");
-        let report = check(directory.path()).expect("package check");
-        assert!(
-            report.failures().contains(&refused),
-            "{}",
-            report.failure_text()
-        );
-    }
-
-    /// The exception covers source replacement alone: a `patch` table in the fixture
-    /// workspace's configuration is refused.
-    #[test]
-    fn a_patch_table_in_the_fixture_workspace_configuration_is_refused() {
+    fn a_source_replacement_and_net_in_the_fixture_directory_are_refused_like_any_other() {
+        let file = format!("{FIXTURE_WORKSPACE}/.cargo/config.toml");
         let directory = tempfile::tempdir().expect("temporary workspace");
         configured(
             directory.path(),
             FIXTURE_WORKSPACE,
-            &format!(
-                "{REPLACED_BY_A_DIRECTORY}\n[patch.crates-io]\nfoo = {{ path = \"vendor/foo\" }}\n"
-            ),
+            &format!("{REPLACED_BY_A_DIRECTORY}\n[net]\noffline = true\n"),
         );
-        fixture_manifest(directory.path(), true);
+        std::fs::write(
+            directory.path().join(FIXTURE_WORKSPACE).join("Cargo.toml"),
+            "[package]\nname = \"seatbelt-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        )
+        .expect("fixture manifest");
 
         let report = check(directory.path()).expect("package check");
         assert_eq!(
             report.failure_text(),
-            configuration_patch_refused(
-                &format!("{FIXTURE_WORKSPACE}/.cargo/config.toml"),
-                "patch.crates-io.foo"
-            )
+            [
+                key_refused(&file, "net", "alias, profile"),
+                replacement_refused(&file),
+            ]
+            .join("\n")
+        );
+    }
+
+    /// The fixture's directory in this repository holds no `.cargo`: the tests that build the
+    /// fixture write its cargo configuration into the copy they run.
+    #[test]
+    fn the_fixture_directory_of_this_repository_holds_no_cargo_configuration() {
+        let cargo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(FIXTURE_WORKSPACE)
+            .join(".cargo");
+        assert!(
+            cargo.parent().expect("fixture directory").is_dir(),
+            "control: {} is the fixture's directory",
+            cargo.display()
+        );
+        assert!(
+            !cargo.exists(),
+            "{} is there: write the fixture's cargo configuration into the copy a test runs",
+            cargo.display()
+        );
+    }
+
+    /// A source replacement beneath the fixture's directory is refused whatever the root's
+    /// members are. Cargo makes a path dependency of a member that lies beneath the root a
+    /// member of the root workspace without a `members` entry, and cargo run in such a package
+    /// beneath the fixture's directory reads the fixture's configuration and builds the root
+    /// workspace with it (shown with `cargo metadata --offline` on a probe workspace, root
+    /// members `["m"]`, `m` depending on `sub = { path = "../fx/sub" }`, `fx` a workspace of its
+    /// own excluding `sub` with a source replacement: run in `fx/sub`, `workspace_root` was the
+    /// root and `foo` came from `fx/vendor/foo`).
+    #[test]
+    fn a_source_replacement_beneath_the_fixture_is_refused_whatever_the_root_members_are() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let root = directory.path();
+        configured(root, FIXTURE_WORKSPACE, REPLACED_BY_A_DIRECTORY);
+        std::fs::write(
+            root.join(FIXTURE_WORKSPACE).join("Cargo.toml"),
+            "[package]\nname = \"seatbelt-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\nexclude = [\"sub\"]\n",
+        )
+        .expect("fixture manifest");
+        let package = root.join(FIXTURE_WORKSPACE).join("sub");
+        std::fs::create_dir_all(&package).expect("package directory");
+        std::fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"sub\"\nversion = \"0.1.0\"\npublish = false\n\n[dependencies]\nfoo = \"1\"\n",
+        )
+        .expect("package manifest");
+        let host = root.join("crates/substrate-host/Cargo.toml");
+        let mut text = std::fs::read_to_string(&host).expect("host manifest");
+        text.push_str("\n[dependencies]\nsub = { path = \"tests/fixtures/cargo-test/sub\" }\n");
+        std::fs::write(&host, text).expect("host manifest");
+
+        let report = check(root).expect("package check");
+        assert!(
+            report.failures().contains(&replacement_refused(&format!(
+                "{FIXTURE_WORKSPACE}/.cargo/config.toml"
+            ))),
+            "{}",
+            report.failure_text()
         );
     }
 
@@ -3266,74 +3174,6 @@ mod tests {
         }
     }
 
-    /// The fixture workspace's configuration holds only `source` and `net`, while the
-    /// exception holds: `include`, `alias` and `build` are refused by the general form, and
-    /// `paths` by its own.
-    #[test]
-    fn the_fixture_configuration_holds_only_source_and_net() {
-        let file = format!("{FIXTURE_WORKSPACE}/.cargo/config.toml");
-        for (text, refused) in [
-            (
-                "include = [\"x.toml\"]\n".to_owned(),
-                key_refused(&file, "include", "net, source"),
-            ),
-            (
-                "[alias]\nb = \"build\"\n".to_owned(),
-                key_refused(&file, "alias", "net, source"),
-            ),
-            (
-                "[build]\njobs = 1\n".to_owned(),
-                key_refused(&file, "build", "net, source"),
-            ),
-            (
-                "paths = [\"vendor/foo\"]\n".to_owned(),
-                format!(
-                    "{file}: paths overrides the packages at [vendor/foo], and only [patch.crates-io] in Cargo.toml carries a patch in this workspace: move each to [patch.crates-io] in Cargo.toml"
-                ),
-            ),
-        ] {
-            let directory = tempfile::tempdir().expect("temporary workspace");
-            configured(
-                directory.path(),
-                FIXTURE_WORKSPACE,
-                &format!("{text}\n{REPLACED_BY_A_DIRECTORY}\n[net]\noffline = true\n"),
-            );
-            fixture_manifest(directory.path(), true);
-
-            let report = check(directory.path()).expect("package check");
-            assert_eq!(report.failure_text(), refused, "{text}");
-        }
-    }
-
-    /// The exception is refused rather than placed where the root manifest names a path the
-    /// comparison cannot place: one with `..` in `members`, an absolute one in
-    /// `default-members` and one with `..` in `exclude`. The fixture's source replacement is
-    /// then refused like any other.
-    #[test]
-    fn a_workspace_path_the_exception_cannot_place_voids_it() {
-        let refused = replacement_refused(&format!("{FIXTURE_WORKSPACE}/.cargo/config.toml"));
-        for added in [
-            "members = [\"crates/../crates/substrate-host\", ",
-            "default-members = [\"/srv/elsewhere\"]\nmembers = [",
-            "exclude = [\"../elsewhere\"]\nmembers = [",
-        ] {
-            let directory = tempfile::tempdir().expect("temporary workspace");
-            configured(directory.path(), FIXTURE_WORKSPACE, REPLACED_BY_A_DIRECTORY);
-            fixture_manifest(directory.path(), true);
-            let manifest = directory.path().join("Cargo.toml");
-            let text = std::fs::read_to_string(&manifest).expect("workspace manifest");
-            std::fs::write(&manifest, text.replacen("members = [", added, 1))
-                .expect("workspace manifest");
-
-            let report = check(directory.path()).expect("package check");
-            assert!(
-                report.failures().contains(&refused),
-                "{added}: {}",
-                report.failure_text()
-            );
-        }
-    }
-
     /// Adversary pass 5. Cargo 1.97, the pinned toolchain, reads `include` in a cargo
     /// configuration on stable and applies the included file's tables, whatever its name and
     /// wherever it lies (shown with `cargo metadata --offline` on a probe workspace whose
@@ -3424,50 +3264,6 @@ mod tests {
                 .any(|failure| failure.starts_with(".cargo/config.toml: alias.b")),
             "an alias passing a source replacement inline passed: {:?}",
             report.failure_text()
-        );
-    }
-
-    /// Adversary pass 5. The exception's reason is that cargo reads the fixture's configuration
-    /// only in a command run beneath the fixture's directory, which builds the fixture's own
-    /// workspace. A member of the root workspace beneath that directory breaks it: cargo run in
-    /// the member reads the fixture's configuration and builds the root workspace with it (shown
-    /// with `cargo metadata --offline` on a probe workspace, root members `["fx/sub"]`, `fx` a
-    /// workspace of its own with `exclude = ["sub"]` and a source replacement in
-    /// `fx/.cargo/config.toml`: run in `fx/sub`, `workspace_root` was the root and `foo` came
-    /// from `fx/vendor/foo`; run at the root, `foo` was not found). The replacement is then
-    /// refused like any other.
-    #[test]
-    fn a_root_member_beneath_the_fixture_workspace_voids_the_exception() {
-        let directory = tempfile::tempdir().expect("temporary workspace");
-        configured(directory.path(), FIXTURE_WORKSPACE, REPLACED_BY_A_DIRECTORY);
-        std::fs::write(
-            directory.path().join(FIXTURE_WORKSPACE).join("Cargo.toml"),
-            "[package]\nname = \"seatbelt-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\nexclude = [\"sub\"]\n",
-        )
-        .expect("fixture manifest");
-        let member = directory.path().join(FIXTURE_WORKSPACE).join("sub");
-        std::fs::create_dir_all(&member).expect("member directory");
-        std::fs::write(
-            member.join("Cargo.toml"),
-            "[package]\nname = \"sub\"\nversion = \"0.1.0\"\npublish = false\n\n[dependencies]\nfoo = \"1\"\n",
-        )
-        .expect("member manifest");
-        let manifest = directory.path().join("Cargo.toml");
-        let text = std::fs::read_to_string(&manifest).expect("workspace manifest");
-        std::fs::write(
-            &manifest,
-            text.replacen(
-                "members = [",
-                &format!("members = [\"{FIXTURE_WORKSPACE}/sub\", "),
-                1,
-            ),
-        )
-        .expect("workspace manifest");
-
-        let report = check(directory.path()).expect("package check");
-        assert_eq!(
-            report.failure_text(),
-            replacement_refused(&format!("{FIXTURE_WORKSPACE}/.cargo/config.toml"))
         );
     }
 }

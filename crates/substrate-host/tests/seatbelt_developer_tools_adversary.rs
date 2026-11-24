@@ -20,6 +20,13 @@ use substrate_wire::ReadOnlyRoot;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
+/// The cargo configuration of a run's copy of the fixture `cargo-test`: its source replacement,
+/// which builds the copy offline from its own `vendor`. It is written into the copy a run gets
+/// and is no file of the repository, so no cargo configuration beneath the repository root
+/// replaces a source (`cargo xtask check-packages`). `cargo-test-c` has no dependency and gets
+/// none.
+const FIXTURE_CARGO_CONFIGURATION: &str = "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n\n[net]\noffline = true\n";
+
 fn macos() -> Arc<dyn ConfinementAdapter> {
     confinement::open(AdapterRequest::Macos(MacosRequest::default()))
         .expect("macos opens on a macOS host whose Seatbelt sandbox enforces")
@@ -95,6 +102,14 @@ async fn cargo_test(fixture: &str, developer: &Path, sealed: &[&str], filter: &s
         .expect("canonical")
         .join("fixture");
     copy_tree(&Path::new(FIXTURES).join(fixture), &workspace);
+    if fixture == "cargo-test" {
+        fs::create_dir_all(workspace.join(".cargo")).expect("cargo configuration directory");
+        fs::write(
+            workspace.join(".cargo/config.toml"),
+            FIXTURE_CARGO_CONFIGURATION,
+        )
+        .expect("cargo configuration");
+    }
     let toolchain = text(&sysroot()).to_owned();
     let profile = ConfinementProfile {
         workspace: Some(workspace.clone()),
