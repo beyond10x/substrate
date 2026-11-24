@@ -12,6 +12,9 @@ mod backend_recheck_conformance_tests;
 #[path = "../adversary_w20_u1_pass2_tests.rs"]
 mod adversary_w20_u1_pass2_tests;
 
+#[path = "create_bounds_tests.rs"]
+mod create_bounds_tests;
+
 use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
@@ -44,6 +47,10 @@ enum Mode {
     Redirect,
     TruncatedPack,
     DuplicateRef,
+    /// Protocol version 2, with a pack written by hand as the pack of every fetch, in place of
+    /// the one `git upload-pack` made ([`Server::start_with_pack`]). References are answered
+    /// from the repository as in [`Mode::V2`].
+    Pack,
 }
 
 struct Request {
@@ -72,6 +79,20 @@ impl Server {
         repository: &Path,
         mode: Mode,
         on_request: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
+        Self::start_serving(repository, mode, on_request, None)
+    }
+
+    /// A server in [`Mode::Pack`] that answers every fetch with `pack`.
+    fn start_with_pack(repository: &Path, pack: Vec<u8>) -> Self {
+        Self::start_serving(repository, Mode::Pack, None, Some(pack))
+    }
+
+    fn start_serving(
+        repository: &Path,
+        mode: Mode,
+        on_request: Option<Arc<dyn Fn() + Send + Sync>>,
+        pack: Option<Vec<u8>>,
     ) -> Self {
         let certificates = tempdir().expect("certificate directory");
         let identity = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
@@ -129,6 +150,7 @@ impl Server {
                         &mut stream,
                         &repository,
                         mode,
+                        pack.as_deref(),
                         &observed,
                         on_request.as_deref(),
                     )
@@ -176,6 +198,7 @@ fn serve_request(
     stream: &mut BufReader<StreamOwned<ServerConnection, TcpStream>>,
     repository: &Path,
     mode: Mode,
+    pack: Option<&[u8]>,
     observed: &Mutex<Vec<Request>>,
     on_request: Option<&(dyn Fn() + Send + Sync)>,
 ) -> std::io::Result<()> {
@@ -226,6 +249,13 @@ fn serve_request(
     {
         response.truncate(response.len() / 2);
     }
+    if let (Mode::Pack, Some(pack)) = (mode, pack)
+        && body
+            .windows(b"command=fetch".len())
+            .any(|part| part == b"command=fetch")
+    {
+        response = with_pack(&response, pack);
+    }
     observed.lock().expect("request records").push(Request {
         path,
         headers,
@@ -247,6 +277,36 @@ fn serve_request(
         stream.get_mut().write_all(&response)?;
     }
     stream.get_mut().flush()
+}
+
+/// The answer `response` to a fetch of protocol version 2 with `pack` as its pack: every
+/// section before the pack as `git upload-pack` wrote it, then `pack` on the first side band,
+/// then the end of the answer.
+fn with_pack(response: &[u8], pack: &[u8]) -> Vec<u8> {
+    // The most bytes of a pack one packet carries beside its length and its band.
+    const PACKET: usize = 65_000;
+    let mut at = 0;
+    loop {
+        let length = std::str::from_utf8(&response[at..at + 4])
+            .ok()
+            .and_then(|length| usize::from_str_radix(length, 16).ok())
+            .expect("packet length");
+        // A length under four is a mark between sections, and four bytes long itself.
+        let end = at + length.max(4);
+        let section = length >= 4 && &response[at + 4..end] == b"packfile\n";
+        at = end;
+        if section {
+            break;
+        }
+    }
+    let mut answer = response[..at].to_vec();
+    for packet in pack.chunks(PACKET) {
+        answer.extend(format!("{:04x}", packet.len() + 5).into_bytes());
+        answer.push(1);
+        answer.extend(packet);
+    }
+    answer.extend(b"0000");
+    answer
 }
 
 fn upload_pack(repository: &Path, discovery: bool, v2: bool, body: &[u8]) -> Vec<u8> {

@@ -342,6 +342,7 @@ fn finish_materialization(
         path_bytes = checked.path_bytes,
         longest_path = checked.longest,
         bytes = checked.bytes,
+        whole_read_bytes = checked.whole_read_bytes,
         "Git materialization stage completed"
     );
     let commit = repository.find_commit(expected).map_err(|_| missing())?;

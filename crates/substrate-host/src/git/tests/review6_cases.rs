@@ -603,9 +603,10 @@ fn directories(repository: &Repository, store: impl FnOnce(&[(Oid, Vec<u8>)])) -
 
 /// The indexing of a fetch admits a pack that stores a tree behind entries of another kind of
 /// bytes: it reads no object as what its type says. The pack here stores the tree of each
-/// directory behind eight entries of 1.1 MiB of zeros that it calls trees; indexed as the
-/// fetch indexes, under an allocation limit of 2 MiB, it is written with its index, the pass
-/// finds eight entries before each tree, and the check admits the baseline.
+/// directory behind eight entries of 1.1 MiB of zeros that it calls trees, each stored behind
+/// the one before it, so the indexing holds two of them at once; indexed as the fetch
+/// indexes, under an allocation limit of 4 MiB, it is written with its index, the pass finds
+/// eight entries before each tree, and the check admits the baseline.
 #[test]
 fn the_fetch_indexes_a_pack_that_stores_a_tree_behind_large_entries_and_the_check_admits_it() {
     let (workspace, commit) = repository_holding(|repository| {
@@ -614,7 +615,7 @@ fn the_fetch_indexes_a_pack_that_stores_a_tree_behind_large_entries_and_the_chec
             index_as_the_fetch(
                 &repository.path().join("objects/pack"),
                 &pack,
-                2 * 1024 * 1024,
+                4 * 1024 * 1024,
             )
             .expect("the fetch indexes the pack");
         })

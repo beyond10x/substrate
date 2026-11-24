@@ -23,6 +23,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   join the kernel refuses is `exec.spawn-failed`, and a `cgroup.procs` the driver cannot open is
   `exec.cgroup-write-failed`. The driver raises no `exec.process-tree-failed`. No route or
   schema changes.
+- The work and the memory of a Git create follow its byte limit, the requested storage limit,
+  else 2 GiB (design 21, § *The baseline store*). Four bounds are multiples of that limit: the
+  bytes that reading the commit, each tree and each file object of the baseline whole inflates
+  and makes, once for each place the baseline names the object (64 times the limit); the bytes
+  of the table of entries the fetch keeps while a pack arrives (the limit); the bytes of the
+  objects the fetch holds until the entries stored behind them have been made (the limit); and
+  the bytes the fetch inflates and makes when it computes the ids (64 times the limit). A create
+  over one of them is refused `workspace.git-storage-limit`, and the workspace is proved absent.
+  The first bound is held where the baseline is checked, before any file object is read. The
+  other three are held in `gix-pack`, which the repository carries as `vendor/gix-pack-0.74.2`:
+  the published crate with those three bounds, selected by `[patch.crates-io]`, and
+  `cargo xtask check-packages` refuses a `[patch.crates-io]` entry that `Cargo.lock` does not
+  resolve to. One case for each bound runs against a source served on loopback, with a pack
+  within every other bound and over that one, and states a bound on the memory of the test
+  process; a create of 1,000 files with 50 commits of history is served. No route, schema or
+  refusal code changes.
 
 ## [0.26.0] — 2026-11-23
 

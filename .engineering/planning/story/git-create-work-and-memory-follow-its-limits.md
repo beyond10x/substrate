@@ -25,7 +25,7 @@ scope:
   path: vendor
 - confidence: inferred
   path: xtask/src
-revision: 5
+revision: 6
 ---
 # Story: the work and the memory of a Git create follow its limits
 
@@ -85,6 +85,12 @@ workspace is proved absent, and the memory of the test process stays under a bou
 states (peak resident memory; for the table of entries peak address space). Each case runs
 under 5 s. The host crate's existing cases of a create pass against the copy unchanged, and an
 ordinary create of 1,000 files with 50 commits of history passes.
+
+After the release that carries this change: the bounds the copy adds are reported to the
+project that publishes `gix-pack`, with the offer of the patch, on the operator's go (operator
+decision of 2026-11-24, relayed by the operator's session: the report is sent only after the
+change is merged and released). The story is not closed before that report is sent or the
+operator drops it.
 
 ## Where the requirement comes from
 

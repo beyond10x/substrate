@@ -1806,8 +1806,6 @@ dependencies = [
 [[package]]
 name = "gix-pack"
 version = "0.74.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d199d515cbdcf05f531f3859be9771fc12acac7b7fe0f5b581b2c1ab1c3a61e"
 dependencies = [
  "clru",
  "crossbeam-deque",

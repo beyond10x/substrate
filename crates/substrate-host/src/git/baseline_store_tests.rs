@@ -24,7 +24,7 @@ use crate::{
     DispatchOutcome, Driver as _, DriverError, HostConfig, HostDriver, WorkspaceDestroyProgress,
 };
 
-fn input(server: &Server, commit: git2::Oid) -> WorkspaceCreateInput {
+pub(super) fn input(server: &Server, commit: git2::Oid) -> WorkspaceCreateInput {
     WorkspaceCreateInput {
         source: WorkspaceSource::Git(GitSourceEnvelope {
             git: server.source(commit),
@@ -35,18 +35,18 @@ fn input(server: &Server, commit: git2::Oid) -> WorkspaceCreateInput {
     }
 }
 
-fn driver(root: &Path, server: &Server) -> Arc<HostDriver> {
+pub(super) fn driver(root: &Path, server: &Server) -> Arc<HostDriver> {
     let mut config = HostConfig::minimum(root);
     config.git_sources.push(server.binding.clone());
     HostDriver::open(config).expect("host driver")
 }
 
-fn baselines(root: &Path) -> PathBuf {
+pub(super) fn baselines(root: &Path) -> PathBuf {
     root.join(".substrate-git-baselines")
 }
 
 /// The names in `directory`, sorted; none when it is absent.
-fn names(directory: &Path) -> Vec<String> {
+pub(super) fn names(directory: &Path) -> Vec<String> {
     let Ok(listing) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
@@ -64,7 +64,7 @@ fn names(directory: &Path) -> Vec<String> {
 }
 
 /// The staging trees of Git creates in the directory of all workspaces.
-fn staging_paths(root: &Path) -> Vec<PathBuf> {
+pub(super) fn staging_paths(root: &Path) -> Vec<PathBuf> {
     names(root)
         .into_iter()
         .filter(|name| name.starts_with(".substrate-git-") && name != ".substrate-git-baselines")
@@ -73,7 +73,7 @@ fn staging_paths(root: &Path) -> Vec<PathBuf> {
 }
 
 /// How a create that was not served ended, and its refusal.
-fn refused(outcome: DispatchOutcome<Workspace>) -> (&'static str, DriverError) {
+pub(super) fn refused(outcome: DispatchOutcome<Workspace>) -> (&'static str, DriverError) {
     match outcome {
         DispatchOutcome::Observed(_) => panic!("the create was served"),
         DispatchOutcome::NotDispatched(error) => ("not dispatched", error),
@@ -365,7 +365,7 @@ async fn a_create_refuses_a_root_name_outside_the_root_name_set_before_dispatch(
 }
 
 /// The workspace a create was served with.
-fn served(outcome: DispatchOutcome<Workspace>) -> Workspace {
+pub(super) fn served(outcome: DispatchOutcome<Workspace>) -> Workspace {
     match outcome {
         DispatchOutcome::Observed(workspace) => workspace,
         DispatchOutcome::NotDispatched(error)
@@ -514,7 +514,7 @@ fn repository_of_zeros(length: usize) -> (tempfile::TempDir, git2::Oid) {
 }
 
 /// The packs and pack indexes in the object store of the staging tree at `target`.
-fn fetched_packs(target: &Path) -> Vec<String> {
+pub(super) fn fetched_packs(target: &Path) -> Vec<String> {
     names(&target.join(".git/objects/pack"))
         .into_iter()
         .filter(|name| {
