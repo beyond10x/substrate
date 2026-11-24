@@ -595,6 +595,33 @@ impl Harness {
         workspace_create_outcome: Option<DriverErrorClass>,
         exec_start_outcome: Option<DriverErrorClass>,
     ) -> Self {
+        Self::open_stating(
+            config,
+            None,
+            snapshot_id,
+            write_limit,
+            fail_write,
+            signal_race,
+            blocked_start,
+            workspace_create_outcome,
+            exec_start_outcome,
+        )
+    }
+
+    /// [`Self::open_custom`] over a driver that publishes `machine_facts` from its construction
+    /// on, or its own facts when that is `None`.
+    #[allow(clippy::too_many_arguments)]
+    fn open_stating(
+        config: StoreConfig,
+        machine_facts: Option<substrate_wire::CapabilityFacts>,
+        snapshot_id: &str,
+        write_limit: Option<usize>,
+        fail_write: bool,
+        signal_race: bool,
+        blocked_start: bool,
+        workspace_create_outcome: Option<DriverErrorClass>,
+        exec_start_outcome: Option<DriverErrorClass>,
+    ) -> Self {
         let directory = tempfile::tempdir().expect("temporary harness");
         let store = Arc::new(
             Store::open_with_config(directory.path().join("state.db"), config)
@@ -620,7 +647,7 @@ impl Harness {
             exec_start_outcome,
             workspace_create_observed: AtomicBool::new(false),
             after_observed_hook: StdMutex::new(None),
-            machine_facts: StdMutex::new(None),
+            machine_facts: StdMutex::new(machine_facts),
             files: StdMutex::new(None),
         });
         let erased: Arc<dyn Driver> = driver.clone();
@@ -633,7 +660,8 @@ impl Harness {
                 snapshot_id: snapshot_id.to_owned(),
                 clock_available: Arc::clone(&clock_available),
             }),
-        );
+        )
+        .expect("application");
         Self {
             directory,
             app,
@@ -1073,9 +1101,12 @@ impl ProcessSupervisor for RefusingSupervisor {
 
 /// A daemon on the machine `vector`'s setup states, with the vector's workspace stored: its
 /// ledger reserves the figure the machine states, which is the least reserve a store opens with;
-/// its driver publishes the machine's facts; a `process-host` setup gives it a host-process driver
-/// and the daemon uid it names; a `host-path` setup is on the host as stated. Before it is
-/// returned, `GET /v1/machine` answers the reserve the vector's machine states.
+/// its driver publishes the machine's facts from its construction on; a `process-host` setup
+/// gives it a host-process driver and the daemon uid it names; a `host-path` setup is on the host
+/// as stated. Before it is returned, `GET /v1/machine` answers the reserve the vector's machine
+/// states. That read-back holds what the route publishes for a daemon whose driver and ledger
+/// state one figure; that no daemon is built whose two figures differ is held where an
+/// application is constructed (`App::with_delegated_context`, `ResultBoundMismatch`).
 async fn result_bound_daemon(name: &str, vector: &Value) -> (Harness, Arc<RefusingSupervisor>) {
     let machine = &vector["setup"][0];
     assert_eq!(machine["kind"], "machine", "{name}");
@@ -1088,11 +1119,12 @@ async fn result_bound_daemon(name: &str, vector: &Value) -> (Harness, Arc<Refusi
     );
     let shipped = StoreConfig::default();
     let around = shipped.operation_terminal_headroom_bytes - shipped.success_result_json_bytes();
-    let mut harness = Harness::open_custom(
+    let mut harness = Harness::open_stating(
         StoreConfig {
             operation_terminal_headroom_bytes: reserve + around,
             ..StoreConfig::default()
         },
+        Some(serde_json::from_value(machine["state"]["facts"].clone()).expect("declared facts")),
         "snap_vector",
         None,
         false,
@@ -1102,8 +1134,6 @@ async fn result_bound_daemon(name: &str, vector: &Value) -> (Harness, Arc<Refusi
         None,
     );
     assert_eq!(harness.store.success_result_json_bytes(), reserve, "{name}");
-    *harness.driver.machine_facts.lock().expect("machine facts") =
-        Some(serde_json::from_value(machine["state"]["facts"].clone()).expect("declared facts"));
     seed_workspace(&harness.store);
     let supervisor = Arc::new(RefusingSupervisor::default());
     for setup in vector["setup"].as_array().expect("setup").iter().skip(1) {
@@ -1337,11 +1367,33 @@ async fn result_unrecorded_vector_reads_its_row_exactly() {
     assert_eq!(harness.driver.dispatch_count.load(Ordering::SeqCst), 0);
 }
 
+/// Each `0.28.0` result-bound request exceeds the 383 bytes its machine states by the margin the
+/// change publishes (23,946; 23,946; 25,240; 260; 144 bytes, in `RESULT_BOUND_VECTORS` order),
+/// counted by the width the daemon decides with: a session start by the wider of its exec and the
+/// session record (`sessions.rs`), every other kind by the width function `widest_result` names.
+#[test]
+fn result_bound_margins_are_the_published_ones_by_the_daemons_rule() {
+    let mut margins = Vec::new();
+    for name in RESULT_BOUND_VECTORS {
+        let vector = bundle_vector("0.28.0", "http", name);
+        let mut widest = widest_result(name, &vector);
+        if vector["action"]["operation"] == "session.start" {
+            widest = widest
+                .max(u64::try_from(substrate_wire::PipeSession::widest_json_bytes()).expect("u64"));
+        }
+        margins.push(widest - stated_reserve(name, &vector));
+    }
+    assert_eq!(margins, [23_946, 23_946, 25_240, 260, 144]);
+}
+
 /// A `0.28.0` result-bound vector runs on the machine its setup states (ADR 0053 decisions 4 and
 /// 11): on the daemon that executes it, `GET /v1/machine` answers the setup's
 /// `operation.result-max-json-bytes`, so the figure the vector's machine publishes is the figure
 /// the daemon decides the vector's request against: the reserve of its ledger, the least a store
-/// opens with (383 bytes, which `cargo xtask check-bundle 0.28.0` holds each vector to).
+/// opens with (383 bytes, which `cargo xtask check-bundle 0.28.0` holds each vector to). The
+/// daemon's driver and ledger state that one figure here; that a daemon whose two figures differ
+/// is never constructed is held by `no_app_publishes_a_figure_its_ledger_does_not_decide_against`
+/// (`tests/http/result_bound.rs`) and the runtime's own case.
 #[tokio::test(flavor = "multi_thread")]
 async fn result_bound_vectors_run_on_the_machine_their_setup_states() {
     const FACT: &str = RESULT_BOUND_FACT;

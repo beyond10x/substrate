@@ -563,7 +563,8 @@ impl Harness {
         );
         let driver =
             PipeFixtureDriver::with_terminals(&directory.path().join("workspaces"), terminals);
-        let app = App::new(store, Arc::clone(&driver) as Arc<dyn Driver>, DEPLOYMENT);
+        let app = App::new(store, Arc::clone(&driver) as Arc<dyn Driver>, DEPLOYMENT)
+            .expect("application");
         let server = TestServer::spawn(Arc::clone(&app)).await;
         let containment = containment_task.then(|| ContainmentTask::spawn(Arc::clone(&app)));
         Self {
@@ -1360,7 +1361,7 @@ async fn capability_inspection_refuses_without_delegated_confinement() {
     );
     let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
         .expect("portable host driver");
-    let app = App::new(store, driver, "dep_pipe_refusal");
+    let app = App::new(store, driver, "dep_pipe_refusal").expect("application");
     let request = Request::builder()
         .method(Method::GET)
         .uri("/v1/sessions")

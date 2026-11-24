@@ -12,7 +12,7 @@ mod tls;
 
 pub use app::{
     App, Authority, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity, PrivateHostPaths,
-    SystemAuthority, router,
+    ResultBoundMismatch, SystemAuthority, router,
 };
 pub use backend_ledger::{StoreBackendLedger, UNSETTLED_PAGE, operation_digest};
 pub use delegation::{ContextRefusal, DelegatedContextPolicy, TrustedKey, VerifiedContext};

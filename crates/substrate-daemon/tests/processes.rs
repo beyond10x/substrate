@@ -142,12 +142,24 @@ impl Harness {
         let workspaces = directory.path().join("workspaces");
         std::fs::create_dir_all(&workspaces).expect("workspace root");
         let driver = HostDriver::open(HostConfig::minimum(workspaces)).expect("host driver");
+        Self::app_over(driver, directory, store, authority, cgroup)
+    }
+
+    /// [`Self::app`] over `driver`.
+    fn app_over(
+        driver: Arc<dyn substrate_host::Driver>,
+        directory: &TempDir,
+        store: &Arc<Store>,
+        authority: &Arc<MovableAuthority>,
+        cgroup: Option<&Path>,
+    ) -> Arc<App> {
         let mut app = App::with_authority(
             Arc::clone(store),
             driver,
             "dep_processes",
             Arc::clone(authority) as Arc<dyn Authority>,
-        );
+        )
+        .expect("application");
         let state = directory.path().join("state.processes");
         let supervisor = cgroup.map(|root| {
             HostProcessSupervisor::open(Some(root), &state)

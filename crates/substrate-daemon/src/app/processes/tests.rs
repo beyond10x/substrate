@@ -20,7 +20,7 @@ fn app(directory: &tempfile::TempDir) -> Arc<App> {
     let store = Arc::new(Store::open(":memory:").expect("state store"));
     let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
         .expect("host driver");
-    App::new(store, driver, "dep_process_posture")
+    App::new(store, driver, "dep_process_posture").expect("application")
 }
 
 async fn call(

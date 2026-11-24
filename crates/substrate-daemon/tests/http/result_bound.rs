@@ -15,7 +15,7 @@ use axum::http::{Method, StatusCode};
 use chrono::Utc;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use substrate_daemon::App;
+use substrate_daemon::{App, ResultBoundMismatch};
 use substrate_host::{
     DispatchOutcome, Driver, DriverError, ExecObservation, HostConfig, HostDriver,
     WorkspaceDestroyProgress,
@@ -386,7 +386,8 @@ async fn harness_with(
         Arc::clone(&store),
         Arc::clone(&driver) as Arc<dyn Driver>,
         "dep_http_test",
-    );
+    )
+    .expect("application");
     let harness = Harness {
         directory,
         app,
@@ -700,7 +701,10 @@ async fn a_start_at_the_bound_completes_and_every_later_mutation_of_it_completes
 /// The fact a daemon publishes, `operation.result-max-json-bytes`, is the reserve its ledger
 /// decides against (ADR 0053 decision 4): with the reserve lowered to an exec start's widest
 /// result the machine states that figure and the start is dispatched; one byte lower, the machine
-/// states the lower figure and the same start is refused before dispatch.
+/// states the lower figure and the same start is refused before dispatch. Each daemon here is
+/// built over a driver that states its ledger's reserve, so this case holds the decision against
+/// the published figure; that no daemon is built over a driver stating another figure is held
+/// by `no_app_publishes_a_figure_its_ledger_does_not_decide_against`.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_published_result_bound_is_the_reserve_the_daemon_decides_against() {
     let width = exec_width(&exec_input(&minted_workspace_id()));
@@ -771,7 +775,11 @@ async fn a_daemon_over_the_shipped_reserve_publishes_the_wire_constant() {
 /// What the daemon publishes is what its snapshot digest covers (ADR 0053 decision 4, amendment
 /// of 2026-11-24): over a lowered reserve, the digest recomputed from the published machine alone
 /// is the published digest, the published fact is the reserve, and a start that names that digest
-/// is admitted under it and dispatched.
+/// is admitted under it and dispatched. The driver states the ledger's reserve, as the driver of
+/// every constructed daemon does, so this case holds that the route publishes what the driver
+/// digested; a route that set the fact to the ledger's figure would publish the same bytes over
+/// such a pair. That no daemon is built over a pair stating two figures is held by
+/// `no_app_publishes_a_figure_its_ledger_does_not_decide_against`.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_published_snapshot_digest_covers_the_published_result_bound() {
     let width = exec_width(&exec_input(&minted_workspace_id()));
@@ -1069,5 +1077,81 @@ async fn a_driver_answer_over_a_member_bound_ends_the_row_terminal_and_cuts_noth
         driver.starts.load(Ordering::SeqCst),
         1,
         "a replay starts nothing"
+    );
+}
+
+/// No application publishes a figure its ledger does not decide against (ADR 0053 decision 4 and
+/// its amendment of 2026-11-24, item 2): the public constructors refuse a driver whose snapshot
+/// states another `operation.result-max-json-bytes` than the ledger reserves, with both figures
+/// named, so no start within a published figure can be refused `operation.result-limit`
+/// (decision 5). The driver here states the wire constant, as the host and namespace drivers do;
+/// the ledger reserves one byte less than a start's widest exec, under the constant. Over a
+/// driver that states the ledger's reserve, the application is constructed and publishes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_app_publishes_a_figure_its_ledger_does_not_decide_against() {
+    let width = exec_width(&exec_input(&minted_workspace_id()));
+    let reserve = width - 1;
+    let directory = tempfile::tempdir().expect("temporary harness");
+    let store = Arc::new(
+        Store::open_with_config(
+            directory.path().join("state.db"),
+            StoreConfig {
+                operation_terminal_headroom_bytes: reserve + AROUND_A_RESULT,
+                ..StoreConfig::default()
+            },
+        )
+        .expect("state store"),
+    );
+    assert_eq!(store.success_result_json_bytes(), reserve);
+    let shipped = substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES;
+    let constant = CountingDriver::open(&directory.path().join("workspaces"), None, true, shipped);
+    let Err(refused) = App::new(
+        Arc::clone(&store),
+        Arc::clone(&constant) as Arc<dyn Driver>,
+        "dep_http_test",
+    ) else {
+        panic!("an application over a snapshot stating {shipped} and a ledger reserving {reserve}");
+    };
+    assert_eq!(
+        refused,
+        ResultBoundMismatch {
+            published: shipped,
+            reserved: reserve
+        }
+    );
+    assert!(
+        refused.to_string().contains(&format!(
+            "operation.result-max-json-bytes {shipped}, and the ledger reserves {reserve}"
+        )),
+        "{refused}"
+    );
+    assert_eq!(constant.starts.load(Ordering::SeqCst), 0);
+
+    let stating = CountingDriver::open(&directory.path().join("stated"), None, true, reserve);
+    let app = App::new(
+        Arc::clone(&store),
+        Arc::clone(&stating) as Arc<dyn Driver>,
+        "dep_http_test",
+    )
+    .expect("an application over a snapshot stating its ledger's reserve");
+    let harness = Harness {
+        directory,
+        app,
+        store,
+    };
+    let (status, machine) = harness
+        .call(
+            "local:1000",
+            Method::GET,
+            "/v1/machine",
+            "req_constructed_machine",
+            axum::body::Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{machine}");
+    assert_eq!(
+        machine["result"]["facts"]["operation.result-max-json-bytes"],
+        json!(reserve),
+        "the published figure is the figure the ledger decides against"
     );
 }

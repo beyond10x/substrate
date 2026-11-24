@@ -5,20 +5,164 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::http::{Method, StatusCode};
 use chrono::Utc;
 use serde_json::{Value, json};
+use substrate_host::{
+    DispatchOutcome, Driver, DriverError, ExecObservation, HostConfig, HostDriver,
+    WorkspaceDestroyProgress,
+};
 use substrate_store::{
     HOST_PROCESS_RENEW_KIND, HOST_PROCESS_START_KIND, HOST_PROCESS_STOP_KIND,
     HostProcessLeaseRequest, HostProcessLimits, HostProcessStartReservation, NewHostProcess,
     NewOperation, Scope, Store, StoreConfig,
 };
-use substrate_wire::{ProcessOwner, ProcessRecord};
+use substrate_wire::{
+    CapabilitySnapshot, ExecOutputQuery, ExecSignalInput, ExecStartInput, FileAbsence,
+    FileObservation, FileReadQuery, FileReadResult, LeaseObservation, OutputSlice, ProcessOwner,
+    ProcessRecord, Workspace, WorkspaceAbsence, WorkspaceCreateInput,
+};
 
 use super::{FakeSupervisor, Harness, MovableAuthority, SUBJECT, input, text, with};
 
 /// The bytes a terminal success adds around its result (`StoreConfig::success_result_json_bytes`).
 const AROUND_A_RESULT: u64 = 35 + 8 + 28;
+
+/// The host driver, whose snapshot states `result_bytes` as `operation.result-max-json-bytes`:
+/// a daemon is constructed only over a snapshot that states its ledger's reserve (ADR 0053
+/// decision 4, amendment of 2026-11-24), and these cases lower that reserve.
+struct StatingDriver {
+    host: Arc<HostDriver>,
+    result_bytes: u64,
+}
+
+#[async_trait]
+impl Driver for StatingDriver {
+    fn machine(&self) -> CapabilitySnapshot {
+        let mut machine = self.host.machine();
+        machine.facts.operation_result_max_json_bytes = self.result_bytes;
+        machine
+    }
+
+    async fn shutdown(&self) -> Result<(), DriverError> {
+        self.host.shutdown().await
+    }
+
+    fn workspace_root_identity(&self, id: &str) -> Result<String, DriverError> {
+        self.host.workspace_root_identity(id)
+    }
+
+    async fn create_workspace(
+        &self,
+        id: &str,
+        root_name: &str,
+        input: &WorkspaceCreateInput,
+    ) -> DispatchOutcome<Workspace> {
+        self.host.create_workspace(id, root_name, input).await
+    }
+
+    async fn observe_workspace(
+        &self,
+        id: &str,
+        root_name: &str,
+        previous: &Workspace,
+    ) -> Result<Workspace, DriverError> {
+        self.host.observe_workspace(id, root_name, previous).await
+    }
+
+    async fn read_workspace_path(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        query: &FileReadQuery,
+    ) -> Result<substrate_host::Listed<FileReadResult>, DriverError> {
+        self.host
+            .read_workspace_path(workspace_id, root_name, path, query)
+            .await
+    }
+
+    async fn write_workspace_file(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        content: &[u8],
+    ) -> Result<FileObservation, DriverError> {
+        self.host
+            .write_workspace_file(workspace_id, root_name, path, content)
+            .await
+    }
+
+    async fn delete_workspace_file(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+    ) -> Result<FileAbsence, DriverError> {
+        self.host
+            .delete_workspace_file(workspace_id, root_name, path)
+            .await
+    }
+
+    async fn destroy_workspace(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+    ) -> Result<WorkspaceDestroyProgress, DriverError> {
+        self.host.destroy_workspace(workspace_id, root_name).await
+    }
+
+    async fn forget_workspace(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+    ) -> Result<WorkspaceAbsence, DriverError> {
+        self.host.forget_workspace(workspace_id, root_name).await
+    }
+
+    async fn start_exec(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        input: &ExecStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        self.host.start_exec(id, workspace_root_name, input).await
+    }
+
+    async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError> {
+        self.host.observe_exec(id).await
+    }
+
+    async fn output(&self, id: &str, query: &ExecOutputQuery) -> Result<OutputSlice, DriverError> {
+        self.host.output(id, query).await
+    }
+
+    async fn signal(
+        &self,
+        id: &str,
+        input: &ExecSignalInput,
+    ) -> Result<ExecObservation, DriverError> {
+        self.host.signal(id, input).await
+    }
+
+    fn completed_execs(&self) -> Vec<ExecObservation> {
+        self.host.completed_execs()
+    }
+
+    fn set_exec_lease(&self, id: &str, lease: Option<LeaseObservation>) {
+        self.host.set_exec_lease(id, lease);
+    }
+
+    fn acknowledge_exec(&self, persisted: &ExecObservation) {
+        self.host.acknowledge_exec(persisted);
+    }
+
+    fn discard_superseded_exec(&self, id: &str) {
+        self.host.discard_superseded_exec(id);
+    }
+}
 
 impl Harness {
     /// A daemon whose host-process driver is [`FakeSupervisor`] and whose ledger reserves what
@@ -40,7 +184,13 @@ impl Harness {
         );
         assert_eq!(store.success_result_json_bytes(), result_bytes);
         let authority = Arc::new(MovableAuthority::default());
-        let mut app = Self::app(&directory, &store, &authority, None);
+        let workspaces = directory.path().join("workspaces");
+        std::fs::create_dir_all(&workspaces).expect("workspace root");
+        let driver = Arc::new(StatingDriver {
+            host: HostDriver::open(HostConfig::minimum(workspaces)).expect("host driver"),
+            result_bytes,
+        });
+        let mut app = Self::app_over(driver, &directory, &store, &authority, None);
         let fake = Arc::new(FakeSupervisor::default());
         Arc::get_mut(&mut app)
             .expect("unshared application")

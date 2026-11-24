@@ -49,7 +49,8 @@ impl Harness {
             .expect("host driver");
         let snapshot = driver.machine().snapshot;
         assert_ne!(snapshot, STALE);
-        let app = App::new(store, driver as Arc<dyn Driver>, "dep_adversary_w1031");
+        let app =
+            App::new(store, driver as Arc<dyn Driver>, "dep_adversary_w1031").expect("application");
         Self {
             _directory: directory,
             app,

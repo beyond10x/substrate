@@ -280,7 +280,8 @@ impl Harness {
             Arc::clone(&store),
             Arc::clone(&driver) as Arc<dyn Driver>,
             "dep_rorootadv2",
-        );
+        )
+        .expect("application");
         Self {
             _directory: directory,
             driver,

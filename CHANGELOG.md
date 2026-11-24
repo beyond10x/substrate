@@ -44,8 +44,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   that code. Every capability snapshot states the reserve as `operation.result-max-json-bytes`,
   the figure the daemon decides against: `OPERATION_RESULT_MAX_JSON_BYTES` (524,217) for the
   ledger as shipped (ADR 0053 decisions 1 to 5 and 10). The daemon publishes the driver's
-  snapshot unchanged, so its digest covers that fact, and does not start when the snapshot
-  states another figure than its ledger reserves (ADR 0053, amendment of 2026-11-24).
+  snapshot unchanged, so its digest covers that fact. No application is constructed over a
+  snapshot that states another figure than its ledger reserves: `App::new`,
+  `App::with_authority` and `App::with_delegated_context` return `ResultBoundMismatch` naming
+  both figures, and the daemon does not start with it (ADR 0053, amendment of 2026-11-24).
 
 ### Changed
 

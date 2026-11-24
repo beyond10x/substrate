@@ -760,8 +760,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         Arc::new(SystemAuthority),
         delegated_context,
         private_host_paths,
-    );
-    require_one_result_bound(&app.driver.machine().facts, &app.store)?;
+    )?;
     Arc::get_mut(&mut app)
         .context("configure capture policy before sharing the application")?
         .allow_unrecorded_sessions = config.allow_unrecorded_sessions;
@@ -973,25 +972,6 @@ fn check_kubernetes_selection(config: &DaemonConfig) -> anyhow::Result<()> {
         bail!(
             "config.driver-conflict: {field} is a host driver setting, and the kubernetes driver \
              reads none"
-        );
-    }
-    Ok(())
-}
-
-/// The snapshot a daemon publishes states the reserve its ledger decides every start against
-/// (ADR 0053 decision 4, amendment of 2026-11-24). The daemon publishes the driver's snapshot as
-/// the driver digested it, so the two are one figure before it serves: a daemon whose driver states
-/// another figure than its store reserves does not start, and the error names both.
-fn require_one_result_bound(
-    facts: &substrate_wire::CapabilityFacts,
-    store: &Store,
-) -> anyhow::Result<()> {
-    let published = facts.operation_result_max_json_bytes;
-    let reserved = store.success_result_json_bytes();
-    if published != reserved {
-        bail!(
-            "the driver's capability snapshot states operation.result-max-json-bytes {published}, \
-             and the ledger reserves {reserved} bytes for a success result"
         );
     }
     Ok(())
@@ -2250,35 +2230,56 @@ impl Drop for MaintenanceTasks {
 #[cfg(test)]
 mod tests {
     /// A daemon serves only a driver snapshot that states the reserve its ledger decides every
-    /// start against (ADR 0053 decision 4, amendment of 2026-11-24): the host driver's probe and a
-    /// store as shipped state one figure, the wire constant, and a snapshot that states another
-    /// figure than the ledger's is refused with both named.
+    /// start against (ADR 0053 decision 4, amendment of 2026-11-24): over the host driver's probe,
+    /// which states the wire constant, an application is constructed with a ledger as shipped,
+    /// and is not with a ledger one byte under or one byte over it. Each refusal names both
+    /// figures, as `serve` reports it.
     #[test]
     fn a_daemon_serves_only_a_snapshot_that_states_its_ledger_reserve() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let driver = super::HostDriver::open(super::HostConfig::minimum(
-            directory.path().join("workspaces"),
-        ))
-        .expect("host driver");
-        let store = super::Store::open(":memory:").expect("state store");
-        let shipped = substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES;
-        assert_eq!(store.success_result_json_bytes(), shipped);
-        super::require_one_result_bound(
-            &substrate_host::Driver::machine(driver.as_ref()).facts,
-            &store,
+        let driver: std::sync::Arc<dyn substrate_host::Driver> = super::HostDriver::open(
+            super::HostConfig::minimum(directory.path().join("workspaces")),
         )
-        .expect("the shipped driver and store state one figure");
-        let mut lowered = substrate_host::Driver::machine(driver.as_ref()).facts;
-        lowered.operation_result_max_json_bytes = shipped - 1;
-        let refused = super::require_one_result_bound(&lowered, &store)
-            .expect_err("a snapshot stating another figure is refused");
-        assert!(
-            refused.to_string().contains(&format!(
-                "operation.result-max-json-bytes {}, and the ledger reserves {shipped}",
-                shipped - 1
-            )),
-            "{refused}"
-        );
+        .expect("host driver");
+        let shipped = substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES;
+        let headroom = substrate_store::StoreConfig::default().operation_terminal_headroom_bytes;
+        for (index, reserved) in [shipped, shipped - 1, shipped + 1].into_iter().enumerate() {
+            let store = std::sync::Arc::new(
+                super::Store::open_with_config(
+                    directory.path().join(format!("state-{index}.db")),
+                    substrate_store::StoreConfig {
+                        operation_terminal_headroom_bytes: headroom + reserved - shipped,
+                        ..substrate_store::StoreConfig::default()
+                    },
+                )
+                .expect("state store"),
+            );
+            assert_eq!(store.success_result_json_bytes(), reserved);
+            let built = super::App::new(store, std::sync::Arc::clone(&driver), "dep_runtime");
+            if reserved == shipped {
+                built.expect("the shipped driver and ledger state one figure");
+                continue;
+            }
+            let Err(refused) = built else {
+                panic!(
+                    "a ledger reserving {reserved} under a snapshot stating {shipped} is refused"
+                );
+            };
+            assert_eq!(
+                refused,
+                crate::ResultBoundMismatch {
+                    published: shipped,
+                    reserved
+                }
+            );
+            let reported = anyhow::Error::from(refused).to_string();
+            assert!(
+                reported.contains(&format!(
+                    "operation.result-max-json-bytes {shipped}, and the ledger reserves {reserved}"
+                )),
+                "{reported}"
+            );
+        }
     }
 
     fn aperture(name: &str, port: u16) -> EgressAperture {

@@ -349,7 +349,8 @@ impl Harness {
             store,
             Arc::clone(&driver) as Arc<dyn Driver>,
             "dep_gitroots",
-        );
+        )
+        .expect("application");
         Self {
             directory,
             driver,

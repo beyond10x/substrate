@@ -258,8 +258,9 @@ async fn machine_get(
         return schema_invalid(&request_id, None, "query");
     }
     // The snapshot as the driver digested it: no fact changes here, so its digest covers every
-    // fact a client reads. The daemon serves only a snapshot whose result bound is its ledger's
-    // reserve (`runtime::require_one_result_bound`, ADR 0053 decision 4, amendment of 2026-11-24).
+    // fact a client reads. No application is constructed whose driver states another result
+    // bound than its ledger reserves (`App::with_delegated_context`, ADR 0053 decision 4,
+    // amendment of 2026-11-24).
     success(
         StatusCode::OK,
         Success::observed(request_id, app.driver.machine()),

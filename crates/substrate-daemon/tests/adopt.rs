@@ -271,7 +271,8 @@ impl Harness {
             execs: Mutex::new(HashMap::new()),
             started_in: Mutex::new(Vec::new()),
         });
-        let app = App::new(store, Arc::clone(&driver) as Arc<dyn Driver>, "dep_adopt");
+        let app = App::new(store, Arc::clone(&driver) as Arc<dyn Driver>, "dep_adopt")
+            .expect("application");
         Self {
             directory,
             app,

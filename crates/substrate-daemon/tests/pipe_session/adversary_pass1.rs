@@ -215,7 +215,8 @@ async fn adversary_a_child_that_exits_before_the_start_commits_is_not_left_ready
         armed: AtomicBool::new(false),
         retired: Mutex::new(HashSet::new()),
     });
-    let app = App::new(store, Arc::clone(&driver) as Arc<dyn Driver>, DEPLOYMENT);
+    let app =
+        App::new(store, Arc::clone(&driver) as Arc<dyn Driver>, DEPLOYMENT).expect("application");
     driver
         .app
         .set(Arc::downgrade(&app))

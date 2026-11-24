@@ -396,12 +396,19 @@ snapshot's digest covers and the figure a start is decided against are one.
    `crates/substrate-daemon/tests/http/result_bound.rs`: over a lowered reserve, the digest
    recomputed from the published machine alone is the published one, and a start naming it is
    admitted and dispatched.
-2. **The daemon serves only a snapshot that states its store's figure.** At startup it compares
-   the snapshot's `operation.result-max-json-bytes` with `Store::success_result_json_bytes`, the
-   figure decision 4's last bullet decides every start against, and does not serve when the two
-   differ, naming both (`require_one_result_bound` in `crates/substrate-daemon/src/runtime.rs`,
-   case `a_daemon_serves_only_a_snapshot_that_states_its_ledger_reserve`). So the figure a daemon
-   publishes is its store's figure.
+2. **No application is constructed over a snapshot that states another figure than its
+   store.** Each public constructor of the daemon's application (`App::new`,
+   `App::with_authority`, `App::with_delegated_context`) compares the driver snapshot's
+   `operation.result-max-json-bytes` with `Store::success_result_json_bytes`, the figure decision
+   4's last bullet decides every start against, and returns `ResultBoundMismatch` naming both
+   when the two differ (`crates/substrate-daemon/src/app/service.rs`). The daemon's `serve` builds
+   its application this way and does not start with that error. Held by
+   `a_daemon_serves_only_a_snapshot_that_states_its_ledger_reserve` in
+   `crates/substrate-daemon/src/runtime.rs` (a ledger one byte under and one byte over the host
+   driver's figure, each refused) and by
+   `no_app_publishes_a_figure_its_ledger_does_not_decide_against` in
+   `crates/substrate-daemon/tests/http/result_bound.rs` (an application built from the library).
+   So the figure a daemon publishes is its store's figure.
 3. **As shipped the figures are one, `OPERATION_RESULT_MAX_JSON_BYTES`.** `CapabilityFacts::default`
    and the host driver's probe state the constant, the namespace driver's snapshot takes the
    default, and the store's default reserve is the constant
