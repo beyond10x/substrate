@@ -10203,8 +10203,7 @@ mod tests {
     #[test]
     fn every_probe_sandbox_carries_the_user_namespace_posture() {
         let directory = tempfile::tempdir().expect("a scratch root");
-        // Each probe records through a backend of its own and runs on a thread of its own: a
-        // probe whose sandbox refuses waits out its own deadline, and the three deadlines overlap.
+        // Each probe records through a backend of its own and runs on a thread of its own.
         let recorder = |name: &str| {
             let scratch = directory.path().join(name);
             std::fs::create_dir(&scratch).expect("a scratch directory of the probe's own");

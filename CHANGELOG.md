@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- A startup probe of the host driver ends when its sandbox has ended. The terminal probe behind
+  `sessions.pty` and the egress aperture probe answer that the mechanism is not proved once the
+  backend they started is gone. Their deadlines, 10 s and 5 s, are unchanged and bound a sandbox
+  that stays and says nothing. No fact changes: a backend that proved a mechanism before proves
+  it now. Held by `a_sandbox_that_ends_at_once_ends_the_probe_before_its_deadline` in
+  `pty::tests` and in `egress::tests`, each through a backend that exits at once and with half
+  the deadline as its bound.
+
 ## [0.27.0] — 2026-11-24
 
 ### Added

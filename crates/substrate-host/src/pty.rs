@@ -354,7 +354,10 @@ pub(crate) fn observe_sandboxed_terminal(
         });
     }
     let mut child = command.spawn().ok()?;
-    // The parent's own copy goes now: while it is open the master never sees the child's exit.
+    // The parent's own copies go now, the three the command holds for the child's standard
+    // streams among them: while one is open the master never sees the child's exit, and a
+    // sandbox that ends at once is waited for until the deadline.
+    drop(command);
     drop(pair.slave);
     let master = pair.master;
     let observed = observe_through(master.as_raw_fd(), resized);
@@ -517,6 +520,8 @@ pub(crate) fn observe_sandboxed_hangup(bubblewrap: &Path) -> Option<i32> {
         });
     }
     let mut child = command.spawn().ok()?;
+    // The command holds three copies of the slave for the child's standard streams.
+    drop(command);
     drop(pair.slave);
     let master = pair.master;
     let mut transcript = Vec::new();
@@ -547,6 +552,25 @@ pub(crate) unsafe fn owned(fd: RawFd) -> OwnedFd {
 #[cfg(test)]
 mod tests {
     use substrate_wire::PtyWindow;
+
+    /// A backend that ends before it prints a line ends each probe when it ends: the probe reads
+    /// the hangup of the terminal and does not wait for its deadline. The mechanism is then not
+    /// provable, and the hangup probe has no status to report.
+    #[test]
+    fn a_sandbox_that_ends_at_once_ends_the_probe_before_its_deadline() {
+        let directory = tempfile::tempdir().expect("a scratch directory");
+        let (backend, _log) = crate::process::recording_backend(directory.path());
+        let started = std::time::Instant::now();
+        assert!(!crate::pty::mechanism_is_provable(&backend));
+        assert_eq!(crate::pty::observe_sandboxed_hangup(&backend), None);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < super::PROBE_DEADLINE / 2,
+            "two probes of a backend that exits at once took {elapsed:?}; each has a deadline of \
+             {:?}",
+            super::PROBE_DEADLINE
+        );
+    }
 
     /// The acceptance's middle clause, at the layer that owns it: a window declared on the master
     /// is the window the confined child reads back with `TIOCGWINSZ`, and a resize applied while
