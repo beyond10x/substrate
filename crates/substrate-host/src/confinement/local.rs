@@ -188,23 +188,39 @@ impl LocalAdapter {
     }
 
     fn observation(run: &LocalRun) -> RunObservation {
-        let (state, exit) = match *run.phase.borrow() {
+        Self::observation_of(
+            &run.id,
+            run.reason.as_deref(),
+            run.live.as_ref(),
+            *run.phase.borrow(),
+        )
+    }
+
+    /// The observation of a run in `phase`: what `observe` and `wait` return, and what the run's
+    /// end task writes as `run_ended` (design 36 D15).
+    fn observation_of(
+        id: &RunId,
+        reason: Option<&str>,
+        live: Option<&Arc<LiveOutput>>,
+        phase: Phase,
+    ) -> RunObservation {
+        let (state, exit) = match phase {
             Phase::Running => (RunState::Running, None),
             Phase::Ended(exit) => (RunState::Ended, Some(exit)),
             Phase::Unknown => (RunState::Unknown, None),
         };
         RunObservation {
-            run: run.id.clone(),
+            run: id.clone(),
             adapter: AdapterName::Local,
             inner: None,
-            declared_insecure: run.reason.clone(),
+            declared_insecure: reason.map(str::to_owned),
             state,
             exit,
             // No `limits` family: only the stall the adapter imposed (design 36 D7).
             limit: if state == RunState::Running {
                 None
             } else {
-                live::stall_limit(run.live.as_ref())
+                live::stall_limit(live)
             },
             memory_oom_kills: None,
         }
@@ -319,6 +335,10 @@ impl LocalAdapter {
             .take()
             .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false, stderr_feed)));
         let reaping = Arc::clone(&reaped);
+        let reason = admitted.insecure_reason().map(str::to_owned);
+        // The run's `run_ended` reaches its end task once `audit_start` made it (design 36 D17).
+        let (hand_end, end_record) = tokio::sync::oneshot::channel();
+        let (end_id, end_reason, end_live) = (id.clone(), reason.clone(), live.clone());
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
             // A process the run started may still hold its output, and the run is not over until
@@ -340,18 +360,23 @@ impl LocalAdapter {
             if let Some(writer) = ending.as_ref().and_then(std::sync::Weak::upgrade) {
                 writer.end().await;
             }
-            let _ = phase.send(match ended {
+            let ended = match ended {
                 Ok(status) => Phase::Ended(RunExit {
                     code: status.code(),
                     signal: status.signal(),
                 }),
                 Err(_) => Phase::Unknown,
-            });
+            };
+            let _ = phase.send(ended);
+            // After the end is published, so neither `wait` nor `observe` waits for it (D20).
+            let observation =
+                Self::observation_of(&end_id, end_reason.as_deref(), end_live.as_ref(), ended);
+            super::write_run_end(end_record, observation).await;
         });
         self.runs.lock().push(Arc::new(LocalRun {
             id: id.clone(),
             pid,
-            reason: admitted.insecure_reason().map(str::to_owned),
+            reason,
             phase: observed,
             captured,
             reaped,
@@ -359,7 +384,7 @@ impl LocalAdapter {
             stdin: writer,
             live,
         }));
-        admitted.audit_start(&id, &command.argv[0]);
+        let _ = hand_end.send(admitted.audit_start(&id, &command.argv[0]));
         Ok(id)
     }
 }

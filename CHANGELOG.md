@@ -44,8 +44,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   kill count, read before the cgroup is removed, and absent when it cannot be read. The host
   driver's `ExecObservation` carries it in the new `end_of_run` member (`EndOfRun`), read for
   every exec whether or not it asked for measurements.
+- `AuditRecord::RunEnded`, written as `"event": "run_ended"` (design 36, story 3): every run an
+  admitted profile with an audit sink starts puts exactly one record of its end into that sink,
+  after its `run_started`, whether or not anyone observes or waits on the run, and also when the
+  adapter was dropped first. It names the run, the profile, the adapter and its inner adapter,
+  the reason a `local` profile is declared insecure, the state (`ended`, or `unknown` where the
+  end could not be established), the exit, the limit that ended the run and the run cgroup's OOM
+  kill count; an absent member is omitted. The record is written once the run's end is published,
+  on the runtime's blocking pool, so a sink may receive it after `wait` returned and a sink that
+  blocks holds neither `wait` nor another run. An end task dropped before it wrote, such as at
+  runtime shutdown, writes `state: unknown` on the dropping thread, and nothing from a thread
+  that is panicking. A profile without a sink starts no task for it. `observe`, `wait` and every
+  other call write no record. Held by six unit cases of the record and of its one-shot value, the
+  `pod` monitor's deadline case, five cases of `ess_confinement_local` (an unobserved run, no
+  second record after `observe` and `wait`, no sink, a sink that blocks on a current-thread
+  runtime, a dropped adapter) and lane cases on `linux`, `systemd` around both inner adapters,
+  `oci`, `pod` and `macos` (`ESS confinement … run ended`, the delegated ones required by name in
+  `scripts/delegated-lane.sh`).
 
 ### Changed
+
+- `RunState` and `RunExit` implement `Serialize`: a state as its snake-case name, an exit as an
+  object whose absent `code` or `signal` is omitted.
 
 - `RunObservation` is `#[non_exhaustive]` and has a constructor,
   `RunObservation::new(run, adapter, state)`, which leaves every optional member absent. A struct

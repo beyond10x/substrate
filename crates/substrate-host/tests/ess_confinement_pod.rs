@@ -940,6 +940,38 @@ async fn admit_and_start(
         .expect("started")
 }
 
+/// Design 36 § 8, story 3, the `pod` lane: a run that nobody observes or waits on puts one
+/// `run_ended` into its profile's sink, written by the run's monitor (D20), with the OOM count
+/// `pod` reports.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pod_run_nobody_observes_writes_one_run_ended() {
+    const NAME: &str = "ESS confinement pod run ended";
+    let Some(kubeconfig) = lane() else {
+        println!("pod lane: ABSENT; 0 executed");
+        return;
+    };
+    let adapter: Arc<dyn ConfinementAdapter> = open_lane(&kubeconfig);
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            image: Some(IMAGE.to_owned()),
+            process_bounds: Some(bounds(120_000, 64 << 20)),
+            ..ConfinementProfile::default()
+        },
+        &command(&["/bin/sh", "-c", "exit 3"]),
+        ("pod", None),
+        // The run's end waits for the kubelet and for the Pod's removal.
+        Duration::from_mins(3),
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(record["exit"], json!({"code": 3}), "{NAME}: {record}");
+    assert_eq!(record["memory_oom_kills"], 0, "{NAME}: {record}");
+    assert!(record.get("limit").is_none(), "{NAME}: {record}");
+    println!("{NAME}: executed");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_writes_its_workspace_reports_its_output_and_leaves_nothing_after_wait() {
     let Some(kubeconfig) = lane() else {
@@ -947,7 +979,7 @@ async fn a_run_writes_its_workspace_reports_its_output_and_leaves_nothing_after_
         return;
     };
     let adapter = open_lane(&kubeconfig);
-    let (sink, records) = recording();
+    let (sink, mut recorded) = support::recorded();
     let run = admit_and_start(
         &adapter,
         ConfinementProfile {
@@ -982,12 +1014,14 @@ async fn a_run_writes_its_workspace_reports_its_output_and_leaves_nothing_after_
         "{stdout}"
     );
     assert!(stdout.contains("read-only"), "{stdout}");
-    let events: Vec<Value> = records
-        .lock()
-        .iter()
-        .map(|record| serde_json::to_value(record).expect("record")["event"].clone())
-        .collect();
-    assert_eq!(events, [json!("profile_admitted"), json!("run_started")]);
+    // Design 36 D20: the monitor writes the run's end after it published it.
+    recorded
+        .run_ended_within("pod run", Duration::from_mins(1))
+        .await;
+    assert_eq!(
+        recorded.events(),
+        ["profile_admitted", "run_started", "run_ended"]
+    );
     assert_eq!(
         leftovers(&kubeconfig, &adapter.settings().namespace, run.as_str()),
         ""

@@ -966,7 +966,7 @@ async fn an_oci_run_is_confined_bounded_and_removed_after_wait() {
             path: cache.clone(),
         }],
     );
-    let (sink, records) = recording();
+    let (sink, mut recorded) = support::recorded();
     let admitted = adapter
         .admit(&ConfinementProfile {
             image: Some(image()),
@@ -1052,12 +1052,55 @@ async fn an_oci_run_is_confined_bounded_and_removed_after_wait() {
         "",
         "the container remains"
     );
-    let events: Vec<_> = events(&records)
-        .into_iter()
-        .map(|record| record["event"].as_str().expect("event").to_owned())
-        .collect();
-    assert_eq!(events, ["profile_admitted", "run_started"]);
+    // Design 36 D20: the monitor writes the run's end after it published it.
+    recorded.run_ended("ESS confinement oci run").await;
+    assert_eq!(
+        recorded.events(),
+        ["profile_admitted", "run_started", "run_ended"]
+    );
     println!("ESS confinement oci run: executed");
+}
+
+/// Design 36 § 8, story 3, the `oci` lane: a run that nobody observes or waits on puts one
+/// `run_ended` into its profile's sink, written by the run's monitor (D20).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oci_run_nobody_observes_writes_one_run_ended() {
+    const NAME: &str = "ESS confinement oci run ended";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let adapter = open_lane(&runtime, Vec::new());
+    let (_dir, workspace) = canonical_tempdir();
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            image: Some(image()),
+            workspace: Some(workspace),
+            ..ConfinementProfile::default()
+        },
+        &Command {
+            argv: vec!["/bin/sh".into(), "-c".into(), "exit 3".into()],
+            env: BTreeMap::new(),
+        },
+        ("oci", None),
+        // The monitor reads the container's state and removes it before it publishes the end.
+        Duration::from_mins(1),
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(
+        record["exit"],
+        serde_json::json!({"code": 3}),
+        "{NAME}: {record}"
+    );
+    assert!(record.get("limit").is_none(), "{NAME}: {record}");
+    assert!(record.get("memory_oom_kills").is_none(), "{NAME}: {record}");
+    println!("{NAME}: executed");
 }
 
 /// Starts `sleep 60` and returns once its container exists.

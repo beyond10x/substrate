@@ -523,13 +523,19 @@ impl MacosAdapter {
     }
 
     fn observation(run: &MacosRun) -> RunObservation {
-        let (state, exit) = match *run.phase.borrow() {
+        Self::observation_of(&run.id, run.live.as_ref(), *run.phase.borrow())
+    }
+
+    /// The observation of a run in `phase`: what `observe` and `wait` return, and what the run's
+    /// end task writes as `run_ended` (design 36 D15).
+    fn observation_of(id: &RunId, live: Option<&Arc<LiveOutput>>, phase: Phase) -> RunObservation {
+        let (state, exit) = match phase {
             Phase::Running => (RunState::Running, None),
             Phase::Ended(exit) => (RunState::Ended, Some(exit)),
             Phase::Unknown => (RunState::Unknown, None),
         };
         RunObservation {
-            run: run.id.clone(),
+            run: id.clone(),
             adapter: AdapterName::Macos,
             inner: None,
             declared_insecure: None,
@@ -539,7 +545,7 @@ impl MacosAdapter {
             limit: if state == RunState::Running {
                 None
             } else {
-                live::stall_limit(run.live.as_ref())
+                live::stall_limit(live)
             },
             memory_oom_kills: None,
         }
@@ -999,6 +1005,9 @@ impl MacosAdapter {
         let reaping = Arc::clone(&reaped);
         let ending_profile = admitted.clone();
         let ending_id = id.clone();
+        // The run's `run_ended` reaches its end task once `audit_start` made it (design 36 D17).
+        let (hand_end, end_record) = tokio::sync::oneshot::channel();
+        let end_live = live.clone();
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
             // A process the run started may still hold its output, and the run is not over until
@@ -1027,13 +1036,17 @@ impl MacosAdapter {
             if let Some(writer) = ending.as_ref().and_then(std::sync::Weak::upgrade) {
                 writer.end().await;
             }
-            let _ = phase.send(match ended {
+            let ended = match ended {
                 Ok(status) => Phase::Ended(RunExit {
                     code: status.code(),
                     signal: status.signal(),
                 }),
                 Err(_) => Phase::Unknown,
-            });
+            };
+            let _ = phase.send(ended);
+            // After `private_tmpdir_left` and after the end is published (design 36 D20).
+            let observation = Self::observation_of(&ending_id, end_live.as_ref(), ended);
+            super::write_run_end(end_record, observation).await;
         });
         self.runs.lock().push(Arc::new(MacosRun {
             id: id.clone(),
@@ -1045,7 +1058,7 @@ impl MacosAdapter {
             stdin: writer,
             live,
         }));
-        admitted.audit_start(&id, &command.argv[0]);
+        let _ = hand_end.send(admitted.audit_start(&id, &command.argv[0]));
         Ok(id)
     }
 }

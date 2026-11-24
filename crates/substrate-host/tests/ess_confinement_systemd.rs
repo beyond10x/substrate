@@ -828,6 +828,88 @@ async fn a_systemd_linux_run_past_its_timeout_names_the_wall_time_limit() {
     println!("{NAME}: executed");
 }
 
+/// Design 36 § 8, story 3, around `local`: a run that nobody observes or waits on puts one
+/// `run_ended` into its profile's sink, named `systemd` with `inner: local`, carrying the reason
+/// it is declared insecure and the OOM count the end task read from the run's cgroup (D20, D23).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_local_run_nobody_observes_writes_one_run_ended() {
+    const NAME: &str = "ESS confinement systemd local run ended";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            inner: Some(InnerAdapter::Local),
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            ..ConfinementProfile::default()
+        },
+        &shell("exit 0"),
+        ("systemd", Some("local")),
+        support::RECORD_WAIT,
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(
+        record["exit"],
+        serde_json::json!({"code": 0}),
+        "{NAME}: {record}"
+    );
+    assert_eq!(record["declared_insecure"], REASON, "{NAME}: {record}");
+    assert_eq!(record["memory_oom_kills"], 0, "{NAME}: {record}");
+    assert!(record.get("limit").is_none(), "{NAME}: {record}");
+    println!("{NAME}: executed");
+}
+
+/// Design 36 § 8, story 3, around `linux`: the inner `linux` has no sink, and the outer adapter's
+/// own task writes the run's one `run_ended` with its own profile and the relabelled
+/// observation, `systemd` with `inner: linux`, naming the limit the inner run reached (D20).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_linux_run_nobody_observes_writes_one_run_ended() {
+    const NAME: &str = "ESS confinement systemd linux run ended";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_ended");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            inner: Some(InnerAdapter::Linux),
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 1_000,
+                processes: 16,
+                memory_bytes: 64 << 20,
+                cpu_millis: 1_000,
+            }),
+            ..ConfinementProfile::default()
+        },
+        &shell("sleep 30"),
+        ("systemd", Some("linux")),
+        support::RECORD_WAIT,
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(record["limit"], "wall_time", "{NAME}: {record}");
+    assert!(
+        record.get("declared_insecure").is_none(),
+        "{NAME}: {record}"
+    );
+    println!("{NAME}: executed");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn systemd_around_linux_gives_linux_the_scope_as_its_delegated_root() {
     let _held = OPENING.lock().await;

@@ -359,6 +359,47 @@ async fn a_linux_run_that_exits_0_names_no_limit_and_counts_no_oom_kill() {
     println!("{NAME}: executed");
 }
 
+// Design 36 § 8, story 3, the story's acceptance: a run that grows past its memory bound, and that
+// nobody observes or waits on after `start` returned, puts exactly one `run_ended` naming the
+// memory limit into its profile's sink after its `run_started`, written by the adapter's own task
+// for the run (D20).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_over_its_memory_bound_writes_one_run_ended_naming_memory_unobserved() {
+    const NAME: &str = "ESS confinement linux run ended memory";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                memory_bytes: 32 << 20,
+                ..BOUNDED
+            }),
+            ..ConfinementProfile::default()
+        },
+        &support::sh("( grow=x; while : ; do grow=\"$grow$grow\"; done ) & wait"),
+        ("linux", None),
+        support::RECORD_WAIT,
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(record["limit"], "memory", "{NAME}: {record}");
+    assert!(
+        record["memory_oom_kills"]
+            .as_u64()
+            .is_some_and(|kills| kills >= 1),
+        "{NAME}: {record}"
+    );
+    assert!(
+        record.get("declared_insecure").is_none(),
+        "{NAME}: {record}"
+    );
+    println!("{NAME}: executed");
+}
+
 /// Admits `profile`, runs `script` under `/bin/sh -c` and returns its stdout once it ended.
 async fn run_script(
     adapter: &Arc<dyn ConfinementAdapter>,

@@ -1544,3 +1544,113 @@ pub async fn adv_live_timeout_is_not_a_stall(
     assert!(losses.is_empty(), "{name}: {losses:?}");
     assert!(!streams[0].is_empty(), "{name}: the queued chunk");
 }
+
+/// How long a case waits for a record its own sink is to receive (design 36 § 8, story 3).
+pub const RECORD_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a profile's sink received: every record as JSON, in order, and each `run_ended` once
+/// more on a channel, so a case waits for that record instead of polling for it.
+pub struct Recorded {
+    pub records: Arc<Mutex<Vec<Value>>>,
+    ended: tokio::sync::mpsc::UnboundedReceiver<Value>,
+}
+
+/// A sink that keeps every record it receives, with its [`Recorded`].
+pub fn recorded() -> (AuditSink, Recorded) {
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let (sender, ended) = tokio::sync::mpsc::unbounded_channel();
+    let kept = Arc::clone(&records);
+    let sink = AuditSink::new(move |record: &AuditRecord| {
+        let value = serde_json::to_value(record).expect("an audit record serializes");
+        kept.lock().push(value.clone());
+        if value["event"] == "run_ended" {
+            let _ = sender.send(value);
+        }
+    });
+    (sink, Recorded { records, ended })
+}
+
+impl Recorded {
+    /// The next `run_ended` record, waited for at most [`RECORD_WAIT`].
+    pub async fn run_ended(&mut self, name: &str) -> Value {
+        self.run_ended_within(name, RECORD_WAIT).await
+    }
+
+    /// The next `run_ended` record, waited for at most `within`: a lane whose run's end takes
+    /// longer than [`RECORD_WAIT`] (a container runtime, a cluster) names its own bound.
+    pub async fn run_ended_within(&mut self, name: &str, within: std::time::Duration) -> Value {
+        match tokio::time::timeout(within, self.ended.recv()).await {
+            Ok(Some(record)) => record,
+            Ok(None) => panic!(
+                "{name}: the sink was dropped with no run_ended record; records: {:?}",
+                self.records.lock()
+            ),
+            Err(elapsed) => panic!(
+                "{name}: no run_ended record within {within:?} ({elapsed}); records: {:?}",
+                self.records.lock()
+            ),
+        }
+    }
+
+    /// A `run_ended` record that arrived and no call of [`Self::run_ended`] took yet.
+    pub fn another_run_ended(&mut self) -> Option<Value> {
+        self.ended.try_recv().ok()
+    }
+
+    /// The `event` of every record, in the order the sink received them.
+    pub fn events(&self) -> Vec<String> {
+        self.records
+            .lock()
+            .iter()
+            .map(|record| record["event"].as_str().expect("an event").to_owned())
+            .collect()
+    }
+}
+
+/// Design 36 § 8, story 3, on any adapter: a run that nobody observes or waits on after `start`
+/// returned puts exactly one `run_ended` into its profile's sink, after its `run_started`, naming
+/// the run, the profile and `adapter` (with `inner`). `profile` is the adapter's own profile
+/// without a sink; the case sets one. The record is waited for at most `within` after `start`
+/// returned. Returns the record for the lane's own assertions.
+pub async fn one_run_ended_unobserved(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: ConfinementProfile,
+    command: &Command,
+    expected: (&str, Option<&str>),
+    within: std::time::Duration,
+) -> Value {
+    let (sink, mut recorded) = recorded();
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..profile
+        })
+        .expect("admitted");
+    let run = adapter.start(&admitted, command).await.expect("started");
+    let record = recorded.run_ended_within(name, within).await;
+    assert_eq!(
+        recorded.events(),
+        ["profile_admitted", "run_started", "run_ended"],
+        "{name}"
+    );
+    assert_eq!(record["run"], run.as_str(), "{name}: {record}");
+    assert_eq!(
+        record["profile"],
+        admitted.id().as_str(),
+        "{name}: {record}"
+    );
+    assert_eq!(record["adapter"], expected.0, "{name}: {record}");
+    assert_eq!(
+        record.get("inner").and_then(Value::as_str),
+        expected.1,
+        "{name}: {record}"
+    );
+    assert_ne!(record["state"], "running", "{name}: {record}");
+    assert!(
+        recorded.another_run_ended().is_none(),
+        "{name}: a second run_ended: {:?}",
+        recorded.records.lock()
+    );
+    record
+}

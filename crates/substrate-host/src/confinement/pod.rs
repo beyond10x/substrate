@@ -1401,15 +1401,17 @@ impl PodAdapter {
             limit: Mutex::new(None),
         });
         let wall = Duration::from_secs(resolved.deadline_seconds);
+        // The run's `run_ended` reaches its monitor once `audit_start` made it (design 36 D17).
+        let (hand_end, end_record) = tokio::sync::oneshot::channel();
         tokio::spawn(monitor(
             Arc::clone(&self.api),
             Arc::clone(&run),
-            sender,
+            (sender, Some(end_record)),
             Instant::now() + wall + DEADLINE_GRACE,
             trace,
         ));
         self.runs.lock().push(run);
-        admitted.audit_start(&id, &command.argv[0]);
+        let _ = hand_end.send(admitted.audit_start(&id, &command.argv[0]));
         Ok(id)
     }
 
@@ -1621,19 +1623,46 @@ fn pod_limit(pod: Option<&Value>, stop: Option<Stop>) -> Option<RunLimit> {
     super::named_limit(&reached)
 }
 
+/// Where a run's monitor takes its `run_ended` from (design 36 D17): `None` in the cases that
+/// follow a monitor without a sink.
+#[cfg(feature = "kubernetes")]
+type EndRecord = Option<tokio::sync::oneshot::Receiver<super::RunEndRecord>>;
+
+/// How a run's monitor publishes the run's end: its phase, and its `run_ended` until written.
+#[cfg(feature = "kubernetes")]
+struct Ending {
+    phase: watch::Sender<Phase>,
+    record: EndRecord,
+}
+
+#[cfg(feature = "kubernetes")]
+impl Ending {
+    /// Publishes the run's end, its output sealed first, and the first time writes its
+    /// `run_ended` from the adapter's observation (design 36 D18, D20). A later publication
+    /// repeats `Unknown` and writes nothing.
+    async fn publish(&mut self, run: &PodRun, ended: Phase) {
+        seal(run);
+        self.phase.send_replace(ended);
+        if let Some(receiver) = self.record.take() {
+            super::write_run_end(receiver, PodAdapter::observation(run)).await;
+        }
+    }
+}
+
 /// Follows one run until the API shows its container ended, or the run is lost, then removes the
 /// Pod and, once the Pod is confirmed gone and the API shows its container stopped
-/// ([`pod_end`]), its policy.
+/// ([`pod_end`]), its policy. The run's `run_ended` follows the first publication of its end.
 /// `trace` holds what `start` read: the policy's `resourceVersion` and the Pod its create stored,
 /// so a Pod gone before the task's first read is still watched.
 #[cfg(feature = "kubernetes")]
 async fn monitor(
     api: Arc<Api>,
     run: Arc<PodRun>,
-    phase: watch::Sender<Phase>,
+    (phase, record): (watch::Sender<Phase>, EndRecord),
     give_up: Instant,
     mut trace: PodTrace,
 ) {
+    let mut ending = Ending { phase, record };
     let name = run.id.as_str().to_owned();
     let pod_path = format!("{}/{name}", api.pods());
     let policy_path = format!("{}/{name}", api.policies());
@@ -1712,8 +1741,7 @@ async fn monitor(
         }
     };
     if matches!(outcome, Phase::Unknown) {
-        seal(&run);
-        phase.send_replace(Phase::Unknown);
+        ending.publish(&run, Phase::Unknown).await;
     }
     // The Pod first, never forced, and its policy only once the Pod is confirmed gone and its
     // container stopped; a removal not confirmed within the limit reports the run `Unknown` while
@@ -1727,10 +1755,9 @@ async fn monitor(
     .await
     .unwrap_or(false);
     if removed {
-        return release(&api, &run, &phase, outcome, &trace, deadline).await;
+        return release(&api, &run, &mut ending, outcome, &trace, deadline).await;
     }
-    seal(&run);
-    phase.send_replace(Phase::Unknown);
+    ending.publish(&run, Phase::Unknown).await;
     // A kubelet may stay away longer than any bound the adapter could pick: the task asks until the
     // API confirms the Pod gone and answers whether its container stopped, for as long as its
     // runtime lives, and only then removes the policy. Until then the run counts against
@@ -1752,7 +1779,7 @@ async fn monitor(
 async fn release(
     api: &Api,
     run: &PodRun,
-    phase: &watch::Sender<Phase>,
+    ending: &mut Ending,
     outcome: Phase,
     trace: &PodTrace,
     deadline: tokio::time::Instant,
@@ -1767,15 +1794,13 @@ async fn release(
         let policy_removed = tokio::time::timeout_at(deadline, api.remove(&policy_path, 0))
             .await
             .unwrap_or(false);
-        seal(run);
-        phase.send_replace(outcome);
+        ending.publish(run, outcome).await;
         if !policy_removed {
             api.remove_until_gone(&policy_path, 0).await;
         }
         return;
     }
-    seal(run);
-    phase.send_replace(Phase::Unknown);
+    ending.publish(run, Phase::Unknown).await;
     // A watch the API keeps not answering is asked for as long as the runtime lives; until it is
     // answered the run counts against `POD_MAX_TRACKED_RUNS`, so these tasks stay bounded.
     let stopped = match stopped {

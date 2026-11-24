@@ -185,6 +185,17 @@ pub(crate) fn open(request: LinuxRequest) -> Result<Arc<dyn ConfinementAdapter>,
 #[cfg(target_os = "linux")]
 pub use imp::proof;
 
+/// The adapter itself, for `systemd` around `linux`, whose task awaits the end of a run of it
+/// (design 36 D20).
+#[cfg(target_os = "linux")]
+pub(crate) use imp::LinuxAdapter;
+
+/// [`open`], returning the adapter itself.
+#[cfg(target_os = "linux")]
+pub(crate) fn open_adapter(request: LinuxRequest) -> Result<Arc<LinuxAdapter>, ConfinementError> {
+    imp::open_adapter(request)
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use std::collections::{BTreeSet, HashMap};
@@ -228,6 +239,12 @@ mod imp {
     pub(super) fn open(
         request: LinuxRequest,
     ) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
+        Ok(open_adapter(request)?)
+    }
+
+    pub(super) fn open_adapter(
+        request: LinuxRequest,
+    ) -> Result<Arc<LinuxAdapter>, ConfinementError> {
         let driver = HostDriver::open(request.config).map_err(|error| {
             if error.code == PLATFORM_UNSERVED {
                 ConfinementError::AdapterUnserved {
@@ -611,12 +628,42 @@ mod imp {
                             }
                         });
                     }
-                    admitted.audit_start(&run, &command.argv[0]);
+                    let end = admitted.audit_start(&run, &command.argv[0]);
+                    // A task of its own per run that has a sink, and none without (design 36
+                    // D19, D20): it is spawned after `run_started`, so it holds the value itself.
+                    if !end.is_inert() {
+                        let ended = self.ended_observation(&run);
+                        tokio::spawn(async move {
+                            // An exec the driver no longer tracks leaves the value unwritten,
+                            // and its drop writes `unknown` (D22).
+                            if let Some(observation) = ended.await {
+                                end.write(observation);
+                            }
+                        });
+                    }
                     Ok(run)
                 }
                 DispatchOutcome::NotDispatched(error)
                 | DispatchOutcome::ContainedAbsent(error)
                 | DispatchOutcome::OutcomeUnknown(error) => Err(ConfinementError::Driver(error)),
+            }
+        }
+
+        /// The run's end as its own observation reads it, once the driver published the exec's
+        /// end (design 36 D20): it awaits `ProcessRuntime::wait_ended` and observes the exec once.
+        /// `None` for an exec the driver does not track. The future holds the driver, not the
+        /// adapter, so dropping the adapter loses no record (D21).
+        pub(crate) fn ended_observation(
+            &self,
+            run: &RunId,
+        ) -> impl std::future::Future<Output = Option<RunObservation>> + Send + use<> {
+            let driver = Arc::clone(&self.driver);
+            let run = run.clone();
+            async move {
+                driver.processes.wait_ended(run.as_str()).await;
+                let observed = driver.observe_exec(run.as_str()).await.ok()?;
+                let observation = Self::observation(&run, &observed);
+                (observation.state != RunState::Running).then_some(observation)
             }
         }
 

@@ -198,7 +198,9 @@ require_executed sandbox_parity \
 # the base view's form (`/usr/bin` listed, `/bin/id` denied) and from two declared roots. The
 # base view's form is absent, so refused here, on a host whose `/bin` is not a link to `/usr/bin`.
 # The `limit` lines are design 36's story 1: runs ended by their memory bound, their CPU budget
-# and their timeout name that limit, and a run that exits 0 names none.
+# and their timeout name that limit, and a run that exits 0 names none. The `run ended` line is
+# its story 3: a run over its memory bound that nobody observes puts one `run_ended` naming the
+# memory limit into its profile's sink.
 require_executed ess_confinement_linux \
   'ESS confinement linux scoped write: executed' \
   'ESS confinement linux scoped git: executed' \
@@ -268,14 +270,18 @@ require_executed ess_confinement_linux \
   'ESS confinement linux limit memory: executed' \
   'ESS confinement linux limit cpu time: executed' \
   'ESS confinement linux limit wall time: executed' \
-  'ESS confinement linux limit none: executed'
+  'ESS confinement linux limit none: executed' \
+  'ESS confinement linux run ended memory: executed'
 # Design 36, story 1: the limit that ended a run, around `local` from the scope's own watch and
-# the run cgroup's OOM count, around `linux` from the driver.
+# the run cgroup's OOM count, around `linux` from the driver. Story 3: one `run_ended` per run
+# nobody observes, around each inner adapter, with the outer adapter's name.
 require_executed ess_confinement_systemd \
   'ESS confinement systemd local limits memory: executed' \
   'ESS confinement systemd local limits cpu time: executed' \
   'ESS confinement systemd local limits wall time: executed' \
   'ESS confinement systemd linux limit wall time: executed' \
+  'ESS confinement systemd local run ended: executed' \
+  'ESS confinement systemd linux run ended: executed' \
   'ESS confinement systemd local scoped write: executed' \
   'ESS confinement systemd linux scoped write: executed' \
   'ESS confinement systemd local retention tail: executed' \

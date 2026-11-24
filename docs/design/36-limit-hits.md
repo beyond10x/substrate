@@ -377,6 +377,9 @@ a run that received no `run_started` gets no `run_ended`, and no run gets two. `
 the run's end task (§ 1). The adapter therefore hands the value of D16 to the end task after
 `audit_start` returned, through a one-shot channel. The end task takes it after the run ended. A
 start that failed after the task was spawned sends nothing, and the task writes nothing.
+`linux` and `systemd` around `linux` have no end task before the run started (D20): they spawn
+theirs after `audit_start` returned and move the value into it, with no channel, and spawn none
+where the profile has no sink (D19). Amended 2026-11-24 with the change that built the record.
 
 **D18. The record is written for a run that ends `Unknown` as well.** The end task writes it on
 every path on which it publishes the run's end, `Ended` or `Unknown`. For `Unknown` the record

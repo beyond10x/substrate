@@ -485,7 +485,7 @@ async fn a_local_run_is_declared_insecure_in_every_observation() {
     let adapter = local();
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::create_dir(workspace.path().join("sub")).expect("workdir");
-    let (sink, records) = recording();
+    let (sink, mut recorded) = support::recorded();
     let admitted = adapter
         .admit(&ConfinementProfile {
             local_reason: Some(REASON.into()),
@@ -531,17 +531,13 @@ async fn a_local_run_is_declared_insecure_in_every_observation() {
         std::fs::read_to_string(workspace.path().join("marker")).expect("marker"),
         "done"
     );
-    let events: Vec<String> = records
-        .lock()
-        .iter()
-        .map(|record| {
-            serde_json::to_value(record).expect("record")["event"]
-                .as_str()
-                .expect("event")
-                .to_owned()
-        })
-        .collect();
-    assert_eq!(events, ["profile_admitted", "run_started"]);
+    // Design 36 D23: the run's end record carries the reason, as its start record does.
+    let ended = recorded.run_ended("declared insecure").await;
+    assert_eq!(ended["declared_insecure"], REASON, "{ended}");
+    assert_eq!(
+        recorded.events(),
+        ["profile_admitted", "run_started", "run_ended"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -616,6 +612,247 @@ async fn a_local_run_that_exits_0_names_no_limit_and_no_oom_count() {
     let observed = adapter.observe(&run).await.expect("observed");
     assert_eq!(observed.limit, None, "{observed:?}");
     assert_eq!(observed.memory_oom_kills, None, "{observed:?}");
+}
+
+/// The profile every `run_ended` case of this file starts from: `local` in `workspace`.
+fn local_profile(workspace: &std::path::Path) -> ConfinementProfile {
+    ConfinementProfile {
+        local_reason: Some(REASON.into()),
+        workspace: Some(workspace.to_path_buf()),
+        ..ConfinementProfile::default()
+    }
+}
+
+/// Design 36 § 8, story 3: a run that exits 0 and that nobody observes or waits on puts exactly
+/// one `run_ended` into its profile's sink, after its `run_started`: state `ended`, exit code 0,
+/// the reason it is declared insecure, and no limit, no count and no `inner` (D15, D20, D23).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_run_nobody_observes_writes_one_run_ended_after_run_started() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let record = support::one_run_ended_unobserved(
+        "local run_ended",
+        &adapter,
+        local_profile(workspace.path()),
+        &support::sh("exit 0"),
+        ("local", None),
+        support::RECORD_WAIT,
+    )
+    .await;
+    let mut members: Vec<&str> = record
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    members.sort_unstable();
+    assert_eq!(
+        members,
+        [
+            "adapter",
+            "declared_insecure",
+            "event",
+            "exit",
+            "profile",
+            "run",
+            "state"
+        ],
+        "{record}"
+    );
+    assert_eq!(record["state"], "ended", "{record}");
+    assert_eq!(record["exit"], serde_json::json!({"code": 0}), "{record}");
+    assert_eq!(record["declared_insecure"], REASON, "{record}");
+}
+
+/// Design 36 D16: `observe` and `wait` on a run whose `run_ended` was written write no second
+/// record, and nothing else reaches the sink.
+#[tokio::test(flavor = "multi_thread")]
+async fn observe_and_wait_on_an_ended_local_run_write_no_second_record() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (sink, mut recorded) = support::recorded();
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..local_profile(workspace.path())
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exit 0"))
+        .await
+        .expect("started");
+    recorded.run_ended("observe and wait").await;
+    let observed = adapter.observe(&run).await.expect("observed");
+    assert_eq!(observed.state, RunState::Ended, "{observed:?}");
+    let waited = adapter.wait(&run).await.expect("waited");
+    assert_eq!(waited.state, RunState::Ended, "{waited:?}");
+    adapter.observe(&run).await.expect("observed again");
+    assert!(recorded.another_run_ended().is_none());
+    assert_eq!(
+        recorded.events(),
+        ["profile_admitted", "run_started", "run_ended"]
+    );
+}
+
+/// Design 36 D19: a profile without a sink runs as before, and a sink of another profile on the
+/// same adapter receives the records of its own run only.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_profile_without_a_sink_runs_as_before_and_writes_nothing() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (sink, mut recorded) = support::recorded();
+    let silent = adapter
+        .admit(&local_profile(workspace.path()))
+        .expect("admitted without a sink");
+    let heard = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..local_profile(workspace.path())
+        })
+        .expect("admitted with a sink");
+    let unheard = adapter
+        .start(&silent, &support::sh("exit 0"))
+        .await
+        .expect("started without a sink");
+    let ended = tokio::time::timeout(support::RECORD_WAIT, adapter.wait(&unheard))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    assert_eq!(ended.exit.and_then(|exit| exit.code), Some(0));
+    let run = adapter
+        .start(&heard, &support::sh("exit 0"))
+        .await
+        .expect("started with a sink");
+    let record = recorded.run_ended("without a sink").await;
+    assert_eq!(record["run"], run.as_str(), "{record}");
+    assert!(recorded.another_run_ended().is_none());
+    assert!(
+        recorded
+            .records
+            .lock()
+            .iter()
+            .all(|record| record.get("run").is_none_or(|id| *id == run.as_str())),
+        "a record of the run without a sink: {:?}",
+        recorded.records.lock()
+    );
+}
+
+/// Design 36 D20: on a current-thread runtime, a sink that blocks on `run_ended` until the case
+/// releases it does not stop `wait` from returning: the sink holds a thread of the blocking pool,
+/// and the runtime's one worker goes on. `wait` returns and the sink is still held; a second
+/// run starts and ends meanwhile; the record is in the sink once it is released.
+#[tokio::test]
+async fn a_sink_that_blocks_on_run_ended_does_not_stop_wait_on_a_current_thread_runtime() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (entered, mut sink_entered) = tokio::sync::mpsc::unbounded_channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let (written, mut ended_runs) = tokio::sync::mpsc::unbounded_channel();
+    let holding = Arc::new(AtomicBool::new(false));
+    let blocked_once = AtomicBool::new(false);
+    let held = Arc::clone(&holding);
+    let sink = AuditSink::new(move |record: &AuditRecord| {
+        let value = serde_json::to_value(record).expect("record");
+        if value["event"] != "run_ended" {
+            return;
+        }
+        if !blocked_once.swap(true, Ordering::AcqRel) {
+            held.store(true, Ordering::Release);
+            let _ = entered.send(());
+            // Bounded, so a sink called on the runtime's worker ends the case rather than
+            // hanging it.
+            let _ = released
+                .lock()
+                .recv_timeout(std::time::Duration::from_secs(10));
+            held.store(false, Ordering::Release);
+        }
+        let _ = written.send(value["run"].as_str().expect("a run").to_owned());
+    });
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..local_profile(workspace.path())
+        })
+        .expect("admitted");
+    let first = adapter
+        .start(&admitted, &support::sh("exit 0"))
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(support::RECORD_WAIT, adapter.wait(&first))
+        .await
+        .expect("wait returns while the sink may hold")
+        .expect("waited");
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    tokio::time::timeout(support::RECORD_WAIT, sink_entered.recv())
+        .await
+        .expect("the sink received run_ended")
+        .expect("the sink lives");
+    assert!(
+        holding.load(Ordering::Acquire),
+        "wait returned only after the sink let go"
+    );
+    let second = adapter
+        .start(&admitted, &support::sh("exit 0"))
+        .await
+        .expect("a second run starts while the sink holds");
+    let ended = tokio::time::timeout(support::RECORD_WAIT, adapter.wait(&second))
+        .await
+        .expect("the second run's wait returns while the sink holds")
+        .expect("waited");
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    assert!(holding.load(Ordering::Acquire), "the sink let go early");
+    release.send(()).expect("the sink waits");
+    // Both records reach the sink: the second while the first was held, the first once released.
+    let mut ended = Vec::new();
+    for _ in 0..2 {
+        ended.push(
+            tokio::time::timeout(support::RECORD_WAIT, ended_runs.recv())
+                .await
+                .expect("a run_ended record")
+                .expect("the sink lives"),
+        );
+    }
+    ended.sort_unstable();
+    let mut expected = vec![first.as_str().to_owned(), second.as_str().to_owned()];
+    expected.sort_unstable();
+    assert_eq!(ended, expected);
+}
+
+/// Design 36 D21: dropping the adapter while its run runs neither ends the run nor loses its
+/// record: the run's end task writes `run_ended` when the run ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_run_whose_adapter_was_dropped_writes_run_ended_when_it_ends() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (sink, mut recorded) = support::recorded();
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..local_profile(workspace.path())
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(
+            &admitted,
+            &support::sh("while [ ! -e go ]; do sleep 0.02; done; exit 4"),
+        )
+        .await
+        .expect("started");
+    assert_eq!(
+        adapter.observe(&run).await.expect("observed").state,
+        RunState::Running
+    );
+    drop(adapter);
+    drop(admitted);
+    assert_eq!(recorded.events(), ["profile_admitted", "run_started"]);
+    std::fs::write(workspace.path().join("go"), b"").expect("go");
+    let record = recorded.run_ended("dropped adapter").await;
+    assert_eq!(record["run"], run.as_str(), "{record}");
+    assert_eq!(record["state"], "ended", "{record}");
+    assert_eq!(record["exit"], serde_json::json!({"code": 4}), "{record}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

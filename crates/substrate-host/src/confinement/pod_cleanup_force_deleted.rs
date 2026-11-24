@@ -59,7 +59,7 @@ async fn follow(cluster: &Arc<Cluster>, api: Arc<Api>, kill: bool) -> (Phase, Op
     let task = tokio::spawn(monitor(
         Arc::clone(&api),
         Arc::clone(&run),
-        sender,
+        (sender, None),
         Instant::now() + Duration::from_mins(10),
         PodTrace::default(),
     ));
@@ -260,21 +260,47 @@ async fn a_kill_whose_pod_shows_its_container_terminated_releases_the_policy() {
 /// Design 36 D7, the `pod` row: the monitor's own stop past the deadline ends the run with
 /// `WallTime`. The monitor is handed a give-up instant already past, so its first read of the
 /// running Pod asks for the deletion; the kubelet then writes the container terminated and removes
-/// the Pod, as it does for a deletion it was asked for.
+/// the Pod, as it does for a deletion it was asked for. Design 36 D20, the `pod` row: the monitor
+/// then writes the run's one `run_ended`, naming that limit, with no `observe` or `wait` called.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_monitors_stop_past_the_deadline_names_the_wall_time_limit() {
     let cluster = cluster(Watch::Terminated);
     let api = Arc::new(start(&cluster));
     let (run, sender) = tracked(RUN);
+    let (written, mut run_ended) = tokio::sync::mpsc::unbounded_channel();
+    let admitted = crate::confinement::admission(
+        &proof(),
+        &ConfinementProfile {
+            image: Some(format!("registry.invalid/run@sha256:{}", "a".repeat(64))),
+            audit: Some(crate::confinement::AuditSink::new(
+                move |record: &crate::confinement::AuditRecord| {
+                    let value = serde_json::to_value(record).expect("a record");
+                    if value["event"] == "run_ended" {
+                        let _ = written.send(value);
+                    }
+                },
+            )),
+            ..ConfinementProfile::default()
+        },
+        |_| Ok(()),
+    )
+    .expect("admitted");
+    let (hand_end, end_record) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(monitor(
         Arc::clone(&api),
         Arc::clone(&run),
-        sender,
+        (sender, Some(end_record)),
         Instant::now()
             .checked_sub(Duration::from_secs(1))
             .expect("an instant in the past"),
         PodTrace::default(),
     ));
+    assert!(
+        hand_end
+            .send(admitted.audit_start(&run.id, "/bin/sleep"))
+            .is_ok(),
+        "the monitor takes the run's end record"
+    );
     let began = Instant::now();
     while cluster.pod_deletes.load(Ordering::SeqCst) == 0 {
         assert!(
@@ -302,4 +328,19 @@ async fn the_monitors_stop_past_the_deadline_names_the_wall_time_limit() {
         Some(RunLimit::WallTime),
         "{observation:?}"
     );
+    let record = tokio::time::timeout(Duration::from_secs(5), run_ended.recv())
+        .await
+        .expect("the monitor wrote run_ended")
+        .expect("the sink lives");
+    assert_eq!(record["run"], RUN, "{record}");
+    assert_eq!(record["adapter"], "pod", "{record}");
+    assert_eq!(record["profile"], admitted.id().as_str(), "{record}");
+    assert_eq!(record["state"], "ended", "{record}");
+    assert_eq!(record["limit"], "wall_time", "{record}");
+    assert_eq!(
+        record["exit"],
+        serde_json::json!({"signal": Signal::Kill.number()}),
+        "{record}"
+    );
+    assert!(run_ended.try_recv().is_err(), "a second run_ended");
 }

@@ -343,8 +343,8 @@ impl ConfinementError {
     }
 }
 
-/// One audit record (ADR 0109 decision 2): an admission, a refusal or a start, or a private
-/// `TMPDIR` a run left behind.
+/// One audit record (ADR 0109 decision 2): an admission, a refusal, a start or an end, or a
+/// private `TMPDIR` a run left behind.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -392,6 +392,30 @@ pub enum AuditRecord {
         path: String,
         error: String,
     },
+    /// A run's end (design 36 D15): what the adapter's observation of the ended run says, with
+    /// the profile's id. Written once for every run that received `run_started`, also for one
+    /// that ended `unknown`, and never while the run runs (D16, D18, D24).
+    #[non_exhaustive]
+    RunEnded {
+        run: RunId,
+        profile: ProfileId,
+        adapter: AdapterName,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        inner: Option<InnerAdapter>,
+        /// The reason of a declared-insecure run, as `run_started` carries it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        declared_insecure: Option<String>,
+        /// `ended` or `unknown`. Never `running`.
+        state: RunState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit: Option<RunExit>,
+        /// The limit that ended the run, where the adapter observed one; absent is "none named".
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<RunLimit>,
+        /// Absent where the adapter does not observe it, as on the observation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memory_oom_kills: Option<u64>,
+    },
 }
 
 impl AuditRecord {
@@ -420,6 +444,12 @@ impl AuditRecord {
 /// Where a profile's audit records go. Called synchronously, once per record, on the thread that
 /// admitted or started (for `private_tmpdir_left`, on the task that ended the run); a sink that
 /// blocks blocks that call.
+///
+/// `run_ended` is called on the Tokio runtime's blocking pool after the run's end was published,
+/// so it may arrive after `wait` returned, and a sink that blocks on it holds a thread of that
+/// pool, never `wait` (design 36 D20). Where the run's end task is dropped before the run ended,
+/// as when its runtime shuts down, the record is written with `state: unknown` on the thread that
+/// drops the task, and not from a thread that is panicking (D22).
 #[derive(Clone)]
 pub struct AuditSink(Arc<dyn Fn(&AuditRecord) + Send + Sync>);
 
@@ -574,8 +604,10 @@ impl AdmittedProfile {
         outcome
     }
 
-    /// Writes a start's audit record.
-    pub(crate) fn audit_start(&self, run: &RunId, program: &str) {
+    /// Writes a start's audit record, and returns the one value that writes the run's
+    /// `run_ended` (design 36 D16): inert where the profile has no sink (D19).
+    pub(crate) fn audit_start(&self, run: &RunId, program: &str) -> RunEndRecord {
+        let declared_insecure = self.insecure_reason().map(str::to_owned);
         audit(
             &self.profile,
             &AuditRecord::RunStarted {
@@ -583,10 +615,18 @@ impl AdmittedProfile {
                 profile: self.id.clone(),
                 adapter: self.adapter.clone(),
                 inner: self.inner,
-                declared_insecure: self.insecure_reason().map(str::to_owned),
+                declared_insecure: declared_insecure.clone(),
                 program: program.to_owned(),
             },
         );
+        RunEndRecord(self.profile.audit.clone().map(|sink| PendingEnd {
+            sink,
+            run: run.clone(),
+            profile: self.id.clone(),
+            adapter: self.adapter.clone(),
+            inner: self.inner,
+            declared_insecure,
+        }))
     }
 
     /// Writes the record of a private `TMPDIR` a run left behind because its removal failed.
@@ -606,6 +646,137 @@ impl AdmittedProfile {
                 error: error.to_string(),
             },
         );
+    }
+}
+
+/// The one `run_ended` record of a started run (design 36 D16). Only
+/// [`AdmittedProfile::audit_start`] makes one, it is not `Clone`, and [`Self::write`] consumes
+/// it, so a run that received no `run_started` gets no `run_ended` and no run gets two.
+///
+/// It owns what the record needs, the sink among it, so the run's end task writes it whether or
+/// not the adapter still exists (D21). Dropped unwritten, it writes `run_ended` with
+/// `state: unknown` and nothing else known, synchronously on the dropping thread, unless that
+/// thread is panicking (D22). Without a sink it is inert (D19).
+#[must_use = "the run's end task writes its run_ended (design 36 D17)"]
+pub(crate) struct RunEndRecord(Option<PendingEnd>);
+
+/// What a [`RunEndRecord`] with a sink holds until it is written.
+struct PendingEnd {
+    sink: AuditSink,
+    run: RunId,
+    profile: ProfileId,
+    adapter: AdapterName,
+    inner: Option<InnerAdapter>,
+    declared_insecure: Option<String>,
+}
+
+impl PendingEnd {
+    /// The record of the ended `observation`; a state of `running`, which no end task passes,
+    /// is written `unknown` (D15: never `running`).
+    fn record(&self, observation: RunObservation) -> AuditRecord {
+        let RunObservation {
+            adapter,
+            inner,
+            declared_insecure,
+            state,
+            exit,
+            limit,
+            memory_oom_kills,
+            ..
+        } = observation;
+        AuditRecord::RunEnded {
+            run: self.run.clone(),
+            profile: self.profile.clone(),
+            adapter,
+            inner,
+            declared_insecure,
+            state: if state == RunState::Running {
+                RunState::Unknown
+            } else {
+                state
+            },
+            exit,
+            limit,
+            memory_oom_kills,
+        }
+    }
+
+    /// D22: the adapter lost sight of the run.
+    fn unknown(&self) -> AuditRecord {
+        AuditRecord::RunEnded {
+            run: self.run.clone(),
+            profile: self.profile.clone(),
+            adapter: self.adapter.clone(),
+            inner: self.inner,
+            declared_insecure: self.declared_insecure.clone(),
+            state: RunState::Unknown,
+            exit: None,
+            limit: None,
+            memory_oom_kills: None,
+        }
+    }
+}
+
+/// A built `run_ended` on its way to the sink: written when dropped, so a closure the blocking
+/// pool drops unrun, as at a runtime's shutdown, still writes it on the dropping thread.
+struct EndWrite {
+    sink: AuditSink,
+    record: AuditRecord,
+}
+
+impl Drop for EndWrite {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            self.sink.record(&self.record);
+        }
+    }
+}
+
+impl RunEndRecord {
+    /// Whether the profile had no sink, so nothing will be written (D19).
+    pub(crate) fn is_inert(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// Writes the run's `run_ended` from `observation`, the adapter's own observation of the
+    /// ended run, on the runtime's blocking pool (D20); on the calling thread where no runtime
+    /// is current.
+    pub(crate) fn write(mut self, observation: RunObservation) {
+        let Some(pending) = self.0.take() else {
+            return;
+        };
+        let write = EndWrite {
+            record: pending.record(observation),
+            sink: pending.sink,
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn_blocking(move || drop(write));
+            }
+            Err(_) => drop(write),
+        }
+    }
+}
+
+impl Drop for RunEndRecord {
+    fn drop(&mut self) {
+        if let Some(pending) = self.0.take()
+            && !std::thread::panicking()
+        {
+            pending.sink.record(&pending.unknown());
+        }
+    }
+}
+
+/// The run's end task's half of design 36 D17: once the end is published, it takes the value
+/// `audit_start` made from `receiver` and writes the record of the ended `observation`. A start
+/// that failed after the task was spawned dropped the sender, and nothing is written.
+pub(crate) async fn write_run_end(
+    receiver: tokio::sync::oneshot::Receiver<RunEndRecord>,
+    observation: RunObservation,
+) {
+    if let Ok(record) = receiver.await {
+        record.write(observation);
     }
 }
 
@@ -770,7 +941,8 @@ impl RunId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunState {
     Running,
     Ended,
@@ -778,9 +950,12 @@ pub enum RunState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a run ended. Serialized, an absent `code` or `signal` is omitted (design 36 D15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct RunExit {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<i32>,
 }
 
@@ -1151,6 +1326,210 @@ mod tests {
                 serde_json::json!(word)
             );
         }
+    }
+
+    /// Design 36 D15: `run_ended` serializes under its event name, the state in snake case, and
+    /// every absent member, an absent `code` or `signal` of the exit among them, is omitted.
+    #[test]
+    fn a_run_ended_record_serializes_with_its_event_and_omits_what_is_absent() {
+        let run = RunId::new("ex_1".to_owned());
+        let profile = ProfileId("p1".to_owned());
+        let bare = AuditRecord::RunEnded {
+            run: run.clone(),
+            profile: profile.clone(),
+            adapter: AdapterName::Local,
+            inner: None,
+            declared_insecure: None,
+            state: RunState::Unknown,
+            exit: None,
+            limit: None,
+            memory_oom_kills: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&bare).expect("serializes"),
+            serde_json::json!({
+                "event": "run_ended", "run": "ex_1", "profile": "p1", "adapter": "local",
+                "state": "unknown",
+            })
+        );
+        let full = AuditRecord::RunEnded {
+            run,
+            profile,
+            adapter: AdapterName::Systemd,
+            inner: Some(InnerAdapter::Linux),
+            declared_insecure: Some(REASON.to_owned()),
+            state: RunState::Ended,
+            exit: Some(RunExit {
+                code: None,
+                signal: Some(9),
+            }),
+            limit: Some(RunLimit::Memory),
+            memory_oom_kills: Some(1),
+        };
+        assert_eq!(
+            serde_json::to_value(&full).expect("serializes"),
+            serde_json::json!({
+                "event": "run_ended", "run": "ex_1", "profile": "p1", "adapter": "systemd",
+                "inner": "linux", "declared_insecure": REASON, "state": "ended",
+                "exit": {"signal": 9}, "limit": "memory", "memory_oom_kills": 1,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(RunExit {
+                code: Some(0),
+                signal: None
+            })
+            .expect("serializes"),
+            serde_json::json!({"code": 0})
+        );
+        assert_eq!(
+            serde_json::to_value(RunState::Running).expect("serializes"),
+            serde_json::json!("running")
+        );
+    }
+
+    type Kept = Arc<parking_lot::Mutex<Vec<serde_json::Value>>>;
+
+    /// A `local` profile admitted with a sink that keeps every record as JSON and sends each
+    /// `run_ended` on the returned channel, or with no sink.
+    fn admitted_local(
+        sink: bool,
+    ) -> (
+        AdmittedProfile,
+        Kept,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
+        let records = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let kept = Arc::clone(&records);
+        let (ended, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let profile = ConfinementProfile {
+            local_reason: Some(REASON.into()),
+            audit: sink.then(|| {
+                AuditSink::new(move |record: &AuditRecord| {
+                    let value = serde_json::to_value(record).expect("record");
+                    kept.lock().push(value.clone());
+                    if value["event"] == "run_ended" {
+                        let _ = ended.send(value);
+                    }
+                })
+            }),
+            ..ConfinementProfile::default()
+        };
+        let admitted = admission(&local::proof(true), &profile, |_| Ok(())).expect("admitted");
+        records.lock().clear();
+        (admitted, records, receiver)
+    }
+
+    fn ended_records(
+        records: &parking_lot::Mutex<Vec<serde_json::Value>>,
+    ) -> Vec<serde_json::Value> {
+        records
+            .lock()
+            .iter()
+            .filter(|record| record["event"] == "run_ended")
+            .cloned()
+            .collect()
+    }
+
+    /// Design 36 D16, D20: the value writes the record of the observation it is given, once,
+    /// on the blocking pool; consumed by the write, it writes nothing more when it goes.
+    #[tokio::test]
+    async fn the_run_end_value_writes_its_observation_once() {
+        let (admitted, records, mut ended) = admitted_local(true);
+        let run = RunId::new("local-1-1".to_owned());
+        let end = admitted.audit_start(&run, "/bin/true");
+        assert!(!end.is_inert());
+        let mut observation = RunObservation::new(run.clone(), AdapterName::Local, RunState::Ended);
+        observation.declared_insecure = Some(REASON.to_owned());
+        observation.exit = Some(RunExit {
+            code: Some(0),
+            signal: None,
+        });
+        observation.limit = Some(RunLimit::OutputStall);
+        end.write(observation);
+        let record = tokio::time::timeout(std::time::Duration::from_secs(5), ended.recv())
+            .await
+            .expect("run_ended reaches the sink")
+            .expect("the sink lives");
+        assert_eq!(
+            record,
+            serde_json::json!({
+                "event": "run_ended", "run": "local-1-1", "profile": admitted.id().as_str(),
+                "adapter": "local", "declared_insecure": REASON, "state": "ended",
+                "exit": {"code": 0}, "limit": "output_stall",
+            })
+        );
+        assert!(ended.try_recv().is_err(), "a second run_ended");
+        let events: Vec<_> = records
+            .lock()
+            .iter()
+            .map(|record| record["event"].clone())
+            .collect();
+        assert_eq!(events, ["run_started", "run_ended"]);
+    }
+
+    /// Design 36 D22: dropped unwritten, the value writes `run_ended` with `state: unknown` and
+    /// no exit, limit or count, synchronously on the dropping thread.
+    #[test]
+    fn the_run_end_value_dropped_unwritten_writes_unknown() {
+        let (admitted, records, _) = admitted_local(true);
+        let end = admitted.audit_start(&RunId::new("local-2-1".to_owned()), "/bin/true");
+        drop(end);
+        assert_eq!(
+            ended_records(&records),
+            [serde_json::json!({
+                "event": "run_ended", "run": "local-2-1", "profile": admitted.id().as_str(),
+                "adapter": "local", "declared_insecure": REASON, "state": "unknown",
+            })]
+        );
+    }
+
+    /// Design 36 D22: nothing is written from a thread that is panicking.
+    #[test]
+    fn the_run_end_value_dropped_by_a_panicking_thread_writes_nothing() {
+        let (admitted, records, _) = admitted_local(true);
+        let end = admitted.audit_start(&RunId::new("local-3-1".to_owned()), "/bin/true");
+        let unwound = std::thread::spawn(move || {
+            let _end = end;
+            panic!("the thread unwinds holding the value");
+        })
+        .join();
+        assert!(unwound.is_err());
+        assert!(ended_records(&records).is_empty(), "{:?}", records.lock());
+    }
+
+    /// Design 36 D19: without a sink the value is inert: written or dropped, nothing is written
+    /// and nothing fails.
+    #[tokio::test]
+    async fn without_a_sink_the_run_end_value_writes_nothing() {
+        let (admitted, records, _) = admitted_local(false);
+        let run = RunId::new("local-4-1".to_owned());
+        let end = admitted.audit_start(&run, "/bin/true");
+        assert!(end.is_inert());
+        end.write(RunObservation::new(
+            run.clone(),
+            AdapterName::Local,
+            RunState::Ended,
+        ));
+        drop(admitted.audit_start(&run, "/bin/true"));
+        assert!(records.lock().is_empty(), "{:?}", records.lock());
+    }
+
+    /// Design 36 D17: an end task whose start failed after it was spawned gets no value, and
+    /// writes nothing.
+    #[tokio::test]
+    async fn an_end_task_whose_sender_was_dropped_writes_nothing() {
+        let (admitted, records, _) = admitted_local(true);
+        let (sender, receiver) = tokio::sync::oneshot::channel::<RunEndRecord>();
+        drop(sender);
+        let run = RunId::new("local-5-1".to_owned());
+        write_run_end(
+            receiver,
+            RunObservation::new(run, AdapterName::Local, RunState::Ended),
+        )
+        .await;
+        assert!(records.lock().is_empty(), "{:?}", records.lock());
+        drop(admitted);
     }
 
     /// The operator's label is the generated name, never a second spelling of it.

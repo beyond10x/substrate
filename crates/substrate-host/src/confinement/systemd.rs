@@ -633,13 +633,14 @@ mod imp {
     ) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
         let hold = LinuxHold::take()?;
         let scope = process_scope(manager)?;
-        let inner = super::super::linux::open(request.with_cgroup_root(Some(scope.clone())))
-            .map_err(|error| match error {
-                ConfinementError::AdapterUnserved { detail, .. } => {
-                    unserved(format!("linux in {}: {detail}", scope.display()))
-                }
-                other => other,
-            })?;
+        let inner =
+            super::super::linux::open_adapter(request.with_cgroup_root(Some(scope.clone())))
+                .map_err(|error| match error {
+                    ConfinementError::AdapterUnserved { detail, .. } => {
+                        unserved(format!("linux in {}: {detail}", scope.display()))
+                    }
+                    other => other,
+                })?;
         let proved = inner.facts();
         if !proved.serves(&ContractFamily::Limits) || !proved.proves(&Fact::WholeTreeKill) {
             return Err(unserved(format!(
@@ -656,7 +657,7 @@ mod imp {
 
     struct SystemdLinux {
         facts: AdapterFacts,
-        inner: Arc<dyn ConfinementAdapter>,
+        inner: Arc<super::super::linux::LinuxAdapter>,
         _hold: LinuxHold,
     }
 
@@ -710,7 +711,18 @@ mod imp {
             let started: Result<RunId, ConfinementError> = async {
                 let inner = self.inner_admission(admitted, true)?;
                 let run = self.inner.start(&inner, command).await?;
-                admitted.audit_start(&run, &command.argv[0]);
+                let end = admitted.audit_start(&run, &command.argv[0]);
+                // The inner admission has no sink, so the inner `linux` writes nothing: this
+                // adapter's own task awaits the inner run's end and writes its `run_ended` with
+                // this profile and the relabelled observation (design 36 D20).
+                if !end.is_inert() {
+                    let ended = self.inner.ended_observation(&run);
+                    tokio::spawn(async move {
+                        if let Some(observation) = ended.await {
+                            end.write(Self::relabel(observation));
+                        }
+                    });
+                }
                 Ok(run)
             }
             .await;
@@ -1175,16 +1187,22 @@ mod imp {
         }
 
         fn observation(run: &LocalRun) -> RunObservation {
-            let (state, exit, end) = match *run.phase.borrow() {
+            Self::observation_of(&run.id, run.reason.as_deref(), *run.phase.borrow())
+        }
+
+        /// The observation of a run in `phase`: what `observe` and `wait` return, and what the
+        /// run's end task writes as `run_ended` (design 36 D15).
+        fn observation_of(id: &RunId, reason: Option<&str>, phase: Phase) -> RunObservation {
+            let (state, exit, end) = match phase {
                 Phase::Running => (RunState::Running, None, EndRead::default()),
                 Phase::Ended(exit, end) => (RunState::Ended, Some(exit), end),
                 Phase::Unknown(end) => (RunState::Unknown, None, end),
             };
             RunObservation {
-                run: run.id.clone(),
+                run: id.clone(),
                 adapter: AdapterName::Systemd,
                 inner: Some(InnerAdapter::Local),
-                declared_insecure: run.reason.clone(),
+                declared_insecure: reason.map(str::to_owned),
                 state,
                 exit,
                 limit: end.limit,
@@ -1484,6 +1502,11 @@ mod imp {
             let imposed = Arc::new(Mutex::new(None));
             let watched = Arc::clone(&imposed);
             let stall = live.clone();
+            let reason = admitted.insecure_reason().map(str::to_owned);
+            // The run's `run_ended` reaches its end task once `audit_start` made it (design 36
+            // D17).
+            let (hand_end, end_record) = tokio::sync::oneshot::channel();
+            let (end_id, end_reason) = (id.clone(), reason.clone());
             tokio::spawn(async move {
                 let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
                 *exited.lock() = true;
@@ -1513,7 +1536,11 @@ mod imp {
                     writer.end().await;
                 }
                 let end = EndRead::of(stall.as_ref(), memory_oom_kills, *imposed.lock());
-                let _ = phase.send(Phase::at_end(ended.ok().filter(|_| drained), end));
+                let ended = Phase::at_end(ended.ok().filter(|_| drained), end);
+                let _ = phase.send(ended);
+                // After the end is published, so neither `wait` nor `observe` waits for it (D20).
+                let observation = Self::observation_of(&end_id, end_reason.as_deref(), ended);
+                super::super::write_run_end(end_record, observation).await;
             });
             Self::watch(
                 cgroup.clone(),
@@ -1526,14 +1553,14 @@ mod imp {
             self.runs.lock().push(Arc::new(LocalRun {
                 id: id.clone(),
                 leader,
-                reason: admitted.insecure_reason().map(str::to_owned),
+                reason,
                 cgroup,
                 phase: observed,
                 captured,
                 stdin: writer,
                 live,
             }));
-            admitted.audit_start(&id, &command.argv[0]);
+            let _ = hand_end.send(admitted.audit_start(&id, &command.argv[0]));
             Ok(id)
         }
     }
