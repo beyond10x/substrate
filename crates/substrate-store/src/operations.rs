@@ -600,18 +600,29 @@ fn charge_new_operation(
     Ok(())
 }
 
+/// Settles the charge of a row its terminal update just wrote, inside the caller's transaction.
+/// Every terminal update of this crate calls it, so its refusals roll the whole update back and
+/// the row stays as it was:
+///
+/// - a resource over [`MAX_RESOURCE_ID_CHARS`] bytes is [`StoreError::OperationResourceTooLong`]
+///   ([`resource_within_bound`]), whatever the headroom: the bound holds for an accepted
+///   operation and its terminal update, and the least headroom counts the resource at it;
+/// - a row over its charge or over the row bound is [`StoreError::OperationTerminalHeadroom`].
 pub(crate) fn finalize_operation_accounting(
     connection: &Connection,
     config: StoreConfig,
     scope: &Scope,
     operation: &str,
 ) -> Result<(), StoreError> {
-    let charged: i64 = connection.query_row(
-        "SELECT charged_bytes FROM operations
+    let (charged, resource): (i64, Option<String>) = connection.query_row(
+        "SELECT charged_bytes, resource FROM operations
          WHERE deployment = ?1 AND subject = ?2 AND operation = ?3",
         params![scope.deployment, scope.subject, operation],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    if let Some(resource) = resource {
+        resource_within_bound(&resource)?;
+    }
     let charged = to_u64(charged)?;
     let row_bytes = operation_row_bytes(connection, scope, operation)?;
     if row_bytes > config.operation_max_row_bytes || row_bytes > charged {
@@ -679,9 +690,11 @@ pub(crate) fn existing_reservation(
 }
 
 /// The ids of an operation the store accepts are within what its terminal headroom counts (ADR
-/// 0053 decision 8, [`StoreConfig::minimum_terminal_headroom_bytes`]): the operation id is at
-/// most [`MAX_OPERATION_ID_CHARS`] characters, each one the wire's operation-id rule admits
-/// ([`is_operation_id_byte`]), and the resource it names is at most [`MAX_RESOURCE_ID_CHARS`].
+/// 0053 decision 8, [`StoreConfig::minimum_terminal_headroom_bytes`]), in the bytes the row
+/// accounting charges ([`operation_row_bytes`]): the operation id is at most
+/// [`MAX_OPERATION_ID_CHARS`] characters of the wire's operation-id alphabet
+/// ([`is_operation_id_byte`]), which is ASCII, so as many bytes; and the resource it names is at
+/// most [`MAX_RESOURCE_ID_CHARS`] bytes ([`resource_within_bound`]).
 fn accepted_ids_within_bounds(new: &NewOperation) -> Result<(), StoreError> {
     if new.operation.len() > MAX_OPERATION_ID_CHARS
         || !new.operation.bytes().all(is_operation_id_byte)
@@ -691,13 +704,22 @@ fn accepted_ids_within_bounds(new: &NewOperation) -> Result<(), StoreError> {
         });
     }
     if let Some(resource) = &new.resource {
-        let chars = resource.chars().count();
-        if chars > MAX_RESOURCE_ID_CHARS {
-            return Err(StoreError::OperationResourceTooLong {
-                chars,
-                max: MAX_RESOURCE_ID_CHARS,
-            });
-        }
+        resource_within_bound(resource)?;
+    }
+    Ok(())
+}
+
+/// The resource an accepted operation names, at acceptance and at its terminal update, is at
+/// most [`MAX_RESOURCE_ID_CHARS`] bytes, the figure
+/// [`StoreConfig::minimum_terminal_headroom_bytes`] counts it at. Every identifier the daemon
+/// mints is ASCII and within it. A longer one is [`StoreError::OperationResourceTooLong`]. A
+/// refused row is not held to it (`insert_refused_operation`).
+fn resource_within_bound(resource: &str) -> Result<(), StoreError> {
+    if resource.len() > MAX_RESOURCE_ID_CHARS {
+        return Err(StoreError::OperationResourceTooLong {
+            bytes: resource.len(),
+            max: MAX_RESOURCE_ID_CHARS,
+        });
     }
     Ok(())
 }

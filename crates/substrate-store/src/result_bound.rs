@@ -49,9 +49,10 @@ pub fn result_unrecorded(operation: &str) -> ErrorDetail {
 }
 
 /// The bytes of the widest outcome a row ends with when its result is not recorded: the error
-/// [`result_unrecorded`] of an operation id of [`MAX_OPERATION_ID_CHARS`] characters, each one
-/// byte of JSON. The store accepts no operation whose id is longer or holds another character
-/// (`accepted_ids_within_bounds`, [`substrate_wire::is_operation_id_byte`]).
+/// [`result_unrecorded`] of an operation id of [`MAX_OPERATION_ID_CHARS`] characters of the
+/// wire's operation-id alphabet, which is ASCII, so each one byte of JSON. The store accepts no
+/// operation whose id is longer or holds another character (`accepted_ids_within_bounds`,
+/// [`substrate_wire::is_operation_id_byte`]).
 #[must_use]
 pub fn widest_unrecorded_outcome_json_bytes() -> u64 {
     let outcome = OperationOutcome::Error {
@@ -67,9 +68,10 @@ impl StoreConfig {
     /// row accounting adds to a row that ends with the widest unrecorded outcome: its longest
     /// `terminal_at` ([`OPERATION_TERMINAL_AT_MAX_BYTES`]), the status charge,
     /// [`widest_unrecorded_outcome_json_bytes`] and the resource the terminal update names, at
-    /// most [`MAX_RESOURCE_ID_CHARS`] (a row may be accepted without one). 35 + 8 + 379 + 32 =
-    /// 454 bytes. Under it a completion over the reserve could not end its row, and the row
-    /// would stay accepted (ADR 0053 decisions 1 and 8).
+    /// most [`MAX_RESOURCE_ID_CHARS`] bytes (a row may be accepted without one; a terminal
+    /// update naming a longer one is refused, [`StoreError::OperationResourceTooLong`]).
+    /// 35 + 8 + 379 + 32 = 454 bytes. Under it a completion over the reserve could not end its
+    /// row, and the row would stay accepted (ADR 0053 decisions 1 and 8).
     #[must_use]
     pub fn minimum_terminal_headroom_bytes() -> u64 {
         OPERATION_TERMINAL_AT_MAX_BYTES

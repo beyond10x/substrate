@@ -144,7 +144,8 @@ fn widest_operation(tag: &str) -> String {
     )
 }
 
-/// A resource id of the widest form the store accepts, `MAX_RESOURCE_ID_CHARS` characters.
+/// A resource id of the widest form the store accepts, `MAX_RESOURCE_ID_CHARS` ASCII characters,
+/// so as many bytes.
 fn widest_resource(prefix: &str) -> String {
     format!(
         "{prefix}{}",

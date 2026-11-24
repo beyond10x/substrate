@@ -1183,18 +1183,22 @@ fn a_store_at_the_least_terminal_headroom_ends_an_over_reserve_completion_with_t
     );
 }
 
-/// A resource longer than `MAX_RESOURCE_ID_CHARS` named at a terminal update is the caller's
-/// value, which the reserve does not bound: at the least headroom the update rolls back and the
-/// row stays accepted.
+/// A terminal update that names a resource one byte over `MAX_RESOURCE_ID_CHARS` is refused by
+/// name, and the row stays accepted.
 #[test]
-fn a_terminal_update_naming_a_resource_past_its_bound_rolls_back_at_the_least_headroom() {
+fn a_terminal_update_naming_a_resource_one_byte_past_its_bound_is_refused_at_the_least_headroom() {
     let resource = format!(
         "ws_{}",
         "w".repeat(substrate_wire::MAX_RESOURCE_ID_CHARS - 2)
     );
     let (store, accepted, completed) = least_headroom_completion(&resource);
     assert!(
-        matches!(completed, Err(StoreError::OperationTerminalHeadroom(_))),
+        matches!(
+            completed,
+            Err(StoreError::OperationResourceTooLong { bytes, max })
+                if bytes == substrate_wire::MAX_RESOURCE_ID_CHARS + 1
+                    && max == substrate_wire::MAX_RESOURCE_ID_CHARS
+        ),
         "{completed:?}"
     );
     let record = store
@@ -1207,7 +1211,7 @@ fn a_terminal_update_naming_a_resource_past_its_bound_rolls_back_at_the_least_he
 
 /// The store accepts an operation only with an id of the wire's operation-id form, at most
 /// `MAX_OPERATION_ID_CHARS` characters each of which the wire's rule admits, and with a resource
-/// of at most `MAX_RESOURCE_ID_CHARS`; each refusal is named and writes no row.
+/// of at most `MAX_RESOURCE_ID_CHARS` bytes; each refusal is named and writes no row.
 #[test]
 fn an_operation_is_accepted_only_with_ids_the_terminal_headroom_counts() {
     use substrate_wire::{MAX_OPERATION_ID_CHARS, MAX_RESOURCE_ID_CHARS};
@@ -1264,8 +1268,8 @@ fn an_operation_is_accepted_only_with_ids_the_terminal_headroom_counts() {
     );
     assert!(matches!(
         store.reserve(&too_long),
-        Err(StoreError::OperationResourceTooLong { chars, max })
-            if chars == MAX_RESOURCE_ID_CHARS + 1 && max == MAX_RESOURCE_ID_CHARS
+        Err(StoreError::OperationResourceTooLong { bytes, max })
+            if bytes == MAX_RESOURCE_ID_CHARS + 1 && max == MAX_RESOURCE_ID_CHARS
     ));
     assert!(
         store
@@ -5719,3 +5723,6 @@ mod result_bound_event_cases;
 
 #[path = "result_bound_completion_path_cases.rs"]
 mod result_bound_completion_path_cases;
+
+#[path = "result_bound_row_accounting_cases.rs"]
+mod result_bound_row_accounting_cases;
