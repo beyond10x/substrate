@@ -10,8 +10,14 @@ scope:
 - confidence: cited
   path: .github/workflows/gate.yml
 - confidence: cited
+  path: STATUS.md
+- confidence: cited
+  path: crates/substrate-host/src/generated/confinement.rs
+- confidence: cited
+  path: crates/substrate-wire/src/generated
+- confidence: cited
   path: spec
-revision: 2
+revision: 3
 ---
 # Story: the ESS pin moves to 0.98.0
 
