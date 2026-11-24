@@ -433,6 +433,12 @@ pub const OPERATION_LEDGER_SUBJECT_MAX_ROWS: u64 = 100_000;
 pub const OPERATION_LEDGER_SUBJECT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub const OPERATION_LEDGER_GLOBAL_MAX_ROWS: u64 = 1_000_000;
 pub const OPERATION_LEDGER_GLOBAL_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// The bytes of compact JSON the operation ledger reserves for the success result of one
+/// operation (ADR 0053 decision 4): 512 KiB less the 71 bytes a terminal success adds around
+/// its result. The `widest_json_bytes` of a result type is compared with it.
+/// `the_default_reserve_is_the_published_result_bound` in the store's tests holds the store's
+/// default reserve to this number.
+pub const OPERATION_RESULT_MAX_JSON_BYTES: u64 = 524_217;
 pub const MIN_LEASE_TTL_MS: u64 = 1_000;
 pub const MAX_LEASE_TTL_MS: u64 = 86_400_000;
 pub const LEASE_CLOCK_TOLERANCE_MS: u64 = 30_000;
@@ -6045,6 +6051,18 @@ pub fn canonical_json(value: &Value) -> Result<String, WireValidationError> {
     Ok(output)
 }
 
+// The widest stored form of each result the operation ledger records, and the bounds of the
+// members a request does not set (ADR 0053 decisions 6 and 7).
+mod result_widths;
+pub use result_widths::{
+    MAX_APERTURE_DESTINATION_CHARS, MAX_APERTURE_LISTEN_CHARS, MAX_APERTURE_NAME_CHARS,
+    MAX_APPLIED_CGROUP_CHARS, MAX_EXEC_REFUSAL_CODE_CHARS, MAX_EXEC_REFUSAL_MESSAGE_CHARS,
+    MAX_EXEC_USAGE_CODE_CHARS, MAX_EXEC_USAGE_MESSAGE_CHARS, MAX_LABEL_KEY_CHARS,
+    MAX_LABEL_VALUE_CHARS, MAX_LABELS, MAX_LEASE_ACTOR_CHARS, MAX_LEASE_PRINCIPAL_CHARS,
+    MAX_OPERATION_ID_CHARS, MAX_PROCESS_EXIT_SIGNAL_CHARS, MAX_RESOURCE_ID_CHARS,
+    MAX_TIMESTAMP_CHARS,
+};
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -7320,6 +7338,12 @@ mod confinement_facts_tests;
 
 #[cfg(test)]
 mod file_text_bound_tests;
+
+#[cfg(test)]
+mod result_width_tests;
+
+#[cfg(test)]
+mod adversary_result_width_tests;
 
 #[cfg(test)]
 mod adoption_tests {

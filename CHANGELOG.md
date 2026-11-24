@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The wire crate states the bytes the operation ledger reserves for one success result,
+  `OPERATION_RESULT_MAX_JSON_BYTES` (524,217), the bounds of the result members a request does
+  not set (`MAX_TIMESTAMP_CHARS`, `MAX_RESOURCE_ID_CHARS`, `MAX_OPERATION_ID_CHARS`, the label,
+  lease, applied `cgroup`, aperture, usage, refusal and exit-signal bounds), and a
+  `widest_json_bytes` on `Exec`, `PipeSession`, `ProcessRecord`, `Workspace`, `FileObservation`,
+  `FileAbsence`, `ExecAbsence`, `SessionAbsence` and `WorkspaceAbsence`: the bytes of compact
+  JSON of the widest form that result is stored in (ADR 0053 decisions 4, 6 and 7). No answer of
+  the daemon changes. Held by the wire crate's `result_width_tests` against the schemas of
+  bundle `0.27.0`, and by `the_default_reserve_is_the_published_result_bound` in the store.
+
 ### Fixed
 
 - A signal to an exec or a session of the host driver whose run has ended, and whose cgroup the
