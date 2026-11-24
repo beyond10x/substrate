@@ -27,9 +27,31 @@ static HELD: Mutex<Vec<File>> = Mutex::new(Vec::new());
 /// A loopback address for a listener a daemon binds later: free now, below the kernel's ephemeral
 /// range, and reserved for this process until it ends.
 pub fn unused_address() -> SocketAddr {
-    // Where the scan starts only spreads processes over the pool; the lock keeps them apart.
-    let start = usize::try_from(std::process::id()).unwrap_or(0);
-    draw_from(start, ephemeral_port_low())
+    draw_from(scan_start(), ephemeral_port_low())
+}
+
+/// Where this process's scan of the pool starts, before the pool's size is taken off. The lock
+/// keeps processes that lock in one directory apart. The multiplier keeps apart the starts of
+/// processes that do not: two checkouts with a target directory each share the loopback
+/// interface and no lock, and process ids one apart then start 7919 ports apart.
+fn scan_start() -> usize {
+    usize::try_from(std::process::id())
+        .unwrap_or(0)
+        .wrapping_mul(7_919)
+}
+
+/// How many ports a scan from offset `start` passes until it has passed every port of `held`,
+/// in a pool of `pool` ports. The order the ports were handed out in does not count: a port
+/// another process released between two draws is handed out by the later draw.
+#[allow(
+    dead_code,
+    reason = "only the cases below call it, and a test binary without the test harness compiles none of them"
+)]
+fn stretch(start: usize, held: &[u16], pool: usize) -> usize {
+    held.iter()
+        .map(|port| (usize::from(port - TEST_PORT_FLOOR) + pool - start % pool) % pool + 1)
+        .max()
+        .unwrap_or(0)
 }
 
 /// The first port of the pool from offset `start` on, wrapping around, that this process can
@@ -138,8 +160,58 @@ fn a_port_handed_out_cannot_be_reserved_a_second_time() {
     );
 }
 
-/// A child process that draws from this process's first port on, as many ports as the
-/// stretch up to its last one holds, so it passes every one of them, is handed none of them.
+/// The stretch a child scans covers every held port, in whatever order the ports were handed
+/// out and across the end of the pool.
+#[test]
+fn the_stretch_of_a_scan_covers_every_held_port_in_any_order() {
+    let port = |offset: u16| TEST_PORT_FLOOR + offset;
+    assert_eq!(
+        stretch(10, &[port(14), port(11), port(12), port(13)], 100),
+        5
+    );
+    assert_eq!(
+        stretch(10, &[port(11), port(12), port(13), port(14)], 100),
+        5
+    );
+    assert_eq!(stretch(98, &[port(99), port(0), port(1)], 100), 4);
+    assert_eq!(stretch(98, &[port(1), port(99), port(0)], 100), 4);
+    assert_eq!(stretch(210, &[port(10)], 100), 1);
+    assert_eq!(stretch(10, &[], 100), 0);
+}
+
+/// Process ids one apart start their scans far apart, so two processes that share no lock
+/// directory do not start on neighbouring ports.
+#[test]
+fn neighbouring_process_ids_start_their_scans_far_apart() {
+    let pool = usize::from(ephemeral_port_low() - TEST_PORT_FLOOR);
+    let own = scan_start() % pool;
+    let next = (scan_start() + 7_919) % pool;
+    let apart = (next + pool - own) % pool;
+    assert!(
+        apart.min(pool - apart) >= 1_024,
+        "scans of neighbouring process ids start {apart} ports apart in a pool of {pool}"
+    );
+}
+
+/// The locks lie in `tmp` of the target directory this test executable was built in, the one
+/// directory every test binary of that target directory uses, and in no package's own.
+#[test]
+fn the_lock_directory_is_the_target_directorys_own() {
+    let executable = std::env::current_exe().expect("this test executable");
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    assert!(
+        executable
+            .ancestors()
+            .any(|directory| directory.join("tmp") == tmp),
+        "{} is `tmp` of no directory above {}",
+        tmp.display(),
+        executable.display()
+    );
+}
+
+/// A child process that draws from where this process's scan starts, as many ports as that
+/// scan passes up to the last port this process holds, so it passes every one of them, is
+/// handed none of them.
 #[test]
 fn a_child_process_is_handed_none_of_the_ports_this_process_holds() {
     // Set in the child: the offset in the pool it draws from, and how many ports it draws.
@@ -159,12 +231,16 @@ fn a_child_process_is_handed_none_of_the_ports_this_process_holds() {
         }
         return;
     }
-    // Each draw scans from one place, so the ports come in the order of the scan.
     let held: Vec<u16> = (0..4).map(|_| unused_address().port()).collect();
     let pool = usize::from(ephemeral_low - TEST_PORT_FLOOR);
-    let first = usize::from(held[0] - TEST_PORT_FLOOR);
-    let last = usize::from(held[3] - TEST_PORT_FLOOR);
-    let count = (last + pool - first) % pool + 1;
+    let first = scan_start() % pool;
+    let count = stretch(first, &held, pool);
+    // The child draws `count` ports and each draw scans from `first`: a count near the pool's
+    // size would run past the test budget and take the pool from the tests beside it.
+    assert!(
+        count <= 1_024,
+        "the ports {held:?} lie {count} ports into the scan from offset {first}: the pool is crowded"
+    );
     let name = format!(
         "{}::a_child_process_is_handed_none_of_the_ports_this_process_holds",
         module_path!()
