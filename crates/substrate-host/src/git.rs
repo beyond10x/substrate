@@ -113,26 +113,7 @@ pub(super) fn materialize(
         .map_err(|_| failed("workspace.git-remote-failed"))?;
     let destination = format!("refs/remotes/origin/{}", source.reference);
     let refspec = format!("+{branch_ref}:{destination}");
-    // What the fetch may allocate for one object while it indexes the pack: an entry, or what
-    // an entry is stored behind, that states more bytes is refused before the bytes are
-    // allocated. The Git library reads a configured integer as a signed one.
-    let alloc_limit = format!(
-        "gitoxide.objects.allocLimit={}",
-        limit.max_bytes.min(i64::MAX.unsigned_abs())
-    );
-    let fetch_repository = gix::open::Options::isolated()
-        .strict_config(true)
-        .config_overrides([
-            "protocol.version=2",
-            "pack.threads=2",
-            "gitoxide.tracePacket=false",
-            "user.name=Substrate",
-            "user.email=substrate@example.invalid",
-            alloc_limit.as_str(),
-        ])
-        .open(target)
-        .map_err(|_| failed("workspace.git-init-failed"))?
-        .to_thread_local();
+    let fetch_repository = open_for_fetch(target, limit)?;
     let remote = fetch_repository
         .remote_at_without_url_rewrite(locator.as_str())
         .map_err(|_| failed("workspace.git-remote-failed"))?
@@ -216,6 +197,42 @@ pub(super) fn materialize(
         "Git materialization stage completed"
     );
     Ok(usage)
+}
+
+/// The threads on which the fetch of a create computes the ids of its pack: one.
+///
+/// One thread makes the entries of a pack in one order, so which objects wait at once follows
+/// the pack alone, and the same pack under the same byte limit gets the same answer every time
+/// (design 21, § *The work and the memory of a create follow its byte limit*, *Objects that
+/// wait*).
+const INDEXING_THREADS: usize = 1;
+
+/// Opens the staging repository at `target` as the fetch of a create under `limit` reads it.
+///
+/// The byte limit of the create is what the fetch may allocate for one object while it indexes
+/// the pack (`gitoxide.objects.allocLimit`): an entry, or what an entry is stored behind, that
+/// states more bytes is refused before the bytes are allocated, and the bounds of the fetch
+/// are multiples of it (design 21, § *The work and the memory of a create follow its byte
+/// limit*). The Git library reads a configured integer as a signed one.
+fn open_for_fetch(target: &Path, limit: StorageLimit) -> Result<gix::Repository, DriverError> {
+    let threads = format!("pack.threads={INDEXING_THREADS}");
+    let alloc_limit = format!(
+        "gitoxide.objects.allocLimit={}",
+        limit.max_bytes.min(i64::MAX.unsigned_abs())
+    );
+    Ok(gix::open::Options::isolated()
+        .strict_config(true)
+        .config_overrides([
+            "protocol.version=2",
+            threads.as_str(),
+            "gitoxide.tracePacket=false",
+            "user.name=Substrate",
+            "user.email=substrate@example.invalid",
+            alloc_limit.as_str(),
+        ])
+        .open(target)
+        .map_err(|_| failed("workspace.git-init-failed"))?
+        .to_thread_local())
 }
 
 /// Whether the fetch ended while it indexed the pack because one object would take more
@@ -342,6 +359,7 @@ fn finish_materialization(
         path_bytes = checked.path_bytes,
         longest_path = checked.longest,
         bytes = checked.bytes,
+        whole_read_bytes = checked.whole_read_bytes,
         "Git materialization stage completed"
     );
     let commit = repository.find_commit(expected).map_err(|_| missing())?;

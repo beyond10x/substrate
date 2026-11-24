@@ -383,7 +383,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-secrets` | a reachable Git object carrying a credential, or an incomplete history scan | yes |
 | `check-advisories` | a RustSec vulnerability or forbidden HTTP/2 dependency | yes |
 | `check-licenses` | non-Apache workspace metadata, an unreviewed dependency licence or third-party notice drift | yes |
-| `check-packages` | a publishable workspace package, a loose internal version edge, a source runtime package without inherited SPDX metadata, its README and a public documentation target, a host driver feature other than `git` and `kubernetes` or a default other than both, a host normal tree without default features (every target) that names gix, git2, libgit2-sys, curl, curl-sys, openssl-sys or the Kubernetes client, or — invariants 1 and 2 — a Flux dependency or a `beyond10x` Git dependency in any dependency table, `[workspace.dependencies]` and `[patch.*]` included | yes |
+| `check-packages` | a publishable workspace package, a loose internal version edge, a source runtime package without inherited SPDX metadata, its README and a public documentation target, a host driver feature other than `git` and `kubernetes` or a default other than both, a host normal tree without default features (every target) that names gix, git2, libgit2-sys, curl, curl-sys, openssl-sys or the Kubernetes client, or — invariants 1 and 2 — a Flux dependency or a `beyond10x` Git dependency in any dependency table, `[workspace.dependencies]` and `[patch.*]` included; or a `[patch.crates-io]` entry that `Cargo.lock` does not resolve to: the lock file holds no package of the entry's name and version, or resolves that package from a source that is not the entry's, so the build would not take the entry's source; or a second package of a patched name from any source: beside the entry's package the lock file holds another package of that name, whatever its version, from the registry, a `sparse+` registry, a Git source or another path, so a dependent of that one would not build the entry's source; or, since only `[patch.crates-io]` in `Cargo.toml` carries a patch, another `[patch]` key or a `[replace]` in `Cargo.toml`, an entry `Cargo.lock` lists under `[[patch.unused]]`, two entries of one package name, or an entry with neither a `path` nor a `git` source; or a top-level key other than `alias` and `profile` in a cargo configuration beneath the root, a fixture that is a workspace of its own included (a test that builds a fixture offline writes its source replacement into the copy it runs), an alias that is not a string or an array of strings or that holds `--config` or `--config=<value>`, or a `.cargo` directory holding both `config` and `config.toml`, a link included; the `.cargo` directory and both file names are taken without regard to ASCII letter case, as cargo reads them on a file system that compares names without it, and a directory holding more than one such file across the spellings is refused, naming every file; outside the check are configuration outside the repository (a file above the root, `CARGO_HOME`, `--config` on a command line or in a script or workflow, `CARGO_*` variables), files beneath a directory named `target` or `.git`, and what `profile` sets (`vendor/axum-0.8.9` and `vendor/gix-pack-0.74.2` are the two entries) | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
@@ -1242,17 +1242,19 @@ at `scripts/bot-token.sh:8` — `org="${B10X_BOT_ORG:-beyond10x}"` — **is** th
 lives in (`git remote -v` shows `github.com/beyond10x/substrate`), so the default is right here. Set
 `B10X_BOT_ORG` only to mint against a different org.
 
-**On the operator's workstation, bot writes go through `b10x-gates`, not through these scripts,
-until `story:bot-token-mints-without-cargo` is done.** `scripts/bot-token.sh` checks its two
-credential files with `cargo xtask check-bot-files`, and since 2026-11-24 the workstation's
-build pool sends `cargo xtask` to a build node, where those files are not: the mint fails. A
-commit, a merge and a push are `b10x-gates bot -- <git arguments>`, a `gh` write is
-`b10x-gates --repository beyond10x/substrate --policy <policy file> gh -- <gh arguments>`, and a
-pull-request merge is `b10x-gates … api --method PUT --path /repos/beyond10x/substrate/pulls/<n>/merge`.
-Where this file writes `scripts/as-bot.sh` or `scripts/bot-gh.sh` below, read that form.
-Both scripts end non-zero and run no program where the mint fails or prints no token
-(`xtask/tests/bot_scripts.rs`): `gh` without a `GH_TOKEN` would act under the login of the
-caller's keyring, which no session may publish under.
+**`scripts/bot-token.sh` mints without cargo, so both scripts work where a build runs
+elsewhere.** It checks its two credential files itself, in the shell, before `jq`, `openssl` or
+`curl` starts: each is there, is a regular file and no symbolic link, belongs to the effective
+user and opens for reading; the configuration is not writable by group or other (mask `022`) and
+the key grants group and other nothing (mask `077`). A refusal prints one line per failed check,
+naming neither its path nor a byte of it, and ends the script with status 1. The workstation's
+build pool sends `cargo xtask` to a build node, where the two files are not, so the check must
+not be a cargo verb; there is none. `xtask/tests/bot_scripts.rs` runs the script with a `PATH`
+of stand-ins and system tools, its `cargo` a stand-in that records a call, against throwaway
+files: every refusal, the
+admitted modes, and a mint with no `cargo` at all. Both scripts end non-zero and run no program
+where the mint fails or prints no token (the same file): `gh` without a `GH_TOKEN` would act
+under the login of the caller's keyring, which no session may publish under.
 
 **Bot authentication does not bypass `main`'s ruleset.** A direct `scripts/as-bot.sh push origin
 main` is rejected with `GH006`: the ruleset restricts `creation`, `update`, `deletion` and
@@ -1264,6 +1266,19 @@ request with
 `scripts/bot-gh.sh`, let `Full gate` run on that exact head, and merge through the pull request. Do
 not retry the direct push or loosen the ruleset; this is the ordinary path for every
 workstation-authored change, including release preparation.
+
+**Bot writes from the operator's workstation go through `b10x-gates`.** The rule has no end date:
+it is the owner's standing rule for every beyond10x repository (the operator's session,
+2026-11-24), whether or not `scripts/as-bot.sh` and `scripts/bot-gh.sh` can mint there. A commit,
+a merge and a push are `b10x-gates bot -- <git arguments>`, a `gh` write is
+`b10x-gates --repository beyond10x/substrate --policy <policy file> gh -- <gh arguments>`, and a
+pull-request merge is `b10x-gates … api --method PUT --path /repos/beyond10x/substrate/pulls/<n>/merge`.
+Where this file writes one of the two scripts for a write from that workstation, read that form.
+A refused `b10x-gates bot -- push` waits and is tried again, at most once in 10 minutes, and its
+refusal line goes to the operator's session; it is not replaced by API writes that make the same
+result another way (`git/refs`, `git/trees`, `git/commits`, `git/tags`, `contents/…`,
+`pulls/<n>/update-branch`). Merging a pull request through the API after green checks, and
+reads, are not such a replacement.
 
 **A pull request's branch must hold `main` before it merges.** A third ruleset on `main`
 (id 23511358, read on 2026-11-23 with `gh api repos/beyond10x/substrate/rules/branches/main`)

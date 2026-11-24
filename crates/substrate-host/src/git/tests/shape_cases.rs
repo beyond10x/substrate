@@ -135,13 +135,19 @@ fn a_baseline_that_names_as_many_paths_as_the_inode_limit_is_served_and_one_more
 /// The check reads each tree of the baseline once, however often the baseline names it: of a
 /// baseline that names 2^41 paths with forty-two trees it reads forty-two. Its counts
 /// saturate: a baseline of seventy-two trees that names more paths than a count holds is
-/// refused like any number over the limit.
+/// refused like any number over the limit. A tree counts its bytes as a whole read once for
+/// each place the baseline names it, so the byte limit here is the largest there is and the
+/// number of paths alone decides.
 #[test]
 fn the_check_reads_a_tree_once_however_often_the_baseline_names_it() {
     let check = |levels: u32, max_inodes: u64| {
         let (workspace, commit) = doubled_repository(levels);
         let repository = Repository::open(workspace.path()).expect("repository");
-        store::check_baseline(&repository, commit, inodes(max_inodes))
+        let limit = StorageLimit {
+            max_bytes: u64::MAX,
+            max_inodes,
+        };
+        store::check_baseline(&repository, commit, limit)
             .ok()
             .map(|checked| (checked.trees, checked.paths))
     };

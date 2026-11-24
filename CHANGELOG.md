@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The wire crate states the bytes the operation ledger reserves for one success result,
+  `OPERATION_RESULT_MAX_JSON_BYTES` (524,217), the bounds of the result members a request does
+  not set (`MAX_TIMESTAMP_CHARS`, `MAX_RESOURCE_ID_CHARS`, `MAX_OPERATION_ID_CHARS`, the label,
+  lease, applied `cgroup`, aperture, usage, refusal and exit-signal bounds), and a
+  `widest_json_bytes` on `Exec`, `PipeSession`, `ProcessRecord`, `Workspace`, `FileObservation`,
+  `FileAbsence`, `ExecAbsence`, `SessionAbsence` and `WorkspaceAbsence`: the bytes of compact
+  JSON of the widest form that result is stored in (ADR 0053 decisions 4, 6 and 7). No answer of
+  the daemon changes. Held by the wire crate's `result_width_tests` against the schemas of
+  bundle `0.27.0`, and by `the_default_reserve_is_the_published_result_bound` in the store.
+
 ### Fixed
 
 - A signal to an exec or a session of the host driver whose run has ended, and whose cgroup the
@@ -47,6 +59,59 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   join the kernel refuses is `exec.spawn-failed`, and a `cgroup.procs` the driver cannot open is
   `exec.cgroup-write-failed`. The driver raises no `exec.process-tree-failed`. No route or
   schema changes.
+- The work and the memory of a Git create follow its byte limit, the requested storage limit,
+  else 2 GiB (design 21, § *The baseline store*). Five counts are held to a multiple of that
+  limit: the bytes that reading the commit, each tree and each file object of the baseline
+  whole inflates and makes, once for each place the baseline names the object (64 times the
+  limit); the bytes the entries of a pack inflate to while the pack arrives (64 times the
+  limit); the bytes of the table of entries the fetch keeps while a pack arrives, 128 for each
+  entry, which is its item of 64 bytes and as much again for what the indexing keeps for it
+  beside the table, and the lists beside them at what they reserve (the limit); the bytes of
+  the objects
+  the fetch holds until the entries stored behind them have been made, each at its own length
+  (the limit); and the bytes the fetch inflates and makes when it computes the ids (64 times
+  the limit). The fetch computes the ids on one thread, so the same pack under the same limit
+  gets the same answer every time. A create over one of the counts is refused
+  `workspace.git-storage-limit`, and the workspace is proved absent. The first count is held
+  where the baseline is checked, before any file object is read. The other four are held in
+  `gix-pack`, which the repository carries as `vendor/gix-pack-0.74.2`: the published crate
+  with those four counts, selected by `[patch.crates-io]`. The copy also fills the queue of
+  its id pass from the table and sorts the entries by id where they lie, so neither keeps a
+  list beside the table; the index it writes of a pack is the same bytes. `cargo xtask check-packages` refuses
+  a `[patch.crates-io]` entry that `Cargo.lock` does not resolve to, and a lock file that holds
+  a second package of the entry's name from any source: the registry, a `sparse+` registry, a
+  Git source or another path. Cases run against a source served
+  on loopback, with a pack within every other count and over one, at the byte or the entry
+  where the count turns, and state a bound on the memory of the test process. Over the indexing
+  of a pack within every count that makes the limit wait, the peak resident memory grew by
+  3.03 to 3.23 times the limit for a pack that deflates and, on the second indexing of a
+  process, by 3.75 to 3.95 times for a pack that does not deflate, whose mapped file is itself
+  nearly the limit; six cases hold that growth under four times. Over the first indexing of a
+  process, which also pays about 2 MiB once for the pages of its program, the pack that does
+  not deflate grew the peak by 3.98 to 4.18 times the limit; that figure is printed and not
+  held. A create of
+  1,000 files with 50 commits of history is served. No route, schema or refusal code changes.
+- `cargo xtask check-packages` holds a rule for replacing a package: only `[patch.crates-io]`
+  in the root `Cargo.toml` carries a patch, and the check refuses by name, with the file, the
+  key or entry, and what to do: another key under `[patch]` (an index URL in any spelling, a
+  registry name, a Git URL) and `[replace]` in `Cargo.toml`; an entry `Cargo.lock` lists under
+  `[[patch.unused]]`; two entries that patch one package name; and an entry with neither a
+  `path` nor a `git` source. Each entry of `[patch.crates-io]` is held to the lock file, a Git
+  entry to its reference. A cargo configuration beneath the root holds only the top-level keys
+  `alias` and `profile`, and an alias is a string or an array of strings with no `--config` or
+  `--config=<value>` token; a `.cargo` directory holding both `config` and `config.toml`, a
+  link included, is refused. The `.cargo` directory and both file names are taken without
+  regard to ASCII letter case, as cargo reads them on a file system that compares names
+  without it (macOS), and a directory holding more than one such file across the spellings is
+  refused, naming every file. The rule holds in every directory the walk enters, a fixture that
+  is a workspace of its own included: the macOS tests that build a fixture offline from its own
+  `vendor` write the source replacement into the copy they run. Outside the check are
+  configuration outside the repository (a file above the root, `CARGO_HOME`, `--config` on a
+  command line or in a script or workflow, `CARGO_*` variables), files beneath a directory
+  named `target` or `.git`, and what `profile` sets. Held by 28 cases of
+  `xtask/src/packages.rs`: 27 on throwaway workspaces, and one that holds that this tree's
+  fixture directory has no `.cargo`. On this tree the check reads the two entries and the one
+  cargo configuration, `.cargo/config.toml`, and passes.
 
 ## [0.26.0] — 2026-11-23
 

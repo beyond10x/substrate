@@ -102,21 +102,24 @@ what it means for a result type that has no member to cut.
    the widest result the request can lead to, counted as the row's serializer writes it:
    - a string the request sets costs `json_char_bytes` for each character, as sent;
    - a member the request does not set is counted at its widest admitted value: present, a
-     string at 6 bytes for each character its bound admits, an integer at 20 digits, a timestamp at 35
+     string at 6 bytes for each character its bound admits (1 byte where only ASCII is admitted: an
+     identifier, the name of a digest, a label key, a root name), an integer at the longest decimal
+     form of its type (20 digits for a 64-bit one), a boolean as `false`, a timestamp at 35
      characters, an identifier the daemon mints at 32 characters, an enumeration at its longest
      name, a list at its bound;
    - the figure covers every later stored form of the same resource, so a mutation of that
      resource never needs a decision of its own. For an exec: every state, `exit`, `usage` in
      its widest variant, `lease`, `refusal` and `unrecorded_output`. For a host process: every
-     state, `exit`, `ended_by`, `expires_at`, `deadline`, the lease and a stop's `reason`.
+     state, `exit`, `ended_by`, `expires_at`, `deadline` and the lease with its `keep_reason`. A
+     stop sets no text.
 
    Each result type gets an associated function in the wire crate, named after the precedent:
 
    | Result type | Function | Takes |
    |---|---|---|
    | `Exec` | `Exec::widest_json_bytes` | the `ExecStartInput` |
-   | `PipeSession` | `PipeSession::widest_json_bytes` | nothing; no member follows the request |
-   | `ProcessRecord` | `ProcessRecord::widest_json_bytes` | the start's `argv`, `cwd`, environment names, `owner` and `reason` |
+   | `PipeSession` | `PipeSession::widest_json_bytes` | nothing; its `workspace` and `capability_snapshot` are counted as a minted identifier and the name of a digest, which they are once the start is validated and its workspace admitted |
+   | `ProcessRecord` | `ProcessRecord::widest_json_bytes` | the start's `argv`, `cwd`, environment names, `owner` and `reason`; `cpu`, `memory` and `listening` are left out, because a read observes them and no stored record holds them |
    | `Workspace` | `Workspace::widest_json_bytes` | nothing; counted at the label and root-name bounds |
    | `FileObservation` | `FileObservation::widest_json_bytes` | the workspace id and the path |
    | `FileAbsence` | `FileAbsence::widest_json_bytes` | the workspace id and the path |
@@ -128,7 +131,9 @@ what it means for a result type that has no member to cut.
 
 7. **Every member a driver, the configuration or the identity sets has a wire constant.**
    Bundle `0.27.0` already publishes a `maxLength` for each of them in `schemas/resource.json`
-   and `schemas/common.json`. The wire crate gains the constant, the width function counts the
+   and `schemas/common.json`, except `refusal.code`: it publishes two codes as a `const` each
+   (`exec.aperture-byte-limit` and `exec.workdir-missing`) and no length, and bundle `0.28.0`
+   adds one (decision 11). The wire crate gains the constant, the width function counts the
    member at it, and `cargo xtask check-bundle 0.28.0` holds the published literal to the
    constant.
 
@@ -139,6 +144,7 @@ what it means for a result type that has no member to cut.
    | applied writable root `host_path` | `host-absolute-path`, 4,000 | configuration or the Git checkout | where a root is declared or materialized |
    | `usage` unavailable `code`, `message` | 128, 2,048 | driver | at the daemon's driver port |
    | `refusal.message` | 512 | driver | at the daemon's driver port |
+   | `refusal.code` | none in `0.27.0`; 128 from `0.28.0` | driver | at the daemon's driver port |
    | process `exit.signal` | 32 | supervisor | at the daemon's driver port |
    | `lease.actor`, `lease.principal` | 256 each | identity | at admission |
 
@@ -182,29 +188,30 @@ what it means for a result type that has no member to cut.
     | Kind | Result | Rule | Figure and the test that holds it |
     |---|---|---|---|
     | `exec.start` | `Exec` | decided, `Exec::widest_json_bytes` | `an_exec_start_no_result_can_fit_is_refused_before_any_driver_is_dispatched` |
-    | `session.start` | `PipeSession` | fits, and decided by the exec input it embeds, `Exec::widest_json_bytes` | 3,899 bytes, `the_widest_session_result_is_under_the_published_bound`; `a_session_start_no_exec_result_can_fit_is_refused_before_any_driver_is_dispatched` |
+    | `session.start` | `PipeSession` | fits, and decided by the exec input it embeds, `Exec::widest_json_bytes` | 3,926 bytes, `the_widest_session_result_is_under_the_published_bound`; `a_session_start_no_exec_result_can_fit_is_refused_before_any_driver_is_dispatched` |
     | `exec.signal` | `Exec` | fits by the start's decision | `a_start_at_the_bound_completes_and_every_later_mutation_of_it_completes` |
     | `exec.lease.renew` | `Exec` | fits by the start's decision | the same test |
-    | `exec.retire` | `ExecAbsence` | fits | 126 bytes, `the_widest_absence_is_under_the_published_bound` |
-    | `session.signal` | `PipeSession` | fits | 3,899 bytes, `the_widest_session_result_is_under_the_published_bound` |
-    | `session.lease.renew` | `PipeSession` | fits | 3,899 bytes, the same test |
-    | `session.retire` | `SessionAbsence` | fits | 126 bytes, `the_widest_absence_is_under_the_published_bound` |
+    | `exec.retire` | `ExecAbsence` | fits | 122 bytes, `the_widest_absence_is_under_the_published_bound` |
+    | `session.signal` | `PipeSession` | fits | 3,926 bytes, `the_widest_session_result_is_under_the_published_bound` |
+    | `session.lease.renew` | `PipeSession` | fits | 3,926 bytes, the same test |
+    | `session.retire` | `SessionAbsence` | fits | 125 bytes, `the_widest_absence_is_under_the_published_bound` |
     | `process.start` | `ProcessRecord` | decided, `ProcessRecord::widest_json_bytes` | `a_process_start_no_result_can_fit_is_refused_before_anything_is_started` |
-    | `process.stop`, and each stop of stop-by-owner | `ProcessRecord` | fits by the start's decision, which counts a stop's `reason` at `MAX_PROCESS_REASON_BYTES` | `a_process_started_at_the_bound_is_stopped_and_renewed_and_every_row_completes` |
+    | `process.stop`, and each stop of stop-by-owner | `ProcessRecord` | fits by the start's decision, which counts the lease's `keep_reason` at `MAX_PROCESS_REASON_BYTES` | `a_process_started_at_the_bound_is_stopped_and_renewed_and_every_row_completes` |
     | `process.lease.renew` | `ProcessRecord` | fits by the start's decision | the same test |
     | the daemon's own completions of a host process | `ProcessRecord` | fits by the start's decision | `a_process_started_at_the_bound_that_exits_or_expires_completes_its_open_rows` |
-    | `workspace.create` | `Workspace` | fits | 110,879 bytes, `the_widest_workspace_result_is_under_the_published_bound` |
-    | `workspace.adopt` | `Workspace` | fits | 110,879 bytes, the same test |
-    | `workspace.lease.renew` | `Workspace` | fits | 110,879 bytes, the same test |
-    | `workspace.destroy` | `WorkspaceAbsence` | fits | 126 bytes, `the_widest_absence_is_under_the_published_bound` |
+    | `workspace.create` | `Workspace` | fits | 110,926 bytes, `the_widest_workspace_result_is_under_the_published_bound` |
+    | `workspace.adopt` | `Workspace` | fits | 110,926 bytes, the same test |
+    | `workspace.lease.renew` | `Workspace` | fits | 110,926 bytes, the same test |
+    | `workspace.destroy` | `WorkspaceAbsence` | fits | 127 bytes, `the_widest_absence_is_under_the_published_bound` |
     | v1 `workspace.file.write` | `FileObservation` | decided, `FileObservation::widest_json_bytes` | `a_v1_file_write_no_result_can_fit_is_refused_before_any_driver_is_dispatched` |
     | v1 `workspace.file.delete` | `FileAbsence` | decided, `FileAbsence::widest_json_bytes` | `a_v1_file_delete_no_result_can_fit_is_refused_before_any_driver_is_dispatched` |
     | v2 replace, edit, patch | `FileMutationResult` | decided, `workspace.write-limit`, unchanged | `a_change_no_result_can_fit_is_refused_before_any_driver_is_dispatched` and three more in `crates/substrate-daemon/tests/http/driver_answer_bound.rs` |
 
     The `Workspace` figure counts 64 labels at the bounds of `labels_within_bounds`, a root name
     at `MAX_ROOT_NAME_BYTES` and a lease whose actor and principal are 256 characters each. The
-    figures were computed from the published schemas for this record and are not yet held by a
-    test. A v1 file path inside the published `relative-path` bound of 4,096 characters costs at
+    three absence figures are those of `WorkspaceAbsence`, `SessionAbsence` and `ExecAbsence`.
+    The figures of the wire crate's tests are held by those tests
+    (`crates/substrate-wire/src/result_width_tests.rs`), each as an equality. A v1 file path inside the published `relative-path` bound of 4,096 characters costs at
     most 24,576 bytes, so such a request is never refused for this cause under the published
     bound.
 
@@ -221,8 +228,8 @@ what it means for a result type that has no member to cut.
       decision 5 in the fact's description;
     - a coverage requirement for the bound, beside `security.bounds.input`;
     - a `maxLength` where a result member has none: the five resource identifiers of
-      `schemas/common.json` (32), and `argv` items, `cwd` and `env_names` items of the process
-      record, each at its wire bound. A member the request sets is counted as sent, whatever
+      `schemas/common.json` (32), `refusal.code` of an exec (128), and `argv` items, `cwd` and
+      `env_names` items of the process record, each at its wire bound. A member the request sets is counted as sent, whatever
       its own published rule bounds.
 
     `xtask/src/bundle/result_bound.rs`, a module beside `run_bounds.rs`, holds it under
@@ -315,9 +322,9 @@ job in the build pool.
 | `the_widest_exec_result_bounds_every_stored_form_of_its_exec` | wire crate | decision 6, every state and variant |
 | `the_widest_process_record_bounds_every_stored_form_of_its_process` | wire crate | decision 6 |
 | `the_widest_v1_file_results_bound_every_result_for_their_path` | wire crate | decision 6 |
-| `the_widest_workspace_result_is_under_the_published_bound` | wire crate | 110,879 bytes |
-| `the_widest_session_result_is_under_the_published_bound` | wire crate | 3,899 bytes |
-| `the_widest_absence_is_under_the_published_bound` | wire crate | 126 bytes |
+| `the_widest_workspace_result_is_under_the_published_bound` | wire crate | 110,926 bytes |
+| `the_widest_session_result_is_under_the_published_bound` | wire crate | 3,926 bytes |
+| `the_widest_absence_is_under_the_published_bound` | wire crate | 127, 125 and 122 bytes |
 | `every_member_a_driver_sets_is_counted_at_its_wire_bound` | wire crate | decision 7 |
 | the five `…_no_result_can_fit_is_refused_before_…` cases of decision 10 | daemon, a module of `tests/http.rs` after `driver_answer_bound.rs`, a store with a small headroom and a driver stub that counts its calls; `Harness::faked()` in `tests/processes.rs` for the process case | 429, the code, no driver call, no resource row, no lease, the same id replays the refusal |
 | `a_start_at_the_bound_completes_and_every_later_mutation_of_it_completes` | daemon, the same module | signal and lease renewal end terminal and replay |

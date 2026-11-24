@@ -7,8 +7,69 @@ config="${B10X_BOT_CONFIG:-${config_root}/b10x-bot.json}"
 key="${B10X_BOT_KEY:-${config_root}/b10x-bot.private-key.pem}"
 org="${B10X_BOT_ORG:-beyond10x}"
 
-script_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-(cd "${script_root}/.." && cargo xtask check-bot-files --config "$config" --key "$key") >&2
+# A relative path gets the prefix `./` once, here: the check, `jq` and `openssl` then take the same
+# string, and each takes it as a path.
+case "$config" in
+  /*) ;;
+  *) config="./${config}" ;;
+esac
+case "$key" in
+  /*) ;;
+  *) key="./${key}" ;;
+esac
+
+# Each credential file is there, is a regular file and no symbolic link, belongs to the
+# effective user and opens for reading; the configuration is not writable by group or other
+# (mask 022) and the key grants group and other nothing (mask 077). Both files are checked and
+# every refusal is printed before either is read, without a byte or a path of either. POSIX
+# `find` tests only: `find` does not follow a symbolic link it is given, and a test that cannot
+# run prints nothing, which refuses.
+refusals=0
+refuse() {
+  printf 'b10x-bot credential input %s\n' "$1" >&2
+  refusals=$((refusals + 1))
+}
+
+# The effective uid, read once. Without a number from `id` no file has a known owner.
+uid="$(id -u 2>/dev/null || :)"
+case "$uid" in
+  '' | *[!0-9]*) uid="" ;;
+esac
+
+# A `find` test holds only where `find` both printed the file and ended with status 0.
+check_credential_file() {
+  local file="$1" message="$2" bit found
+  shift 2
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    refuse "is unavailable"
+    return
+  fi
+  found=""
+  if [ -n "$uid" ]; then
+    found="$(find "$file" -prune -type f -user "$uid" 2>/dev/null)" || found=""
+  fi
+  if [ -z "$found" ]; then
+    refuse "must be a current-user-owned regular file"
+    return
+  fi
+  local safe=()
+  for bit in "$@"; do
+    safe+=(! -perm "-${bit}")
+  done
+  found="$(find "$file" -prune "${safe[@]}" 2>/dev/null)" || found=""
+  if [ -z "$found" ]; then
+    refuse "$message"
+  fi
+  if ! { : <"$file"; } 2>/dev/null; then
+    refuse "is not readable"
+  fi
+}
+
+check_credential_file "$config" "must be not group/world-writable" 020 002
+check_credential_file "$key" "must be owner-only" 040 020 010 004 002 001
+if [ "$refusals" -ne 0 ]; then
+  exit 1
+fi
 
 app_id="${B10X_BOT_APP_ID:-$(jq -er '.app_id' "$config")}"
 

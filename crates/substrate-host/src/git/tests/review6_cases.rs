@@ -554,8 +554,8 @@ fn large_entries(kind: u8, entries: u32, objects: &[(Oid, Vec<u8>)]) -> Pack {
 }
 
 /// Indexes `pack` into the directory `packs` as the fetch of a create does: with
-/// `Bundle::write_to_directory`, two threads, and `limit` as the most it allocates for one
-/// object.
+/// `Bundle::write_to_directory`, the threads a create names, and `limit` as the most it
+/// allocates for one object.
 fn index_as_the_fetch(
     packs: &Path,
     pack: &[u8],
@@ -570,7 +570,7 @@ fn index_as_the_fetch(
         None::<gix::OdbHandle>,
         gix::hash::Kind::Sha1,
         gix::odb::pack::bundle::write::Options {
-            thread_limit: Some(2),
+            thread_limit: Some(super::super::INDEXING_THREADS),
             alloc_limit_bytes: Some(limit),
             ..Default::default()
         },
@@ -603,9 +603,10 @@ fn directories(repository: &Repository, store: impl FnOnce(&[(Oid, Vec<u8>)])) -
 
 /// The indexing of a fetch admits a pack that stores a tree behind entries of another kind of
 /// bytes: it reads no object as what its type says. The pack here stores the tree of each
-/// directory behind eight entries of 1.1 MiB of zeros that it calls trees; indexed as the
-/// fetch indexes, under an allocation limit of 2 MiB, it is written with its index, the pass
-/// finds eight entries before each tree, and the check admits the baseline.
+/// directory behind eight entries of 1.1 MiB of zeros that it calls trees, each stored behind
+/// the one before it, so the indexing holds two of them at once; indexed as the fetch
+/// indexes, under an allocation limit of 4 MiB, it is written with its index, the pass finds
+/// eight entries before each tree, and the check admits the baseline.
 #[test]
 fn the_fetch_indexes_a_pack_that_stores_a_tree_behind_large_entries_and_the_check_admits_it() {
     let (workspace, commit) = repository_holding(|repository| {
@@ -614,7 +615,7 @@ fn the_fetch_indexes_a_pack_that_stores_a_tree_behind_large_entries_and_the_chec
             index_as_the_fetch(
                 &repository.path().join("objects/pack"),
                 &pack,
-                2 * 1024 * 1024,
+                4 * 1024 * 1024,
             )
             .expect("the fetch indexes the pack");
         })

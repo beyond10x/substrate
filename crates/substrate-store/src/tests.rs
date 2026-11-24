@@ -972,6 +972,22 @@ fn terminal_update_cannot_exceed_reserved_headroom_and_rolls_back() {
     assert_eq!(after, before);
 }
 
+/// The reserve the default configuration leaves for a success result is the result bound the
+/// wire crate states (ADR 0053 decision 4): a default that moves without the constant, or the
+/// constant without the default, fails here.
+#[test]
+fn the_default_reserve_is_the_published_result_bound() {
+    assert_eq!(
+        StoreConfig::default().success_result_json_bytes(),
+        substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES
+    );
+    assert_eq!(
+        substrate_wire::OPERATION_RESULT_MAX_JSON_BYTES,
+        512 * 1024 - 35 - 8 - 28,
+        "the default headroom less terminal_at, the status charge and the outcome envelope"
+    );
+}
+
 /// `success_result_json_bytes` is exact against the row accounting: a success result of that
 /// many bytes of JSON, completed at the longest `terminal_at` for the resource the acceptance
 /// named, is recorded and replays, and one byte more is the headroom error with the row still

@@ -1,0 +1,330 @@
+use std::collections::BTreeMap;
+
+use super::{Error, Tree, traverse};
+use crate::exact_vec;
+
+/// Maps each referenced base object ID to indices in `Tree::child_items` of ref-deltas waiting for it.
+pub(super) type RefDeltaChildren = BTreeMap<gix_hash::ObjectId, Vec<u32>>;
+
+/// An item stored within the [`Tree`] whose data is stored in a pack file, identified by
+/// the offset of its first (`offset`) and last (`next_offset`) bytes.
+///
+/// It represents either a root entry, or one that relies on a base to be resolvable,
+/// alongside associated `data` `T`.
+pub struct Item<T> {
+    /// The offset into the pack file at which the pack entry's data is located.
+    pub offset: crate::data::Offset,
+    /// The offset of the next item in the pack file.
+    pub next_offset: crate::data::Offset,
+    /// Data to store with each Item, effectively data associated with each entry in a pack.
+    pub data: T,
+    /// Indices into our Tree's `items`, one for each pack entry that depends on us.
+    ///
+    /// Limited to u32 as that's the maximum amount of objects in a pack.
+    // SAFETY INVARIANT:
+    //    - only one Item in a tree may have any given child index. `future_child_offsets`
+    //      and `ref_child_indices` should also not contain any indices found in `children`.
+    //    - These indices should be in bounds for tree.child_items
+    children: Vec<u32>,
+}
+
+impl<T> Item<T> {
+    /// Get the children
+    // (we don't want to expose mutable access)
+    pub(super) fn children(&self) -> &[u32] {
+        &self.children
+    }
+
+    pub(super) fn extend_children(&mut self, children: impl IntoIterator<Item = u32>) {
+        self.children.extend(children);
+    }
+}
+
+/// Identify what kind of node we have last seen
+pub(super) enum NodeKind {
+    Root,
+    Child,
+}
+
+impl<T> Tree<T> {
+    /// The items a tree reserves for before one is added. `num_objects` is what a pack states it holds, so a
+    /// tree reserves for no more of them and grows with the items that are added.
+    const RESERVED_ITEMS: usize = 4096;
+
+    /// Instantiate a empty tree for `num_objects` items, reserving for at most [`Self::RESERVED_ITEMS`] of them.
+    pub(crate) fn with_capacity(num_objects: usize) -> Result<Self, Error> {
+        let reserved = (num_objects / 2).min(Self::RESERVED_ITEMS);
+        Ok(Tree {
+            root_items: exact_vec(reserved),
+            child_items: exact_vec(reserved),
+            last_seen: None,
+            future_child_offsets: Vec::new(),
+            ref_child_indices: BTreeMap::new(),
+        })
+    }
+
+    /// The items an entry is counted as: the one the tree keeps for it, and one more for what the indexing keeps
+    /// for it beside the tree. One after the other that is the growth of a list of items while the pack arrives, a
+    /// place in the queue of the id pass for an entry stored as it is, and the list the roots and the children are
+    /// merged into, where an entry stored behind another lies twice until the list of the children is dropped.
+    /// Each is at most one item for an entry. The entries are sorted by id where they lie, so the sorting keeps
+    /// nothing for them. The queue is freed before the merge: where an allocator keeps it resident under the
+    /// merge, an entry stored as it is has its item and its place in the queue, and an entry stored behind another
+    /// its two items.
+    const ITEMS_PER_ENTRY: usize = 2;
+
+    /// The bytes `count` entries of a tree are counted as: [`Self::ITEMS_PER_ENTRY`] items each.
+    pub(crate) fn bytes_of_items(count: usize) -> usize {
+        count
+            .saturating_mul(Self::ITEMS_PER_ENTRY)
+            .saturating_mul(std::mem::size_of::<Item<T>>())
+    }
+
+    /// The bytes a list of child indices is counted as beside the bytes it reserves: its allocation.
+    const LIST_BYTES: usize = 16;
+
+    /// The bytes an id that entries name is counted as in `ref_child_indices`, beside what its list reserves. The
+    /// map keeps an id and the head of its list, 44 bytes, in nodes of eleven that it fills to five at the least,
+    /// and a node has one above it for every six: that is less than 128 bytes for each id however the ids arrive.
+    const NAMED_ID_BYTES: usize = 128;
+
+    /// Add `index` to `list` and answer the bytes the list is counted as more than before: four for each index
+    /// it newly reserves for, and [`Self::LIST_BYTES`] when it reserved for none before.
+    fn push_counted(list: &mut Vec<u32>, index: u32) -> usize {
+        let reserved = list.capacity();
+        list.push(index);
+        let grown = (list.capacity() - reserved).saturating_mul(std::mem::size_of::<u32>());
+        if reserved == 0 { grown + Self::LIST_BYTES } else { grown }
+    }
+
+    pub(super) fn num_items(&self) -> usize {
+        self.root_items.len() + self.child_items.len()
+    }
+
+    /// Returns self's root and child items.
+    ///
+    /// You can rely on them following the same `children` invariants as they did in the tree
+    pub(super) fn take_root_child_and_refs(self) -> (Vec<Item<T>>, Vec<Item<T>>, RefDeltaChildren) {
+        (self.root_items, self.child_items, self.ref_child_indices)
+    }
+
+    pub(super) fn assert_is_incrementing_and_update_next_offset(
+        &mut self,
+        offset: crate::data::Offset,
+    ) -> Result<(), Error> {
+        let items = match &self.last_seen {
+            Some(NodeKind::Root) => &mut self.root_items,
+            Some(NodeKind::Child) => &mut self.child_items,
+            None => return Ok(()),
+        };
+        let item = &mut items.last_mut().expect("last seen won't lie");
+        if offset <= item.offset {
+            return Err(Error::InvariantIncreasingPackOffset {
+                last_pack_offset: item.offset,
+                pack_offset: offset,
+            });
+        }
+        item.next_offset = offset;
+        Ok(())
+    }
+
+    pub(super) fn set_pack_entries_end_and_resolve_ref_offsets(
+        &mut self,
+        pack_entries_end: crate::data::Offset,
+    ) -> Result<(), traverse::Error> {
+        if !self.future_child_offsets.is_empty() {
+            for (parent_offset, child_index) in self.future_child_offsets.drain(..) {
+                // SAFETY invariants upheld:
+                //  - We are draining from future_child_offsets and adding to children, keeping things the same.
+                //  - We can rely on the `future_child_offsets` invariant to be sure that `children` is
+                //    not getting any indices that are already in use in `children` elsewhere
+                //  - The indices are in bounds for child_items since they were in bounds for future_child_offsets,
+                //    we can carry over the invariant.
+                if let Ok(i) = self.child_items.binary_search_by_key(&parent_offset, |i| i.offset) {
+                    self.child_items[i].children.push(child_index as u32);
+                } else if let Ok(i) = self.root_items.binary_search_by_key(&parent_offset, |i| i.offset) {
+                    self.root_items[i].children.push(child_index as u32);
+                } else {
+                    return Err(traverse::Error::OutOfPackRefDelta {
+                        base_pack_offset: parent_offset,
+                    });
+                }
+            }
+        }
+
+        self.assert_is_incrementing_and_update_next_offset(pack_entries_end)
+            .expect("BUG: pack now is smaller than all previously seen entries");
+        Ok(())
+    }
+
+    /// Add a new root node, one that only has children but is not a child itself, at the given pack `offset` and associate
+    /// custom `data` with it.
+    pub(crate) fn add_root(&mut self, offset: crate::data::Offset, data: T) -> Result<(), Error> {
+        self.assert_is_incrementing_and_update_next_offset(offset)?;
+        self.last_seen = NodeKind::Root.into();
+        self.root_items.push(Item {
+            offset,
+            next_offset: 0,
+            data,
+            // SAFETY INVARIANT upheld: there are no children
+            children: Default::default(),
+        });
+        Ok(())
+    }
+
+    /// Add a child of the item at `base_offset` which itself resides at pack `offset` and associate custom `data` with it.
+    ///
+    /// Answers the bytes the tree keeps for the child beside its item: what the list it was added to is counted
+    /// as more than before.
+    pub(crate) fn add_child(
+        &mut self,
+        base_offset: crate::data::Offset,
+        offset: crate::data::Offset,
+        data: T,
+    ) -> Result<usize, Error> {
+        self.assert_is_incrementing_and_update_next_offset(offset)?;
+
+        let next_child_index = self.child_items.len();
+        // SAFETY INVARIANT upheld:
+        // - This is one of two methods that modifies `children` and future_child_offsets. Out
+        //   of the two, it is the only one that produces new indices in the system.
+        // - This always pushes next_child_index to *either* `children` or `future_child_offsets`,
+        //   maintaining the cross-field invariant there.
+        // - This method will always push to child_items (at the end), incrementing
+        //   future values of next_child_index. This means next_child_index is always
+        //   unique for this method call.
+        // - As the only method producing new indices, this is the only time
+        //   next_child_index will be added to children/future_child_offsets, upholding the invariant.
+        // - Since next_child_index will always be a valid index by the end of this method,
+        //   this always produces valid in-bounds indices, upholding the bounds invariant.
+
+        let kept = if let Ok(i) = self.child_items.binary_search_by_key(&base_offset, |i| i.offset) {
+            Self::push_counted(&mut self.child_items[i].children, next_child_index as u32)
+        } else if let Ok(i) = self.root_items.binary_search_by_key(&base_offset, |i| i.offset) {
+            Self::push_counted(&mut self.root_items[i].children, next_child_index as u32)
+        } else {
+            let reserved = self.future_child_offsets.capacity();
+            self.future_child_offsets.push((base_offset, next_child_index));
+            (self.future_child_offsets.capacity() - reserved)
+                .saturating_mul(std::mem::size_of::<(crate::data::Offset, usize)>())
+        };
+
+        self.last_seen = NodeKind::Child.into();
+        self.child_items.push(Item {
+            offset,
+            next_offset: 0,
+            data,
+            // SAFETY INVARIANT upheld: there are no children
+            children: Default::default(),
+        });
+        Ok(kept)
+    }
+
+    /// Add a child whose base is identified by object id and may occur anywhere in the pack.
+    ///
+    /// Answers the bytes the tree keeps for the child beside its item: what the list of its id is counted as
+    /// more than before, and [`Self::NAMED_ID_BYTES`] for an id no earlier child named.
+    #[cfg(feature = "streaming-input")]
+    pub(crate) fn add_child_by_id(
+        &mut self,
+        base_id: gix_hash::ObjectId,
+        offset: crate::data::Offset,
+        data: T,
+    ) -> Result<usize, Error> {
+        self.assert_is_incrementing_and_update_next_offset(offset)?;
+
+        let child_index = self.child_items.len() as u32;
+        let named = self.ref_child_indices.len();
+        let mut kept = Self::push_counted(self.ref_child_indices.entry(base_id).or_default(), child_index);
+        if self.ref_child_indices.len() > named {
+            kept += Self::NAMED_ID_BYTES;
+        }
+        self.last_seen = NodeKind::Child.into();
+        self.child_items.push(Item {
+            offset,
+            next_offset: 0,
+            data,
+            children: Default::default(),
+        });
+        Ok(kept)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    mod from_offsets_in_pack {
+        use std::sync::atomic::AtomicBool;
+
+        use crate as pack;
+
+        const SMALL_PACK_INDEX: &str = "objects/pack/pack-a2bf8e71d8c18879e499335762dd95119d93d9f1.idx";
+        const SMALL_PACK: &str = "objects/pack/pack-a2bf8e71d8c18879e499335762dd95119d93d9f1.pack";
+
+        const INDEX_V1: &str = "objects/pack/pack-c0438c19fb16422b6bbcce24387b3264416d485b.idx";
+        const PACK_FOR_INDEX_V1: &str = "objects/pack/pack-c0438c19fb16422b6bbcce24387b3264416d485b.pack";
+
+        use gix_testtools::fixture_path;
+
+        #[test]
+        fn v1() -> Result<(), Box<dyn std::error::Error>> {
+            tree(INDEX_V1, PACK_FOR_INDEX_V1)
+        }
+
+        #[test]
+        fn v2() -> Result<(), Box<dyn std::error::Error>> {
+            tree(SMALL_PACK_INDEX, SMALL_PACK)
+        }
+
+        fn tree(index_path: &str, pack_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+            let idx = pack::index::File::at(fixture_path(index_path), gix_hash::Kind::Sha1)?;
+            crate::cache::delta::Tree::from_offsets_in_pack(
+                &fixture_path(pack_path),
+                idx.sorted_offsets().into_iter(),
+                &|ofs| *ofs,
+                &|id| idx.lookup(id).map(|index| idx.pack_offset_at_index(index)),
+                &mut gix_features::progress::Discard,
+                &AtomicBool::new(false),
+                gix_hash::Kind::Sha1,
+            )?;
+            Ok(())
+        }
+    }
+
+    mod size {
+        use gix_testtools::size_ok;
+
+        use super::super::Item;
+
+        #[test]
+        fn size_of_pack_tree_item() {
+            let actual = std::mem::size_of::<[Item<()>; 7_500_000]>();
+            let expected = 300_000_000;
+            assert!(
+                size_ok(actual, expected),
+                "we don't want these to grow unnoticed: {actual} <~ {expected}"
+            );
+        }
+
+        #[test]
+        fn size_of_pack_verify_data_structure() {
+            pub struct EntryWithDefault {
+                _index_entry: crate::index::Entry,
+                _kind: gix_object::Kind,
+                _object_size: u64,
+                _decompressed_size: u64,
+                _compressed_size: u64,
+                _header_size: u16,
+                _level: u16,
+            }
+
+            let actual = std::mem::size_of::<[Item<EntryWithDefault>; 7_500_000]>();
+            let sha1 = 840_000_000;
+            let sha256_extra = 120_000_000;
+            let expected = sha1 + sha256_extra;
+            assert!(
+                size_ok(actual, expected),
+                "we don't want these to grow unnoticed: {actual} <~ {expected}"
+            );
+        }
+    }
+}

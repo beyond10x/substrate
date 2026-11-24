@@ -252,6 +252,12 @@ fn the_environment_is_cleared() {
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cargo-test");
 
+/// The cargo configuration of a run's copy of the fixture: its source replacement, which builds
+/// the copy offline from its own `vendor`. It is written into the copy a run gets and is no file
+/// of the repository, so no cargo configuration beneath the repository root replaces a source
+/// (`cargo xtask check-packages`).
+const FIXTURE_CARGO_CONFIGURATION: &str = "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n\n[net]\noffline = true\n";
+
 fn macos() -> Arc<dyn ConfinementAdapter> {
     confinement::open(AdapterRequest::Macos(MacosRequest::default()))
         .expect("macos opens on a macOS host whose Seatbelt sandbox enforces")
@@ -352,6 +358,12 @@ async fn cargo_test(filter: Option<&str>, port: u16) -> Ended {
         .expect("canonical")
         .join("fixture");
     copy_tree(Path::new(FIXTURE), &workspace);
+    fs::create_dir_all(workspace.join(".cargo")).expect("cargo configuration directory");
+    fs::write(
+        workspace.join(".cargo/config.toml"),
+        FIXTURE_CARGO_CONFIGURATION,
+    )
+    .expect("cargo configuration");
     let sysroot = sysroot();
     let toolchain = text(&sysroot).to_owned();
     let developer = seatbelt::developer_root().expect("the runner has developer tools");
