@@ -260,7 +260,14 @@ pub(super) mod function {
             {
                 let _progress =
                     root_progress.add_child_with_id("sorting by id".into(), gix_features::progress::UNKNOWN);
-                items.sort_by_key(|e| e.data.id);
+                // The items are sorted where they lie, so the sorting keeps nothing beside them. Items of one id
+                // keep the order they have here, the roots in the order of the pack and after them the children
+                // in the order of the pack: each item gets its place here as its second key. The place is kept in
+                // `next_offset`, which the traversal read last and the writing of the index does not read.
+                for (place, item) in items.iter_mut().enumerate() {
+                    item.next_offset = place as crate::data::Offset;
+                }
+                items.sort_unstable_by_key(|e| (e.data.id, e.next_offset));
             }
 
             root_progress.inc();

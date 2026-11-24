@@ -30,14 +30,14 @@ const LIMIT: StorageLimit = StorageLimit {
     max_inodes: 2000,
 };
 
-/// The byte limit of the cases that fill the table of entries: 8 MiB, which is 131,072 items.
+/// The byte limit of the cases that fill the table of entries: 8 MiB, which is 65,536 entries.
 const TABLE_LIMIT: StorageLimit = StorageLimit {
     max_bytes: 8 * MEBIBYTE,
     max_inodes: 2000,
 };
 
-/// The bytes one item of the table of entries takes.
-const ITEM_BYTES: u64 = 64;
+/// The bytes the table of entries counts for one entry: two items of 64 bytes.
+const ITEM_BYTES: u64 = 128;
 
 /// The type a pack gives an entry stored behind an object it names by its id.
 const BEHIND_AN_ID: u8 = 7;
@@ -281,16 +281,16 @@ fn the_bounds_of_the_id_pass_turn_at_the_same_byte_on_one_thread_and_on_two() {
 /// the byte limit holds is not over the bound, and the table is still reserved for no more
 /// than 8,192 items before an entry arrives, whatever number the pack states.
 ///
-/// A create that requests no limit has 2 GiB, which is 33,554,432 items. The pack here is the
+/// A create that requests no limit has 2 GiB, which is 16,777,216 entries. The pack here is the
 /// twelve bytes that state that many entries and bring none, so the create ends for the pack
 /// that is cut short, `workspace.git-fetch-failed`, and not for a bound; its workspace is
-/// proved absent. The address space of the process grows by less than 1 GiB over the create:
-/// a table reserved for the entries the pack states would take 2 GiB and more of it.
+/// proved absent. The address space of the process grows by less than 768 MiB over the create:
+/// a table reserved for the entries the pack states would take 1 GiB and more of it.
 #[tokio::test]
 async fn a_create_whose_pack_states_as_many_entries_as_its_byte_limit_holds_reserves_no_table() {
-    const ADDRESS_SPACE_BOUND_KIB: u64 = 1024 * 1024;
+    const ADDRESS_SPACE_BOUND_KIB: u64 = 768 * 1024;
     let stated = u32::try_from(DEFAULT_BYTE_LIMIT / ITEM_BYTES).expect("entries");
-    assert_eq!(stated, 33_554_432);
+    assert_eq!(stated, 16_777_216);
     let mut pack = b"PACK".to_vec();
     pack.extend(2_u32.to_be_bytes());
     pack.extend(stated.to_be_bytes());
@@ -321,13 +321,13 @@ async fn a_create_whose_pack_states_as_many_entries_as_its_byte_limit_holds_rese
 /// `workspace.git-storage-limit` with no pack, no branch and nothing checked out in the
 /// staging tree.
 ///
-/// The byte limit is 8 MiB, which is 131,072 items; each entry is a file object of eight
-/// bytes. Over the first fetch the most memory resident at once grows by less than six times
+/// The byte limit is 8 MiB, which is 65,536 entries; each entry is a file object of eight
+/// bytes. Over the first fetch the most memory resident at once grows by less than four times
 /// the byte limit.
 #[test]
 fn a_fetch_whose_pack_brings_as_many_entries_as_its_byte_limit_holds_is_indexed() {
     let entries = TABLE_LIMIT.max_bytes / ITEM_BYTES;
-    assert_eq!(entries, 131_072);
+    assert_eq!(entries, 65_536);
     let full = pack_of(entries, whole_entry);
     let over = pack_of(entries + 1, whole_entry);
     assert!(length(&over) <= TABLE_LIMIT.max_bytes);
@@ -346,7 +346,7 @@ fn a_fetch_whose_pack_brings_as_many_entries_as_its_byte_limit_holds_is_indexed(
         "a full table of whole entries",
         "growth of the peak resident memory",
         grown,
-        6 * TABLE_LIMIT.max_bytes / 1024,
+        4 * TABLE_LIMIT.max_bytes / 1024,
     );
 
     let (outcome, target) = fetch(over, TABLE_LIMIT);
@@ -359,7 +359,7 @@ fn a_fetch_whose_pack_brings_as_many_entries_as_its_byte_limit_holds_is_indexed(
 /// its lists together stay within a fixed multiple of the byte limit: over the fetch the
 /// most memory resident at once grows by less than six times the byte limit.
 ///
-/// The byte limit is 8 MiB, which is 131,072 items. The lists are counted in the table beside
+/// The byte limit is 8 MiB, which is 65,536 entries. The lists are counted in the table beside
 /// the items, so a pack of that many entries that each name another id is over the bound of
 /// the table: the fetch step ends `workspace.git-storage-limit` and keeps no pack. The pack
 /// that fills the table with such entries, and ends `workspace.git-fetch-failed` because no

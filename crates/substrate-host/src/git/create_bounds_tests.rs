@@ -31,6 +31,9 @@ use crate::{DispatchOutcome, Driver as _, DriverError, DriverErrorClass};
 #[path = "security_create_bounds_tests.rs"]
 mod security_create_bounds_tests;
 
+#[path = "review2_create_bounds_tests.rs"]
+mod review2_create_bounds_tests;
+
 const MEBIBYTE: u64 = 1024 * 1024;
 
 /// The most memory that may be resident at once in the process of a case, in kibibytes:
@@ -357,22 +360,22 @@ async fn a_create_whose_whole_reads_come_to_more_than_64_times_its_byte_limit_is
 }
 
 /// The table of entries. While a pack arrives the fetch keeps one item of 64 bytes for each
-/// entry, and those items take no more bytes than the byte limit of the create: a pack that
-/// states more entries is refused before its first entry is read, and before the table is
-/// reserved for more than 8,192 items.
+/// entry and counts the entry as two items, 128 bytes, and that count takes no more bytes
+/// than the byte limit of the create: a pack that states more entries is refused before its
+/// first entry is read, and before the table is reserved for more than 8,192 items.
 ///
-/// A create that requests no limit has 2 GiB, which is 33,554,432 items. The pack here is the
-/// twelve bytes that state one entry more, so it is within every other bound.
+/// A create that requests no limit has 2 GiB, which is 16,777,216 entries. The pack here is
+/// the twelve bytes that state one entry more, so it is within every other bound.
 ///
 /// The create is refused `workspace.git-storage-limit` and the workspace is proved absent.
-/// The address space of the process grows by less than 1 GiB over the create: a table
-/// reserved for the entries the pack states would take 2 GiB of it, none of it resident.
+/// The address space of the process grows by less than 768 MiB over the create: a table
+/// reserved for the entries the pack states would take 1 GiB of it and 64 bytes more, none
+/// of it resident.
 #[tokio::test]
 async fn a_create_whose_pack_states_more_entries_than_its_byte_limit_holds_is_refused() {
-    const ITEM_BYTES: u64 = 64;
-    const ADDRESS_SPACE_BOUND_KIB: u64 = 1024 * 1024;
-    let stated = u32::try_from(DEFAULT_BYTE_LIMIT / ITEM_BYTES + 1).expect("entries");
-    assert_eq!(stated, 33_554_433);
+    const ADDRESS_SPACE_BOUND_KIB: u64 = 768 * 1024;
+    let stated = u32::try_from(DEFAULT_BYTE_LIMIT / ENTRY_BYTES + 1).expect("entries");
+    assert_eq!(stated, 16_777_217);
     let mut pack = b"PACK".to_vec();
     pack.extend(2_u32.to_be_bytes());
     pack.extend(stated.to_be_bytes());
@@ -638,16 +641,17 @@ const TABLE_LIMIT: StorageLimit = StorageLimit {
     max_inodes: 2000,
 };
 
-/// What the table of entries counts for one entry: its item.
-const ITEM_BYTES: u64 = 64;
+/// What the table of entries counts for one entry: two items of 64 bytes, the one it keeps
+/// for the entry and one for what the indexing keeps for it beside the table.
+const ENTRY_BYTES: u64 = 2 * 64;
 
-/// What the table counts beside the item of an entry stored behind an earlier one that no
-/// other entry is stored behind: the list of that earlier entry, which reserves for four
+/// What the table counts beside the two items of an entry stored behind an earlier one that
+/// no other entry is stored behind: the list of that earlier entry, which reserves for four
 /// entries of four bytes each, and 16 bytes for the list's allocation.
 const FIRST_BEHIND_BYTES: u64 = 4 * 4 + 16;
 
-/// What the table counts beside the item of an entry that names an id no earlier entry named:
-/// 128 bytes for the id, and the list of that id as [`FIRST_BEHIND_BYTES`].
+/// What the table counts beside the two items of an entry that names an id no earlier entry
+/// named: 128 bytes for the id, and the list of that id as [`FIRST_BEHIND_BYTES`].
 const NAMED_ID_BYTES: u64 = 128 + FIRST_BEHIND_BYTES;
 
 /// A zlib stream that holds `bytes` as they are, in one block.
@@ -795,40 +799,41 @@ fn an_object_that_waits_is_counted_at_its_own_bytes_whichever_entry_is_made_befo
 /// one. The fetch keeps, beside the item of each entry, a list in the entry it is stored
 /// behind, and counts the list at the bytes it reserves and 16 for its allocation. An entry
 /// that no other is stored behind yet reserves for four entries when the first arrives, so
-/// that entry counts 96 bytes: its item and 32 of the list. The items and the lists together
-/// take no more than the byte limit of the create.
+/// that entry counts 160 bytes: its two items and 32 of the list. The items and the lists
+/// together take no more than the byte limit of the create.
 ///
 /// The byte limit is 8 MiB. Each pair of the pack is a file object of eight bytes and one
-/// entry stored behind it, 160 bytes of the table. 52,428 pairs and one file object more are
-/// 8,388,544 bytes: that pack is indexed. One entry stored behind that last object takes the
-/// table to 8,388,640 bytes, over the limit: that pack is refused
+/// entry stored behind it, 288 bytes of the table. 29,126 pairs and two file objects more
+/// are 8,388,544 bytes: that pack is indexed. One entry stored behind the last object takes
+/// the table to 8,388,704 bytes, over the limit: that pack is refused
 /// `workspace.git-storage-limit` with no pack, no branch and nothing checked out in the
-/// staging tree.
+/// staging tree. Its items alone are 7,456,640 bytes, within the limit.
 #[test]
 fn a_fetch_counts_the_list_of_an_entry_stored_behind_another_in_its_table() {
-    let pair = 2 * ITEM_BYTES + FIRST_BEHIND_BYTES;
-    assert_eq!(pair, 160);
-    let pairs = (TABLE_LIMIT.max_bytes - ITEM_BYTES) / pair;
-    assert_eq!(pairs, 52_428);
-    assert!(pairs * pair + ITEM_BYTES <= TABLE_LIMIT.max_bytes);
-    assert!(pairs * pair + pair > TABLE_LIMIT.max_bytes);
+    let pair = 2 * ENTRY_BYTES + FIRST_BEHIND_BYTES;
+    assert_eq!(pair, 288);
+    let pairs = (TABLE_LIMIT.max_bytes - 2 * ENTRY_BYTES) / pair;
+    assert_eq!(pairs, 29_126);
+    assert!(pairs * pair + 2 * ENTRY_BYTES <= TABLE_LIMIT.max_bytes);
+    assert!(pairs * pair + ENTRY_BYTES + pair > TABLE_LIMIT.max_bytes);
     let pack_of = |last_has_one_behind: bool| {
         let mut pack = Pack::new();
         for number in 0..pairs {
             let first = pack.small(2 * number);
             pack.small_behind(first, 2 * number + 1);
         }
-        let last = pack.small(2 * pairs);
+        pack.small(2 * pairs);
+        let last = pack.small(2 * pairs + 1);
         if last_has_one_behind {
-            pack.small_behind(last, 2 * pairs + 1);
+            pack.small_behind(last, 2 * pairs + 2);
         }
         pack
     };
     let full = pack_of(false);
-    assert_eq!(full.entries, 104_857);
+    assert_eq!(full.entries, 58_254);
     let over = pack_of(true);
-    assert_eq!(over.entries, 104_858);
-    assert!(u64::from(over.entries) * ITEM_BYTES <= TABLE_LIMIT.max_bytes);
+    assert_eq!(over.entries, 58_255);
+    assert!(u64::from(over.entries) * ENTRY_BYTES <= TABLE_LIMIT.max_bytes);
 
     let (outcome, target) = fetch(full.sent(), TABLE_LIMIT);
     assert_fetch_indexed(outcome, target.path());
@@ -840,10 +845,10 @@ fn a_fetch_counts_the_list_of_an_entry_stored_behind_another_in_its_table() {
 /// The table of entries counts the lists beside its items: entries that name an id. The fetch
 /// keeps an entry stored behind an object it names by its id in a list of that id until the
 /// object is made, and counts an id no earlier entry named as 128 bytes and its list as 32.
-/// Such an entry counts 224 bytes: its item, the id and the list. The items and the lists
-/// together take no more than the byte limit of the create.
+/// Such an entry counts 288 bytes: its two items, the id and the list. The items and the
+/// lists together take no more than the byte limit of the create.
 ///
-/// The byte limit is 8 MiB, which is 37,449 entries that each name another id. A pack of
+/// The byte limit is 8 MiB, which is 29,127 entries that each name another id. A pack of
 /// that many is within the bound: no entry of it has the object it names, so the fetch step
 /// ends `workspace.git-fetch-failed` and keeps no pack. Over that fetch the most memory
 /// resident at once grows by less than three times the byte limit. A pack of one entry more
@@ -851,10 +856,10 @@ fn a_fetch_counts_the_list_of_an_entry_stored_behind_another_in_its_table() {
 /// in the staging tree.
 #[test]
 fn a_fetch_counts_the_id_an_entry_names_and_its_list_in_its_table() {
-    let naming = ITEM_BYTES + NAMED_ID_BYTES;
-    assert_eq!(naming, 224);
+    let naming = ENTRY_BYTES + NAMED_ID_BYTES;
+    assert_eq!(naming, 288);
     let entries = TABLE_LIMIT.max_bytes / naming;
-    assert_eq!(entries, 37_449);
+    assert_eq!(entries, 29_127);
     let pack_of = |entries: u64| {
         let mut pack = Pack::new();
         for number in 0..entries {
@@ -905,14 +910,14 @@ fn entry_of<'pack>(range: std::ops::Range<u64>, pack: &'pack &[u8]) -> Option<&'
 /// number, as the fetch does not: the bound is then held by the count of each entry as it
 /// arrives.
 ///
-/// The limit is 64 KiB, which is 1,024 items. 1,024 file objects of eight bytes are indexed;
+/// The limit is 64 KiB, which is 512 entries. 512 file objects of eight bytes are indexed;
 /// one more ends the indexer with the error a create names `workspace.git-storage-limit`.
 #[test]
 fn an_indexer_counts_each_entry_that_arrives_whatever_number_was_stated() {
     use gix::odb::pack;
     const LIMIT: usize = 64 * 1024;
-    let held = u64::try_from(LIMIT).expect("limit") / ITEM_BYTES;
-    assert_eq!(held, 1024);
+    let held = u64::try_from(LIMIT).expect("limit") / ENTRY_BYTES;
+    assert_eq!(held, 512);
     for (entries, over) in [(held, false), (held + 1, true)] {
         let mut sent = Pack::new();
         for number in 0..entries {
@@ -954,4 +959,205 @@ fn an_indexer_counts_each_entry_that_arrives_whatever_number_was_stated() {
             Err(error) => panic!("{entries} entries: {error:?}"),
         }
     }
+}
+
+/// The index the indexer of the fetch writes of `sent`, read as the fetch of a create has it
+/// read: beside a store that holds no object, on the threads a create names, under a byte
+/// limit of 1 MiB. Beside it the checksum the index ends with.
+fn index_of_the_fetch(sent: &[u8]) -> (Vec<u8>, String) {
+    use gix::odb::pack;
+    let directory = tempdir().expect("pack directory");
+    let written = pack::Bundle::write_to_directory(
+        &mut &sent[..],
+        Some(directory.path()),
+        &mut gix::progress::Discard,
+        &AtomicBool::new(false),
+        Some(gix::objs::find::Never),
+        gix::hash::Kind::Sha1,
+        pack::bundle::write::Options {
+            thread_limit: Some(crate::git::INDEXING_THREADS),
+            iteration_mode: pack::data::input::Mode::Verify,
+            index_version: pack::index::Version::default(),
+            alloc_limit_bytes: Some(usize::try_from(MEBIBYTE).expect("a length in memory")),
+            compression: gix::zlib::Compression::BEST_SPEED,
+        },
+    )
+    .expect("a pack that holds an object more than once");
+    let index = std::fs::read(written.index_path.expect("the index file")).expect("the index");
+    (index, written.index.index_hash.to_string())
+}
+
+/// The index `git index-pack` writes of `sent`.
+fn index_git_writes(sent: &[u8]) -> Vec<u8> {
+    let directory = tempdir().expect("pack directory");
+    let pack = directory.path().join("sent.pack");
+    let index = directory.path().join("sent.idx");
+    std::fs::write(&pack, sent).expect("the pack");
+    let output = std::process::Command::new("git")
+        .current_dir(directory.path())
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("index-pack")
+        .arg("-o")
+        .arg(&index)
+        .arg(&pack)
+        .output()
+        .expect("git index-pack");
+    assert!(
+        output.status.success(),
+        "git index-pack: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read(index).expect("the index")
+}
+
+/// One entry of a pack of file objects of eight bytes: the number its object is made of,
+/// whether the pack stores it behind another entry, and where it begins.
+struct Placed {
+    number: u64,
+    behind: bool,
+    offset: u64,
+}
+
+/// The order an index has for `placed`: by id, and among the entries of one id first those
+/// the pack stores as they are, then those stored behind another, each in the order of the
+/// pack. No two entries have the same key, so the order does not follow how this list is
+/// sorted.
+fn order_of_an_index(placed: &[Placed]) -> Vec<(Vec<u8>, u64)> {
+    let mut keyed: Vec<(Vec<u8>, bool, u64)> = placed
+        .iter()
+        .map(|entry| {
+            let id = gix::objs::compute_hash(
+                gix::hash::Kind::Sha1,
+                gix::objs::Kind::Blob,
+                &entry.number.to_be_bytes(),
+            )
+            .expect("the id of a file object");
+            (id.as_slice().to_vec(), entry.behind, entry.offset)
+        })
+        .collect();
+    keyed.sort();
+    keyed
+        .into_iter()
+        .map(|(id, _, offset)| (id, offset))
+        .collect()
+}
+
+/// The entries of `index`, a version 2 index of `count` entries that all begin in the first
+/// 2 GiB of their pack, in its order: the id of each and where it begins.
+fn entries_of_an_index(index: &[u8], count: usize) -> Vec<(Vec<u8>, u64)> {
+    let ids = 8 + 256 * 4;
+    let offsets = ids + count * 20 + count * 4;
+    (0..count)
+        .map(|entry| {
+            let id = index[ids + entry * 20..][..20].to_vec();
+            let offset: [u8; 4] = index[offsets + entry * 4..][..4]
+                .try_into()
+                .expect("four bytes");
+            (id, u64::from(u32::from_be_bytes(offset)))
+        })
+        .collect()
+}
+
+/// The entries of one id keep the order they have before the index is sorted by id: first the
+/// entries the pack stores as they are, in the order of the pack, then the entries stored
+/// behind another, in the order of the pack. The indexer sorts its entries by id where they
+/// lie, with the place an entry had before as its second key, so the index of a pack that
+/// holds an object more than once has one order, whatever a sorting does with equal ids.
+///
+/// Both packs hold 48 file objects of eight bytes more than once, the ids in no order.
+///
+/// - In the first each object is stored as it is three times and then twice behind another
+///   object: 240 entries, five of each id, whose order in the index is the order of the pack.
+///   The index is the one `git index-pack` writes of the pack.
+/// - In the second each object is stored twice behind one object and after that twice as it
+///   is: 193 entries, and of each id the two entries stored as they are come first, which is
+///   not the order of the pack.
+///
+/// Each index is held to its order entry by entry ([`order_of_an_index`]) and to its checksum.
+/// No stream of these packs is deflated, so their bytes and the checksums follow no library.
+#[test]
+fn an_index_lists_the_entries_of_one_id_in_the_order_they_had_before_the_sorting() {
+    const OBJECTS: u64 = 48;
+    const IN_THE_ORDER_OF_THE_PACK: &str = "0707b694a41631ca9847271b372fbcadb6d31451";
+    const AS_THEY_ARE_FIRST: &str = "89a04edb6a32585c60c299936d24eec263405328";
+
+    let mut pack = Pack::new();
+    let mut placed = Vec::new();
+    let mut firsts = Vec::new();
+    for round in 0..3 {
+        for number in 0..OBJECTS {
+            let offset = pack.small(number);
+            placed.push(Placed {
+                number,
+                behind: false,
+                offset,
+            });
+            if round == 0 {
+                firsts.push(offset);
+            }
+        }
+    }
+    for _ in 0..2 {
+        for number in 0..OBJECTS {
+            let base = firsts[usize::try_from((number + 1) % OBJECTS).expect("an object")];
+            placed.push(Placed {
+                number,
+                behind: true,
+                offset: length(&pack.bytes),
+            });
+            pack.small_behind(base, number);
+        }
+    }
+    let sent = pack.sent();
+    let (index, checksum) = index_of_the_fetch(&sent);
+    assert_eq!(placed.len(), 240);
+    assert_eq!(
+        entries_of_an_index(&index, placed.len()),
+        order_of_an_index(&placed)
+    );
+    assert!(
+        index == index_git_writes(&sent),
+        "the index is not the one git writes"
+    );
+    eprintln!("equal ids: in the order of the pack: {checksum}");
+
+    let mut pack = Pack::new();
+    let mut placed = Vec::new();
+    let base = pack.small(OBJECTS);
+    placed.push(Placed {
+        number: OBJECTS,
+        behind: false,
+        offset: base,
+    });
+    for _ in 0..2 {
+        for number in 0..OBJECTS {
+            placed.push(Placed {
+                number,
+                behind: true,
+                offset: length(&pack.bytes),
+            });
+            pack.small_behind(base, number);
+        }
+    }
+    for _ in 0..2 {
+        for number in 0..OBJECTS {
+            let offset = pack.small(number);
+            placed.push(Placed {
+                number,
+                behind: false,
+                offset,
+            });
+        }
+    }
+    let sent = pack.sent();
+    let (index, second) = index_of_the_fetch(&sent);
+    assert_eq!(placed.len(), 193);
+    assert_eq!(
+        entries_of_an_index(&index, placed.len()),
+        order_of_an_index(&placed)
+    );
+    eprintln!("equal ids: stored as they are first: {second}");
+    assert_eq!(checksum, IN_THE_ORDER_OF_THE_PACK);
+    assert_eq!(second, AS_THEY_ARE_FIRST);
 }

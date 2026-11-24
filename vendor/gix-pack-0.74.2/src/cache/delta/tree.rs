@@ -63,9 +63,21 @@ impl<T> Tree<T> {
         })
     }
 
-    /// The bytes `count` items of a tree take.
+    /// The items an entry is counted as: the one the tree keeps for it, and one more for what the indexing keeps
+    /// for it beside the tree. One after the other that is the growth of a list of items while the pack arrives, a
+    /// place in the queue of the id pass for an entry stored as it is, and the list the roots and the children are
+    /// merged into, where an entry stored behind another lies twice until the list of the children is dropped.
+    /// Each is at most one item for an entry. The entries are sorted by id where they lie, so the sorting keeps
+    /// nothing for them. The queue is freed before the merge: where an allocator keeps it resident under the
+    /// merge, an entry stored as it is has its item and its place in the queue, and an entry stored behind another
+    /// its two items.
+    const ITEMS_PER_ENTRY: usize = 2;
+
+    /// The bytes `count` entries of a tree are counted as: [`Self::ITEMS_PER_ENTRY`] items each.
     pub(crate) fn bytes_of_items(count: usize) -> usize {
-        count.saturating_mul(std::mem::size_of::<Item<T>>())
+        count
+            .saturating_mul(Self::ITEMS_PER_ENTRY)
+            .saturating_mul(std::mem::size_of::<Item<T>>())
     }
 
     /// The bytes a list of child indices is counted as beside the bytes it reserves: its allocation.

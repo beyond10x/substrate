@@ -208,19 +208,18 @@ where
     MBFN: FnMut(&mut T, &dyn Progress, Context<'_>) -> Result<(), E> + Send + Clone,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let work = items
-        .iter_mut()
-        .map(|item| {
-            // SAFETY: Required from the caller, and each root item is unique.
-            #[expect(unsafe_code)]
-            let node = unsafe { Node::new(item, child_items) };
-            WorkItem {
-                level: 0,
-                node,
-                parent: None,
-            }
-        })
-        .collect::<Vec<_>>();
+    // The work of the roots is made as it is taken: the threads' queue of roots is filled from the items, and no
+    // list of that work is kept beside it.
+    let work = items.iter_mut().map(|item| {
+        // SAFETY: Required from the caller, and each root item is unique.
+        #[expect(unsafe_code)]
+        let node = unsafe { Node::new(item, child_items) };
+        WorkItem {
+            level: 0,
+            node,
+            parent: None,
+        }
+    });
     let budget = OwnShared::new(Budget {
         held: Default::default(),
         resolved: Default::default(),
@@ -249,7 +248,7 @@ where
         let _ = thread_limit;
         let _ = num_objects;
         resolve_serial(
-            work,
+            work.collect(),
             objects,
             size,
             progress,
@@ -329,9 +328,9 @@ where
 /// more descendants, and exits only when no work remains.
 #[cfg(feature = "parallel")]
 #[expect(clippy::too_many_arguments)]
-fn resolve_parallel<T, F, MBFN, E, R>(
+fn resolve_parallel<'a, T, F, MBFN, E, R>(
     num_threads: usize,
-    work: Vec<WorkItem<'_, T>>,
+    work: impl ExactSizeIterator<Item = WorkItem<'a, T>>,
     objects: gix_features::progress::StepShared,
     size: gix_features::progress::StepShared,
     progress: &dyn Progress,
@@ -344,7 +343,7 @@ fn resolve_parallel<T, F, MBFN, E, R>(
     should_interrupt: &AtomicBool,
 ) -> Result<(), Error>
 where
-    T: Send,
+    T: Send + 'a,
     R: Send + Sync,
     F: for<'r> Fn(EntryRange, &'r R) -> Option<&'r [u8]> + Send + Clone,
     MBFN: FnMut(&mut T, &dyn Progress, Context<'_>) -> Result<(), E> + Send + Clone,
