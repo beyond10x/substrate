@@ -272,11 +272,28 @@ this way:
   differ. `cargo xtask check-packages` therefore refuses a `[patch.crates-io]` entry that
   `Cargo.lock` does not resolve to, and a lock that holds a second package of an entry's name
   from any source, whatever its version: the registry, a `sparse+` registry, a Git source or
-  another path. A dependent of that second package would not build the entry's source. The
-  check reads every table cargo applies to crates.io, `[patch.crates-io]` and the one keyed by
-  the URL of its index, in `Cargo.toml` and in `.cargo/config.toml` or `.cargo/config`, and
-  holds a Git entry to the one package of its reference: the same repository at another
-  revision is a second package.
+  another path. A dependent of that second package would not build the entry's source. A Git
+  entry is held to the one package of its reference: the same repository at another revision
+  is a second package. The rule is closed: only `[patch.crates-io]` in the root `Cargo.toml`
+  carries a patch, and the check refuses by name, instead of modelling them:
+  - another key under `[patch]` (an index URL in any spelling, a registry name, a Git URL)
+    and `[replace]` in `Cargo.toml`;
+  - in a cargo configuration beneath the root (`.cargo/config.toml` or `.cargo/config`): a
+    `patch` table, a `paths` key, a `[source.<name>]` table with `replace-with`, and a
+    `[source.crates-io]` table with `registry`, `local-registry`, `directory` or `git`;
+  - a `.cargo` directory holding both names, of which cargo reads `config` alone;
+  - an entry `Cargo.lock` lists under `[[patch.unused]]`;
+  - two entries that patch one package name, a renamed entry counted by its `package`;
+  - an entry with neither a `path` nor a `git` source.
+
+  One named exception admits the source replacement of
+  `crates/substrate-host/tests/fixtures/cargo-test/.cargo/config.toml` while its directory
+  is a workspace of its own (a `[workspace]` table in its `Cargo.toml`), no member of the
+  root's and not beneath a member's `src`, so it applies to no build of this workspace; a
+  `patch` table or `paths` key there is still refused. Each refusal names the file and the
+  key or entry, and what to do. Outside the check are configuration outside the repository
+  (a file above the root, `CARGO_HOME`, `--config`, `CARGO_*` variables) and files beneath
+  a directory named `target` or `.git`.
 - The cases below run the fetch of a create, so they fail with a `gix-pack` that does not hold
   the four counts, whichever version it is.
 - An update of `gix` takes the published source of the `gix-pack` it resolves as
