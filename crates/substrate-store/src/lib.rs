@@ -207,17 +207,21 @@ pub enum StoreError {
          needs to end with operation.result-unrecorded"
     )]
     OperationTerminalHeadroomBelowUnrecorded { configured: u64, required: u64 },
-    /// ADR 0053 decision 8: an accepted operation's id has the wire's operation-id form, so its
-    /// row can end with the widest `operation.result-unrecorded` outcome.
+    /// ADR 0053 decision 8: an accepted operation's id is at most 128 characters of the wire's
+    /// operation-id alphabet, which is ASCII, so as many bytes, and its row can end with the
+    /// widest `operation.result-unrecorded` outcome. The wire's minimum of 16 characters is the
+    /// wire's rule and not the store's.
     #[error(
         "operation id is not accepted: at most {max} characters, each an ASCII letter, a digit, \
          `_` or `-`"
     )]
     OperationIdInvalid { max: usize },
-    /// ADR 0053 decision 8: an accepted operation names a resource of at most the characters of
-    /// an identifier the daemon mints, which the least terminal headroom counts.
-    #[error("operation resource of {chars} characters is longer than {max}")]
-    OperationResourceTooLong { chars: usize, max: usize },
+    /// ADR 0053 decision 8: an accepted operation names a resource of at most `max` bytes, the
+    /// length of an identifier the daemon mints, which the least terminal headroom counts. It
+    /// refuses an acceptance, and a terminal update, which rolls back and leaves the row as it
+    /// was. A refused row is not held to it.
+    #[error("operation resource of {bytes} bytes is longer than {max} bytes")]
+    OperationResourceTooLong { bytes: usize, max: usize },
     #[error("operation ledger capacity is exhausted: {0:?}")]
     OperationCapacity(OperationCapacity),
     #[error("configured operation ledger capacity is below durable occupancy: {0:?}")]

@@ -170,14 +170,17 @@ what it means for a result type that has no member to cut.
      `the_unrecorded_error_is_the_named_error_and_its_widest_outcome_is_379_bytes` holds that
      figure as an equality. A store does not open with a terminal headroom under what a row
      needs to end with it, the longest `terminal_at`, the status charge, that outcome and the
-     widest resource a terminal update names, `MAX_RESOURCE_ID_CHARS`
+     widest resource a terminal update names, `MAX_RESOURCE_ID_CHARS` bytes
      (`StoreConfig::minimum_terminal_headroom_bytes`, 35 + 8 + 379 + 32 = 454 bytes), and names
-     the refusal `OperationTerminalHeadroomBelowUnrecorded`. The store accepts an operation only
-     with an id of at most `MAX_OPERATION_ID_CHARS` characters the wire's operation-id rule
-     admits (`OperationIdInvalid`) and a resource of at most `MAX_RESOURCE_ID_CHARS`
-     (`OperationResourceTooLong`), the figures that outcome and that resource are counted at. A
-     terminal update that names a longer resource is a caller's value the reserve does not
-     bound: it rolls back and the row stays accepted;
+     the refusal `OperationTerminalHeadroomBelowUnrecorded`. Every figure is in the bytes the
+     row accounting charges. The store accepts an operation only with an id of at most
+     `MAX_OPERATION_ID_CHARS` characters of the wire's operation-id alphabet, which is ASCII, so
+     as many bytes (`OperationIdInvalid`), and a resource of at most `MAX_RESOURCE_ID_CHARS`
+     bytes (`OperationResourceTooLong`), the figures that outcome and that resource are counted
+     at. A terminal update that names a resource over the bound is refused
+     (`OperationResourceTooLong`) and the row stays accepted. The bound is for the operations
+     the store accepts and their terminal updates; a refused row names the resource the caller
+     named and reserves no headroom;
    - the row writes the operation's `operation.failed` and the resource's own events exactly as
      the recorded completion of the same path writes them (`append_completion_events` in
      `crates/substrate-store/src/result_bound.rs`), so a reader that follows the resource's

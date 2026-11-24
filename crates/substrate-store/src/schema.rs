@@ -606,6 +606,9 @@ fn validate_store_config(config: StoreConfig) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// The bytes of the state `accepted` in a row, which a row that is not terminal is charged with.
+const ACCEPTED_STATE_BYTES: u64 = "accepted".len() as u64;
+
 #[allow(clippy::too_many_lines)] // One bounded, atomic legacy-accounting migration.
 fn migrate_operation_ledger_accounting(
     connection: &mut Connection,
@@ -674,9 +677,16 @@ fn migrate_operation_ledger_accounting(
             subject,
         };
         let row_bytes = operation_row_bytes(&transaction, &scope, &operation)?;
+        // A row that is not terminal is charged as it was when it was accepted: with the 8
+        // bytes of `accepted`, which `terminal` has too, and the headroom. An `unknown` row
+        // (7 bytes) is charged the same, as `mark_dispatch_unknown` leaves its charge, so its
+        // terminal update fits the headroom.
         let charged_bytes = if matches!(state.as_str(), "accepted" | "unknown") {
+            let state_bytes = u64::try_from(state.len()).map_err(|_| StoreError::IntegerRange)?;
             row_bytes
-                .checked_add(config.operation_terminal_headroom_bytes)
+                .checked_sub(state_bytes)
+                .and_then(|bytes| bytes.checked_add(ACCEPTED_STATE_BYTES))
+                .and_then(|bytes| bytes.checked_add(config.operation_terminal_headroom_bytes))
                 .ok_or(StoreError::IntegerRange)?
         } else {
             row_bytes
