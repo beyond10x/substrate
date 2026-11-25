@@ -281,6 +281,8 @@ pub(crate) struct ExecLists {
     subpaths: Vec<String>,
     denied: Vec<String>,
     caller: crate::exec_gate::Caller,
+    /// A wire start's `sandbox`, which rows 3 and 4 of design 37 § 6 are answered from.
+    sandbox: Option<Box<substrate_wire::ConfinementRequest>>,
 }
 
 impl ExecLists {
@@ -290,6 +292,7 @@ impl ExecLists {
             subpaths: admitted.profile().exec_subpaths.clone(),
             denied: admitted.profile().exec_denied_paths.clone(),
             caller: crate::exec_gate::Caller::Adapter,
+            sandbox: None,
         }
     }
 
@@ -309,6 +312,7 @@ impl ExecLists {
             subpaths: sandbox.exec_subpaths.clone().unwrap_or_default(),
             denied: sandbox.exec_denied_paths.clone(),
             caller: crate::exec_gate::Caller::Wire,
+            sandbox: Some(Box::new(sandbox.clone())),
         })
     }
 
@@ -319,6 +323,7 @@ impl ExecLists {
             subpaths: entries.iter().map(|entry| (*entry).to_owned()).collect(),
             denied: Vec::new(),
             caller: crate::exec_gate::Caller::Adapter,
+            sandbox: None,
         }
     }
 
@@ -1249,13 +1254,36 @@ impl ProcessRuntime {
             return Ok(());
         }
         // Admission refuses a deny-list beside no allow-list (D13); this is the driver's own
-        // answer, because on `linux` an empty allow-list runs every program of the view.
+        // answer, because on `linux` an empty allow-list runs every program of the view. A
+        // wire start's is row 3 of design 37 § 6, with the table's message.
         if lists.subpaths().is_empty() {
+            let [_, row, ..] = substrate_wire::EXEC_LIST_REFUSALS;
+            let message = match lists.sandbox {
+                Some(_) => row.message.unwrap_or_default(),
+                None => "A run with an executable deny-list needs an allow-list beside it.",
+            };
             return Err(DriverError::refused(
                 crate::confinement::EXEC_DENIED_PATHS_WITHOUT_SUBPATHS,
-                "A run with an executable deny-list needs an allow-list beside it.",
+                message,
                 lists.caller().denied(),
             ));
+        }
+        // A wire start's row 4: the code, address and message `exec_lists_fact_refusal` gives
+        // for what this driver proved, read as the facts a snapshot would publish.
+        if let Some(sandbox) = &lists.sandbox {
+            let subpaths = self.exec_gate.is_some() && self.exec_subpaths_proved;
+            let facts = substrate_wire::CapabilityFacts {
+                confinement_exec_subpaths: subpaths.then_some(true),
+                confinement_exec_denied_paths: (subpaths && self.exec_denied_paths_proved)
+                    .then_some(true),
+                ..substrate_wire::CapabilityFacts::default()
+            };
+            return match substrate_wire::exec_lists_fact_refusal(sandbox, &facts) {
+                Some((row, address, message)) => {
+                    Err(DriverError::unserved(row.code, message, address))
+                }
+                None => Ok(()),
+            };
         }
         if !(self.exec_gate.is_some() && self.exec_subpaths_proved) {
             return Err(DriverError::unserved(
@@ -9818,15 +9846,24 @@ mod tests {
         let mut listed = pty_exec_input(&snapshot);
         listed.sandbox.exec_subpaths = Some(vec!["bin".to_owned()]);
         let fact = crate::confinement::FACT_UNSERVED;
-        assert_at(
-            &wire(&runtime, &listed).await,
-            fact,
-            "sandbox.exec_subpaths",
+        // Row 4 on the wire: `exec_lists_fact_refusal`'s code, address and message for the
+        // property not proved; the adapter API keeps its own sentence.
+        let fact_message = |property: substrate_wire::ConfinementProperty| {
+            let [_, row] = substrate_wire::CONFINEMENT_UNSERVED_REFUSALS;
+            row.message.replace("{name}", property.name())
+        };
+        let error = wire(&runtime, &listed).await;
+        assert_at(&error, fact, "sandbox.exec_subpaths");
+        assert_eq!(
+            error.message,
+            fact_message(substrate_wire::ConfinementProperty::ExecSubpaths)
         );
-        assert_at(
-            &adapter(&runtime, &listed, ExecLists::listing(&["bin"])).await,
-            fact,
-            "exec_subpaths",
+        let error = adapter(&runtime, &listed, ExecLists::listing(&["bin"])).await;
+        assert_at(&error, fact, "exec_subpaths");
+        assert_eq!(
+            error.message,
+            "This host did not prove an executable allow-list, so a run that carries one is not \
+             started."
         );
 
         let root = tempfile::tempdir().expect("a root");
@@ -9834,40 +9871,44 @@ mod tests {
         let mut both = pty_exec_input(&snapshot);
         both.sandbox.exec_subpaths = Some(vec!["bin".to_owned()]);
         both.sandbox.exec_denied_paths = vec!["bin/tool".to_owned()];
-        assert_at(
-            &wire(&runtime, &both).await,
-            fact,
-            "sandbox.exec_denied_paths",
+        let error = wire(&runtime, &both).await;
+        assert_at(&error, fact, "sandbox.exec_denied_paths");
+        assert_eq!(
+            error.message,
+            fact_message(substrate_wire::ConfinementProperty::ExecDeniedPaths)
         );
-        assert_at(
-            &adapter(
-                &runtime,
-                &both,
-                ExecLists::listing_and_denying(&["bin"], &["bin/tool"]),
-            )
-            .await,
-            fact,
-            "exec_denied_paths",
+        let error = adapter(
+            &runtime,
+            &both,
+            ExecLists::listing_and_denying(&["bin"], &["bin/tool"]),
+        )
+        .await;
+        assert_at(&error, fact, "exec_denied_paths");
+        assert_eq!(
+            error.message,
+            "This host did not prove an executable deny-list, so a run that carries one is not \
+             started."
         );
 
+        // Row 3 on the wire: the table's fixed message; the adapter API keeps its own.
         let runtime = runtime.proving_exec_denied_paths(true);
         let mut alone = pty_exec_input(&snapshot);
         alone.sandbox.exec_denied_paths = vec!["bin/tool".to_owned()];
         let without = crate::confinement::EXEC_DENIED_PATHS_WITHOUT_SUBPATHS;
-        assert_at(
-            &wire(&runtime, &alone).await,
-            without,
-            "sandbox.exec_denied_paths",
-        );
-        assert_at(
-            &adapter(
-                &runtime,
-                &alone,
-                ExecLists::listing_and_denying(&[], &["bin/tool"]),
-            )
-            .await,
-            without,
-            "exec_denied_paths",
+        let error = wire(&runtime, &alone).await;
+        assert_at(&error, without, "sandbox.exec_denied_paths");
+        let [_, row, ..] = substrate_wire::EXEC_LIST_REFUSALS;
+        assert_eq!(Some(error.message.as_str()), row.message, "{error}");
+        let error = adapter(
+            &runtime,
+            &alone,
+            ExecLists::listing_and_denying(&[], &["bin/tool"]),
+        )
+        .await;
+        assert_at(&error, without, "exec_denied_paths");
+        assert_eq!(
+            error.message,
+            "A run with an executable deny-list needs an allow-list beside it."
         );
 
         let mut empty = pty_exec_input(&snapshot);

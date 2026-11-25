@@ -4252,7 +4252,15 @@ pub const EXEC_LIST_REFUSALS: [ExecListRefusal; 8] = [
     ExecListRefusal {
         code: EXEC_SANDBOX_PATH_UNREPRESENTABLE,
         status: 422,
-        addresses: &[EXEC_SUBPATHS_ADDRESS, EXEC_DENIED_PATHS_ADDRESS, "argv"],
+        addresses: &[
+            EXEC_SUBPATHS_ADDRESS,
+            EXEC_DENIED_PATHS_ADDRESS,
+            "argv",
+            "read_only_roots",
+            "read_only_files",
+            "writable_roots",
+            "workspace",
+        ],
         message: None,
     },
     ExecListRefusal {
