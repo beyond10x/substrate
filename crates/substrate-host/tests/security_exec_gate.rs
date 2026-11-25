@@ -9,7 +9,8 @@
 //! - **The run cannot remove the ruleset** (D4), also not through the environment its command
 //!   names.
 //! - **A kernel without Landlock proves no fact** (D8, D19), and a listed profile is then refused.
-//! - **The daemon publishes no `confinement.exec-subpaths`** (D16) though the driver proved it.
+//! - **The driver publishes the two list facts it proved and nothing else of the helper**
+//!   (design 37 § 5, which ends design 35 D16).
 //!
 //! The cases need `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a delegated cgroup v2 subtree this
 //! process is inside, bubblewrap, and `SUBSTRATE_EXEC_GATE` naming the helper. Without the first
@@ -836,13 +837,16 @@ fn security_a_helper_in_a_workspace_is_refused_however_the_workspace_root_is_spe
     println!("{NAME}: executed");
 }
 
-/// **A driver that proved the helper publishes no `confinement.exec-subpaths`, and what it
-/// publishes is what a driver without a helper publishes** (design 35 D16; `AGENTS.md`
-/// invariant 4). A wire start has no field for a list, so a wire client must not be able to
-/// require the property, nor tell from the published facts whether a helper is configured.
+/// **A driver publishes the two list facts it proved and nothing else of the helper** (design
+/// 37 § 5, which ends design 35 D16; `AGENTS.md` invariant 4). With a helper the published
+/// facts hold `confinement.exec-subpaths`, and `confinement.exec-denied-paths` where the
+/// deny-list was proved; without one they hold neither. Apart from those two members the
+/// published facts of the two drivers are equal: no path of the helper and no other word of
+/// its configuration reaches a client.
 #[tokio::test(flavor = "multi_thread")]
-async fn security_a_driver_that_proved_the_helper_publishes_what_a_driver_without_one_does() {
+async fn security_a_driver_publishes_the_list_facts_it_proved_and_nothing_else_of_the_helper() {
     const NAME: &str = "security exec gate published facts";
+    const PUBLISHED: [&str; 2] = ["confinement.exec-subpaths", "confinement.exec-denied-paths"];
     let Some(cgroup_root) = delegated(NAME) else {
         return;
     };
@@ -853,7 +857,11 @@ async fn security_a_driver_that_proved_the_helper_publishes_what_a_driver_withou
         let host = tempfile::tempdir().expect("host root");
         let adapter = open_with(host.path(), &cgroup_root, gate.clone()).expect("linux opens");
         let facts = adapter.facts();
-        let proved = (facts.proves(&Fact::ExecSubpaths), facts.withheld.clone());
+        let proved = (
+            facts.proves(&Fact::ExecSubpaths),
+            facts.proves(&Fact::ExecDeniedPaths),
+            facts.withheld.clone(),
+        );
         drop(adapter);
         let host = tempfile::tempdir().expect("host root");
         let driver = HostDriver::open(config(host.path(), &cgroup_root, gate)).expect("opens");
@@ -861,27 +869,39 @@ async fn security_a_driver_that_proved_the_helper_publishes_what_a_driver_withou
         drop(driver);
         (
             proved,
-            machine.facts.confinement_exec_subpaths,
+            (
+                machine.facts.confinement_exec_subpaths,
+                machine.facts.confinement_exec_denied_paths,
+            ),
             serde_json::to_value(&machine.facts).expect("facts serialize"),
         )
     };
-    let ((subpaths, withheld), property, with_helper) = published(Some(helper()));
+    let ((subpaths, denied, withheld), properties, mut with_helper) = published(Some(helper()));
     assert!(
         subpaths && withheld.is_empty(),
         "the driver proved the helper: {withheld:?}"
     );
-    assert_eq!(property, None, "confinement.exec-subpaths is published");
-    assert!(
-        !with_helper.to_string().contains("exec-subpaths")
-            && !with_helper.to_string().contains("exec_subpaths"),
-        "{with_helper}"
+    assert_eq!(
+        properties,
+        (Some(true), denied.then_some(true)),
+        "a driver publishes each list fact it proved, and no other"
     );
-    let ((subpaths, withheld), property, without_helper) = published(None);
-    assert!(!subpaths && withheld.is_empty(), "{withheld:?}");
-    assert_eq!(property, None);
+    let ((subpaths, denied, withheld), properties, without_helper) = published(None);
+    assert!(!subpaths && !denied && withheld.is_empty(), "{withheld:?}");
+    assert_eq!(properties, (None, None));
+    for name in PUBLISHED {
+        assert!(
+            !without_helper.to_string().contains(name),
+            "a driver without a helper names {name}: {without_helper}"
+        );
+        with_helper
+            .as_object_mut()
+            .expect("the facts are an object")
+            .remove(name);
+    }
     assert_eq!(
         with_helper, without_helper,
-        "the published facts differ with a helper configured"
+        "the published facts differ in more than the two list facts with a helper configured"
     );
     println!("{NAME}: executed");
 }
