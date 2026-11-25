@@ -141,6 +141,10 @@ pub enum ArgumentSource {
     Option {
         /// Long flag name, without dashes.
         long: String,
+        /// Given once per element of a required `List<T>`, each occurrence read by the element
+        /// rule; no occurrence is `[]` (beyond10x/ess#694). Omitted when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        repeated: bool,
     },
     /// Ordinary positional value.
     Positional {
@@ -167,6 +171,12 @@ pub enum ArgumentSource {
     },
     /// Every argv word after the first `--`, verbatim, into one required `List<String>`.
     Trailing {},
+    /// A valueless switch over a required `Boolean`: present is `true`, absent is `false`
+    /// (beyond10x/ess#694).
+    Flag {
+        /// Long flag name, without dashes.
+        long: String,
+    },
 }
 
 /// One input field's source.
