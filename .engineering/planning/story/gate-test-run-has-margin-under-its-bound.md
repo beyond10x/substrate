@@ -4,7 +4,7 @@ id: story:gate-test-run-has-margin-under-its-bound
 kind: story
 status: draft
 title: The gate's test run has margin under its 120 s bound on the hosted runner
-revision: 2
+revision: 3
 ---
 # Story: the gate's test run has margin under its 120 s bound on the hosted runner
 
@@ -136,6 +136,22 @@ One observation that is the pool's and not this repository's:
 is not the test user's. It failed in three runs of the host library on the pool's build node
 and passed in a fourth and in a run of that one case on unchanged `main`; it passes on the
 hosted runner.
+
+## What the hosted runner measured, 2026-11-25
+
+Read from the `gate-time:` lines of the job *Gate: tests and Clippy*.
+
+- The pull request of the change, run
+  [45506332168](https://github.com/beyond10x/substrate/actions/runs/45506332168):
+  `test build: 805 s`, `test run: 109 s`.
+- `main` at `7641b34c1`, the merge of that pull request, run
+  [45516552609](https://github.com/beyond10x/substrate/actions/runs/45516552609):
+  `test build: 598 s`, `test run: 78 s`, `doctests: 2 s`.
+- The runs on `main` before the change read 85 s to 115 s for the test run.
+
+One of the two runs with the change is under the 90 s of *Acceptance* and one is over it. Two
+runs do not say which is the usual one, so the story stays open: the next runs on `main` are
+read the same way, and a run over 90 s names its ten slowest tests from `xtask slowest-tests`.
 
 ## What changes
 
