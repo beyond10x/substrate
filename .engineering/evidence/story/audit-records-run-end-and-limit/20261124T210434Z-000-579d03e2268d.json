@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-24T21:04:34Z",
+  "actor": "agent:substrate",
+  "artifact": "story:audit-records-run-end-and-limit",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "release-lanes.yml, job Confinement lane (scripts/delegated-lane.sh), commit c5f0b8716d, 201 delegated cases, release 0.27.0",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/45483880771"
+  }
+}
