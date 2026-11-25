@@ -1,0 +1,87 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "workspace.file.read",
+    "request": {
+      "headers": {
+        "x-request-id": "req_dir_list_0001"
+      },
+      "method": "GET",
+      "path": "/v1/workspaces/ws_vector/files/src",
+      "query": {
+        "cursor": null,
+        "limit_items": 10,
+        "mode": "directory"
+      }
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "security.bounds.list"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "request_id": "req_dir_list_0001",
+        "result": {
+          "items": [
+            {
+              "kind": "file",
+              "name": "main.txt",
+              "size": 5
+            }
+          ],
+          "kind": "directory",
+          "next_cursor": null,
+          "observed_at": "2026-08-13T12:00:00Z",
+          "path": "src",
+          "workspace": "ws_vector"
+        }
+      },
+      "status": 200
+    }
+  },
+  "id": "bounded-directory-list-is-observed",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/listed_items",
+      "expected": 1,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "workspace",
+      "name": "owned-with-file",
+      "state": {
+        "files": {
+          "src/main.txt": "aGVsbG8="
+        },
+        "owner": "local:1000"
+      }
+    }
+  ]
+}

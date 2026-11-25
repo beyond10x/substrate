@@ -1,0 +1,23 @@
+{
+  "$schema": "schemas/packaging.json",
+  "archive": {
+    "compression": "none",
+    "format": "posix-tar",
+    "gid": 0,
+    "group_name": "",
+    "mode": "files-0644-directories-0755",
+    "owner_name": "",
+    "path_order": "utf8-bytewise",
+    "source_date_epoch": "source-commit-author-seconds",
+    "uid": 0
+  },
+  "json_authority": "checked-in-deterministic-source-form",
+  "release_blockers": [
+    "source-commit-materialized",
+    "standards-inputs-digest-pinned",
+    "double-build-byte-identity",
+    "independent-runner-pass",
+    "private-oci-signature"
+  ],
+  "status": "development"
+}

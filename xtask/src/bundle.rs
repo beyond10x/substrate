@@ -45,6 +45,7 @@ use crate::repo;
 use crate::report::Report;
 
 mod confinement_facts;
+mod exec_lists;
 mod host_process;
 mod namespace_driver;
 mod omitted_entries;
@@ -902,6 +903,11 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     check_standing_additions(version, released, failures);
+    if exec_lists::binds(version) {
+        exec_lists::check(released, failures);
+        exec_lists::check_introduction(released, failures);
+        return;
+    }
     if version == "0.28.0" {
         result_bound::check_introduction(released, failures);
         return;
@@ -952,7 +958,15 @@ fn check_standing_additions(version: &str, released: &Tree, failures: &mut Vec<S
     }
     // Design 30 (ADR 0048) binds every bundle from `0.26.0` on.
     if confinement_facts::applies_to(version) {
-        confinement_facts::check(version, released, failures);
+        // Design 37 § 6 answers `confinement.fact-unserved` at the two list addresses too. Where
+        // `exec_lists` holds those vectors to their row, design 30's check counts the one at
+        // `sandbox.requires.facts` it published; in a later bundle it counts every one.
+        if exec_lists::binds(version) {
+            let held = exec_lists::without_list_fact_vectors(released);
+            confinement_facts::check(version, &held, failures);
+        } else {
+            confinement_facts::check(version, released, failures);
+        }
     }
     // The bounds of issue #236 (ADR 0013 and ADR 0010, amended 2026-11-20) bind every bundle from
     // `0.27.0` on.
@@ -5958,7 +5972,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 28, "every released bundle must be checked");
+        assert_eq!(checked, 29, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is
