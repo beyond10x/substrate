@@ -512,6 +512,12 @@ pub struct DaemonConfig {
     /// `None` gives a sandbox no trust anchor. TLS still crosses the aperture byte for byte, and a
     /// child that verifies will refuse rather than trust something it cannot check.
     pub ca_bundle: Option<PathBuf>,
+    /// The executable allow-list's helper (`HostConfig::exec_gate`, design 35, design 37 § 7).
+    ///
+    /// `None` proves neither list's fact, and a start naming a list is refused. A helper the host
+    /// driver's open refuses stops `serve` before it listens; an open that withholds the facts
+    /// lets it serve without them.
+    pub exec_gate: Option<PathBuf>,
     /// Operator-declared trusted keys for delegated context (ADR 0011).
     ///
     /// Verifying material only, resolved once at startup. An empty list is a real posture, not a
@@ -655,6 +661,7 @@ impl DaemonConfig {
             egress_apertures: Vec::new(),
             writable_roots: Vec::new(),
             ca_bundle: None,
+            exec_gate: None,
             delegated_context_keys: Vec::new(),
             require_delegated_context: false,
             tcp: None,
@@ -967,6 +974,7 @@ fn check_kubernetes_selection(config: &DaemonConfig) -> anyhow::Result<()> {
         ("egress_apertures", !config.egress_apertures.is_empty()),
         ("writable_roots", !config.writable_roots.is_empty()),
         ("ca_bundle", config.ca_bundle.is_some()),
+        ("exec_gate", config.exec_gate.is_some()),
     ];
     if let Some((field, _)) = declared.into_iter().find(|(_, declared)| *declared) {
         bail!(
@@ -1011,6 +1019,7 @@ fn open_host_driver(
         .collect();
     host_config.aperture_root = aperture_state_root(&config.state);
     host_config.ca_bundle.clone_from(&config.ca_bundle);
+    host_config.exec_gate.clone_from(&config.exec_gate);
     // ADR 0036 S2: host processes are served only by a daemon whose one listener is the personal
     // Unix socket, and only once the driver proved the delegated cgroup root usable for process
     // cgroups. Any other daemon opens no driver and publishes no `process.host`; every start it
@@ -2280,6 +2289,34 @@ mod tests {
                 "{reported}"
             );
         }
+    }
+
+    /// Design 37 § 7: a helper the host driver's open refuses stops the daemon before it
+    /// listens, with the driver's own error. A relative path is refused on every host,
+    /// `config.exec-gate-invalid`, before the open reads the file.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_helper_the_open_refuses_stops_the_daemon_before_it_listens() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let socket = directory.path().join("other/substrate.sock");
+        std::fs::create_dir_all(directory.path().join("other")).expect("socket directory");
+        // `state` is left for `serve` to create owner-private, as it requires.
+        let mut config = super::DaemonConfig::minimum(
+            &socket,
+            directory.path().join("state/state.db"),
+            directory.path().join("workspaces"),
+            "dep_exec_gate",
+            vec![nix::unistd::Uid::effective().as_raw()],
+        );
+        config.exec_gate = Some(std::path::PathBuf::from("substrate-exec-gate"));
+        // A daemon that opened anyway would serve until a signal: bounded, it fails instead.
+        let refused =
+            tokio::time::timeout(std::time::Duration::from_secs(10), super::serve(config))
+                .await
+                .expect("the daemon stops at the open instead of serving")
+                .expect_err("the open refuses a relative helper");
+        let reported = format!("{refused:#}");
+        assert!(reported.contains("config.exec-gate-invalid"), "{reported}");
+        assert!(!socket.exists(), "no socket is bound: {reported}");
     }
 
     fn aperture(name: &str, port: u16) -> EgressAperture {

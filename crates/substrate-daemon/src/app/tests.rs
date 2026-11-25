@@ -2099,3 +2099,157 @@ fn every_resource_id_the_system_authority_mints_is_within_the_store_bound() {
 }
 
 mod review_replay_grant_cases;
+
+mod exec_lists;
+
+/// A driver that states a snapshot and dispatches nothing, for the cases of a test module that
+/// hold an answer the daemon gives before dispatch. This file is the test composition root, so
+/// it is the one place such a driver is written (`tests/driver_port.rs`).
+mod snapshot_driver {
+    use std::sync::Arc;
+
+    use substrate_host::{
+        DispatchOutcome, Driver, DriverError, ExecObservation, Listed, WorkspaceDestroyProgress,
+    };
+    use substrate_store::Store;
+    use substrate_wire::{
+        CapabilitySnapshot, ExecOutputQuery, ExecSignalInput, ExecStartInput, FileAbsence,
+        FileObservation, FileReadQuery, FileReadResult, LeaseObservation, OutputSlice, Workspace,
+        WorkspaceCreateInput,
+    };
+
+    const DISPATCH: &str = "a snapshot driver is never dispatched to";
+
+    struct SnapshotDriver(CapabilitySnapshot);
+
+    /// An application over an in-memory store whose driver states the minimum host driver's
+    /// snapshot as `edit` leaves it, and panics on every call but `machine`: a case that gets an
+    /// answer from it got that answer before dispatch.
+    pub(in crate::app::tests) fn snapshot_app(
+        deployment: &str,
+        edit: impl FnOnce(&mut CapabilitySnapshot),
+    ) -> (tempfile::TempDir, Arc<crate::app::App>) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let mut snapshot = super::minimum_host_driver(directory.path()).machine();
+        edit(&mut snapshot);
+        let store = Arc::new(Store::open(":memory:").expect("state store"));
+        let app = crate::app::App::new(store, Arc::new(SnapshotDriver(snapshot)), deployment)
+            .expect("application");
+        (directory, app)
+    }
+
+    #[async_trait::async_trait]
+    impl Driver for SnapshotDriver {
+        fn machine(&self) -> CapabilitySnapshot {
+            self.0.clone()
+        }
+
+        async fn shutdown(&self) -> Result<(), DriverError> {
+            unreachable!("{DISPATCH}")
+        }
+
+        fn workspace_root_identity(&self, _id: &str) -> Result<String, DriverError> {
+            unreachable!("{DISPATCH}")
+        }
+
+        async fn create_workspace(
+            &self,
+            _id: &str,
+            _root_name: &str,
+            _input: &WorkspaceCreateInput,
+        ) -> DispatchOutcome<Workspace> {
+            unreachable!("{DISPATCH}")
+        }
+
+        async fn observe_workspace(
+            &self,
+            _id: &str,
+            _root_name: &str,
+            _previous: &Workspace,
+        ) -> Result<Workspace, DriverError> {
+            unreachable!("{DISPATCH}")
+        }
+
+        async fn read_workspace_path(
+            &self,
+            _workspace_id: &str,
+            _root_name: &str,
+            _path: &str,
+            _query: &FileReadQuery,
+        ) -> Result<Listed<FileReadResult>, DriverError> {
+            unreachable!("{DISPATCH}")
+        }
+
+        async fn write_workspace_file(
+            &self,
+            _workspace_id: &str,
+            _root_name: &str,
+            _path: &str,
+            _content: &[u8],
+        ) -> Result<FileObservation, DriverError> {
+            unreachable!("{DISPATCH}")
+        }
+
+        async fn delete_workspace_file(
+            &self,
+            _workspace_id: &str,
+            _root_name: &str,
+            _path: &str,
+        ) -> Result<FileAbsence, DriverError> {
+            unreachable!("{DISPATCH}")
+        }
+
+        async fn destroy_workspace(
+            &self,
+            _workspace_id: &str,
+            _root_name: &str,
+        ) -> Result<WorkspaceDestroyProgress, DriverError> {
+            unreachable!("{DISPATCH}")
+        }
+
+        async fn start_exec(
+            &self,
+            _id: &str,
+            _workspace_root_name: &str,
+            _input: &ExecStartInput,
+        ) -> DispatchOutcome<ExecObservation> {
+            unreachable!("{DISPATCH}")
+        }
+
+        async fn observe_exec(&self, _id: &str) -> Result<ExecObservation, DriverError> {
+            unreachable!("{DISPATCH}")
+        }
+
+        async fn output(
+            &self,
+            _id: &str,
+            _query: &ExecOutputQuery,
+        ) -> Result<OutputSlice, DriverError> {
+            unreachable!("{DISPATCH}")
+        }
+
+        async fn signal(
+            &self,
+            _id: &str,
+            _input: &ExecSignalInput,
+        ) -> Result<ExecObservation, DriverError> {
+            unreachable!("{DISPATCH}")
+        }
+
+        fn completed_execs(&self) -> Vec<ExecObservation> {
+            unreachable!("{DISPATCH}")
+        }
+
+        fn set_exec_lease(&self, _id: &str, _lease: Option<LeaseObservation>) {
+            unreachable!("{DISPATCH}")
+        }
+
+        fn acknowledge_exec(&self, _persisted: &ExecObservation) {
+            unreachable!("{DISPATCH}")
+        }
+
+        fn discard_superseded_exec(&self, _id: &str) {
+            unreachable!("{DISPATCH}")
+        }
+    }
+}
