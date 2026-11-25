@@ -1,0 +1,105 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "exec.lease.renew",
+    "request": {
+      "body": {
+        "input": {
+          "ttl_ms": 60000
+        },
+        "op": "01JPHASE3EXECLEASE00001"
+      },
+      "headers": {
+        "x-request-id": "req_exec_lease01"
+      },
+      "method": "POST",
+      "path": "/v1/execs/ex_vector/lease/renew",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "route.exec.lease.renew",
+    "lease.renewal"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "operation": "01JPHASE3EXECLEASE00001",
+        "request_id": "req_exec_lease01",
+        "result": {
+          "applied": {
+            "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "cgroup": "substrate/vector",
+            "filesystem": "workspace-rw-system-ro",
+            "network": "none",
+            "profile": "workspace"
+          },
+          "exit": null,
+          "id": "ex_vector",
+          "kind": "exec",
+          "lease": {
+            "actor": "vector-client",
+            "authorizing_operation": "01JPHASE3EXECLEASE00001",
+            "clock_tolerance_ms": 30000,
+            "principal": null,
+            "renew_by": "2026-08-13T12:01:00Z",
+            "state": "active",
+            "ttl_ms": 60000
+          },
+          "observed_at": "2026-08-13T12:00:00Z",
+          "requested": {
+            "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "network": "none",
+            "profile": "workspace",
+            "require": true
+          },
+          "state": "running",
+          "workspace": "ws_vector"
+        }
+      },
+      "status": 200
+    }
+  },
+  "id": "exec-lease-renewal-is-keyed",
+  "layer": "http",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/renewal_event_in_same_transaction",
+      "expected": true,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "lease",
+      "name": "active-exec",
+      "state": {
+        "boot_id": "boot-a",
+        "deadline_boottime_ms": 1060000
+      }
+    }
+  ]
+}

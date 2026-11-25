@@ -1,0 +1,52 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "snapshot.page",
+      "snapshot": "snap_incomplete"
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "snapshot.incomplete"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "code": "snapshot.incomplete",
+      "status": "conflict"
+    }
+  },
+  "id": "incomplete-snapshot-forbids-advancement",
+  "layer": "driver",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/resume_cursor_emitted",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "snapshot",
+      "name": "missing-materialized-row",
+      "state": {
+        "declared": 3,
+        "stored": 2
+      }
+    }
+  ]
+}

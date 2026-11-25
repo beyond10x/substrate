@@ -1,0 +1,26 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "client_visible_changes": [
+    "0.29.0 adds no route and preserves the 45 routes of 0.28.0 (design 37). It adds two optional members to the sandbox of an exec start and of a session start's exec, the same two on the exec record, one confinement property, one optional member of the capability snapshot, and a published refusal with a vector for each of the eight codes a start that names a list can earn.",
+    "sandbox.exec_subpaths is the executable allow-list and sandbox.exec_denied_paths the deny-list (common.json exec-subpaths and exec-denied-paths). Each holds at most 64 unique entries of 1 to 4095 bytes (MAX_EXEC_SUBPATHS, MAX_EXEC_DENIED_PATHS, MAX_EXEC_LIST_ENTRY_BYTES); a list over its bound, an empty or over-long entry, an entry written twice and null are request.schema-invalid (422). Absent, an allow-list is no list and every program of the view executes; present, the run executes its program and what the entries admit. An empty deny-list reads as an absent one. The requested and applied sandbox of the exec record echo both lists as sent, and a start without them has neither, so it serializes and hashes as on 0.28.0: one vector replays such a start under its stored request hash.",
+    "The capability snapshot may publish confinement.exec-denied-paths, proved only where confinement.exec-subpaths is, and sandbox.requires.facts admits its word exec-denied-paths after exec-subpaths: eight properties. Naming an allow-list requires confinement.exec-subpaths and naming a deny entry requires confinement.exec-denied-paths, whatever sandbox.requires names.",
+    "The snapshot's optional withheld lists why a fact the deployment was configured to prove is absent: at most 12 closed entries of fact (confinement.exec-subpaths, confinement.exec-denied-paths), cause (file-system-unlisted, mount-id-unreported) and address (config.exec_gate, config.workspace_root, config.writable_roots), each once, in the order fact, address, cause. An entry carries no host path.",
+    "A start that names a list can earn, before the program starts and recorded as refused: exec.sandbox-exec-subpaths-empty (422) at sandbox.exec_subpaths for a present and empty allow-list; confinement.exec-denied-paths-without-subpaths (422) at sandbox.exec_denied_paths for a deny entry without an allow-list; confinement.fact-unserved (501) at sandbox.exec_subpaths or sandbox.exec_denied_paths when the snapshot does not prove the list's fact; session.pty-unserved (501) at mode for a pty session with an allow-list; exec.sandbox-path-unrepresentable (422) for an entry or a program the view cannot carry; exec.sandbox-exec-subpath-undeclared (422) for an absolute entry outside the locations a list may name; exec.sandbox-program-unlisted (422) at argv for a program a deny entry holds; and exec.sandbox-place-unserved (501) where a place the start needs cannot be established.",
+    "Of the refusals a start that names a list can earn, the lexical rules (request.schema-invalid) and then the first three are checked by the daemon in that order, after exec.capability-stale, for every driver; the last five by the host driver. Each has one vector, the fact refusal one per list; the vector of exec.sandbox-place-unserved is published and not executed, because no lane has a volume whose place it refuses.",
+    "What a list does not stop, as design 35 states it: the list restricts which files the run may execute, not what an admitted interpreter or loader then runs. A deny-list is exact only where the run cannot write. And another hard link to a denied file beneath a listed path runs when it existed before the start."
+  ],
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.29.0"
+}
