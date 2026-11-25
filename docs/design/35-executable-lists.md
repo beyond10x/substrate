@@ -25,6 +25,11 @@ wire byte and no contract bundle: the lists are substrate-host's confinement API
 decisions 7 and 8). No code before acceptance (invariant 8). § 17 lists the decisions, § 18 every
 claim that is inferred and not observed, § 19 the three defaults the stakeholder decided.
 
+Record added on 2026-11-25: § 3.14 holds the xfs probe that D27's C obliges. Every case held on
+`xfs`. The record changes no decision and no code: `xfs` joins the list with
+`story:exec-start-carries-executable-lists`
+([design 37](37-executable-lists-on-the-wire.md) § 11).
+
 Revised nine times on 2026-11-21.
 
 - After the first review: session `sdc` decided the helper (D5, D19) under
@@ -691,6 +696,88 @@ own and print that they are absent where the host grants none.
   listed directory admits the programs of a mount beneath it. That is the allow-list's
   meaning (§ 5).
 
+### 3.14 The xfs probe D27 obliges
+
+Run on 2026-11-25, before `story:exec-start-carries-executable-lists` is planned (D27, C). The
+lists F1 to F7 of § 3.9 and its table ran on a mounted `xfs`, with the same cases on `ext4` in
+the same harness as the control. Nothing of the run is committed: the harness is a scratch
+script, and its helper for `xfs` is the shipped helper built with `xfs` added to
+`LISTED_FILE_SYSTEMS`, a change that was not kept.
+
+**Where.** A container on the probe host (kernel 6.18.55, Docker 29.8.2) from a probe image of
+its own: `debian:trixie` with xfsprogs 6.13.0, e2fsprogs, bubblewrap 0.12.0, util-linux 2.41.5.
+The quota fixture's image was not used: it has neither `mkfs.xfs` nor bubblewrap (§ 6, *The
+place of a path*). The container had Docker's default capabilities and `SYS_ADMIN`, loop access
+as the quota fixture has it, no network, no AppArmor profile, the seccomp profile
+`deploy/seccomp/host-exec-v1-amd64.json` and unmasked `/proc` paths. Docker's default seccomp
+profile refuses `pivot_root`, and bubblewrap cannot mount `/proc` while Docker masks paths
+beneath it; both were observed before the profile and the unmasking were chosen.
+
+**The volume.** One 512 MiB image a file system, made by `mkfs.xfs` with its defaults and
+mounted through a loop device. The kernel's row:
+`rw,relatime - xfs /dev/loop4 rw,inode64,logbufs=8,logbsize=32k,noquota`. The features
+`mkfs.xfs` gave it: V5 with `crc=1`, `reflink=1`, `rmapbt=1`, `sparse=1`, `exchange=0`, no
+realtime device.
+
+**The view.** Bubblewrap as uid 1000 with the floor's flags, built as § 3.9 builds it: one
+directory as `/opt/a` and as `/opt/b`, a directory as `/opt/t` and its `bin` as `/opt/x`, a
+workspace at `/workspace` and its `tools/bin` a second time at `/second`. The run's program was
+`/usr/bin/dash`; the files a case executes are copies of the helper started with `--version`.
+
+**The shipped helper on `xfs`.** Unchanged, it ended every run with status 125 and one line:
+`substrate-exec-gate: cannot establish the place of /workspace: file-system-unlisted xfs`.
+
+**The table.**
+
+| file system | device and root of the row of `/opt/x` | `st_dev` of the files | type field |
+|---|---|---|---|
+| xfs | `7:4`, `/tree/t/bin` | `7:4` | `xfs` |
+| ext4 (control) | `7:4`, `/tree/t/bin` | `7:4` | `ext4` |
+
+On both the device of the row equals `st_dev` of the files, and two mounts of one directory
+have rows with one device and one root: `/opt/a` and `/opt/b` are both `7:4 /tree/a`, and
+`/workspace/tools/bin/cup` and `/second/cup` are one inode. The device number is the same on
+both because each file system ran in a container of its own on the same loop device.
+
+**The cases.** One line a sub-case in the run's log, 38 for each file system.
+
+| # | lists | right answer | xfs | ext4 (control) |
+|---|---|---|---|---|
+| F1 | `/opt/a` listed, `/opt/b/tool` denied; and the reverse | `tool` denied under both names, `other` runs | right, 8 of 8 | right, 8 of 8 |
+| F2 | `/opt/t` listed, `/opt/x/tool` denied | `/opt/t/bin/tool` and `/opt/x/tool` denied, `other` runs | right, 4 of 4 | right, 4 of 4 |
+| F3 | `/opt/t` listed, `/opt/t/bin/tool` denied | the same | right, 4 of 4 | right, 4 of 4 |
+| F4 | `/workspace/tools` listed; `lowonly`, `uponly` and `cup` denied through `/second` | each denied under both names; `cupok` and `other` run | right, 10 of 10 | right, 10 of 10 |
+| F5 | F4, then the run appends to `cup` and to `cupok` | `cup` still denied under both names, `cupok` still runs | right, 6 of 6 | right, 6 of 6 |
+| F6 | `/opt/t/bin` and a workspace directory listed, `/opt/t` denied | `execve` of `/opt/t/bin/other` is `EACCES`; without the deny entry it runs | right, 2 of 2 | right, 2 of 2 |
+| F7 | the `follow` check with `/workspace` writable, cases (a) to (d) | (a), (b) and (c) end with status 125, (d) passes | right, 4 of 4, with (b) in the form below | the same |
+
+- **F4 and F5 on a file system without layers.** `lowonly`, `uponly`, `cup` and `cupok` are
+  plain files. The append of F5 happened during the run and grew each file by 8 bytes, with
+  device and inode unchanged.
+- **F7 (b) is run in the form the shipped mechanism has.** § 3.9 ran it with the probe helper
+  of the fourth revision, which refused an entry in a root that holds the workspace by itself.
+  In the shipped mechanism the driver classes such a root and passes it as `--writable`
+  (`class_of`, `writable_source`), and the helper refuses what lies in a writable root. With
+  that argument (b) ends with status 125 on both file systems. Without it the shipped helper
+  runs the program, on `ext4` as on `xfs`: the form of § 3.9 no longer names a case of the
+  helper alone.
+- A denied execution is status 126 from `dash`, `Permission denied`.
+
+**Result.** No case gave a wrong answer on `xfs`, and the control gave the same 38 lines. By
+D27's rule `xfs` enters `LISTED_FILE_SYSTEMS`. The change of the constant, of its test and of
+every sentence that names the three types is made with
+`story:exec-start-carries-executable-lists`, not here.
+
+**What the probe did not cover.**
+
+- One `xfs`: the features above, on a loop device, on one kernel. No realtime device, no
+  `exchange=1`, no file that shares extents with another through a reflink.
+- The helper under bubblewrap, not the driver: no open of `linux` and no start ran on `xfs`.
+  The driver's open proves both facts by its own throwaway runs on every host (§ 9), so a host
+  where the rule did not hold on `xfs` would publish neither fact.
+- § 3.9's F8, F9, L1, S1 to S3, U1 to U3 and C1 are not the obligation and were not run.
+- `btrfs` stays refused by name; nothing was run on it.
+
 ## 4. The rule
 
 **D1. On `linux` a profile with a non-empty `exec_subpaths` is held to its literal program and the
@@ -1126,7 +1213,8 @@ beside the place function. Adding a type is a change to this document, backed by
   device of its row differ. Not probed.
 - **`xfs`** is outside the list. That it behaves as ext4 does here is inferred, and nothing was
   run on it: no xfs is mounted on the probe host, and mounting one needs privilege the probes
-  did not have.
+  did not have. Since 2026-11-25 it is observed: the probe of § 3.14 ran the cases on a mounted
+  `xfs`, and the type joins the list with `story:exec-start-carries-executable-lists`.
 - **Network and user-space file systems** are outside the list: `nfs`, `nfs4`, `cifs`, `smb3`,
   `ceph`, `9p`, `virtiofs`, `fuse` and every `fuse.<name>`. Not probed.
 - **Kernel file systems** (`proc`, `sysfs`, `devtmpfs`, `devpts`, `cgroup2`, `mqueue`) are
@@ -3942,7 +4030,7 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 | D24 | the helper's arguments: each path is a class (`follow` or `beneath`), a mount root and a relative path. Third revision: the class comes from the mount's host source, not its mode in this run; `--writable` names the mounts the run can write; a `follow` path that resolves into one is `exec.sandbox-path-unrepresentable` (422) before dispatch and exit 125 in the helper. Sixth revision: `--env <name> <value>` carries the program's environment (D28); the form is a proposal. Ninth revision: the class of a mount, and the refusal of a followed path into a writable mount, follow the mounts beneath a writable location (D30); the merged checks compare places alone, a finding read from the code |
 | D25 | new in the third revision. Whether one path lies in another is decided by place: the device and root of its mount in `/proc/self/mountinfo`, joined with the rest of the path. The helper reads the view's table, the driver its own. The view-ancestor rule the review proposed is not taken (K2). Accepted by the stakeholder on 2026-11-21 with two conditions (D26, § 3.9). Fourth revision: the mount is the row with the mount ID the kernel reports for the opened path (`statx`, `STATX_MNT_ID`), not the longest matching mount point (S2). Sixth revision: a path that does not exist has no place where a name after its nearest existing ancestor is `..` or `.`; the cause is `path-unopenable` (E5). Ninth revision: this is "lies in" by place; the checks that use it also ask about the mounts beneath a directory (D30) |
 | D26 | new in the fourth revision, the stakeholder's first condition. Where a place cannot be established, nothing compares path text: nine named causes, one of them a file-system type outside the closed list `ext4`, `overlay`, `tmpfs`. A start is refused `exec.sandbox-place-unserved` (501, new) before dispatch; the open is refused `config.exec-gate-unserved` (501, existing) with the cause; the helper exits 125 with one line. `btrfs`, `xfs` and every network file system are outside the list and refused by name. Accepted by the stakeholder on 2026-11-21, the mount-ID change included. Fifth revision: at the open, `file-system-unlisted` and `mount-id-unreported` withhold the facts and no longer refuse the open (D27); the other seven causes refuse it as before. Sixth revision: a table that was read and is not UTF-8 is `mount-table-unparsable`, and `path-unopenable` gains the case of D25. Ninth revision: a tenth cause, `mount-covered`, for a mount the rule needs that the kernel does not report at its own mount point; `mount-row-missing`, `mount-row-repeated`, `mount-point-mismatch` and `mount-root-deleted` are also raised for a row whose attachment cannot be established (D30). It refuses the open, so eight causes refuse there and two withhold |
-| D27 | new in the fifth revision, decided by the stakeholder (agent:sdc) on 2026-11-21: "B now, C before the wire story". With a helper configured and a path of the open on a file-system type outside the list, the adapter opens, both facts stay absent, and a profile with a list is refused `confinement.fact-unserved` (501). The cause, path, address and type are in `ExecListProof`, in `AdapterFacts.withheld`, in the `FactUnserved` error and in one `warn` line; the audit record and the wire do not change. Which paths and causes withhold is a reading: every path the open places (the coordinator's), and `mount-id-unreported` beside `file-system-unlisted` (this document's). C: `xfs` is probed in the quota fixture's container before the wire story is planned and enters the list only if every case holds; `btrfs` stays refused by name. Sixth revision: its sentence "nothing ever runs with a list that is not enforced" holds for an admitted start only with D28 |
+| D27 | new in the fifth revision, decided by the stakeholder (agent:sdc) on 2026-11-21: "B now, C before the wire story". With a helper configured and a path of the open on a file-system type outside the list, the adapter opens, both facts stay absent, and a profile with a list is refused `confinement.fact-unserved` (501). The cause, path, address and type are in `ExecListProof`, in `AdapterFacts.withheld`, in the `FactUnserved` error and in one `warn` line; the audit record and the wire do not change. Which paths and causes withhold is a reading: every path the open places (the coordinator's), and `mount-id-unreported` beside `file-system-unlisted` (this document's). C: `xfs` is probed in the quota fixture's container before the wire story is planned and enters the list only if every case holds; `btrfs` stays refused by name. Sixth revision: its sentence "nothing ever runs with a list that is not enforced" holds for an admitted start only with D28. Record of 2026-11-25: C's probe ran, in a probe image of its own and not in the quota fixture's container (§ 3.14); every case held on `xfs`, so it enters the list with `story:exec-start-carries-executable-lists` |
 | D28 | new in the sixth revision, decided by the coordinator of the request on 2026-11-21 after the adversary pass and the security review of story 1's implementation (E1 to E3); not yet read by the stakeholder. On a start with a list, no variable of the run reaches a process that runs before `landlock_restrict_self` returned: bubblewrap gets no `--setenv` of the run's variables, no stage before the helper starts with one, the driver hands the variables to the helper as operands, and the helper gives them only to the `execve` of the program. No variable is refused by name; a start without a list keeps its argv. This document's additions, each a proposal: no `--setenv` at all on such a start; the helper refuses to run when a variable other than bubblewrap's `PWD` reached its own process, where the decision said it clears them; the operand form `--env <name> <value>`. What remains is a stated limit (§ 7): inside the domain a preload object loads into every allowed dynamic program and can run code, and `execve` of an unlisted path still fails. Seventh revision: implemented at `767fbea57`; the coordinator settled the three additions as written (no `--setenv`, the helper refuses, `--env`), and the cases of E1 to E3 pass there |
 | D29 | new in the seventh revision, decided by the coordinator of the request on 2026-11-21 after the second adversary pass and the second security look (E6, E7). The stakeholder (agent:sdc): "No objection to D29: static helper, the driver refuses a helper that needs a dynamic loader, and a listed start with a controlling terminal is refused before dispatch until the helper takes the terminal itself." The helper is statically linked: at the open the driver tests the bytes it read through the one descriptor, the bytes it then seals and binds, and refuses `config.exec-gate-invalid` (422) unless they are an ELF program with no `PT_INTERP`. The rule is "no `PT_INTERP`", not "no `PT_DYNAMIC`", so a static position-independent helper passes (the stakeholder's first point). No list of loader files is kept and no declared mount is refused for its path. On a start with a list the helper is the first program bubblewrap starts in the view; a start with a list and a controlling terminal is refused before dispatch, with `session.pty-unserved` (501) proposed and the implementor's to confirm. The lane builds the helper static and refuses by name where it cannot. This document's additions, each a reading: bytes that are not an ELF image for the driver's machine, or whose headers cannot be read, are refused too. With D28: before `landlock_restrict_self` returns, the processes in the view are bubblewrap's own and the static helper, and nothing the run or the profile names is loaded as code. The limit inside the domain is unchanged (§ 7). Eighth revision: implemented at `1d961b30f`; the coordinator settled the fuller byte test and `session.pty-unserved` as proposed, and a third pass of both reviews found no blocker. The sentence is observed on one traced start (E13: bubblewrap 0.13.0, a static-pie musl helper); of the nine things it rests on, four are struck, two are settled for what was traced, and three are not run: a host with a registered `binfmt_misc` handler, a trace through `systemd`, and a host whose `/bin/sh` is dash. Amendment 1 to rule 1: the byte test also refuses an image the kernel would not start (only `ET_EXEC` and `ET_DYN`, the class's program header size, a header count the kernel accepts), because bubblewrap's `execvp` runs `/bin/sh` on a file the kernel refuses (E15). Amendment 2, rule 7: on a start with a list a declared mount at the helper's own path is refused before dispatch, with the driver's existing refusal for a mount that collides with one it owns; its code is the implementor's to report (E16) |
 | D30 | new in the ninth revision, decided by the coordinator of the request on 2026-11-21 after the security review and the adversary pass of story 2's implementation at `aafb9823a` (E18 to E21). The stakeholder (agent:sdc): "D30 accepted: \"lies in\" follows the view's mounts, attachment points read from the mount table as places, one function for the helper and the driver's pre-dispatch checks, and a start is refused exec.sandbox-place-unserved where an attachment point cannot be established. Not taking the blanket refusal of every directory that holds a mount is right." The attachment point of a mount is a place: its parent row's device, and the parent row's root joined with its mount point relative to the parent's. A mount is beneath a directory when its attachment point lies in the directory's place or its parent mount is beneath it. A directory reaches its own place and the root of every mount beneath it, and `X` lies in `Y` when the place of `X` lies in a place `Y` reaches. This document's form of the rule: it is written through what a directory reaches, not through the mount a path is on, because a second mount of a denied file's directory beneath a listed directory is not the mount the entry is on (E21 (a)). It serves six checks with one function: D11's two steps, the driver's check of the program, and story 1's four checks of a location a run can write, which compare places alone in merged code (read, not run). It fails closed with D26's causes and one new one, `mount-covered`. A mount of a type outside the list is not compared and refuses only beneath a denied directory. Amended 2026-11-22 (§ 18): and as an entry of a directory the helper would expand, on a start with a deny-list. Amended 2026-11-22, round 4 (§ 18): only where it is not hidden; and the driver also asks what the root of a mount of a listed type reaches where the helper would step that mount as a directory. An allow-list without a deny-list is unchanged: a listed directory admits what is mounted beneath it |
@@ -4000,7 +4088,8 @@ The runtime vectors' delegated lane is unchanged: 189 cases, and it still lists 
 - D27, `TMPDIR`: that `tempfile::tempdir()` follows `TMPDIR` is that crate's and the standard
   library's documented behaviour, not a run.
 - D27, C: that the quota fixture's container can mount an `xfs` image once `xfsprogs` is in a
-  recipe. The recipe was read; nothing was built.
+  recipe. The recipe was read; nothing was built. The probe of 2026-11-25 did not test it: it
+  ran in a probe image of its own (§ 3.14).
 - D27, the chart sentence: where it belongs was read from the guide and the chart's files. That
   it lands with the wire story is this document's reading.
 - D26, one source file for the helper and the driver: how the file is shared between the two
@@ -4466,7 +4555,9 @@ refused by link count.
 - Whether `xfs` enters D26's list. That is no longer open-ended: D27's C obliges the probe
   before `story:exec-start-carries-executable-lists` is planned, and says what its result
   decides. Until then a workspace volume on `xfs` opens without the lists and says why.
-  `btrfs` stays refused by name; a probe of it would start with the subvolume case.
+  `btrfs` stays refused by name; a probe of it would start with the subvolume case. The probe
+  ran on 2026-11-25 and every case held (§ 3.14): `xfs` enters the list with that story, and
+  until the story merges the sentence before this one still describes the code.
 - The cause of a withheld fact on the wire, and in the daemon's own startup output:
   `story:exec-start-carries-executable-lists` (D27).
 - The cause in the audit record. `ProfileRefused` keeps its shape (D27).
