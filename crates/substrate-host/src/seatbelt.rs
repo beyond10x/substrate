@@ -33,10 +33,10 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 pub const SANDBOX_UNAVAILABLE: &str = "exec.sandbox-unavailable";
 
 /// The refusal for a path SBPL cannot carry as a plain absolute string literal.
-pub const PATH_UNREPRESENTABLE: &str = "exec.sandbox-path-unrepresentable";
+pub const PATH_UNREPRESENTABLE: &str = substrate_wire::EXEC_SANDBOX_PATH_UNREPRESENTABLE;
 
 /// The refusal for a program the policy does not list as executable.
-pub const PROGRAM_UNLISTED: &str = "exec.sandbox-program-unlisted";
+pub const PROGRAM_UNLISTED: &str = substrate_wire::EXEC_SANDBOX_PROGRAM_UNLISTED;
 
 /// System locations every macOS process reads while the dynamic loader and libSystem start.
 const SYSTEM_READ_SUBPATHS: [&str; 6] = [
@@ -60,7 +60,7 @@ const MACH_SERVICES: [&str; 3] = [
 
 /// The refusal for an exec subpath outside the workspace, the declared read-only roots and the
 /// system and developer directories: exec by subpath would make it readable without a declaration.
-pub const EXEC_SUBPATH_UNDECLARED: &str = "exec.sandbox-exec-subpath-undeclared";
+pub const EXEC_SUBPATH_UNDECLARED: &str = substrate_wire::EXEC_SANDBOX_EXEC_SUBPATH_UNDECLARED;
 
 /// The refusal for a start whose exec subpaths hold the developer tools when the SDK or the
 /// toolchain `clang` could not be resolved outside the sandbox: inside it, cargo would link through

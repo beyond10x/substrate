@@ -110,6 +110,7 @@ fn runtime(host: &Host, configured_backend: &Path) -> ProcessRuntime {
             exec_output_limit_bytes: Some(65_536),
             ..CapabilityFacts::default()
         },
+        withheld: Vec::new(),
     };
     ProcessRuntime::new(config, capability).expect("runtime")
 }
@@ -134,6 +135,8 @@ fn input() -> ExecStartInput {
             apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         },
         limits: ExecLimits {
             timeout_ms: 5_000,

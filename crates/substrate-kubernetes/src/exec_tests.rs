@@ -282,6 +282,8 @@ fn input(argv: &[&str]) -> ExecStartInput {
             apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         },
         limits: ExecLimits {
             timeout_ms: 10_000,
@@ -1027,6 +1029,39 @@ async fn members_this_driver_does_not_serve_are_refused_before_any_request() {
             panic!("{code}: dispatched");
         };
         assert_eq!(refused.code, code, "case {index}: {}", refused.message);
+    }
+    assert_eq!(rig.pod_creates(), 0, "no Pod create was sent");
+}
+
+/// § 8 for the executable lists of design 37: this driver proves neither
+/// `confinement.exec-subpaths` nor `confinement.exec-denied-paths` and enforces neither list,
+/// so a start that names one is refused by name before any request (`AGENTS.md` invariant 3),
+/// `confinement.fact-unserved` at the member, as the daemon answers it (row 4 of design 37
+/// § 6). It is never started without its list.
+#[tokio::test]
+async fn a_start_naming_an_executable_list_is_refused_before_any_request() {
+    let rig = rig().await;
+    let mut allow = input(&["/bin/true"]);
+    allow.sandbox.exec_subpaths = Some(vec!["/usr/bin".to_owned()]);
+    let mut both = allow.clone();
+    both.sandbox.exec_denied_paths = vec!["/usr/bin/env".to_owned()];
+    for (index, (start, address)) in [
+        (allow, substrate_wire::EXEC_SUBPATHS_ADDRESS),
+        (both, substrate_wire::EXEC_SUBPATHS_ADDRESS),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("exec_listed_{index}");
+        let DispatchOutcome::NotDispatched(refused) = rig.start(&id, &start).await else {
+            panic!("case {index}: a start naming an executable list was dispatched");
+        };
+        assert_eq!(
+            (refused.code, refused.address.as_deref()),
+            (substrate_wire::CONFINEMENT_FACT_UNSERVED, Some(address)),
+            "case {index}: {}",
+            refused.message
+        );
     }
     assert_eq!(rig.pod_creates(), 0, "no Pod create was sent");
 }

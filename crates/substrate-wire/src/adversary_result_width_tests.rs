@@ -37,6 +37,8 @@ fn start(apertures: usize, roots: usize) -> ExecStartInput {
             profile: SandboxProfile::Workspace,
             required: true,
             requires: None,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         },
         limits: ExecLimits {
             timeout_ms: 1_000,

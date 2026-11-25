@@ -34,7 +34,7 @@ substrate-exec-gate <option>... -- <program> [<argument>...]
   lies is read from the view's mount table (`/proc/self/mountinfo`), never from the text of
   two paths, and a place, or where a mount beneath a `--writable` root is attached, that
   cannot be established refuses as well: nothing on a file-system type other than `ext4`,
-  `overlay` and `tmpfs` has one. A path of either class is placed where it ends.
+  `overlay`, `tmpfs` and `xfs` has one. A path of either class is placed where it ends.
 - `--deny` names a path that gets no execute right, from an `--allow` entry, as the program or
   as the loader. Landlock has no deny rule, so where a listed directory holds a denied path the
   helper grants each of its entries on its own, and the directory itself gets no rule. A
@@ -86,7 +86,7 @@ outside the driver's workspace root and every declared writable root, and have o
 **install a copy, not cargo's own output**, which cargo hard-links to a second name under
 `deps/`. The driver reads it once, when it opens, and runs those bytes in every later start.
 
-The lists are served on `ext4`, `overlay` and `tmpfs`. Where the file, the workspace root, a
+The lists are served on `ext4`, `overlay`, `tmpfs` and `xfs`. Where the file, the workspace root, a
 declared writable root, `/usr`, `/bin`, `/lib`, `/lib64` or the temporary directory lies on
 another file-system type, the driver opens without the helper: the adapter proves no
 executable-list fact, `facts().withheld` names the path and the type, and a profile with a list
@@ -113,7 +113,7 @@ a link to `/workspace/../usr/bin` is refused, and `/usr/bin` listed in its place
 numbers (a network file system mounted twice with different options, two FUSE mounts of one
 directory), the comparison cannot see that a read-only root and a mount the run can write hold
 the same files. The only guard there is that nothing on a file system other than `ext4`,
-`overlay` and `tmpfs` is followed: a listed path that ends on one, reads a symbolic link on
+`overlay`, `tmpfs` and `xfs` is followed: a listed path that ends on one, reads a symbolic link on
 one or passes through a directory on one is refused.
 
 ## Denying a program

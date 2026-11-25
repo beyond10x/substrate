@@ -182,6 +182,8 @@ impl VectorDriver {
                     apertures: Vec::new(),
                     profile: SandboxProfile::Workspace,
                     required: true,
+                    exec_subpaths: None,
+                    exec_denied_paths: Vec::new(),
                 },
                 applied: Some(AppliedConfinement {
                     requires: None,
@@ -197,6 +199,8 @@ impl VectorDriver {
                     network: AppliedNetwork::None,
                     cgroup: Some("substrate/vector".to_owned()),
                     capsule: None,
+                    exec_subpaths: None,
+                    exec_denied_paths: Vec::new(),
                 }),
                 exit: Some(substrate_wire::ExecExit {
                     code: None,
@@ -256,6 +260,7 @@ impl Driver for VectorDriver {
             probed_at: FIXED_TIME.parse().expect("fixed time"),
             valid_until: None,
             facts,
+            withheld: Vec::new(),
         }
     }
 

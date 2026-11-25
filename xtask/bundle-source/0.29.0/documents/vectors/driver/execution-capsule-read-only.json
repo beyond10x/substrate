@@ -1,0 +1,50 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "capsule.exec",
+      "write": "/runtime/config/effective.json"
+    },
+    "kind": "driver",
+    "port": "security"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "security.capsule-read-only"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "write_succeeded": false
+    }
+  },
+  "id": "capsule-files-are-read-only-inside-the-sandbox",
+  "layer": "driver",
+  "phase": 4,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/capsule_sha256_changed",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "capsule",
+      "name": "bounded-inline",
+      "state": {
+        "mount": "/runtime"
+      }
+    }
+  ]
+}

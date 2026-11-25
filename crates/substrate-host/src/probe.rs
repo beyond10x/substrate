@@ -296,9 +296,11 @@ pub(crate) fn probe_host(
         // ADR 0036 S2: published only when the composition root proved the host-process
         // supervisor's cgroups usable and serves the personal Unix socket alone.
         process_host: config.host_processes.then_some(true),
+        confinement_exec_denied_paths: None,
     };
     let mut facts = facts;
-    publish_confinement(&mut facts);
+    publish_confinement(&mut facts, &exec_lists);
+    let withheld = withheld_on_the_wire(config.exec_gate.is_some(), &facts, &exec_lists);
     let driver_version = env!("CARGO_PKG_VERSION");
     let snapshot = snapshot_identity(&SnapshotMaterial {
         adapter: AdapterName::Linux,
@@ -319,6 +321,7 @@ pub(crate) fn probe_host(
             probed_at,
             valid_until: None,
             facts,
+            withheld,
         },
         exec_lists,
     })
@@ -333,7 +336,7 @@ fn snapshot_identity(material: &SnapshotMaterial<'_>) -> String {
 /// already probed above, and from nothing else: each one is exactly a clause of
 /// `confinement::linux::proof`, which the probe tests hold this function to. A fact is `true` or
 /// absent, never `false`, so an unproved clause leaves its fact unpublished.
-fn publish_confinement(facts: &mut CapabilityFacts) {
+fn publish_confinement(facts: &mut CapabilityFacts, exec_lists: &ExecListProof) {
     let held = |proved: bool| proved.then_some(true);
     // The confinement floor every exec rides: argv-only spawning inside the bubblewrap namespaces
     // (`exec.argv-only`, `exec.namespaces`), proved by `probe_bubblewrap`, cgroup delegation and
@@ -379,13 +382,52 @@ fn publish_confinement(facts: &mut CapabilityFacts) {
                 .is_some_and(|namespaces| namespaces.pid),
     );
     facts.confinement_sealed_paths = None;
-    // exec-subpaths: the one member `linux::proof` proves and this function withholds (design 35
-    // D16). The adapter proves it from the driver's own probe of the executable gate; a wire
-    // start has no field for the list, so a client that required the property would be admitted
-    // and its run would execute anything. `story:exec-start-carries-executable-lists` adds the
-    // field and publishes the fact.
-    facts.confinement_exec_subpaths = None;
+    // exec-subpaths and exec-denied-paths: the driver's own probes of the executable gate, on
+    // the floor, and no entry of the open for the fact (design 35 D14 and D27). A wire start
+    // carries both lists in its sandbox (design 37 § 5), so both are published where proved.
+    let withheld =
+        |fact: crate::confinement::Fact| exec_lists.withheld.iter().any(|entry| entry.fact == fact);
+    let subpaths =
+        floor && exec_lists.subpaths && !withheld(crate::confinement::Fact::ExecSubpaths);
+    facts.confinement_exec_subpaths = held(subpaths);
+    facts.confinement_exec_denied_paths = held(
+        subpaths && exec_lists.denied_paths && !withheld(crate::confinement::Fact::ExecDeniedPaths),
+    );
     facts.confinement_private_tmpdir = None;
+}
+
+/// The snapshot's `withheld` (design 37 § 8): for each executable-list fact the snapshot does
+/// not publish, the open's entries for it, each distinct fact, configuration field and cause
+/// once and no path or file-system type. Empty where no helper is configured: a capability
+/// that was not configured was not withheld.
+fn withheld_on_the_wire(
+    configured: bool,
+    facts: &CapabilityFacts,
+    exec_lists: &ExecListProof,
+) -> Vec<substrate_wire::WithheldFact> {
+    use substrate_wire::{WithheldAddress, WithheldCause, WithheldFact, WithheldFactName};
+    if !configured {
+        return Vec::new();
+    }
+    let fact = |fact: &crate::confinement::Fact| match fact {
+        crate::confinement::Fact::ExecSubpaths => Some(WithheldFactName::ExecSubpaths),
+        crate::confinement::Fact::ExecDeniedPaths => Some(WithheldFactName::ExecDeniedPaths),
+        _ => None,
+    };
+    substrate_wire::withheld_facts(exec_lists.withheld.iter().filter_map(|entry| {
+        let fact = fact(&entry.fact).filter(|name| !facts.proves(name.property()))?;
+        let cause = WithheldCause::ALL
+            .into_iter()
+            .find(|cause| cause.name() == entry.cause)?;
+        let address = WithheldAddress::ALL
+            .into_iter()
+            .find(|address| address.name() == entry.address)?;
+        Some(WithheldFact {
+            fact,
+            cause,
+            address,
+        })
+    }))
 }
 
 /// The floor's argv around one throwaway run that starts from the executable gate's sealed bytes
@@ -562,6 +604,7 @@ pub(crate) fn probe_exec_subpaths(config: &HostConfig, gate: &ExecGate) -> bool 
     drop(pinned);
     let Ok(lists) = crate::exec_gate::plan(
         gate,
+        crate::exec_gate::Caller::Adapter,
         &["allowed".to_owned()],
         &[],
         "/bin/sh",
@@ -692,6 +735,7 @@ pub(crate) fn probe_exec_denied_paths(config: &HostConfig, gate: &ExecGate) -> b
     drop(pinned);
     let Ok(mut lists) = crate::exec_gate::plan(
         gate,
+        crate::exec_gate::Caller::Adapter,
         &["allowed".to_owned(), "apart".to_owned()],
         &[],
         "/bin/sh",
@@ -1570,7 +1614,7 @@ mod tests {
                         cause: "file-system-unlisted",
                         address: "config.workspace_root",
                         path: "/data/workspaces".to_owned(),
-                        file_system: Some("xfs".to_owned()),
+                        file_system: Some("btrfs".to_owned()),
                     }],
                     ..ExecListProof::default()
                 },
@@ -1662,8 +1706,11 @@ mod tests {
         }
     }
 
-    /// The adapter's proof on `facts`, with the executable-list probe held or not.
-    fn proof_of(facts: &CapabilityFacts, probe_held: bool) -> crate::confinement::AdapterFacts {
+    /// The adapter's proof on `facts`, with what the driver's probe proved of the lists.
+    fn proof_of(
+        facts: &CapabilityFacts,
+        exec_lists: &ExecListProof,
+    ) -> crate::confinement::AdapterFacts {
         crate::confinement::linux::proof(
             &CapabilitySnapshot {
                 snapshot: format!("sha256:{}", "0".repeat(64)),
@@ -1673,67 +1720,76 @@ mod tests {
                 probed_at: Utc::now(),
                 valid_until: None,
                 facts: facts.clone(),
+                withheld: Vec::new(),
             },
-            &ExecListProof {
-                subpaths: probe_held,
-                denied_paths: probe_held,
-                ..ExecListProof::default()
-            },
+            exec_lists,
         )
     }
 
-    /// The one member the adapter proves and the daemon does not publish (design 35 D16):
-    /// `linux::proof` proves `exec_subpaths` where the driver's probe held, and
-    /// `publish_confinement` withholds `confinement.exec-subpaths`, because a wire start has no
-    /// field for the list. `story:exec-start-carries-executable-lists` adds the field and removes
-    /// this exception.
-    const PROVED_AND_NOT_PUBLISHED: [ConfinementProperty; 1] = [ConfinementProperty::ExecSubpaths];
-
-    /// The second member the adapter proves and the daemon does not publish (design 35 D16, D10):
-    /// `exec_denied_paths` has no wire property at all, so there is nothing for
-    /// `publish_confinement` to set, and the published facts hold no member of this name.
-    /// `story:exec-start-carries-executable-lists` gives it one.
-    const PROVED_WITHOUT_A_WIRE_PROPERTY: [(crate::confinement::Fact, &str); 1] = [(
-        crate::confinement::Fact::ExecDeniedPaths,
-        "exec-denied-paths",
-    )];
-
-    /// What [`PROVED_WITHOUT_A_WIRE_PROPERTY`] states, for one published set and one proof.
-    fn assert_proved_without_a_wire_property(
-        facts: &CapabilityFacts,
-        proof: &crate::confinement::AdapterFacts,
-        expected: bool,
-    ) {
-        for (fact, name) in &PROVED_WITHOUT_A_WIRE_PROPERTY {
-            assert!(
-                ConfinementProperty::ALL
-                    .into_iter()
-                    .all(|property| property.name() != *name),
-                "{name} is a wire property; design 35 D16 has none until a wire start carries \
-                 the list"
-            );
-            assert!(
-                serde_json::to_value(facts)
-                    .expect("facts serialize")
-                    .get(format!("confinement.{name}"))
-                    .is_none(),
-                "{name} is published"
-            );
-            assert_eq!(
-                proof.proves(fact),
-                expected,
-                "the adapter proves {name} exactly on the floor with the probe held"
-            );
+    /// One entry of the driver's proof of the lists, as the open keeps it (design 35 D27).
+    fn kept(
+        fact: crate::confinement::Fact,
+        cause: &'static str,
+        address: &'static str,
+        path: &str,
+        file_system: Option<&str>,
+    ) -> crate::confinement::FactWithheld {
+        crate::confinement::FactWithheld {
+            fact,
+            cause,
+            address,
+            path: path.to_owned(),
+            file_system: file_system.map(str::to_owned),
         }
     }
 
+    /// The proofs of the lists the published set is held to: none, both probes held (the
+    /// second), the allow-list's alone, and both held with an entry of the open for each fact.
+    fn list_proofs() -> [ExecListProof; 5] {
+        use crate::confinement::Fact;
+        let held = ExecListProof {
+            subpaths: true,
+            denied_paths: true,
+            withheld: Vec::new(),
+        };
+        [
+            ExecListProof::default(),
+            held.clone(),
+            ExecListProof {
+                denied_paths: false,
+                ..held.clone()
+            },
+            ExecListProof {
+                withheld: vec![kept(
+                    Fact::ExecDeniedPaths,
+                    "mount-id-unreported",
+                    "config.writable_roots",
+                    "/srv/out",
+                    None,
+                )],
+                ..held.clone()
+            },
+            ExecListProof {
+                withheld: vec![kept(
+                    Fact::ExecSubpaths,
+                    "file-system-unlisted",
+                    "config.workspace_root",
+                    "/data/workspaces",
+                    Some("btrfs"),
+                )],
+                ..held
+            },
+        ]
+    }
+
     /// The published set and the adapter's own proof agree member by member, on the full set
-    /// and on each set that loses one underlying fact, so neither can drift from the other. The
-    /// two exceptions are stated by name, [`PROVED_AND_NOT_PUBLISHED`] and
-    /// [`PROVED_WITHOUT_A_WIRE_PROPERTY`]: with the executable-list probes held the adapter
-    /// proves both list facts on the floor, and no set publishes either.
+    /// and on each set that loses one underlying fact, and for each proof of the lists: none,
+    /// both probes held, the allow-list's alone, and both held with the open's entries. No
+    /// member is excepted (design 37 § 5): both list facts are published exactly where the
+    /// adapter proves them.
     #[test]
     fn the_published_set_is_the_linux_adapters_proof() {
+        use crate::confinement::Fact;
         let full = delegated_facts();
         let mut variants = vec![full.clone(), CapabilityFacts::default()];
         for remove in 0..6 {
@@ -1754,58 +1810,40 @@ mod tests {
             }
             variants.push(facts);
         }
-        for mut facts in variants {
-            publish_confinement(&mut facts);
-            let floor = facts.exec_argv_only == Some(true) && facts.exec_namespaces.is_some();
-            for probe_held in [false, true] {
-                let proof = proof_of(&facts, probe_held);
+        let proofs = list_proofs();
+        let held = &proofs[1];
+        for facts in variants {
+            for exec_lists in &proofs {
+                let mut published = facts.clone();
+                publish_confinement(&mut published, exec_lists);
+                let proof = proof_of(&published, exec_lists);
                 for family in ConfinementFamily::ALL {
                     let generated: crate::confinement::ContractFamily =
                         serde_json::from_value(serde_json::json!(family.name().replace('-', "_")))
                             .expect("a wire family is a contract family");
                     assert_eq!(
-                        facts.serves_family(family),
+                        published.serves_family(family),
                         proof.serves(&generated),
-                        "{}",
+                        "{} on {exec_lists:?}",
                         family.name()
                     );
                 }
                 for property in ConfinementProperty::ALL {
-                    let generated: crate::confinement::Fact = serde_json::from_value(
-                        serde_json::json!(property.name().replace('-', "_")),
-                    )
+                    let generated: Fact = serde_json::from_value(serde_json::json!(
+                        property.name().replace('-', "_")
+                    ))
                     .expect("a wire property is a contract fact");
-                    if PROVED_AND_NOT_PUBLISHED.contains(&property) {
-                        assert!(
-                            !facts.proves(property),
-                            "{} is published; design 35 D16 withholds it until a wire start \
-                             carries the list",
-                            property.name()
-                        );
-                        assert_eq!(
-                            proof.proves(&generated),
-                            floor && probe_held,
-                            "the adapter proves {} exactly on the floor with the probe held",
-                            property.name()
-                        );
-                        continue;
-                    }
                     assert_eq!(
-                        facts.proves(property),
+                        published.proves(property),
                         proof.proves(&generated),
-                        "{}",
+                        "{} on {exec_lists:?}",
                         property.name()
                     );
                 }
-                assert_proved_without_a_wire_property(&facts, &proof, floor && probe_held);
             }
         }
         let mut facts = full;
-        publish_confinement(&mut facts);
-        assert!(
-            proof_of(&facts, true).proves(&crate::confinement::Fact::ExecSubpaths),
-            "the adapter proves exec_subpaths on the full set"
-        );
+        publish_confinement(&mut facts, held);
         assert_eq!(
             ConfinementFamily::ALL
                 .into_iter()
@@ -1825,8 +1863,130 @@ mod tests {
                 ConfinementProperty::WholeTreeKill,
                 ConfinementProperty::IpcSocketAllowlist,
                 ConfinementProperty::IpcSignalsContained,
+                ConfinementProperty::ExecSubpaths,
+                ConfinementProperty::ExecDeniedPaths,
             ]
         );
+    }
+
+    /// The entries of an open, in no order: two facts, three fields, both causes, and one
+    /// fact, field and cause kept for two paths.
+    fn kept_in_any_order() -> Vec<crate::confinement::FactWithheld> {
+        use crate::confinement::Fact;
+        vec![
+            kept(
+                Fact::ExecDeniedPaths,
+                "mount-id-unreported",
+                "config.exec_gate",
+                "/usr",
+                None,
+            ),
+            kept(
+                Fact::ExecSubpaths,
+                "file-system-unlisted",
+                "config.writable_roots",
+                "/srv/out",
+                Some("fuse.sshfs"),
+            ),
+            kept(
+                Fact::ExecSubpaths,
+                "file-system-unlisted",
+                "config.workspace_root",
+                "/data/workspaces",
+                Some("btrfs"),
+            ),
+            kept(
+                Fact::ExecSubpaths,
+                "mount-id-unreported",
+                "config.workspace_root",
+                "/data/workspaces/again",
+                None,
+            ),
+            // A second path with the same fact, address and cause: one entry.
+            kept(
+                Fact::ExecSubpaths,
+                "file-system-unlisted",
+                "config.writable_roots",
+                "/srv/cache",
+                Some("nfs4"),
+            ),
+            kept(
+                Fact::ExecDeniedPaths,
+                "file-system-unlisted",
+                "config.exec_gate",
+                "/usr",
+                Some("btrfs"),
+            ),
+        ]
+    }
+
+    /// **The snapshot's `withheld`, on a proof written by hand** (design 37 § 8): one entry per
+    /// distinct fact, address and cause, in the order fact, address, cause, whatever order and
+    /// however many paths the open kept them in; no host path and no file-system type; no
+    /// entry for a fact that is published; and none where no helper is configured.
+    #[test]
+    fn the_snapshots_withheld_names_each_distinct_fact_address_and_cause_once() {
+        use substrate_wire::{WithheldAddress, WithheldCause, WithheldFact, WithheldFactName};
+        let exec_lists = ExecListProof {
+            subpaths: false,
+            denied_paths: false,
+            withheld: kept_in_any_order(),
+        };
+        let entry = |fact, address, cause| WithheldFact {
+            fact,
+            cause,
+            address,
+        };
+        let facts = CapabilityFacts::default();
+        let withheld = withheld_on_the_wire(true, &facts, &exec_lists);
+        assert_eq!(
+            withheld,
+            [
+                entry(
+                    WithheldFactName::ExecSubpaths,
+                    WithheldAddress::WorkspaceRoot,
+                    WithheldCause::FileSystemUnlisted,
+                ),
+                entry(
+                    WithheldFactName::ExecSubpaths,
+                    WithheldAddress::WorkspaceRoot,
+                    WithheldCause::MountIdUnreported,
+                ),
+                entry(
+                    WithheldFactName::ExecSubpaths,
+                    WithheldAddress::WritableRoots,
+                    WithheldCause::FileSystemUnlisted,
+                ),
+                entry(
+                    WithheldFactName::ExecDeniedPaths,
+                    WithheldAddress::ExecGate,
+                    WithheldCause::FileSystemUnlisted,
+                ),
+                entry(
+                    WithheldFactName::ExecDeniedPaths,
+                    WithheldAddress::ExecGate,
+                    WithheldCause::MountIdUnreported,
+                ),
+            ]
+        );
+        let written = serde_json::to_string(&withheld).expect("the entries serialize");
+        for host in ["/usr", "/srv", "/data", "btrfs", "nfs4", "fuse.sshfs"] {
+            assert!(!written.contains(host), "{host} in {written}");
+        }
+        // A fact that is published has no entry, whatever the open kept for it.
+        let published = CapabilityFacts {
+            confinement_exec_subpaths: Some(true),
+            ..CapabilityFacts::default()
+        };
+        assert!(
+            withheld_on_the_wire(true, &published, &exec_lists)
+                .iter()
+                .all(|entry| entry.fact == WithheldFactName::ExecDeniedPaths),
+            "an entry for a published fact"
+        );
+        // No helper configured: nothing was withheld, the capability was not configured.
+        assert!(withheld_on_the_wire(false, &facts, &exec_lists).is_empty());
+        assert!(withheld_on_the_wire(true, &facts, &ExecListProof::default()).is_empty());
     }
 
     /// Design 30 § 4.1: `driver_version` is a version string and never names the adapter or the
@@ -2496,7 +2656,7 @@ exit 1
             cause: "file-system-unlisted",
             address: "config.workspace_root",
             path: "/data/workspaces".to_owned(),
-            file_system: Some("xfs".to_owned()),
+            file_system: Some("btrfs".to_owned()),
         }];
         let config = HostConfig::minimum("/does/not/exist");
         let probed = probe_host(&config, true, None, entries.clone())

@@ -19,12 +19,13 @@ use substrate_guarded::DriverErrorClass;
 use substrate_wire::ReadOnlyRoot;
 
 use super::{
-    EXEC_GATE_INVALID, EXEC_GATE_UNSERVED, ExecGate, FileFacts, Location, Mounts, OpenDecision,
-    OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening, PLACE_UNSERVED, Shown,
-    Sighted, Source, Unfollowed, View, check_file, check_length, check_linkage, check_links,
-    check_location, check_openable, check_protocol, class_together, classed, decide_open,
-    denied_unplaced, judge_denied, judge_link, judge_passed, open, place_open, plan,
-    shown_location, start_unplaced, withheld_facts, writable_source,
+    At, Caller, EXEC_GATE_INVALID, EXEC_GATE_UNSERVED, ExecGate, FileFacts, Listed, Location,
+    Mounts, OpenDecision, OpenPlacement, OpenPlaces, OpenSightings, OpenUnplaced, Opening,
+    PLACE_UNSERVED, PROGRAM, Shown, Sighted, Source, Unfollowed, View, WORKSPACE, WRITABLE_MOUNT,
+    check_file, check_length, check_linkage, check_links, check_location, check_openable,
+    check_protocol, class_together, classed, decide_open, denied_unplaced, judge_denied,
+    judge_link, judge_passed, open, place_open, plan, shown_location, start_unplaced,
+    withheld_facts, writable_source,
 };
 use crate::confinement::{Fact, FactWithheld};
 use crate::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
@@ -37,7 +38,7 @@ const HOST: &str = "\
 31 1 259:2 / / rw,noatime shared:1 - ext4 /dev/nvme0n1p2 rw
 60 31 259:2 /work/u/workspaces /mnt/second rw,noatime shared:1 - ext4 /dev/nvme0n1p2 rw
 61 31 0:40 / /tmp rw,nosuid,nodev shared:30 - tmpfs tmpfs rw
-62 31 8:17 / /data rw,noatime shared:40 - xfs /dev/sdb1 rw
+62 31 8:17 / /data rw,noatime shared:40 - btrfs /dev/sdb1 rw
 ";
 
 fn host() -> MountTree {
@@ -80,7 +81,7 @@ fn writable() -> Vec<Location> {
         .iter()
         .map(|path| {
             let place = host().table().place_of(&seen(path, 31)).expect("placed");
-            Location::reaching(path, &place, &host()).expect("reached")
+            Location::reaching(path, path, &place, &host()).expect("reached")
         })
         .collect()
 }
@@ -231,7 +232,7 @@ fn what_is_mounted_beneath_a_writable_location_lies_in_it_for_the_class() {
         ("/tmp/tools", 61, Class::Follow),
     ] {
         assert_eq!(
-            classed("read_only_roots", &seen(path, mount), &writable, &table).expect("classed"),
+            classed(at("read_only_roots"), &seen(path, mount), &writable, &table).expect("classed"),
             class,
             "{path}"
         );
@@ -336,7 +337,7 @@ fn a_mount_beneath_a_source_that_cannot_be_compared_refuses_no_start() {
     let class = |rows: &str, source: &str| {
         let table = tree(&format!("{HOST}{rows}"));
         let writable = established(&helper(), &table).writable;
-        classed("read_only_roots", &seen(source, 31), &writable, &table)
+        classed(at("read_only_roots"), &seen(source, 31), &writable, &table)
             .unwrap_or_else(|error| panic!("{source} with {rows}: {error}"))
     };
     for rows in [
@@ -360,7 +361,7 @@ fn a_mount_beneath_a_source_that_cannot_be_compared_refuses_no_start() {
     let table = tree(&format!("{HOST}{covered}"));
     let writable = established(&helper(), &table).writable;
     let error = classed(
-        "read_only_roots",
+        at("read_only_roots"),
         &seen("/opt/tools", 31),
         &writable,
         &table,
@@ -430,7 +431,13 @@ fn a_source_that_overlaps_a_writable_location_is_asked_as_one() {
             &table,
         )
         .writable;
-        let source = writable_source(address, &seen("/opt/tools", 31), &writable, &table);
+        let source = writable_source(
+            Caller::Adapter,
+            at(address),
+            &seen("/opt/tools", 31),
+            &writable,
+            &table,
+        );
         (table, source)
     };
     // Every mount beneath it can be compared: a location, with what it reaches.
@@ -493,8 +500,8 @@ fn the_classes_of_the_shown_mounts_do_not_depend_on_their_order() {
 84 31 0:64 / /opt/a/shared rw - tmpfs tmpfs rw
 85 31 0:64 / /opt/b/shared rw - tmpfs tmpfs rw
 ";
-    let shown = |address: &'static str, path: &str| Shown {
-        address,
+    let shown = |address: &str, path: &str| Shown {
+        at: at(address),
         path: path.to_owned(),
         source: Source::Opaque,
         file: false,
@@ -515,7 +522,7 @@ fn the_classes_of_the_shown_mounts_do_not_depend_on_their_order() {
                 _ => shown("read_only_roots", path),
             })
             .collect();
-        class_together(&shown, &mut locations, &table).map(|classes| {
+        class_together(Caller::Adapter, &shown, &mut locations, &table).map(|classes| {
             let joined: Vec<String> = locations[2..]
                 .iter()
                 .map(|location| location.path.clone())
@@ -561,7 +568,7 @@ fn a_mount_of_an_unlisted_type_is_compared_row_against_row_only() {
         let table = tree(&format!("{HOST}{rows}"));
         let writable = established(&helper(), &table).writable;
         classed(
-            "read_only_roots",
+            at("read_only_roots"),
             &seen("/opt/tools", 31),
             &writable,
             &table,
@@ -572,7 +579,7 @@ fn a_mount_of_an_unlisted_type_is_compared_row_against_row_only() {
         // Beneath the workspace only, and beneath the source only.
         (
             "83 31 0:5 /null /work/u/workspaces/ws_1/null rw - devtmpfs devtmpfs rw\n\
-             84 31 8:33 / /opt/tools/data rw - xfs /dev/sdc1 rw\n",
+             84 31 8:33 / /opt/tools/data rw - btrfs /dev/sdc1 rw\n",
             Class::Follow,
         ),
         // One ramfs beneath both.
@@ -633,7 +640,7 @@ fn a_symbolic_link_the_walk_reads_is_placed() {
         descriptor_path: Some(host.to_owned()),
         remaining: Vec::new(),
     };
-    let judged = |link: &Opened| judge_link(link, &table, &writable);
+    let judged = |link: &Opened| judge_link(link, &table, &writable, Caller::Adapter);
     for (mount_id, cause) in [
         (Some(85), "file-system-unlisted ramfs"),
         (None, "mount-id-unreported"),
@@ -651,7 +658,7 @@ fn a_symbolic_link_the_walk_reads_is_placed() {
             }
             Ok(()) => panic!("{cause}: a link with no place was followed"),
         };
-        let error = unplaced.refusal("/opt/k/media/link", "exec_subpaths");
+        let error = unplaced.refusal("/opt/k/media/link", Listed::Entry, Caller::Adapter);
         assert_eq!(error.code, PLACE_UNSERVED, "{error}");
         assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
         assert_eq!(error.address.as_deref(), Some("exec_subpaths"));
@@ -674,7 +681,8 @@ fn a_symbolic_link_the_walk_reads_is_placed() {
                 "resolves through the symbolic link /opt/j/link, which lies in \
                  /work/u/workspaces, a location a run can write"
             );
-            let error = Unfollowed::Refused(why).refusal("/opt/j/link", "exec_subpaths");
+            let error =
+                Unfollowed::Refused(why).refusal("/opt/j/link", Listed::Entry, Caller::Adapter);
             assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
         }
         Err(Unfollowed::Unplaced(why)) => panic!("{why}"),
@@ -719,11 +727,11 @@ fn a_directory_the_walk_passes_through_is_placed() {
             descriptor_path: Some(host.to_owned()),
             remaining: Vec::new(),
         };
-        judge_passed(&directory, &table, &writable)
+        judge_passed(&directory, &table, &writable, Caller::Adapter)
     };
     match passed("/opt/k/media/dir", "/opt/tools/media/dir", 85) {
         Some(why @ Unfollowed::Unplaced(_)) => {
-            let error = why.refusal("/opt/k/media/dir/tool", "exec_subpaths");
+            let error = why.refusal("/opt/k/media/dir/tool", Listed::Entry, Caller::Adapter);
             assert_eq!(error.code, PLACE_UNSERVED, "{error}");
             assert_eq!(error.address.as_deref(), Some("exec_subpaths"));
             assert!(
@@ -745,7 +753,11 @@ fn a_directory_the_walk_passes_through_is_placed() {
                 "passes through /opt/j/dir, which lies in /work/u/workspaces, a location a run \
                  can write"
             );
-            let error = Unfollowed::Refused(why).refusal("/opt/j/dir/../tool", "exec_subpaths");
+            let error = Unfollowed::Refused(why).refusal(
+                "/opt/j/dir/../tool",
+                Listed::Entry,
+                Caller::Adapter,
+            );
             assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
         }
         Some(Unfollowed::Unplaced(why)) => panic!("{why}"),
@@ -808,8 +820,8 @@ fn per_fact(paths: impl IntoIterator<Item = FactWithheld>) -> Vec<FactWithheld> 
 #[test]
 fn an_unlisted_file_system_at_the_open_withholds_the_facts() {
     let base = || sightings(seen("/opt/substrate/substrate-exec-gate", 31));
-    for file_system in ["xfs", "btrfs", "nfs4", "fuse.sshfs"] {
-        let table = tree(&HOST.replace("xfs", file_system));
+    for file_system in ["btrfs", "nfs4", "fuse.sshfs", "zfs"] {
+        let table = tree(&HOST.replace("btrfs", file_system));
         // The workspace root, the helper's own file, a declared writable root, a base
         // directory and the probes' temporary directory, each with its address.
         let mut workspace_root = base();
@@ -876,8 +888,12 @@ fn every_path_of_the_open_is_placed_before_the_answer() {
     assert_eq!(
         withheld_facts(&withheld(place_open(&two, &table))),
         per_fact([
-            entry("config.exec_gate", "/data/substrate-exec-gate", Some("xfs")),
-            entry("config.exec_gate", "/data/tmp", Some("xfs")),
+            entry(
+                "config.exec_gate",
+                "/data/substrate-exec-gate",
+                Some("btrfs")
+            ),
+            entry("config.exec_gate", "/data/tmp", Some("btrfs")),
         ])
     );
     // The refusing cause is on the last path the open places, after a withholding one.
@@ -967,9 +983,9 @@ fn a_withheld_open_never_reaches_the_trust_check() {
         bytes: 1 << 20,
         links: 2,
     };
-    let mut on_xfs = sightings(seen("/opt/substrate/substrate-exec-gate", 31));
-    on_xfs.workspace_root = seen("/data/workspaces", 62);
-    match decide_open(gate(), two_links, place_open(&on_xfs, &table))
+    let mut on_btrfs = sightings(seen("/opt/substrate/substrate-exec-gate", 31));
+    on_btrfs.workspace_root = seen("/data/workspaces", 62);
+    match decide_open(gate(), two_links, place_open(&on_btrfs, &table))
         .expect("withheld, not refused")
     {
         OpenDecision::Withheld(entries) => assert_eq!(
@@ -977,7 +993,7 @@ fn a_withheld_open_never_reaches_the_trust_check() {
             per_fact([entry(
                 "config.workspace_root",
                 "/data/workspaces",
-                Some("xfs")
+                Some("btrfs")
             )])
         ),
         OpenDecision::Use => panic!("a helper on a host that withholds is used"),
@@ -1008,18 +1024,18 @@ fn a_withheld_open_never_reaches_the_trust_check() {
         ..one_link
     };
     assert_unserved(
-        &decide_open(gate(), directory, place_open(&on_xfs, &table)).expect_err("a directory"),
+        &decide_open(gate(), directory, place_open(&on_btrfs, &table)).expect_err("a directory"),
         "is not a regular file",
     );
 }
 
-/// D26 at a start: a declared root whose row has the type `xfs` has no class. The start is
+/// D26 at a start: a declared root whose row has the type `btrfs` has no class. The start is
 /// `exec.sandbox-place-unserved`, 501, with the declaring field as its address, and the mount
 /// is never classed `follow` for want of an answer.
 #[test]
 fn a_mount_whose_place_cannot_be_established_refuses_the_start() {
     let error = classed(
-        "read_only_roots",
+        at("read_only_roots"),
         &seen("/data/tools", 62),
         &writable(),
         &host(),
@@ -1030,8 +1046,8 @@ fn a_mount_whose_place_cannot_be_established_refuses_the_start() {
     assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
     assert_eq!(error.address.as_deref(), Some("read_only_roots"));
     for holds in [
-        "cannot establish the place of /data/tools: file-system-unlisted xfs",
-        "ext4, overlay, tmpfs",
+        "cannot establish the place of /data/tools: file-system-unlisted btrfs",
+        "ext4, overlay, tmpfs, xfs",
     ] {
         assert!(error.message.contains(holds), "{error}");
     }
@@ -1046,7 +1062,7 @@ fn a_mount_whose_place_cannot_be_established_refuses_the_start() {
         (unread, "mount-point-mismatch"),
         (seen("/opt/tools", 61), "mount-point-mismatch"),
     ] {
-        let error = classed("read_only_files", &source, &writable(), &host())
+        let error = classed(at("read_only_files"), &source, &writable(), &host())
             .expect_err("an unestablished place");
         assert_eq!(error.code, PLACE_UNSERVED, "{error}");
         assert_eq!(error.address.as_deref(), Some("read_only_files"));
@@ -1114,8 +1130,13 @@ fn the_protocol_check_decides_on_the_line() {
 fn the_class_of_a_mount_follows_its_host_source() {
     let table = host();
     let class = |path: &str, mount_id: u64, writable: &[Location]| {
-        classed("read_only_roots", &seen(path, mount_id), writable, &table)
-            .unwrap_or_else(|error| panic!("{path}: {error}"))
+        classed(
+            at("read_only_roots"),
+            &seen(path, mount_id),
+            writable,
+            &table,
+        )
+        .unwrap_or_else(|error| panic!("{path}: {error}"))
     };
     // Beside every writable location.
     assert_eq!(class("/usr", 31, &writable()), Class::Follow);
@@ -1489,7 +1510,8 @@ impl Staged {
             scratch: false,
         };
         let config = HostConfig::minimum(self.root.path().join("workspaces"));
-        let mut mounts = Mounts::of(&view, &config).expect("the view on the host's table");
+        let mut mounts =
+            Mounts::of(&view, &config, Caller::Adapter).expect("the view on the host's table");
         change(&mut mounts);
         ask(&mounts)
     }
@@ -1530,7 +1552,7 @@ impl Staged {
         program: &str,
         loader: Option<&str>,
     ) -> Result<Lists, DriverError> {
-        self.plan_all(roots, entries, &[], program, loader)
+        self.plan_all(Caller::Adapter, roots, entries, &[], program, loader)
     }
 
     /// [`Self::plan`], with `denied` as the deny-list.
@@ -1541,11 +1563,23 @@ impl Staged {
         denied: &[&str],
         program: &str,
     ) -> Result<Lists, DriverError> {
-        self.plan_all(roots, entries, denied, program, None)
+        self.plan_all(Caller::Adapter, roots, entries, denied, program, None)
+    }
+
+    /// [`Self::plan_denying`], for a wire start (design 37 § 6, amended).
+    fn plan_wire(
+        &self,
+        roots: &[(&Path, &str)],
+        entries: &[&str],
+        denied: &[&str],
+        program: &str,
+    ) -> Result<Lists, DriverError> {
+        self.plan_all(Caller::Wire, roots, entries, denied, program, None)
     }
 
     fn plan_all(
         &self,
+        caller: Caller,
         roots: &[(&Path, &str)],
         entries: &[&str],
         denied: &[&str],
@@ -1565,6 +1599,7 @@ impl Staged {
         let entries: Vec<String> = entries.iter().map(|entry| (*entry).to_owned()).collect();
         plan(
             &ExecGate::seal(b"gate", loader.map(str::to_owned)).expect("sealed"),
+            caller,
             &entries,
             &denied,
             program,
@@ -1714,6 +1749,77 @@ fn an_entry_the_view_cannot_carry_is_refused_by_name() {
         "has a symbolic link in it",
     );
     println!("exec gate refused entries: executed");
+}
+
+/// Design 37 § 6: the messages bundle `0.29.0` publishes for rows 6 to 8 are the driver's own.
+/// Each of the three vectors' starts is planned as a wire start, and the driver's code, address
+/// and whole message are the vector's.
+#[test]
+fn the_published_messages_of_rows_6_to_8_are_the_drivers() {
+    let staged = Staged::new();
+    if !placed("published messages", staged.root.path()) {
+        return;
+    }
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contracts/substrate-wire/0.29.0/vectors/http");
+    for name in [
+        "exec-lists-entry-unrepresentable-is-refused",
+        "exec-lists-entry-undeclared-is-refused",
+        "exec-lists-denied-program-is-refused",
+    ] {
+        let bytes = std::fs::read(vectors.join(format!("{name}.json"))).expect("the vector");
+        let vector: serde_json::Value = serde_json::from_slice(&bytes).expect("vector JSON");
+        let input = &vector["action"]["request"]["body"]["input"];
+        let list = |member: &str| -> Vec<&str> {
+            input["sandbox"][member]
+                .as_array()
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .map(|entry| entry.as_str().expect("an entry"))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let program = input["argv"][0].as_str().expect("a program");
+        let published = &vector["expected"]["response"]["body"]["error"];
+        let error = staged
+            .plan_wire(
+                &[],
+                &list("exec_subpaths"),
+                &list("exec_denied_paths"),
+                program,
+            )
+            .expect_err("a refused list");
+        assert_eq!(
+            (error.code, error.address.as_deref(), error.message.as_str()),
+            (
+                published["code"].as_str().expect("a code"),
+                published["address"].as_str(),
+                published["message"].as_str().expect("a message"),
+            ),
+            "{name}"
+        );
+    }
+}
+
+/// Design 37 § 16 (D20): a wire start whose program is a capsule's `/runtime/run` is refused at
+/// `argv`, because `/runtime` is no mount a list can name and the program is placed before any
+/// entry. An allow-list that names `/runtime` does not change the answer.
+#[test]
+fn a_wire_start_of_a_capsules_program_is_refused_at_argv() {
+    let staged = Staged::new();
+    if !placed("capsule program", staged.root.path()) {
+        return;
+    }
+    for entries in [&["/runtime"][..], &["/usr/bin"][..]] {
+        assert_refused(
+            staged.plan_wire(&[], entries, &[], "/runtime/run"),
+            PATH_UNREPRESENTABLE,
+            "argv",
+            "\"/runtime/run\" lies in no mount an executable list can name",
+        );
+    }
 }
 
 /// D24, the class comes from the host source: a read-only root whose host directory lies in the
@@ -1900,7 +2006,7 @@ fn an_entry_in_a_mount_classed_beneath_is_placed_where_it_ends() {
         ("/workspace/bin/tool", "argv", "/workspace/bin/tool"),
     ] {
         let error = staged
-            .on_an_unlisted_type(&[], |mounts| mounts.located(text, address))
+            .on_an_unlisted_type(&[], |mounts| mounts.located(text, listed(address)))
             .expect_err("an end with no place");
         assert_eq!(error.code, PLACE_UNSERVED, "{error}");
         assert_eq!(error.class, DriverErrorClass::Unserved, "{error}");
@@ -1947,7 +2053,7 @@ fn the_walk_asks_for_the_place_of_every_link_and_directory() {
     for path in ["/opt/ro/hop", "/opt/ro/dir/../hop"] {
         let error = staged
             .on_an_unlisted_type(&roots, |mounts| {
-                mounts.check_followed("the entry", path, "exec_subpaths")
+                mounts.check_followed("the entry", path, Listed::Entry)
             })
             .expect_err("a walk that reads a link with no place");
         assert_eq!(error.code, PLACE_UNSERVED, "{error}");
@@ -1964,8 +2070,13 @@ fn the_walk_asks_for_the_place_of_every_link_and_directory() {
         let directory = Opened::of_path(tools.join("dir").to_str().expect("UTF-8"))
             .expect("the directory opens");
         let place = mounts.tree.table().place_of(&directory).expect("placed");
-        let location = Location::reaching("the staged directory", &place, &mounts.tree)
-            .expect("nothing is mounted beneath it");
+        let location = Location::reaching(
+            "the staged directory",
+            "the staged directory",
+            &place,
+            &mounts.tree,
+        )
+        .expect("nothing is mounted beneath it");
         mounts.locations.push(location);
     };
     for (path, holds) in [
@@ -1981,7 +2092,7 @@ fn the_walk_asks_for_the_place_of_every_link_and_directory() {
         ),
     ] {
         let followed = staged.asked(&roots, writable, |mounts| {
-            mounts.check_followed("the entry", path, "exec_subpaths")
+            mounts.check_followed("the entry", path, Listed::Entry)
         });
         let error = followed.expect_err("a walk through a directory a run can write");
         assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
@@ -2012,7 +2123,7 @@ fn a_declared_root_on_an_unlisted_file_system_refuses_the_plan() {
     assert_eq!(error.address.as_deref(), Some("read_only_roots"), "{error}");
     for holds in [
         "cannot establish the place of /opt/p: file-system-unlisted proc",
-        "ext4, overlay, tmpfs",
+        "ext4, overlay, tmpfs, xfs",
     ] {
         assert!(error.message.contains(holds), "{error}");
     }
@@ -2456,7 +2567,7 @@ fn a_deny_entry_without_a_place_refuses_the_start_for_each_of_the_nine_causes() 
         ),
         (
             on(host().table(), &seen("/data/tool", 62)),
-            "file-system-unlisted xfs",
+            "file-system-unlisted btrfs",
         ),
     ];
     assert_eq!(cases.len(), 9, "D26 names nine causes");
@@ -2649,7 +2760,14 @@ fn a_program_in_a_mount_beneath_a_denied_directory_is_refused_by_what_the_entry_
         sighted_at(&tree, mount_id, path, Some((7, inode)))
     };
     let judged = |program: &Sighted, denied: Sighted| {
-        judge_denied(&tree, "/program", program, &[("the entry", denied)], &[])
+        judge_denied(
+            &tree,
+            Caller::Adapter,
+            "/program",
+            program,
+            &[("the entry", denied)],
+            &[],
+        )
     };
     let refused = |program: &Sighted, denied: Sighted, what: &str| {
         let error = judged(program, denied).expect_err(what);
@@ -2735,8 +2853,15 @@ fn a_reach_the_deny_list_needs_and_cannot_have_refuses_the_start() {
     let at = |path: &str| sighted_at(&tree, 31, path, None);
     let program = sighted_at(&tree, 31, "/usr/bin/sh", Some((7, 5)));
     let unserved = |denied: &[(&str, Sighted)], listed: &[Sighted], address: &str, line: &str| {
-        let error = judge_denied(&tree, "/usr/bin/sh", &program, denied, listed)
-            .expect_err("a reach that cannot be established");
+        let error = judge_denied(
+            &tree,
+            Caller::Adapter,
+            "/usr/bin/sh",
+            &program,
+            denied,
+            &named(listed),
+        )
+        .expect_err("a reach that cannot be established");
         assert_eq!(error.code, PLACE_UNSERVED, "{line}: {error}");
         assert_eq!(error.class, DriverErrorClass::Unserved, "{line}: {error}");
         assert_eq!(error.address.as_deref(), Some(address), "{line}: {error}");
@@ -2772,7 +2897,14 @@ fn a_reach_the_deny_list_needs_and_cannot_have_refuses_the_start() {
         unserved(&denied(), &[at(directory)], "exec_subpaths", line);
     }
     let planned = |denied: &[(&str, Sighted)], listed: &[Sighted]| {
-        judge_denied(&tree, "/usr/bin/sh", &program, denied, listed)
+        judge_denied(
+            &tree,
+            Caller::Adapter,
+            "/usr/bin/sh",
+            &program,
+            denied,
+            &named(listed),
+        )
     };
     planned(&denied(), &[at("/boot")])
         .expect("a type outside the list beneath a listed directory is compared with nothing");
@@ -2838,10 +2970,11 @@ fn an_unlisted_mount_among_the_entries_of_an_expanded_directory_refuses_the_star
     let judged = |denied: Sighted, listed: &[Sighted]| {
         judge_denied(
             &tree,
+            Caller::Adapter,
             "/usr/bin/sh",
             &program,
             &[("denied", denied)],
-            listed,
+            &named(listed),
         )
     };
     let unserved = |denied: Sighted, listed: &[Sighted], mount_point: &str| {
@@ -2928,7 +3061,14 @@ fn judged_on(
     listed: &[Sighted],
 ) -> Result<(), DriverError> {
     let program = sighted_at(tree, 31, "/usr/bin/sh", Some((7, 5)));
-    judge_denied(tree, "/usr/bin/sh", &program, denied, listed)
+    judge_denied(
+        tree,
+        Caller::Adapter,
+        "/usr/bin/sh",
+        &program,
+        denied,
+        &named(listed),
+    )
 }
 
 /// The refusal before dispatch of a start whose helper would ask what the root of a mount
@@ -3246,4 +3386,591 @@ fn a_deny_entry_is_absent_only_where_its_name_is_and_then_denies_no_ancestor() {
         "is 4106 bytes long",
     );
     println!("exec gate deny entry guards: executed");
+}
+
+/// Each listed directory of `listed`, named as an adapter's entry is: by no text a refusal
+/// reads on that path.
+fn named(listed: &[Sighted]) -> Vec<(&'static str, Sighted)> {
+    listed
+        .iter()
+        .map(|sighted| ("listed", sighted.clone()))
+        .collect()
+}
+
+/// **Row 9's message on the wire** (design 37 § 6, amended by the rule of its § 8): for the
+/// cause `file-system-unlisted` on a mount table written as text, a wire start's refusal names
+/// the path of the view and the cause's name, and neither the row's type field nor an entry
+/// of `LISTED_FILE_SYSTEMS`; the adapter API's message keeps both. A mount beneath an entry is
+/// named by the entry as the request sent it, never by the mount point of the host's table.
+#[test]
+fn on_the_wire_an_unplaced_path_is_named_by_its_view_path_and_the_cause_word_only() {
+    // A read-only root declared at `/opt/p`, whose host source lies on `/data`, a `btrfs` row.
+    let source = Opened {
+        path: "/opt/p".to_owned(),
+        mount_id: Some(62),
+        descriptor_path: Some("/data/tools".to_owned()),
+        remaining: Vec::new(),
+    };
+    let classed_by = |caller: Caller| {
+        writable_source(caller, At::ReadOnlyRoots, &source, &writable(), &host())
+            .expect_err("a root on a type outside the list")
+    };
+    let wire = classed_by(Caller::Wire);
+    assert_eq!(wire.code, PLACE_UNSERVED, "{wire}");
+    assert_eq!(wire.class, DriverErrorClass::Unserved, "{wire}");
+    assert_eq!(wire.address.as_deref(), Some("read_only_roots"), "{wire}");
+    assert_eq!(
+        wire.message,
+        "This host cannot hold the run to its executable list: cannot establish the place of \
+         /opt/p: file-system-unlisted."
+    );
+    for named in ["btrfs", "/data"]
+        .into_iter()
+        .chain(substrate_exec_gate::place::LISTED_FILE_SYSTEMS)
+    {
+        assert!(!wire.message.contains(named), "{named}: {wire}");
+    }
+    let adapter = classed_by(Caller::Adapter);
+    assert_eq!(
+        (adapter.code, adapter.address.as_deref()),
+        (wire.code, wire.address.as_deref())
+    );
+    for holds in [
+        "cannot establish the place of /opt/p: file-system-unlisted btrfs",
+        "ext4, overlay, tmpfs, xfs",
+    ] {
+        assert!(adapter.message.contains(holds), "{adapter}");
+    }
+
+    // A mount beneath a denied directory and beneath a listed one: the entry, as sent.
+    let tree = tree(HOST_WITH_DENIED_MOUNTS);
+    let program = sighted_at(&tree, 31, "/usr/bin/sh", Some((7, 5)));
+    let boot = || [("/boot", sighted_at(&tree, 31, "/boot", None))];
+    let wire = judge_denied(&tree, Caller::Wire, "/usr/bin/sh", &program, &boot(), &[])
+        .expect_err("a vfat mount beneath a denied directory");
+    assert_eq!(
+        wire.address.as_deref(),
+        Some("sandbox.exec_denied_paths"),
+        "{wire}"
+    );
+    assert_eq!(
+        wire.message,
+        "This host cannot hold the run to its executable list: cannot establish where a mount \
+         beneath /boot is attached: file-system-unlisted."
+    );
+    for named in ["vfat", "/boot/efi"] {
+        assert!(!wire.message.contains(named), "{named}: {wire}");
+    }
+    let adapter = judge_denied(
+        &tree,
+        Caller::Adapter,
+        "/usr/bin/sh",
+        &program,
+        &boot(),
+        &[],
+    )
+    .expect_err("the same start through the adapter");
+    assert_eq!(adapter.address.as_deref(), Some("exec_denied_paths"));
+    assert!(
+        adapter
+            .message
+            .contains("cannot establish where /boot/efi is attached: file-system-unlisted vfat"),
+        "{adapter}"
+    );
+    let wire = judge_denied(
+        &tree,
+        Caller::Wire,
+        "/usr/bin/sh",
+        &program,
+        &[("/opt/t/bin", sighted_at(&tree, 31, "/opt/t/bin", None))],
+        &[("/opt/x", sighted_at(&tree, 71, "/srv/again/x", None))],
+    )
+    .expect_err("a stack beneath a listed directory");
+    assert_eq!(
+        wire.address.as_deref(),
+        Some("sandbox.exec_subpaths"),
+        "{wire}"
+    );
+    assert_eq!(
+        wire.message,
+        "This host cannot hold the run to its executable list: cannot establish where a mount \
+         beneath /opt/x is attached: mount-covered."
+    );
+}
+
+/// **A wire start's refused entry is addressed at the wire's member, an adapter start's at the
+/// profile's** (design 37 § 6, amended), on one staged view: an entry outside the eligible
+/// locations and one that does not exist, in each list. `argv` is the same on both.
+#[test]
+fn a_wire_start_names_the_wire_members_and_an_adapter_start_the_profiles() {
+    let staged = Staged::new();
+    if !placed("wire addresses", staged.root.path()) {
+        return;
+    }
+    std::fs::create_dir_all(staged.workspace.join("bin")).expect("bin");
+    for (caller, entry, denied) in [
+        (Caller::Adapter, "exec_subpaths", "exec_denied_paths"),
+        (
+            Caller::Wire,
+            "sandbox.exec_subpaths",
+            "sandbox.exec_denied_paths",
+        ),
+    ] {
+        let plan = |entries: &[&str], denying: &[&str], program: &str| match caller {
+            Caller::Adapter => staged.plan_denying(&[], entries, denying, program),
+            Caller::Wire => staged.plan_wire(&[], entries, denying, program),
+        };
+        assert_refused(
+            plan(&["/opt/none"], &[], "/usr/bin/env"),
+            EXEC_SUBPATH_UNDECLARED,
+            entry,
+            "lies outside",
+        );
+        assert_refused(
+            plan(&["absent"], &[], "/usr/bin/env"),
+            PATH_UNREPRESENTABLE,
+            entry,
+            "does not exist at the start",
+        );
+        assert_refused(
+            plan(&["bin"], &["/opt/none"], "/usr/bin/env"),
+            EXEC_SUBPATH_UNDECLARED,
+            denied,
+            "lies outside",
+        );
+        assert_refused(
+            plan(&["bin"], &["bin/.."], "/usr/bin/env"),
+            PATH_UNREPRESENTABLE,
+            denied,
+            "",
+        );
+        assert_refused(
+            plan(&["bin"], &[], "/tmp/program"),
+            PATH_UNREPRESENTABLE,
+            "argv",
+            "lies in no mount",
+        );
+    }
+    println!("exec gate wire addresses: executed");
+}
+
+/// The closed address a case names by the adapter API's text.
+fn at(address: &str) -> At {
+    At::ALL
+        .into_iter()
+        .find(|at| at.named(Caller::Adapter) == address)
+        .unwrap_or_else(|| panic!("{address} is no address of rows 6 to 9"))
+}
+
+/// The list a case names by the adapter API's text.
+fn listed(address: &str) -> Listed {
+    Listed::ALL
+        .into_iter()
+        .find(|listed| At::from(*listed).named(Caller::Adapter) == address)
+        .unwrap_or_else(|| panic!("{address} is no list"))
+}
+
+/// **Every address the driver can answer a wire start's rows 6 to 9 at is in that row of
+/// `EXEC_LIST_REFUSALS`** (design 37 § 6), walked over the closed types the refusals take:
+/// `unrepresentable` (row 6) and `Caller::unplaced` (row 9) take an `At`, so each row holds
+/// every `At` as a wire start names it; `Mounts::eligible` answers a `Listed`, the program at
+/// row 8 and a list's entry at row 7. A variant added to either type fails to compile in the
+/// `match` below until it is in its `ALL`, and then fails here until its row holds it.
+#[test]
+fn every_address_a_wire_start_is_refused_at_is_in_its_row() {
+    let row = |code: &str| {
+        substrate_wire::EXEC_LIST_REFUSALS
+            .iter()
+            .find(|row| row.code == code)
+            .unwrap_or_else(|| panic!("{code} has no row"))
+    };
+    let holds = |code: &str, address: &str| {
+        let row = row(code);
+        assert!(
+            row.addresses.contains(&address),
+            "{code} is answered at {address}, which its row does not hold: {:?}",
+            row.addresses
+        );
+    };
+    for at in At::ALL {
+        match at {
+            At::Listed(Listed::Entry | Listed::Denied | Listed::Program)
+            | At::ReadOnlyRoots
+            | At::ReadOnlyFiles
+            | At::WritableRoots
+            | At::Workspace => {}
+        }
+        for code in [PATH_UNREPRESENTABLE, PLACE_UNSERVED] {
+            holds(code, at.named(Caller::Wire));
+        }
+    }
+    for listed in Listed::ALL {
+        let code = match listed {
+            Listed::Program => super::PROGRAM_UNLISTED,
+            Listed::Entry | Listed::Denied => EXEC_SUBPATH_UNDECLARED,
+        };
+        holds(code, At::from(listed).named(Caller::Wire));
+    }
+    // The adapter API names the lists by the profile's fields, the rest alike.
+    for at in At::ALL {
+        let expected = match at {
+            At::Listed(Listed::Entry) => ("sandbox.exec_subpaths", "exec_subpaths"),
+            At::Listed(Listed::Denied) => ("sandbox.exec_denied_paths", "exec_denied_paths"),
+            _ => (at.named(Caller::Adapter), at.named(Caller::Adapter)),
+        };
+        assert_eq!(
+            (at.named(Caller::Wire), at.named(Caller::Adapter)),
+            expected
+        );
+    }
+    assert_eq!(At::Workspace.named(Caller::Wire), WORKSPACE);
+    assert_eq!(At::WritableRoots.named(Caller::Wire), WRITABLE_MOUNT);
+    assert_eq!(At::Listed(Listed::Program).named(Caller::Wire), PROGRAM);
+}
+
+/// **What an open that withholds returns is what it announces** (design 37 § 7, amended):
+/// `Opening::announced` writes each entry once at `warn`, with the fact, the cause, the
+/// configuration field, the path and the file-system type, and returns exactly those entries,
+/// which the snapshot's `withheld` and the adapter's proof are read from.
+#[test]
+fn an_open_that_withholds_returns_the_entries_it_announces() {
+    type Lines = Vec<(tracing::Level, BTreeMap<String, String>)>;
+    struct Recorder(Arc<Mutex<Lines>>);
+    struct Fields(BTreeMap<String, String>);
+    impl tracing::field::Visit for Fields {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+    impl tracing::Subscriber for Recorder {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0
+                .lock()
+                .expect("the lines")
+                .push((*event.metadata().level(), fields.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    let entries = per_fact([
+        entry("config.workspace_root", "/data/workspaces", Some("btrfs")),
+        entry("config.exec_gate", "/usr", None),
+    ]);
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let (gate, returned) = tracing::subscriber::with_default(Recorder(Arc::clone(&lines)), || {
+        Opening::Withheld(entries.clone()).announced()
+    });
+    assert!(gate.is_none(), "an open that withholds holds no helper");
+    assert_eq!(returned, entries);
+    let lines = lines.lock().expect("the lines");
+    assert_eq!(lines.len(), entries.len(), "{lines:?}");
+    for ((level, fields), entry) in lines.iter().zip(&entries) {
+        assert_eq!(*level, tracing::Level::WARN, "{fields:?}");
+        assert_eq!(fields["fact"], format!("{:?}", entry.fact), "{fields:?}");
+        assert_eq!(fields["cause"], entry.cause, "{fields:?}");
+        assert_eq!(fields["address"], entry.address, "{fields:?}");
+        assert_eq!(fields["path"], entry.path, "{fields:?}");
+        assert_eq!(
+            fields["file_system"],
+            entry.file_system.as_deref().unwrap_or("unreported"),
+            "{fields:?}"
+        );
+    }
+}
+
+/// **Every address a wire start is refused at for row 6 is in that row of
+/// `EXEC_LIST_REFUSALS`** (design 37 § 6). A read-only root whose host source lies in the
+/// workspace root is a mount the run can write, and the helper is told it (`--writable`). A
+/// mount longer than the kernel takes is refused before dispatch; the wire crate and the
+/// published pattern of a root's mount state no byte bound, only 64 components.
+#[test]
+fn on_the_wire_a_writable_mount_too_long_for_the_helper_is_refused_at_an_address_of_row_6() {
+    let staged = Staged::new();
+    if !placed("wire writable mount too long", staged.root.path()) {
+        return;
+    }
+    std::fs::create_dir_all(staged.workspace.join("bin")).expect("bin");
+    let data = staged.workspace.join("data");
+    std::fs::create_dir_all(&data).expect("a directory of the workspace");
+    // Seventeen names of 255 bytes, 4352 bytes with their separators.
+    let mount = format!("/{}", vec!["m".repeat(255); 17].join("/"));
+    assert!(mount.len() > 4095, "{}", mount.len());
+    let error = staged
+        .plan_wire(
+            &[(data.as_path(), mount.as_str())],
+            &["bin"],
+            &[],
+            "/usr/bin/env",
+        )
+        .expect_err("a writable mount the helper cannot be given");
+    assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
+    let row = substrate_wire::EXEC_LIST_REFUSALS
+        .iter()
+        .find(|row| row.code == PATH_UNREPRESENTABLE)
+        .expect("row 6");
+    let address = error.address.as_deref().unwrap_or_default();
+    assert!(
+        row.addresses.contains(&address),
+        "{PATH_UNREPRESENTABLE} is answered at {address}, which its row does not hold: {:?}",
+        row.addresses
+    );
+    // The field the mount was declared in, which the start named.
+    assert_eq!(address, "read_only_roots", "{error}");
+}
+
+/// **On the wire a refusal of rows 6 to 8 names no host path** (design 37 § 6: "Their messages
+/// name paths of the view, which the request itself sent, and never a host path"). A path that
+/// resolves through a link in a location a run can write is refused for it; the locations of
+/// the host's configuration are named by their host paths (`writable_locations`).
+#[test]
+fn on_the_wire_a_path_refused_for_a_writable_location_names_no_host_path() {
+    let table = tree(&format!(
+        "{HOST}70 31 0:50 / /work/u/workspaces/ws_1/media rw - tmpfs tmpfs rw\n"
+    ));
+    let writable = established(
+        &sightings(seen("/opt/substrate/substrate-exec-gate", 31)),
+        &table,
+    )
+    .writable;
+    let link = Opened {
+        path: "/opt/j/link".to_owned(),
+        mount_id: Some(70),
+        descriptor_path: Some("/work/u/workspaces/ws_1/media/link".to_owned()),
+        remaining: Vec::new(),
+    };
+    let Err(refused) = judge_link(&link, &table, &writable, Caller::Wire) else {
+        panic!("a link a run can replace was followed")
+    };
+    let error = refused.refusal("/opt/j/link", Listed::Entry, Caller::Wire);
+    assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
+    assert!(!error.message.contains("/work/u"), "{error}");
+}
+
+/// **On the wire, a path whose end shows a location a run can write names that location by
+/// its view name, never by its host path** (design 37 § 6: "Their messages name paths of the
+/// view, which the request itself sent, and never a host path"). The location is one of the
+/// host's configuration, as `writable_locations` builds it for a declared writable root this
+/// start does not bind: its `path` is the host's, its `view` the words a wire start names it
+/// by. Added once the root was classed `follow`, as in
+/// `the_walk_asks_for_the_place_of_every_link_and_directory`, and asked through
+/// `check_followed` and so `check_reached`.
+#[test]
+fn on_the_wire_an_end_that_shows_a_writable_location_names_no_host_path() {
+    let staged = Staged::new();
+    if !placed("wire end shows a writable location", staged.root.path()) {
+        return;
+    }
+    let tools = staged.root.path().join("tools");
+    std::fs::create_dir_all(tools.join("dir/inner")).expect("a directory of the root");
+    let host = tools.join("dir").to_str().expect("UTF-8").to_owned();
+    let roots: [(&Path, &str); 1] = [(&tools, "/opt/ro")];
+    let error = staged
+        .asked(
+            &roots,
+            |mounts| {
+                let directory = Opened::of_path(&host).expect("the directory opens");
+                let place = mounts.tree.table().place_of(&directory).expect("placed");
+                let location =
+                    Location::reaching(&host, super::DECLARED_WRITABLE_ROOT, &place, &mounts.tree)
+                        .expect("nothing is mounted beneath it");
+                mounts.locations.push(location);
+                mounts.caller = Caller::Wire;
+            },
+            |mounts| mounts.check_followed("/opt/ro/dir/inner", "/opt/ro/dir/inner", Listed::Entry),
+        )
+        .expect_err("an end that shows a location a run can write");
+    assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
+    assert_eq!(
+        error.address.as_deref(),
+        Some("sandbox.exec_subpaths"),
+        "{error}"
+    );
+    let staged_root = staged.root.path().to_str().expect("UTF-8");
+    assert!(
+        !error.message.contains(staged_root),
+        "a wire refusal names a host path: {error}"
+    );
+    println!("exec gate wire end shows a writable location: executed");
+}
+
+/// What a wire start's [`PLACE_UNSERVED`] must not name: a file-system type, an entry of
+/// `LISTED_FILE_SYSTEMS`, or a host path among `hosts`.
+fn assert_wire_words(error: &DriverError, address: &str, message: &str, hosts: &[&str]) {
+    assert_eq!(error.code, PLACE_UNSERVED, "{error}");
+    assert_eq!(error.address.as_deref(), Some(address), "{error}");
+    assert_eq!(error.message, message);
+    for named in ["ramfs", "proc"]
+        .into_iter()
+        .chain(substrate_exec_gate::place::LISTED_FILE_SYSTEMS)
+        .chain(hosts.iter().copied())
+    {
+        assert!(!error.message.contains(named), "{named}: {error}");
+    }
+}
+
+/// **A wire start's place refusal names a path of the view and the cause's name, at every
+/// site that asks a place once the view stands** (design 37 § 6): `located`, `sighted` and
+/// `denied` for an end in a mount classed `beneath`, `check_reached` for an end in a mount
+/// classed `follow`, and `Unfollowed::Unplaced` for a symbolic link the walk reads. Asked on a
+/// staged view whose directories lie on a mount the case retypes `ramfs` once the view stands
+/// (`Staged::on_an_unlisted_type`).
+#[test]
+fn on_the_wire_every_place_a_start_asks_is_named_by_its_view_path_and_the_cause_word() {
+    type Ask = Box<dyn Fn(&Mounts<'_>) -> Result<(), DriverError>>;
+    let staged = Staged::new();
+    if !placed("wire place words", staged.root.path()) {
+        return;
+    }
+    write(&staged.workspace.join("bin/tool"), b"tool");
+    let tools = staged.root.path().join("tools");
+    write(&tools.join("tool"), b"tool");
+    std::os::unix::fs::symlink("tool", tools.join("link")).expect("a link");
+    let host = staged.root.path().to_str().expect("UTF-8").to_owned();
+    let words = |view: &str| {
+        format!(
+            "This host cannot hold the run to its executable list: cannot establish the place \
+             of {view}: file-system-unlisted."
+        )
+    };
+    let entry = "sandbox.exec_subpaths";
+    let cases: [(&str, &str, Ask); 6] = [
+        (
+            "/workspace/bin",
+            entry,
+            Box::new(|mounts| mounts.located("bin", Listed::Entry).map(drop)),
+        ),
+        (
+            "/workspace/bin/tool",
+            "argv",
+            Box::new(|mounts| {
+                mounts
+                    .sighted("/workspace/bin/tool", Listed::Program)
+                    .map(drop)
+            }),
+        ),
+        (
+            "bin/tool",
+            "sandbox.exec_denied_paths",
+            Box::new(|mounts| mounts.denied("bin/tool").map(drop)),
+        ),
+        (
+            "/opt/r/tool",
+            entry,
+            Box::new(|mounts| mounts.located("/opt/r/tool", Listed::Entry).map(drop)),
+        ),
+        (
+            "/opt/r/tool",
+            entry,
+            Box::new(|mounts| mounts.sighted("/opt/r/tool", Listed::Entry).map(drop)),
+        ),
+        (
+            "/opt/r/link",
+            entry,
+            Box::new(|mounts| mounts.located("/opt/r/link", Listed::Entry).map(drop)),
+        ),
+    ];
+    for (view, address, ask) in cases {
+        let error = staged
+            .asked(
+                &[(tools.as_path(), "/opt/r")],
+                |mounts| {
+                    mounts.tree = staged.retyped();
+                    mounts.caller = Caller::Wire;
+                },
+                |mounts| ask(mounts),
+            )
+            .expect_err("an end with no place");
+        assert_wire_words(&error, address, &words(view), &[&host]);
+    }
+    println!("exec gate wire place words: executed");
+}
+
+/// **The places `Mounts::of` asks before the view stands, on the wire** (design 37 § 6): the
+/// table as a tree, named by the view's root; the host's workspace root, named by the
+/// workspace's mount; and a writable root of the host's configuration the view does not bind,
+/// named by no path. Each holds the cause's name and no host path or type.
+#[test]
+fn on_the_wire_the_places_of_the_view_itself_name_no_host_path() {
+    let staged = Staged::new();
+    if !placed("wire view places", staged.root.path()) {
+        return;
+    }
+    let host = staged.root.path().to_str().expect("UTF-8").to_owned();
+    let workspace = OwnedFd::from(std::fs::File::open(&staged.workspace).expect("workspace"));
+    let view = View {
+        workspace: &workspace,
+        read_only_roots: &[],
+        read_only_files: &[],
+        writable_roots: &[],
+        scratch: false,
+    };
+    let config = HostConfig::minimum(staged.root.path().join("workspaces"));
+    let prefix = "This host cannot hold the run to its executable list: cannot establish";
+    let refused = |config: &HostConfig, tree: Result<MountTree, _>| match Mounts::of_tree(
+        &view,
+        config,
+        Caller::Wire,
+        tree,
+    ) {
+        Ok(_) => panic!("a view with a place it cannot establish"),
+        Err(error) => error,
+    };
+
+    // The table: a row whose parent no row is, a mount point the request never sent.
+    let why = MountTable::parse(&format!(
+        "{HOST}90 99 0:70 / /srv/orphan rw - tmpfs tmpfs rw\n"
+    ))
+    .expect("the table parses")
+    .into_tree_as_written()
+    .expect_err("a row no row is the parent of");
+    let named = match why.asked {
+        substrate_exec_gate::place::Asked::Place => "the place of /",
+        substrate_exec_gate::place::Asked::Attachment => "where a mount beneath / is attached",
+    };
+    let message = format!("{prefix} {named}: {}.", why.cause.name());
+    assert_wire_words(
+        &refused(&config, Err(why)),
+        Caller::Wire.entry(),
+        &message,
+        &["/srv", &host],
+    );
+
+    // The host's workspace root, on a mount of a type outside the list.
+    assert_wire_words(
+        &refused(&config, Ok(staged.retyped())),
+        "workspace",
+        &format!("{prefix} the place of /workspace: file-system-unlisted."),
+        &[&host],
+    );
+
+    // A writable root of the host's configuration, which this start does not bind.
+    let mut declaring = config.clone();
+    declaring.writable_roots = vec![crate::DeclaredWritableRoot {
+        name: "kernel".to_owned(),
+        path: PathBuf::from("/proc/sys"),
+    }];
+    let table = std::fs::read_to_string("/proc/self/mountinfo").expect("the mount table");
+    assert_wire_words(
+        &refused(&declaring, Ok(tree(&table))),
+        "writable_roots",
+        &format!("{prefix} the place of a writable root this host declares: file-system-unlisted."),
+        &["/proc/sys", &host],
+    );
+    println!("exec gate wire view places: executed");
 }

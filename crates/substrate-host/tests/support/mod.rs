@@ -176,6 +176,9 @@ fn refusal(error: &ConfinementError) -> (String, String, Value) {
             "ExecDeniedPathsWithoutSubpaths".into(),
             json!({"adapter": adapter.name()}),
         ),
+        ConfinementError::ExecSubpathsExceeded { .. } => {
+            panic!("the model states no bound of the allow-list: {error}")
+        }
         ConfinementError::ExecDeniedPathsExceeded { .. } => {
             panic!("the model states no bound of the deny-list: {error}")
         }

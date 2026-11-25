@@ -590,6 +590,7 @@ impl NamespaceDriver {
             probed_at: proved.map_or(wall, |proved| proved.at),
             valid_until,
             facts,
+            withheld: Vec::new(),
         };
         Computed {
             snapshot,

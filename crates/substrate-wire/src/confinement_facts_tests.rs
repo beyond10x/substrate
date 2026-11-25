@@ -25,14 +25,16 @@ const FAMILIES: [(&str, &str); 10] = [
     ("audit", "confinement.family.audit"),
 ];
 
-/// Design 30 § 4.3's seven, in the `Fact` order of `spec/confinement/confinement.yaml`.
-const PROPERTIES: [(&str, &str); 7] = [
+/// Design 30 § 4.3's seven and design 37 § 5's deny-list property, in the `Fact` order of
+/// `spec/confinement/confinement.yaml`.
+const PROPERTIES: [(&str, &str); 8] = [
     ("paths-are-host-paths", "confinement.paths-are-host-paths"),
     ("whole-tree-kill", "confinement.whole-tree-kill"),
     ("ipc-socket-allowlist", "confinement.ipc-socket-allowlist"),
     ("ipc-signals-contained", "confinement.ipc-signals-contained"),
     ("sealed-paths", "confinement.sealed-paths"),
     ("exec-subpaths", "confinement.exec-subpaths"),
+    ("exec-denied-paths", "confinement.exec-denied-paths"),
     ("private-tmpdir", "confinement.private-tmpdir"),
 ];
 
@@ -94,6 +96,7 @@ fn every_property_has_its_wire_word_and_fact_name_in_the_fact_order() {
             | ConfinementProperty::IpcSignalsContained
             | ConfinementProperty::SealedPaths
             | ConfinementProperty::ExecSubpaths
+            | ConfinementProperty::ExecDeniedPaths
             | ConfinementProperty::PrivateTmpdir => 1,
         })
         .sum::<usize>();
@@ -374,6 +377,8 @@ fn applied(cgroup: Option<String>, requires: Option<ConfinementRequires>) -> App
         workdir: None,
         writable_roots: Vec::new(),
         requires,
+        exec_subpaths: None,
+        exec_denied_paths: Vec::new(),
     }
 }
 

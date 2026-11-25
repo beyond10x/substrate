@@ -262,6 +262,7 @@ struct Arguments {
             "egress_apertures",
             "writable_roots",
             "ca_bundle",
+            "exec_gate",
         ]
     )]
     kubernetes_config: Option<PathBuf>,
@@ -387,6 +388,15 @@ struct Arguments {
     /// never present and unverified.
     #[arg(long, env = "SUBSTRATE_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<PathBuf>,
+
+    /// The statically linked `substrate-exec-gate` helper that holds a run to its executable
+    /// lists (design 35, design 37 § 7).
+    ///
+    /// Absent, no start may name a list. A helper the host driver refuses stops startup; where
+    /// a path of the open lies on a file-system type the helper does not serve, the daemon
+    /// starts without the lists and its snapshot says why.
+    #[arg(long, value_name = "PATH")]
+    exec_gate: Option<PathBuf>,
 
     /// Trust a delegated-context signer as `kid=issuer=base64url-public-key` (repeatable). ADR 0011.
     ///
@@ -584,6 +594,7 @@ impl From<Arguments> for DaemonConfig {
             egress_apertures: arguments.egress_apertures,
             writable_roots: arguments.writable_roots,
             ca_bundle: arguments.ca_bundle,
+            exec_gate: arguments.exec_gate,
             delegated_context_keys: arguments.delegated_context_keys,
             require_delegated_context: arguments.require_delegated_context,
             tcp,
@@ -661,6 +672,24 @@ mod tests {
         assert!(
             Arguments::try_parse_from(REQUIRED.into_iter().chain(["--tmp-bytes", "-1"])).is_err(),
             "a negative size is not a size"
+        );
+    }
+
+    /// Design 37 § 7: no `--exec-gate` names no helper; a given path reaches the host
+    /// configuration unchanged.
+    #[test]
+    fn exec_gate_is_absent_by_default_and_reaches_the_host_configuration() {
+        let default = Arguments::try_parse_from(REQUIRED).expect("default arguments");
+        assert_eq!(super::DaemonConfig::from(default).exec_gate, None);
+        let named = Arguments::try_parse_from(
+            REQUIRED
+                .into_iter()
+                .chain(["--exec-gate", "/usr/libexec/substrate-exec-gate"]),
+        )
+        .expect("a helper");
+        assert_eq!(
+            super::DaemonConfig::from(named).exec_gate,
+            Some(std::path::PathBuf::from("/usr/libexec/substrate-exec-gate"))
         );
     }
 
@@ -816,6 +845,7 @@ mod tests {
             ["--egress-aperture", "model=127.0.0.1:443/tcp"],
             ["--writable-root", "cache=/srv/cache"],
             ["--ca-bundle", "/etc/ca.pem"],
+            ["--exec-gate", "/usr/libexec/substrate-exec-gate"],
         ] {
             let refused = Arguments::try_parse_from(KUBERNETES.into_iter().chain(host_only))
                 .and_then(Arguments::validated);

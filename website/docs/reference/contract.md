@@ -81,7 +81,7 @@ like any other directory. Send the segment as written: a client that removes dot
 `/files/` and gets 404. Every other file route refuses `.` with `workspace.path-escape`. A daemon
 that predates the root page answers that code too, and a client may then fall back to the tree.
 
-Release `0.27.0` advertises `substrate-wire/0.28.0` in `x-b10x-contract` and its inner
+Release `0.28.0` advertises `substrate-wire/0.29.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest, because it identifies the distribution package and not
 the inner contract manifest.
@@ -90,7 +90,7 @@ the inner contract manifest.
 `/v1/sessions` in bundle `0.15.0`, and no `/v1/pipe-sessions` compatibility alias is served.
 
 Frozen compatibility declarations and route/schema details are in the
-[0.28.0 bundle](https://github.com/beyond10x/substrate/tree/0.27.0/contracts/substrate-wire/0.28.0).
+[0.29.0 bundle](https://github.com/beyond10x/substrate/tree/0.28.0/contracts/substrate-wire/0.29.0).
 See [system model and derivation](../concepts/model.md) for which artifacts are generated and
 [status](../status.md) for release maturity.
 
@@ -112,7 +112,10 @@ See [system model and derivation](../concepts/model.md) for which artifacts are 
 | `POST` | `/v1/execs/{exec_id}/lease/renew` | renew exec liveness |
 | `DELETE` | `/v1/execs/{exec_id}` | retire an exec |
 
-Exec start is served only when the daemon verified its complete host confinement floor.
+Exec start is served only when the daemon verified its complete host confinement floor. A start
+may limit which files its run executes, with `sandbox.exec_subpaths` and
+`sandbox.exec_denied_paths`: see
+[executable lists on the wire](../guides/confinement-profiles.md#executable-lists-on-the-wire).
 
 ## Sessions
 
@@ -159,6 +162,16 @@ Read [operations and observations](../concepts/operations.md) for retry semantic
 Earlier bundle directories remain immutable. A source contract promotion is not by itself a signed
 daemon release. Consumers must pin and test the matching SDK/daemon revision. The SDK refuses an
 older daemon's contract before issuing mutations.
+
+### `0.29.0`
+
+`0.29.0` adds no route and publishes the
+[executable lists](../guides/confinement-profiles.md#executable-lists-on-the-wire): the optional
+`sandbox.exec_subpaths` and `sandbox.exec_denied_paths` on both starts and on the exec record,
+the optional fact `confinement.exec-denied-paths` with its word in `sandbox.requires.facts`, the
+snapshot's optional `withheld` of at most 12 entries, and eight refusal codes, each with a
+vector. A start without the two members serializes and hashes as on `0.28.0`. A client that
+validates capability snapshots or exec records against `0.28.0` must move to `0.29.0`.
 
 ### `0.28.0`
 

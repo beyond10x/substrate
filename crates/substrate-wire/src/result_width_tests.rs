@@ -27,22 +27,22 @@ use super::{
     ExecLimits, ExecMeasurement, ExecRefusal, ExecStartInput, ExecState, ExecUsage,
     ExecutionCapsuleInput, FileAbsence, FileKind, FileObservation, LeaseObservation,
     LeaseRenewInput, LeaseState, MAX_APERTURE_DESTINATION_CHARS, MAX_APERTURE_LISTEN_CHARS,
-    MAX_APERTURE_NAME_CHARS, MAX_APPLIED_CGROUP_CHARS, MAX_EGRESS_APERTURES,
-    MAX_EXEC_REFUSAL_CODE_CHARS, MAX_EXEC_REFUSAL_MESSAGE_CHARS, MAX_EXEC_USAGE_CODE_CHARS,
-    MAX_EXEC_USAGE_MESSAGE_CHARS, MAX_LABEL_KEY_CHARS, MAX_LABEL_VALUE_CHARS, MAX_LABELS,
-    MAX_LEASE_ACTOR_CHARS, MAX_LEASE_PRINCIPAL_CHARS, MAX_OPERATION_ID_CHARS,
-    MAX_PROCESS_EXIT_SIGNAL_CHARS, MAX_PROCESS_REASON_BYTES, MAX_READ_ONLY_FILE_PATH_BYTES,
-    MAX_RESOURCE_ID_CHARS, MAX_ROOT_NAME_BYTES, MAX_TIMESTAMP_CHARS, MAX_WRITABLE_ROOTS,
-    NetworkMode, OPERATION_RESULT_MAX_JSON_BYTES, PipeSession, PipeSessionLimits,
-    ProcessConfinement, ProcessDeadline, ProcessDeadlineSource, ProcessEndedBy, ProcessEnvDigest,
-    ProcessExit, ProcessKind, ProcessLease, ProcessLeaseState, ProcessOwner, ProcessPresence,
-    ProcessProfile, ProcessRecord, ProcessState, ProcessTimestamp, ReadOnlyFile, ReadOnlyRoot,
-    ResourceUsage, RootName, SESSION_OUTPUT_BACKPRESSURE, SESSION_OUTPUT_LIMIT, SandboxProfile,
-    SecretSlotRequest, SessionAbsence, SessionAttachmentState, SessionKind, SessionMode,
-    SessionState, Signal, StorageLimit, StorageUsage, UnrecordedOutput, Workspace,
-    WorkspaceAbsence, WorkspaceAccess, WorkspaceKind, WorkspaceOrigin, WorkspaceState,
-    WritableGitRoot, WritableHostRoot, WritableRoot, json_char_bytes, valid_aperture_name,
-    validate_operation_id,
+    MAX_APERTURE_NAME_CHARS, MAX_APPLIED_CGROUP_CHARS, MAX_EGRESS_APERTURES, MAX_EXEC_DENIED_PATHS,
+    MAX_EXEC_LIST_ENTRY_BYTES, MAX_EXEC_REFUSAL_CODE_CHARS, MAX_EXEC_REFUSAL_MESSAGE_CHARS,
+    MAX_EXEC_SUBPATHS, MAX_EXEC_USAGE_CODE_CHARS, MAX_EXEC_USAGE_MESSAGE_CHARS,
+    MAX_LABEL_KEY_CHARS, MAX_LABEL_VALUE_CHARS, MAX_LABELS, MAX_LEASE_ACTOR_CHARS,
+    MAX_LEASE_PRINCIPAL_CHARS, MAX_OPERATION_ID_CHARS, MAX_PROCESS_EXIT_SIGNAL_CHARS,
+    MAX_PROCESS_REASON_BYTES, MAX_READ_ONLY_FILE_PATH_BYTES, MAX_RESOURCE_ID_CHARS,
+    MAX_ROOT_NAME_BYTES, MAX_TIMESTAMP_CHARS, MAX_WRITABLE_ROOTS, NetworkMode,
+    OPERATION_RESULT_MAX_JSON_BYTES, PipeSession, PipeSessionLimits, ProcessConfinement,
+    ProcessDeadline, ProcessDeadlineSource, ProcessEndedBy, ProcessEnvDigest, ProcessExit,
+    ProcessKind, ProcessLease, ProcessLeaseState, ProcessOwner, ProcessPresence, ProcessProfile,
+    ProcessRecord, ProcessState, ProcessTimestamp, ReadOnlyFile, ReadOnlyRoot, ResourceUsage,
+    RootName, SESSION_OUTPUT_BACKPRESSURE, SESSION_OUTPUT_LIMIT, SandboxProfile, SecretSlotRequest,
+    SessionAbsence, SessionAttachmentState, SessionKind, SessionMode, SessionState, Signal,
+    StorageLimit, StorageUsage, UnrecordedOutput, Workspace, WorkspaceAbsence, WorkspaceAccess,
+    WorkspaceKind, WorkspaceOrigin, WorkspaceState, WritableGitRoot, WritableHostRoot,
+    WritableRoot, json_char_bytes, valid_aperture_name, validate_operation_id,
 };
 
 /// The characters the serializer writes for an instant held as `DateTime<Utc>` with
@@ -387,6 +387,8 @@ fn minimal_start() -> ExecStartInput {
             profile: SandboxProfile::Workspace,
             required: true,
             requires: None,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         },
         limits: ExecLimits {
             timeout_ms: 1_000,
@@ -431,6 +433,11 @@ fn full_start() -> ExecStartInput {
         ]),
         facts: Some(vec![ConfinementProperty::WholeTreeKill]),
     });
+    start.sandbox.exec_subpaths = Some(vec![
+        "/usr/bin/git".to_owned(),
+        format!("tools/{EVERY_COST}"),
+    ]);
+    start.sandbox.exec_denied_paths = vec![format!("tools/{EVERY_COST}/unsafe")];
     start.workspace_access = WorkspaceAccess::Scoped {
         writable_subtrees: vec![format!("out/{EVERY_COST}")],
     };
@@ -587,6 +594,8 @@ fn stored_applied(start: &ExecStartInput, echo: bool, listed: bool) -> AppliedCo
         workdir: start.workdir.clone(),
         writable_roots: start.writable_roots.iter().map(stored_root).collect(),
         requires: start.sandbox.requires.clone(),
+        exec_subpaths: start.sandbox.exec_subpaths.clone(),
+        exec_denied_paths: start.sandbox.exec_denied_paths.clone(),
     }
 }
 
@@ -879,6 +888,36 @@ fn an_exec_width_counts_every_entry_of_a_list_longer_than_its_wire_bound() {
     );
     for form in stored_execs(&start).iter().take(32) {
         assert!(at_the_timestamp_bound(form) <= Exec::widest_json_bytes(&start));
+    }
+}
+
+/// Design 37 § 7: both executable lists count toward the widest exec as the request sent them,
+/// once in the requested sandbox and once in the applied record's echo. At their bounds the
+/// figure is over the reserve, and a start without them keeps the figure it had.
+#[test]
+fn an_exec_width_counts_both_executable_lists_as_sent() {
+    let minimal = minimal_start();
+    assert_eq!(Exec::widest_json_bytes(&minimal), 24_325);
+    let mut empty_deny = minimal_start();
+    empty_deny.sandbox.exec_denied_paths = Vec::new();
+    assert_eq!(Exec::widest_json_bytes(&empty_deny), 24_325);
+    let entry = |entry: usize| format!("{entry:0>MAX_EXEC_LIST_ENTRY_BYTES$}");
+    let mut start = minimal_start();
+    start.sandbox.exec_subpaths = Some((0..MAX_EXEC_SUBPATHS).map(entry).collect());
+    start.sandbox.exec_denied_paths = (0..MAX_EXEC_DENIED_PATHS).map(entry).collect();
+    let added = json_bytes(&start.sandbox) - json_bytes(&minimal.sandbox);
+    let widest = Exec::widest_json_bytes(&start);
+    assert_eq!(widest, 24_325 + 2 * added);
+    assert_eq!(widest, at_the_timestamp_bound(&widest_stored_exec(&start)));
+    assert!(widest > published_bound(), "{widest}");
+    let mut present_and_empty = minimal_start();
+    present_and_empty.sandbox.exec_subpaths = Some(Vec::new());
+    assert_eq!(
+        Exec::widest_json_bytes(&present_and_empty),
+        24_325 + 2 * ",\"exec_subpaths\":[]".len()
+    );
+    for form in stored_execs(&start).iter().take(32) {
+        assert!(at_the_timestamp_bound(form) <= widest);
     }
 }
 

@@ -472,6 +472,8 @@ fn the_applied_confinement_reports_the_workdir_only_when_one_was_set() {
         read_only_files: Vec::new(),
         secret_slots: Vec::new(),
         workdir: None,
+        exec_subpaths: None,
+        exec_denied_paths: Vec::new(),
     };
     let rendered = serde_json::to_value(&confinement).expect("encodes");
     assert!(rendered.get("workdir").is_none());

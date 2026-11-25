@@ -473,6 +473,7 @@ pub(super) fn validate_exec_input(
             false,
         ));
     }
+    check_exec_lists(&facts, &input.sandbox, mutation, request_id)?;
     check_confinement_requires(&facts, &input.sandbox, mutation, request_id)?;
     check_egress_aperture(&facts, &input.sandbox, mutation, request_id)?;
     check_secret_slots(&facts, mutation, request_id)?;
@@ -593,6 +594,78 @@ fn check_confinement_requires(
         ));
     }
     Ok(())
+}
+
+/// Rows 1 to 4 of design 37 § 6, in that order, for every driver: the lexical rules of the two
+/// executable lists (`request.schema-invalid` at the member), a present and empty allow-list, a
+/// deny-list without an allow-list, then a list whose fact the snapshot the start was admitted
+/// against does not prove, the allow-list's first. Answered after `exec.capability-stale` and
+/// before every other field's check; the caller records each as refused before any dispatch.
+/// Code, status, address and message come from the wire crate's table and function. A session
+/// start reaches this through the exec it embeds, so it has the exec start's addresses.
+fn check_exec_lists(
+    facts: &substrate_wire::CapabilityFacts,
+    sandbox: &substrate_wire::ConfinementRequest,
+    mutation: &BoundMutation<ExecStartInput>,
+    request_id: &str,
+) -> Result<(), Response> {
+    use substrate_wire::WireValidationError::{
+        ExecListEntryDuplicate, ExecListEntryInvalid, ExecListExceeded,
+    };
+
+    match substrate_wire::validate_exec_lists(sandbox) {
+        Ok(()) => {}
+        Err(
+            ExecListExceeded { address }
+            | ExecListEntryInvalid { address }
+            | ExecListEntryDuplicate { address },
+        ) => return Err(schema_invalid(request_id, Some(&mutation.op), address)),
+        Err(_) => return Err(schema_invalid(request_id, Some(&mutation.op), "input")),
+    }
+    let refusal = if sandbox.exec_subpaths.as_ref().is_some_and(Vec::is_empty) {
+        Some(fixed_exec_list_refusal(
+            substrate_wire::EXEC_SANDBOX_EXEC_SUBPATHS_EMPTY,
+        ))
+    } else if sandbox.exec_subpaths.is_none() && !sandbox.exec_denied_paths.is_empty() {
+        Some(fixed_exec_list_refusal(
+            substrate_wire::CONFINEMENT_EXEC_DENIED_PATHS_WITHOUT_SUBPATHS,
+        ))
+    } else {
+        substrate_wire::exec_lists_fact_refusal(sandbox, facts)
+    };
+    let Some((row, address, message)) = refusal else {
+        return Ok(());
+    };
+    let status = StatusCode::from_u16(row.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let class = if status == StatusCode::NOT_IMPLEMENTED {
+        ErrorClass::Unserved
+    } else {
+        ErrorClass::Refused
+    };
+    Err(failure(
+        status,
+        request_id,
+        Some(&mutation.op),
+        class,
+        row.code,
+        &message,
+        Some(address),
+        false,
+    ))
+}
+
+/// A row of design 37 § 6 the daemon answers with its fixed message at its one address (rows 2
+/// and 3), read from the wire crate's table.
+fn fixed_exec_list_refusal(code: &str) -> (substrate_wire::ExecListRefusal, &'static str, String) {
+    let row = substrate_wire::EXEC_LIST_REFUSALS
+        .into_iter()
+        .find(|row| row.code == code)
+        .expect("the wire crate publishes the row");
+    let [address] = row.addresses else {
+        unreachable!("row {code} is answered at one address");
+    };
+    let message = row.message.expect("the row has a fixed message");
+    (row, address, message.to_owned())
 }
 
 /// Exec admission (ADR 0047 N6, design 34 § 6.4): the four Linux facts, or design 30's neutral

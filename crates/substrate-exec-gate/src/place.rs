@@ -78,7 +78,7 @@ use std::fmt;
 /// The closed list of file-system types the place rule was observed to hold on (design 35
 /// § 3.9), compared as exact text with the type field of a path's row. For a bind mount that is
 /// the type of the file system the mount shows. Adding a type is a change to design 35.
-pub const LISTED_FILE_SYSTEMS: [&str; 3] = ["ext4", "overlay", "tmpfs"];
+pub const LISTED_FILE_SYSTEMS: [&str; 4] = ["ext4", "overlay", "tmpfs", "xfs"];
 
 /// `STATX_MNT_ID` (Linux 5.8).
 #[cfg(target_os = "linux")]
@@ -1431,7 +1431,6 @@ mod tests {
     fn file_system_unlisted() {
         for file_system in [
             "btrfs",
-            "xfs",
             "nfs4",
             "fuse.sshfs",
             "proc",
@@ -1451,7 +1450,7 @@ mod tests {
                 format!("file-system-unlisted {file_system}")
             );
         }
-        for file_system in ["ext4", "overlay", "tmpfs"] {
+        for file_system in ["ext4", "overlay", "tmpfs", "xfs"] {
             let table = format!("540 500 0:70 /tree /mnt rw - {file_system} source rw\n");
             assert_eq!(
                 place(Some(540), Some("/mnt/tool"), &table),
@@ -1461,19 +1460,38 @@ mod tests {
                 })
             );
         }
-        assert_eq!(LISTED_FILE_SYSTEMS, ["ext4", "overlay", "tmpfs"]);
+        assert_eq!(LISTED_FILE_SYSTEMS, ["ext4", "overlay", "tmpfs", "xfs"]);
+    }
+
+    /// Design 35 § 3.14: the place rule held on `xfs`, so a row of that type is placed, and
+    /// `btrfs` stays refused by name.
+    #[test]
+    fn a_row_of_type_xfs_passes_the_place_check() {
+        let table = "540 500 0:70 /tree /mnt rw - xfs source rw\n";
+        assert_eq!(
+            place(Some(540), Some("/mnt/tool"), table),
+            Ok(Place {
+                device: "0:70".to_owned(),
+                names: vec!["tree".to_owned(), "tool".to_owned()],
+            })
+        );
+        let table = "540 500 0:70 /tree /mnt rw - btrfs source rw\n";
+        assert_eq!(
+            place(Some(540), Some("/mnt/tool"), table),
+            Err(Cause::FileSystemUnlisted("btrfs".to_owned()))
+        );
     }
 
     /// The causes are checked in D26's order: the first that holds is the one named.
     #[test]
     fn the_first_cause_that_holds_is_named() {
         // A deleted root on an unlisted type whose mount point does not match either.
-        let table = "550 500 0:70 /tree//deleted /at rw - xfs source rw\n";
+        let table = "550 500 0:70 /tree//deleted /at rw - btrfs source rw\n";
         assert_eq!(
             place(Some(550), Some("/elsewhere"), table),
             Err(Cause::MountRootDeleted)
         );
-        let table = "550 500 0:70 /tree /at rw - xfs source rw\n";
+        let table = "550 500 0:70 /tree /at rw - btrfs source rw\n";
         assert_eq!(
             place(Some(550), Some("/elsewhere"), table),
             Err(Cause::MountPointMismatch)
@@ -1533,7 +1551,7 @@ mod tests {
 501 500 259:2 /usr /usr ro - ext4 /dev/a rw
 501 500 259:2 /usr /usr ro - ext4 /dev/a rw
 520 500 259:2 /tree//deleted /at rw - ext4 /dev/a rw
-540 500 0:70 / /mnt rw - xfs source rw
+540 500 0:70 / /mnt rw - btrfs source rw
 ",
         )
         .expect("parses");
@@ -1563,7 +1581,7 @@ mod tests {
             ),
             (
                 opened("/mnt/a", Some(540), Some("/mnt/a")),
-                Cause::FileSystemUnlisted("xfs".to_owned()),
+                Cause::FileSystemUnlisted("btrfs".to_owned()),
             ),
         ] {
             let refused = Unestablished {
@@ -2081,7 +2099,7 @@ mod tests {
 610 500 0:95 / /srv/dev rw - tmpfs tmpfs rw
 611 610 0:5 /null /srv/dev/null rw - devtmpfs devtmpfs rw
 612 610 0:96 / /srv/dev/pts rw - devpts devpts rw
-613 500 8:17 / /srv/data rw - xfs /dev/sdb1 rw
+613 500 8:17 / /srv/data rw - btrfs /dev/sdb1 rw
 614 613 0:97 / /srv/data/scratch rw - tmpfs tmpfs rw
 ",
         );

@@ -91,10 +91,11 @@ pub struct AdapterFacts {
 ///
 /// `linux` opened with `HostConfig.exec_gate` set proves no executable-list fact where a path
 /// of the open has no place the lists can be decided by, for one of two causes: the path lies
-/// on a file-system type outside `ext4`, `overlay` and `tmpfs` (`file-system-unlisted`), or the
-/// kernel reports no mount ID for it (`mount-id-unreported`). The adapter opens, a profile that
-/// carries a list is refused `confinement.fact-unserved`, and that refusal repeats the entry.
-/// Every other cause refuses the open `config.exec-gate-unserved` instead.
+/// on a file-system type outside `ext4`, `overlay`, `tmpfs` and `xfs`
+/// (`file-system-unlisted`), or the kernel reports no mount ID for it (`mount-id-unreported`).
+/// The adapter opens, a profile that carries a list is refused `confinement.fact-unserved`, and
+/// that refusal repeats the entry. Every other cause refuses the open
+/// `config.exec-gate-unserved` instead.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FactWithheld {
     pub fact: Fact,

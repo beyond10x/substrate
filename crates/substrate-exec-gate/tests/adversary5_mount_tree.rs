@@ -248,3 +248,35 @@ fn adversary5_a_chain_of_ten_thousand_mounts_is_walked_on_a_worker_stack() {
         println!("{line}");
     }
 }
+
+/// **`xfs` is served by the exact text of a row's type field and by nothing near it** (design
+/// 35 § 3.14, design 37 § 11): a type a mounter chose that holds `xfs` (a FUSE subtype), the
+/// same letters in another case, a longer or shorter name, and an escape written as text are
+/// each `file-system-unlisted` with the field as written; `xfs` itself is placed.
+#[test]
+fn security_xfs_is_served_by_its_exact_type_field_alone() {
+    for kind in [
+        "fuse.xfs", "xfs.fuse", "fuse", "fuseblk", "XFS", "Xfs", "xfs2", "xf", "xfs\\040", "btrfs",
+    ] {
+        let table = MountTable::parse(&format!(
+            "{ROOT}{}",
+            row(2, 1, "0:50", "/tree", "/mnt", kind)
+        ))
+        .expect("the rows parse");
+        assert_eq!(
+            table.place(Some(2), Some("/mnt/tool")),
+            Err(Cause::FileSystemUnlisted(kind.to_owned())),
+            "{kind}"
+        );
+    }
+    // `xfs` is placed exactly as `ext4` is on the same row.
+    let placed = |kind: &str| {
+        let table = MountTable::parse(&format!(
+            "{ROOT}{}",
+            row(2, 1, "0:50", "/tree", "/mnt", kind)
+        ))
+        .expect("the rows parse");
+        at(&table, 2, "/mnt/tool")
+    };
+    assert_eq!(placed("xfs"), placed("ext4"));
+}

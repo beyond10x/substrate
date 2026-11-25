@@ -1,0 +1,96 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "workspace.file.write",
+    "request": {
+      "body": {
+        "input": {
+          "content": {
+            "data": "aGVsbG8=",
+            "encoding": "base64"
+          }
+        },
+        "op": "01JPHASE2FILEWRITE00001"
+      },
+      "headers": {
+        "x-request-id": "req_file_write_001"
+      },
+      "method": "PUT",
+      "path": "/v1/workspaces/ws_vector/files/src/main.txt",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "route.workspace.file.write",
+    "security.bounds.write",
+    "security.atomic-replacement",
+    "lifecycle.post-action-observation"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "operation": "01JPHASE2FILEWRITE00001",
+        "request_id": "req_file_write_001",
+        "result": {
+          "atomic_replacement": true,
+          "kind": "file",
+          "observed_at": "2026-08-13T12:00:00Z",
+          "path": "src/main.txt",
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "size": 5,
+          "workspace": "ws_vector"
+        }
+      },
+      "status": 200
+    }
+  },
+  "id": "bounded-file-replacement-is-atomic",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/partial_target_visible",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/reobserved_sha256",
+      "expected": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "workspace",
+      "name": "owned-with-old-file",
+      "state": {
+        "files": {
+          "src/main.txt": "b2xk"
+        },
+        "owner": "local:1000"
+      }
+    }
+  ]
+}

@@ -643,6 +643,13 @@ fn detail(error: &ConfinementError) -> (String, Option<String>) {
             "a deny-list of executables needs an allow-list beside it".to_owned(),
             Some("exec_denied_paths".to_owned()),
         ),
+        ConfinementError::ExecSubpathsExceeded { .. } => (
+            format!(
+                "at most {} executable paths are listed",
+                substrate_host::confinement::MAX_EXEC_SUBPATHS
+            ),
+            Some("exec_subpaths".to_owned()),
+        ),
         ConfinementError::ExecDeniedPathsExceeded { .. } => (
             format!(
                 "at most {} paths are denied",

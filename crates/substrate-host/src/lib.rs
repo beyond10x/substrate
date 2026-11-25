@@ -399,8 +399,8 @@ pub struct HostConfig {
     ///   temporary directory lies in it. The message names the path and the cause.
     ///
     /// **One case opens without the lists and says why** (design 35 D27). The lists are served
-    /// on `ext4`, `overlay` and `tmpfs`. Where one of those paths lies on another file-system
-    /// type, for example a workspace volume on `xfs` or `btrfs`, or the kernel reports no mount
+    /// on `ext4`, `overlay`, `tmpfs` and `xfs`. Where one of those paths lies on another
+    /// file-system type, for example a workspace volume on `btrfs`, or the kernel reports no mount
     /// ID for it, the driver opens, the helper is not used, and the adapter proves no
     /// executable-list fact. `AdapterFacts::withheld` then holds one entry per path with the
     /// cause, the path and the type; a profile with a list is refused
@@ -1288,8 +1288,8 @@ impl HostDriver {
     }
 
     /// What this driver's probe proved of the executable lists at open (design 35 D14): the
-    /// second argument of [`confinement::linux::proof`]. Host-private: the capability snapshot
-    /// publishes none of it.
+    /// second argument of [`confinement::linux::proof`]. The capability snapshot publishes the
+    /// facts it proves and its entries without their paths (design 37 §§ 5 and 8).
     pub(crate) fn exec_list_proof(&self) -> confinement::linux::ExecListProof {
         self.exec_lists.clone()
     }
@@ -2356,6 +2356,8 @@ mod tests {
                 apertures: Vec::new(),
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             limits: substrate_wire::ExecLimits {
                 timeout_ms: 5_000,

@@ -43,7 +43,20 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.28.0` exist; `0.28.0` adds no route and publishes ADR 0053's result bound: the
+   through `0.29.0` exist; `0.29.0` adds no route and publishes design 37: the optional
+   `sandbox.exec_subpaths` and `sandbox.exec_denied_paths` on the exec start and on a session
+   start's exec, at most `MAX_EXEC_SUBPATHS` and `MAX_EXEC_DENIED_PATHS` (64 each) unique entries
+   of 1 to `MAX_EXEC_LIST_ENTRY_BYTES` (4,095) bytes, which the requested and the applied sandbox
+   of the exec record echo as sent; the optional fact `confinement.exec-denied-paths` beside
+   `confinement.exec-subpaths`, and its word in `sandbox.requires.facts`; the snapshot's optional
+   `withheld`, at most `MAX_WITHHELD_FACTS` (12) closed entries of fact, cause and address that
+   carry no host path; and the eight codes a start that names a list can earn, the rows of
+   `EXEC_LIST_REFUSALS`, each with a vector and the fact refusal with one per list. A start
+   without the members serializes and hashes as on `0.28.0`, which one vector holds by its
+   stored request hash. The vector of `exec.sandbox-place-unserved` is published and not
+   executed. Each value is held to its wire constant, and each refusal to its row, by
+   `cargo xtask check-bundle 0.29.0` (`xtask/src/bundle/exec_lists.rs`);
+   `0.28.0` added no route and published ADR 0053's result bound: the
    required fact `operation.result-max-json-bytes`, `const` `OPERATION_RESULT_MAX_JSON_BYTES`
    (524,217), with the client's counting rule in its description; the refusal
    `operation.result-limit` (429) on the inputs of the exec, session and host-process starts and
@@ -139,8 +152,9 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon and Rust SDK advertise `substrate-wire/0.28.0` with the SHA-256 of that bundle's
-   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); ADR 0053 records the result bound
+   The daemon and Rust SDK advertise `substrate-wire/0.29.0` with the SHA-256 of that bundle's
+   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); design 37 records the executable
+   lists of `0.29.0`, ADR 0053 the result bound
    of `0.28.0`, the 2026-11-20 amendments of ADR 0013
    and ADR 0010 the bounds of `0.27.0`, design 30 records the confinement
    facts and `requires`, design 34 § 11 records the namespace-driver additions, ADR 0036 S12 the process event stream, ADR 0010 the read-only roots, ADR 0038 the writable-root
@@ -223,7 +237,7 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   deliberately not committed (`docs/design/09-delegated-context-and-grant-attribution.md` § 6), so
   the vectors are verify-only. They do **not** verify with `delegated_signing_key` in
   `crates/substrate-daemon/tests/runtime_vectors.rs`, whose published seed signs only the
-  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.28.0`. The exception is scoped by rule
+  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.29.0`. The exception is scoped by rule
   **and** by path; a JWT anywhere else, including any other vector, is still a finding. Proven, not
   asserted: the same token in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-*.json`
   is allowed and in `crates/substrate-daemon/src/` is caught. **Widening this allowlist is a
@@ -264,7 +278,7 @@ then `cargo nextest run -p b10x-substrate-host --no-default-features` over `host
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, one bounded
-`cargo xtask check-bundles 0.5.0 ... 0.28.0`,
+`cargo xtask check-bundles 0.5.0 ... 0.29.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 
@@ -400,8 +414,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
-| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.28.0` in one invocation |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-eight |
+| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.29.0` in one invocation |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-nine |
 | `namespace-lane check [--bless]` | a lane object that differs from its golden in `xtask/tests/golden/namespace-lane/`, a Role that is not ADR 0047 decision 3's table as the ADR writes it, or a driver-side object that is cluster-scoped or lacks a design 34 § 4 ownership key | no — `.github/workflows/namespace-lane.yml`, and its cases under `cargo test` |
 | `namespace-lane observe [--admin-kubeconfig <file>] [--executor-image <ref>]` | runs design 34 § 10.3's O1 to O4, O6 to O8 and O10 on a kind cluster of its own (`substrate-namespace-lane-<id>`) through `b10x-substrate-kubernetes-client`, never `kubectl`. It then runs design 34's steps 3 to 7 against the shipped daemon with `--driver kubernetes`: it builds that daemon and the vectors' test binary before the cluster exists, and pushes the executor image to the lane's registry unless `--executor-image` names one, which `--admin-kubeconfig` requires. It also refuses a kubeconfig whose server is not `https://127.0.0.1:<port>`, and never reads `KUBECONFIG`; a given one is refused before it is read under `~/.kube` (of `HOME` and of the uid's passwd entry) or as a file `KUBECONFIG` names, then for a cluster or user member kind never writes (`tls-server-name`, `proxy-url`, `exec`, `auth-provider`), a context or cluster not `kind-substrate-namespace-lane-<id>`, and, before any write, no node `substrate-namespace-lane-<id>-control-plane`; prints `Namespace-lane: <sha> <count> <RFC 3339 UTC>` only when every observation ran at a clean, unmoved `HEAD`, every step case passed or was declared absent with its reason, what the run created was removed and no signal arrived; `<count>` is still the observations' | no — a workstation run |
 | `chart-lane static [--helm <path>]` | a rendering of `deploy/helm/substrate` that breaks ADR 0046 (a second Service selecting the pods, a Service certificate name, an unretained ledger claim, a token, a capability, host namespace or host path the profile does not grant, an open NetworkPolicy rule), or a privilege, cgroup, mount, quota, transport or egress posture the chart renders instead of refusing | no — `chart-lane.yml` |
@@ -429,7 +443,7 @@ already ahead of `0.4.0` — `ExecStartInput::read_only_roots` (the `ExecStartIn
 `crates/substrate-wire/src/lib.rs`) has no `0.4.0` schema — and no bound sits *on* a type as a
 derive attribute. The bounds the schemas state are free constants: the wire crate's own
 `pub const MAX_…`/`MIN_…` items (`grep -c '^pub const \(MAX\|MIN\)_' crates/substrate-wire/src/lib.rs`
-= 61), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
+= 65), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
 host-local literals their enforcement sites hold — `PIPE_MAX_FRAME_BYTES`,
 `PIPE_MAX_INPUT_BYTES` and `PIPE_MAX_QUEUED_FRAMES` in `crates/substrate-daemon/src/app.rs`, and
 `PIPE_FRAME_BYTES` and `PIPE_QUEUED_FRAMES` in `crates/substrate-host/src/process.rs`.
@@ -454,7 +468,7 @@ a list, and the six lexical writable-root refusals (422) of ADR 0038 with
 `exec.writable-roots-host-unserved` and `exec.writable-roots-git-unserved` (501), which both lanes
 answer for a host root the daemon did not declare and for every Git root, and the portable lane
 also for the one host root the runner declares, which it cannot prove without confinement — across
-136 cases, and its delegated lane 201, whose four writable-root cases bind that declared root and
+147 cases, and its delegated lane 222, whose four writable-root cases bind that declared root and
 check the host side: the write lands, its parent and sibling do not change, a working directory
 beneath the mount runs there, and the declared path swapped for a symlink is
 `exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and nine roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 8}` (bundle `0.27.0`), eight roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a ninth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a
@@ -484,6 +498,36 @@ publishes the families and properties the `linux` adapter proved and never an ad
 `request.schema-invalid` (422), each recorded as refused; the delegated lane also runs one admitted
 start whose applied record echoes `requires`, and refuses a session start requiring
 `network-ingress`.
+Both lanes also hold design 37's executable lists (bundle `0.29.0`). The journey's daemon has no
+`--exec-gate`: it publishes neither `confinement.exec-subpaths` nor
+`confinement.exec-denied-paths` and no `withheld`, and an exec start naming an allow-list, and
+one naming both lists, is `confinement.fact-unserved` (501) at the member, each compared with
+its vector. A session start naming a list gets that answer on the delegated lane and
+`session.confinement-unavailable` (501) on the portable one, which serves no session and so
+never reads the lists. A sixth lane function,
+`runtime_clean_room_holds_runs_to_executable_lists`, runs the shape case on both lanes:
+`exec.sandbox-exec-subpaths-empty` and `confinement.exec-denied-paths-without-subpaths` compared
+with their vectors, `null`, 65 entries, an empty entry, an entry of 4,096 bytes and a duplicate
+in either list as `request.schema-invalid`, and a retried start with other lists as a request conflict. On the
+delegated lane its daemon is started with `--exec-gate` naming the static helper the lane exports
+as `SUBSTRATE_EXEC_GATE`: both facts are published; an exec start and a session start each run
+a listed program, fail an unlisted one and a denied one beneath the listed directory with
+`EACCES`, end with status 126 and echo both lists in the requested and the applied record; a
+start without the members has a record without them; a `pty` session with a list is
+`session.pty-unserved`; `exec.sandbox-path-unrepresentable`,
+`exec.sandbox-exec-subpath-undeclared` and `exec.sandbox-program-unlisted` are answered once
+each at their row's address; a start with a capsule and a list is
+`exec.sandbox-path-unrepresentable` at `argv`, because its program lies beneath `/runtime`,
+which no list can name; and one start holds a Git writable root beside an allow-list. Each of these cases prints
+`runtime exec lists <name>: executed`, or `: ABSENT (<cause>)` where the delegated root or the
+helper is missing or the open withheld a fact; `scripts/delegated-lane.sh` requires the thirteen
+`executed` lines by name, takes no `: ABSENT (` line of the runner, and compares the inventory
+the functions print with `DELEGATED_CASES` in the source. One more test of the binary,
+`a_dynamically_linked_helper_stops_the_daemon_before_it_listens`, starts the daemon with the
+copy `SUBSTRATE_EXEC_GATE_DYNAMIC` names and requires `config.exec-gate-invalid`, an exit
+status other than 0 and no socket; it answers no request and is counted in no lane.
+`exec.sandbox-place-unserved` is published and not executed: no lane has a volume whose place
+it refuses.
 Both totals include
 one route/refusal probe for every operation in the promoted registry (the seven host-process routes
 of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on
@@ -503,8 +547,9 @@ absent and a symlinked one refused `exec.workdir-missing` before dispatch, and a
 refused `exec.aperture-undeclared` for an undeclared name, run with two apertures each reporting its
 `listen` address, and refused `exec.aperture-host-listed-twice` for `localhost` listed second
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Each
-lane spans five test functions of that binary, so that none outlasts the 60 s test budget: the
-journey, the two exec-retention cases (delegated only), the adopted workspace and writable Git roots.
+lane spans six test functions of that binary, so that none outlasts the 60 s test budget: the
+journey, the two exec-retention cases (delegated only), the adopted workspace, writable Git roots
+and the executable lists.
 Each starts a daemon of its own and asserts its own count (`LaneCases`); the file does not compile
 unless the counts sum to the two totals, and `scripts/delegated-lane.sh` refuses a run whose
 functions did not report the whole delegated inventory. Its delegated lane runs only when
@@ -591,7 +636,7 @@ lies**: a symbolic link in a listed directory that points outside it is not admi
 their tools through `base_directories()`, so they assume tools that are regular files in those
 directories and would fail on a 26.04 runner. Those cases need Landlock ABI 2
 (Linux 5.19) and the workspace root, `/usr`, `/bin`, `/lib`, `/lib64` and the temporary directory
-on `ext4`, `overlay` or `tmpfs`; the preload cases and the stand-in helpers also need a C
+on `ext4`, `overlay`, `tmpfs` or `xfs`; the preload cases and the stand-in helpers also need a C
 compiler named `cc` that links statically. Without the
 delegated root the host cases print `ABSENT`; the helper's own cases start cargo's dynamically
 linked test build with no driver around it, need no delegated root and
@@ -607,8 +652,9 @@ rule, so `--deny` makes the helper grant each entry of a listed directory on its
 directory holds a denied path (`grant` in `crates/substrate-exec-gate/src/landlock.rs`); whether
 one path holds another is decided by place, never by path text. The fact `exec_denied_paths`
 stands directly after `exec_subpaths`, is proved by a second open-time probe
-(`probe_exec_denied_paths`) only where the first held, and is not published: it has no wire
-property (`PROVED_WITHOUT_A_WIRE_PROPERTY` in `crates/substrate-host/src/probe.rs`). A deny-list
+(`probe_exec_denied_paths`) only where the first held, and is published as
+`confinement.exec-denied-paths` only where `confinement.exec-subpaths` is (bundle `0.29.0`;
+`publish_confinement` in `crates/substrate-host/src/probe.rs`). A deny-list
 beside an empty `exec_subpaths` is `confinement.exec-denied-paths-without-subpaths` (422) on
 every adapter, before any fact is read. The lane requires the `exec deny` lines of
 `ess_confinement_linux`: probes K2 and K8 through the driver, the acceptance, and the two cases
@@ -673,11 +719,38 @@ after every allow (`render_exec_denied` in `crates/substrate-host/src/seatbelt.r
 run only in the hosted macOS check, and how Seatbelt matches a deny entry in another letter
 case on a case-insensitive volume is not verified.
 
+**Both lists are on the wire from bundle `0.29.0`** (design 37). The daemon names the helper
+with `--exec-gate <path>`: no default, no environment variable, refused beside
+`--driver kubernetes`. A helper the host driver's open refuses stops the daemon before it binds
+its socket (`a_helper_the_open_refuses_stops_the_daemon_before_it_listens` in
+`crates/substrate-daemon/src/runtime.rs`). An open that cannot place a path it needs serves
+without the two facts and says why in the snapshot's `withheld`, which names a fact, a cause and
+a configuration address and never a host path (`publish_confinement`,
+`substrate_wire::withheld_facts`). The refusals of a start that names a list are the rows of
+`substrate_wire::EXEC_LIST_REFUSALS`, which is the one home of each code, status, address set and
+fixed message: the daemon answers rows 1 to 4 in `check_exec_lists`
+(`crates/substrate-daemon/src/app/operations.rs`), after `exec.capability-stale` and before every
+other field of the exec, for every driver, and the host driver answers rows 5 to 9 at
+`gate_start`. The ledger records a row of the daemon `refused` and a row of the driver
+`terminal`, with the refusal as the accepted operation's error, as it records every other
+refusal of a driver (design 37 D23); a case or a vector that reads the ledger names the state of
+its row. A session start runs its own checks first, so on a host that serves no session it
+is `session.confinement-unavailable` with a list as without one. The three wire starts of the
+host driver read `sandbox.exec_subpaths` and `sandbox.exec_denied_paths` and are held to them as
+an adapter start is; what differs is the caller (`Caller` in
+`crates/substrate-host/src/exec_gate.rs`): a wire start is refused at `sandbox.exec_subpaths` or
+`sandbox.exec_denied_paths`, an adapter start at `exec_subpaths` or `exec_denied_paths`, and a
+wire message names a path of the run's view and a cause by name, never a host path and never a
+file-system type. A profile of the adapter API with more than `MAX_EXEC_SUBPATHS` (64) allow
+entries is `confinement.exec-subpaths-exceeded`; the wire answers the same list
+`request.schema-invalid` and never reaches that code.
+
 **The runner has a third lane, the namespace lane.** It runs only when
 `SUBSTRATE_VECTORS_KUBERNETES_CONFIG` names a namespace driver's kubeconfig. It starts the shipped
 daemon with `--driver kubernetes` on its Unix socket, as deployment `dep_namespace_vectors`, and
-runs `NAMESPACE_CASES` (64) once. These are selected by the facts a kind cluster publishes: a
-probed snapshot with `confinement.no-egress` absent, the workspace and file routes, the promoted
+runs `NAMESPACE_CASES` (65) once. These are selected by the facts a kind cluster publishes: a
+probed snapshot with `confinement.no-egress` absent and both executable-list facts absent
+(design 37), the workspace and file routes, the promoted
 route inventory, the eight root-page cases the wire alone sets up (ADR 0052; a FIFO, a symbolic
 link and `.git` at the root are absent, because no route of this lane makes one),
 `exec.sandbox-unavailable` (501) for an exec, and a destroy that reaches 404.
@@ -754,8 +827,8 @@ cases, because they are in a different crate and outside `DELEGATED_CASES`.
 **The gate verifies every released bundle, not just `0.1.0`.** The four
 `run python3 scripts/check-contract-bundle*.py` lines in `scripts/gate.sh` run the
 four frozen Python checkers, and the line after them runs `cargo xtask check-bundles` for `0.5.0`
-through `0.28.0`, so
-a green gate *is* evidence that all twenty-eight still hold. Cutting a successor bundle therefore means
+through `0.29.0`, so
+a green gate *is* evidence that all twenty-nine still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 
@@ -1114,18 +1187,18 @@ scenarios than ran absent, and nothing is refused.
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
-release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **`0.16.1` is the published
-release** (2026-10-29, tagged commit `f2fd606`): the daemon, disposable MCP and executor images at
-`0.16.1`, the development bundle `ghcr.io/beyond10x/b10x-substrate-wire:0.25.0`, the chart
-`oci://ghcr.io/beyond10x/charts/b10x-substrate` `0.16.1` and the two binary archives under a signed
-`SHA256SUMS`. It is the first release with the executor image, and its annotated tag carries all
+release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **This file does not
+name the current release.** It is the workspace version's section of [CHANGELOG.md](CHANGELOG.md)
+and the release line of `STATUS.md`, which `cargo xtask check-docs` holds to the workspace
+version (§ *Public website*). Release `0.16.1` (2026-10-29, tagged commit `f2fd606`) was the first
+with the executor image and the first whose annotated tag carried all
 four records `release.yml` requires: `Confinement-lane:`, `Quota-lane:`, `Chart-lane:` and
 `Namespace-lane:`. Tag `0.16.0` was never published, because `main`'s gate on its commit failed
-`cargo xtask check-advisories` and release tags are write-once. The previous release, `0.15.0`, was
+`cargo xtask check-advisories` and release tags are write-once. Release `0.15.0` was
 published by a protected-`main` recovery dispatch under the workflow identity
 `release.yml@refs/heads/main` and predates the executor image.
-Do not maintain a second digest list here: the digests of every release are the GitHub release's own
-([0.16.1](https://github.com/beyond10x/substrate/releases/tag/0.16.1)) and
+Do not maintain a digest list here: the digests of every release are its GitHub release's own
+(for example [0.16.1](https://github.com/beyond10x/substrate/releases/tag/0.16.1)) and
 [CHANGELOG.md](CHANGELOG.md)'s.
 
 **Ruleset `main-requires-the-full-gate` (id 23425552, no bypass actors) requires that check on `main` (`gh api repos/beyond10x/substrate/rules/branches/main` → `required_status_checks` beside `creation`, `update`, `deletion`, `non_fast_forward` and the two email patterns); the legacy `GET …/branches/main/protection` still answers 404 `Branch not protected`, because rulesets are not branch protection.** The gate is also enforced at release time: `release.yml` reads

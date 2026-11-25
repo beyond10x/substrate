@@ -34,13 +34,23 @@ const STARTS: [(&str, &str); 2] = [
 
 /// The first bundle that publishes design 30; every later one keeps it.
 const FIRST: (u64, u64, u64) = (0, 26, 0);
+/// The bundle that introduced design 30, whose compatibility block names its seven properties.
+const INTRODUCED: &str = "0.26.0";
 
-pub(super) fn applies_to(version: &str) -> bool {
+/// The first bundle that publishes the deny-list's property (design 37 § 5).
+const DENY_LIST: (u64, u64, u64) = (0, 29, 0);
+
+/// The version as three numbers, or `None` for any other form.
+fn parsed(version: &str) -> Option<(u64, u64, u64)> {
     let mut parts = version.split('.').map(str::parse::<u64>);
     match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => (major, minor, patch) >= FIRST,
-        _ => false,
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => Some((major, minor, patch)),
+        _ => None,
     }
+}
+
+pub(super) fn applies_to(version: &str) -> bool {
+    parsed(version).is_some_and(|version| version >= FIRST)
 }
 
 /// Every family word and fact name, in ADR 0044 decision 1's order. The match does not compile
@@ -74,10 +84,27 @@ fn families() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// Every property word and fact name, in the `Fact` order of `spec/confinement/`.
-fn properties() -> Vec<(&'static str, &'static str)> {
+/// Every property word and fact name the bundle `version` is held to, in the `Fact` order of
+/// `spec/confinement/`: the seven of design 30, and `exec-denied-paths` after `exec-subpaths`
+/// from `0.29.0` on (design 37 § 5). The match does not compile when a variant is added, so each
+/// property later than design 30 is given the bundle that introduces it.
+fn properties(version: &str) -> Vec<(&'static str, &'static str)> {
+    let version = parsed(version);
     wire::ConfinementProperty::ALL
         .into_iter()
+        .filter(|property| {
+            let since = match property {
+                wire::ConfinementProperty::ExecDeniedPaths => Some(DENY_LIST),
+                wire::ConfinementProperty::PathsAreHostPaths
+                | wire::ConfinementProperty::WholeTreeKill
+                | wire::ConfinementProperty::IpcSocketAllowlist
+                | wire::ConfinementProperty::IpcSignalsContained
+                | wire::ConfinementProperty::SealedPaths
+                | wire::ConfinementProperty::ExecSubpaths
+                | wire::ConfinementProperty::PrivateTmpdir => None,
+            };
+            since.is_none_or(|since| version.is_some_and(|version| version >= since))
+        })
         .map(|property| {
             let fact = match property {
                 wire::ConfinementProperty::PathsAreHostPaths => {
@@ -92,6 +119,9 @@ fn properties() -> Vec<(&'static str, &'static str)> {
                 }
                 wire::ConfinementProperty::SealedPaths => wire::CONFINEMENT_SEALED_PATHS_FACT,
                 wire::ConfinementProperty::ExecSubpaths => wire::CONFINEMENT_EXEC_SUBPATHS_FACT,
+                wire::ConfinementProperty::ExecDeniedPaths => {
+                    wire::CONFINEMENT_EXEC_DENIED_PATHS_FACT
+                }
                 wire::ConfinementProperty::PrivateTmpdir => wire::CONFINEMENT_PRIVATE_TMPDIR_FACT,
             };
             (property.name(), fact)
@@ -101,8 +131,8 @@ fn properties() -> Vec<(&'static str, &'static str)> {
 
 /// The class check, for `0.26.0` and every later bundle.
 pub(super) fn check(version: &str, released: &Tree, failures: &mut Vec<String>) {
-    check_facts(released, failures);
-    check_requires(released, failures);
+    check_facts(version, released, failures);
+    check_requires(version, released, failures);
     check_starts(released, failures);
     check_record(version, released, failures);
     for refusal in wire::CONFINEMENT_UNSERVED_REFUSALS {
@@ -125,7 +155,7 @@ pub(super) fn check_introduction(released: &Tree, failures: &mut Vec<String>) {
         .collect();
     let mut named = vec!["0.25.0", "sandbox.requires", "echoes requires", "cgroup"];
     named.extend(families().into_iter().map(|(_, fact)| fact));
-    named.extend(properties().into_iter().map(|(_, fact)| fact));
+    named.extend(properties(INTRODUCED).into_iter().map(|(_, fact)| fact));
     named.extend(wire::CONFINEMENT_UNSERVED_REFUSALS.map(|refusal| refusal.code));
     for named in named {
         if !changes.iter().any(|change| change.contains(named)) {
@@ -137,7 +167,7 @@ pub(super) fn check_introduction(released: &Tree, failures: &mut Vec<String>) {
 /// Design 30 § 4.3: each family and property fact is an optional `const: true`, published only
 /// from a verified mechanism, and the document names no other `confinement.family.` fact and no
 /// other `confinement.` fact beside the neutral `confinement.no-egress`.
-fn check_facts(released: &Tree, failures: &mut Vec<String>) {
+fn check_facts(version: &str, released: &Tree, failures: &mut Vec<String>) {
     let Some(capability) = json_at(released, CAPABILITY, failures) else {
         return;
     };
@@ -147,7 +177,7 @@ fn check_facts(released: &Tree, failures: &mut Vec<String>) {
         .and_then(Value::as_array);
     let expected: Vec<&str> = families()
         .into_iter()
-        .chain(properties())
+        .chain(properties(version))
         .map(|(_, fact)| fact)
         .collect();
     for name in &expected {
@@ -177,7 +207,8 @@ fn check_facts(released: &Tree, failures: &mut Vec<String>) {
     {
         if name != wire::CONFINEMENT_NO_EGRESS_FACT && !expected.contains(&name.as_str()) {
             failures.push(format!(
-                "{CAPABILITY}: {name} is published and the wire crate names no such fact"
+                "{CAPABILITY}: {name} is published and the wire crate names no such fact for \
+                 {version}"
             ));
         }
     }
@@ -186,7 +217,7 @@ fn check_facts(released: &Tree, failures: &mut Vec<String>) {
 /// Design 30 § 4.4: the closed `requires` object, each list exactly the wire enum in its order,
 /// unique and bounded by its size, the object non-empty, and its two refusals annotated as the
 /// wire rows are.
-fn check_requires(released: &Tree, failures: &mut Vec<String>) {
+fn check_requires(version: &str, released: &Tree, failures: &mut Vec<String>) {
     let Some(common) = json_at(released, COMMON, failures) else {
         return;
     };
@@ -224,7 +255,10 @@ fn check_requires(released: &Tree, failures: &mut Vec<String>) {
         ),
         (
             "facts",
-            properties().into_iter().map(|(word, _)| word).collect(),
+            properties(version)
+                .into_iter()
+                .map(|(word, _)| word)
+                .collect(),
         ),
     ] {
         let list = definition.pointer(&format!("/properties/{member}"));
@@ -356,7 +390,7 @@ fn check_record(version: &str, released: &Tree, failures: &mut Vec<String>) {
             failures.push(format!("{RESOURCE}: {at} still requires cgroup"));
         }
     }
-    let record = match wire_record() {
+    let record = match wire_record(version) {
         Ok(record) => record,
         Err(error) => {
             failures.push(format!(
@@ -382,10 +416,10 @@ fn check_record(version: &str, released: &Tree, failures: &mut Vec<String>) {
 /// A running exec record whose start required every family and property and whose applied record
 /// echoes that and names no cgroup: parsed into `substrate_wire::Exec` and serialized back, so it
 /// is a record the daemon can emit.
-fn wire_record() -> Result<Value, String> {
+fn wire_record(version: &str) -> Result<Value, String> {
     let requires = json!({
         "families": families().into_iter().map(|(word, _)| word).collect::<Vec<_>>(),
-        "facts": properties().into_iter().map(|(word, _)| word).collect::<Vec<_>>(),
+        "facts": properties(version).into_iter().map(|(word, _)| word).collect::<Vec<_>>(),
     });
     let snapshot = format!("sha256:{}", "7".repeat(64));
     let record = json!({
@@ -655,6 +689,76 @@ mod tests {
                 &failures,
                 &format!("{code} must be answered by exactly one vector, found 0"),
             );
+        }
+    }
+
+    /// Design 37 § 5: bundles `0.26.0` to `0.28.0` publish the seven properties of design 30,
+    /// and a bundle from `0.29.0` on publishes eight, `exec-denied-paths` after `exec-subpaths`.
+    #[test]
+    fn the_deny_list_property_is_held_from_0_29_0_on_only() {
+        let words = |version: &str| -> Vec<&str> {
+            super::properties(version)
+                .into_iter()
+                .map(|(word, _)| word)
+                .collect()
+        };
+        let seven = [
+            "paths-are-host-paths",
+            "whole-tree-kill",
+            "ipc-socket-allowlist",
+            "ipc-signals-contained",
+            "sealed-paths",
+            "exec-subpaths",
+            "private-tmpdir",
+        ];
+        for version in ["0.25.0", "0.26.0", "0.27.0", "0.28.0", "0.29"] {
+            assert_eq!(words(version), seven, "{version}");
+        }
+        let mut eight = seven.to_vec();
+        eight.insert(6, "exec-denied-paths");
+        for version in ["0.29.0", "0.30.0", "1.0.0"] {
+            assert_eq!(words(version), eight, "{version}");
+        }
+        assert_eq!(
+            super::properties("0.29.0")[6],
+            (
+                "exec-denied-paths",
+                substrate_wire::CONFINEMENT_EXEC_DENIED_PATHS_FACT
+            )
+        );
+    }
+
+    /// A bundle before `0.29.0` that declares the deny-list's fact, or admits its property in
+    /// `sandbox.requires.facts`, is refused: those bundles published seven.
+    #[test]
+    fn a_bundle_before_0_29_0_naming_the_deny_list_property_is_refused() {
+        let declared = edited(super::CAPABILITY, |capability| {
+            capability["properties"]["facts"]["properties"]["confinement.exec-denied-paths"] = serde_json::json!({
+                "const": true,
+                "x-b10x-published-only-from": super::PUBLISHED_ONLY_FROM,
+            });
+        });
+        assert_reported(
+            &failures_of(&declared),
+            "confinement.exec-denied-paths is published and the wire crate names no such fact \
+             for 0.26.0",
+        );
+        let admitted = edited(super::COMMON, |common| {
+            let list = &mut common["$defs"]["confinement-requires"]["properties"]["facts"];
+            list["items"]["enum"]
+                .as_array_mut()
+                .expect("enum")
+                .insert(6, "exec-denied-paths".into());
+            list["maxItems"] = 8.into();
+        });
+        assert_reported(
+            &failures_of(&admitted),
+            "confinement-requires.facts must be exactly",
+        );
+        for version in ["0.27.0", "0.28.0"] {
+            let mut failures = Vec::new();
+            super::check(version, &tree(version), &mut failures);
+            assert!(failures.is_empty(), "{version}: {failures:?}");
         }
     }
 

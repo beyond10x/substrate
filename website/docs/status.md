@@ -9,9 +9,9 @@ Substrate has a tagged, keyless-signed daemon image and a public, keyless-signed
 development contract bundle. Distribution is proven; the bundle remains a development contract
 because stability is a separate compatibility decision.
 
-Release [0.27.0](https://github.com/beyond10x/substrate/releases/tag/0.27.0), published on 24 November 2026,
+Release [0.28.0](https://github.com/beyond10x/substrate/releases/tag/0.28.0), published on 25 November 2026,
 ships the daemon, disposable MCP and executor images, the Helm chart and the
-signed `substrate-wire/0.28.0` development bundle. [Release notes](./releases.md) lists what changed.
+signed `substrate-wire/0.29.0` development bundle. [Release notes](./releases.md) lists what changed.
 
 Tag 0.16.0 was not published: the gate on its commit failed a dependency advisory check, and
 release tags are write-once. 0.16.1 is the first release of everything listed under 0.16.0.
@@ -41,21 +41,22 @@ Treat every capability as deployment-specific and verify it through `GET /v1/mac
 | Kubernetes namespace driver | `--driver kubernetes`, a development profile: empty workspaces from 0.16.1, and from 0.18.0 an exec where the probe proved six confinement facts |
 | remote conformance | from 0.17.0, `b10x-substrate-conformance` certifies a deployed endpoint from outside it. See [remote conformance](./guides/remote-conformance.md) |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
-| distribution | Apache-2.0 source plus keyless-signed 0.27.0 daemon, MCP and executor images, chart and binaries, and the signed 0.28.0 development bundle |
+| distribution | Apache-2.0 source plus keyless-signed 0.28.0 daemon, MCP and executor images, chart and binaries, and the signed 0.29.0 development bundle |
 
 ## Newest release
 
-Release 0.27.0 adds:
+Release 0.28.0 adds:
 
 | Area | State |
 |---|---|
-| result bound (ADR 0053) | a too-wide result is refused `operation.result-limit` (429) |
-| contract bundle | `substrate-wire/0.28.0`, with the fact `operation.result-max-json-bytes` (524,217) |
-| run limit (design 36) | `RunLimit` names what ended a confined run |
-| Rust API | breaking: the three `App` constructors return `Result` |
-| `exec run`, `workspace renew`, `session signal` | a retry prints the stored result |
-| host driver | a signal to an ended run answers with its end |
-| Git create | work and memory follow the byte limit |
+| executable lists (design 37) | a start carries `sandbox.exec_subpaths` and `sandbox.exec_denied_paths` |
+| contract bundle | `substrate-wire/0.29.0`, with eight refusal codes |
+| daemon | `--exec-gate <path>` names the static helper |
+| capability snapshot | `confinement.exec-denied-paths` and `withheld` |
+| file systems | the lists are served on `xfs` too |
+| Rust API | breaking: six public types gain a member |
+| `ConfinementProfile` | breaking: the allow-list holds 64 entries |
+| host driver | a startup probe ends with its sandbox |
 
 The Kubernetes namespace driver's limits are in the
 [deployment guide](./guides/deployment.md#kubernetes-namespace-driver).
@@ -85,7 +86,7 @@ in a broader architecture do not imply served endpoints.
   Identity round trip on a reused keep-alive connection (at most 8 idle, closed after 30 s idle or
   any error), so a completed revocation applies to the next request.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Release `0.27.0` advertises `substrate-wire/0.28.0` and the SHA-256 of its inner
+- Release `0.28.0` advertises `substrate-wire/0.29.0` and the SHA-256 of its inner
   `bundle.json` as one claim. The outer OCI package has its own digest. Bundle `0.15.0`
   deliberately replaced `/v1/pipe-sessions` with `/v1/sessions` and serves no compatibility alias.
 - Git materialization needs a configured source and transient Connector authority. The conditional

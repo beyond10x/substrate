@@ -239,7 +239,7 @@ impl Check {
 /// Every code `substrate_refusals_total` names: the codes the wire crate names as constants.
 /// Any other code is counted as `other`. `tests::the_refusal_codes_are_the_wire_constants` holds
 /// this list to the wire crate's source, so a constant added there fails until it is added here.
-const REFUSAL_CODES: [&str; 114] = [
+const REFUSAL_CODES: [&str; 120] = [
     substrate_wire::EXEC_METRICS_UNSERVED,
     substrate_wire::EXEC_SCRATCH_QUOTA_UNSERVED,
     substrate_wire::EXEC_SCRATCH_QUOTA_LIMIT,
@@ -354,6 +354,12 @@ const REFUSAL_CODES: [&str; 114] = [
     substrate_wire::WORKSPACE_ADOPT_UNSERVED,
     substrate_wire::CONFINEMENT_FAMILY_UNSERVED,
     substrate_wire::CONFINEMENT_FACT_UNSERVED,
+    substrate_wire::EXEC_SANDBOX_EXEC_SUBPATHS_EMPTY,
+    substrate_wire::CONFINEMENT_EXEC_DENIED_PATHS_WITHOUT_SUBPATHS,
+    substrate_wire::EXEC_SANDBOX_PATH_UNREPRESENTABLE,
+    substrate_wire::EXEC_SANDBOX_EXEC_SUBPATH_UNDECLARED,
+    substrate_wire::EXEC_SANDBOX_PROGRAM_UNLISTED,
+    substrate_wire::EXEC_SANDBOX_PLACE_UNSERVED,
 ];
 
 /// One counter per label combination.
@@ -1293,8 +1299,8 @@ mod tests {
             None,
             Some("linux"),
         );
-        assert_eq!(SERIES_MAXIMUM, 586);
-        assert_eq!(HOST_SERIES_MAXIMUM, 587);
+        assert_eq!(SERIES_MAXIMUM, 592);
+        assert_eq!(HOST_SERIES_MAXIMUM, 593);
         assert_eq!(samples(&exposition).len(), HOST_SERIES_MAXIMUM);
         let refusals = samples(&exposition)
             .iter()
@@ -1520,7 +1526,7 @@ mod tests {
             )
         );
         assert_eq!(samples(&namespace).len(), KUBERNETES_SERIES_MAXIMUM);
-        assert_eq!(KUBERNETES_SERIES_MAXIMUM, 587);
+        assert_eq!(KUBERNETES_SERIES_MAXIMUM, 593);
     }
 
     /// The scrape states the driver's count as it is, so one more collision is one more on the
@@ -1554,8 +1560,18 @@ mod tests {
             "SESSION_AUTHORITY_TRANSCRIPT_DOMAIN",
             "WORKSPACE_ROOT_DIRECTORY",
         ];
-        let named = source
-            .lines()
+        // A declaration rustfmt wraps after its `=` is read as one line with the next, so a long
+        // name does not take a constant out of the count.
+        let lines: Vec<&str> = source.lines().collect();
+        let declarations = lines.iter().enumerate().map(|(index, line)| {
+            match (line.strip_suffix(" ="), lines.get(index + 1)) {
+                (Some(head), Some(value)) if line.starts_with("pub const ") => {
+                    format!("{head} = {}", value.trim_start())
+                }
+                _ => (*line).to_owned(),
+            }
+        });
+        let named = declarations
             .filter_map(|line| {
                 let (name, rest) = line.strip_prefix("pub const ")?.split_once(": &str = \"")?;
                 let value = rest.strip_suffix("\";")?;

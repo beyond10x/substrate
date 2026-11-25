@@ -53,9 +53,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.28.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.29.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "2cf0b0bd5a96600f4fbc02d2f98c3c76d839e3926399535487bc41f29e219e78";
+    "65bde1870351dfb72d4431d2dd88f0f641e91cc814007d01e0a5250517539bfd";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2991,7 +2991,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.28.0/operations.json");
+            .join("contracts/substrate-wire/0.29.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -3657,6 +3657,9 @@ async fn check_http_journey(
         check_writable_roots_refused(daemon, &workspace, &snapshot, cgroup_root.is_some()).await;
     passed +=
         check_confinement_requires(daemon, &workspace, &snapshot, cgroup_root.is_some()).await;
+    // This daemon is started without `--exec-gate` on both lanes, so it proves no executable
+    // list; the delegated one still serves sessions, which holds row 4 on a session start.
+    passed += check_exec_lists_unserved(daemon, &workspace, &snapshot, cgroup_root.is_some()).await;
 
     if let Some(cgroup_root) = cgroup_root {
         passed += check_confined_writable_roots(daemon, &workspace, &snapshot, writable).await;
@@ -8095,12 +8098,981 @@ async fn check_root_page_host_entries(daemon: &Daemon, workspace: &str) -> usize
 }
 
 // ---------------------------------------------------------------------------------------------
+// The executable lists on the wire (design 37, bundle `0.29.0`)
+// ---------------------------------------------------------------------------------------------
+
+/// Names the statically linked `substrate-exec-gate` that `scripts/delegated-lane.sh` builds.
+/// The daemon of [`runtime_clean_room_holds_runs_to_executable_lists`] is started with
+/// `--exec-gate` naming it on the delegated lane; unset, those cases are absent.
+const EXEC_GATE_VARIABLE: &str = "SUBSTRATE_EXEC_GATE";
+/// Names a dynamically linked build of the same helper, which a daemon refuses at startup.
+const EXEC_GATE_DYNAMIC_VARIABLE: &str = "SUBSTRATE_EXEC_GATE_DYNAMIC";
+/// The two facts that prove the lists (design 37 § 5).
+const EXEC_LIST_FACTS: [&str; 2] = ["confinement.exec-subpaths", "confinement.exec-denied-paths"];
+/// The addresses of the two members (design 37 § 2): an exec start's, and a session start's too.
+const EXEC_SUBPATHS_ADDRESS: &str = "sandbox.exec_subpaths";
+const EXEC_DENIED_PATHS_ADDRESS: &str = "sandbox.exec_denied_paths";
+/// Where a declared Git root is mounted in the start that holds it to an allow-list.
+const EXEC_LIST_GIT_MOUNT: &str = "/srv/listed-checkout";
+
+/// The cases of [`runtime_clean_room_holds_runs_to_executable_lists`] that need the delegated
+/// root and the helper, each printing `<name>: executed`, or `<name>: ABSENT (<cause>)` where it
+/// did not run. `scripts/delegated-lane.sh` requires every `executed` line and no `ABSENT` line.
+const EXEC_LIST_DELEGATED_NAMES: [&str; 11] = [
+    "runtime exec lists facts",
+    "runtime exec lists exec start",
+    "runtime exec lists session start",
+    "runtime exec lists start without the members",
+    "runtime exec lists pty session",
+    "runtime exec lists entry unrepresentable",
+    "runtime exec lists entry undeclared",
+    "runtime exec lists capsule start",
+    "runtime exec lists program unlisted",
+    "runtime exec lists shape",
+    "runtime exec lists git root",
+];
+
+/// A path an environment variable names, or `None` when it is unset or empty.
+fn named_path(variable: &str) -> Option<PathBuf> {
+    std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The host's copy of a base tool, where this distribution keeps it, as the path a run's view
+/// shows it at: `/usr` and `/bin` are bound read-only at their own paths.
+fn base_tool(name: &str) -> String {
+    ["/usr/bin", "/bin"]
+        .iter()
+        .map(|directory| Path::new(directory).join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("no {name} in /usr/bin or /bin"))
+        .display()
+        .to_string()
+}
+
+/// A released vector of bundle `0.29.0`, read from the bundle's own bytes: the runner links no
+/// implementation, so what it compares an answer with is what the bundle published.
+fn released_vector(version: &str, name: &str) -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contracts/substrate-wire")
+        .join(version)
+        .join("vectors/http")
+        .join(format!("{name}.json"));
+    let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    serde_json::from_slice(&bytes).expect("vector JSON")
+}
+
+/// One start a vector sends, against this daemon: the vector's operation, request id and route,
+/// and its input with this daemon's workspace and snapshot in place of the fixture's.
+struct VectorStart {
+    operation: String,
+    request_id: String,
+    path: String,
+    input: Value,
+    expected_status: u16,
+    expected_body: Value,
+}
+
+impl VectorStart {
+    fn of(name: &str, workspace: &str, snapshot: &str) -> Self {
+        let vector = released_vector("0.29.0", &format!("exec-lists-{name}"));
+        let request = &vector["action"]["request"];
+        let mut input = request["body"]["input"].clone();
+        let exec = if input.get("exec").is_some() {
+            &mut input["exec"]
+        } else {
+            &mut input
+        };
+        exec["workspace"] = json!(workspace);
+        exec["sandbox"]["capability_snapshot"] = json!(snapshot);
+        let response = &vector["expected"]["response"];
+        Self {
+            operation: text(&request["body"]["op"]),
+            request_id: text(&request["headers"]["x-request-id"]),
+            path: text(&request["path"]),
+            input,
+            expected_status: u16::try_from(response["status"].as_u64().expect("status"))
+                .expect("an HTTP status"),
+            expected_body: response["body"].clone(),
+        }
+    }
+
+    /// The vector's exec input as a raw-pipe session start's `exec`.
+    fn as_session(&self) -> Value {
+        session_with_exec_field(self.input.clone(), "wait", json!(false))
+    }
+
+    /// The vector's error as this daemon answers it for `operation` and `request_id`.
+    fn expected_error_for(&self, operation: &str, request_id: &str) -> Value {
+        let mut body = self.expected_body.clone();
+        body["error"]["operation"] = json!(operation);
+        body["request_id"] = json!(request_id);
+        body
+    }
+}
+
+/// How the ledger records a refused start (design 37 D23): a refusal the daemon answers before it
+/// accepts the operation is `refused`; one the driver answers ends the accepted operation, whose
+/// state is `terminal` with the refusal as its error.
+const RECORDED_BY_THE_DAEMON: &str = "refused";
+const RECORDED_BY_THE_DRIVER: &str = "terminal";
+
+/// Sends `input` to `path` under `operation`, requires the answer to be `status` and `body`
+/// exactly, and the operation recorded as `recorded`.
+async fn expect_answer_recorded(
+    daemon: &Daemon,
+    path: &str,
+    (operation, request_id): (&str, &str),
+    input: &Value,
+    (status, body): (u16, &Value),
+    recorded: &str,
+) {
+    let (actual, answer) = daemon
+        .call("POST", path, request_id, Some(&mutation(operation, input)))
+        .await;
+    assert_eq!(actual, status, "{operation}: {answer}");
+    assert_eq!(&answer, body, "{operation}");
+    assert_eq!(
+        ledger_row(daemon, operation, &format!("{request_id}_ledger")).await["state"],
+        recorded,
+        "{operation}"
+    );
+}
+
+/// [`expect_answer_recorded`] for a refusal the daemon answers before it accepts the operation.
+async fn expect_refused_as(
+    daemon: &Daemon,
+    path: &str,
+    ids: (&str, &str),
+    input: &Value,
+    status: u16,
+    body: &Value,
+) {
+    expect_answer_recorded(
+        daemon,
+        path,
+        ids,
+        input,
+        (status, body),
+        RECORDED_BY_THE_DAEMON,
+    )
+    .await;
+}
+
+/// Sends `input` to `path` under `operation` and requires `code` with `status` at `address`,
+/// and the operation recorded as `recorded`. Returns the error.
+async fn expect_error_recorded(
+    daemon: &Daemon,
+    path: &str,
+    (operation, request_id): (&str, &str),
+    input: &Value,
+    (status, code, address): (u16, &str, &str),
+    recorded: &str,
+) -> Value {
+    let response = daemon
+        .call("POST", path, request_id, Some(&mutation(operation, input)))
+        .await;
+    expect_error_at(&response, status, code, address);
+    assert_eq!(
+        ledger_row(daemon, operation, &format!("{request_id}_ledger")).await["state"],
+        recorded,
+        "{operation}"
+    );
+    response.1["error"].clone()
+}
+
+/// [`expect_error_recorded`] for a refusal the daemon answers before it accepts the operation.
+async fn expect_refused_at(
+    daemon: &Daemon,
+    path: &str,
+    ids: (&str, &str),
+    input: &Value,
+    answer: (u16, &str, &str),
+) -> Value {
+    expect_error_recorded(daemon, path, ids, input, answer, RECORDED_BY_THE_DAEMON).await
+}
+
+/// `input` with its `sandbox` naming `allow` and `deny`, each set only where given.
+fn with_lists(mut input: Value, allow: Option<Value>, deny: Option<Value>) -> Value {
+    if let Some(allow) = allow {
+        input["sandbox"]["exec_subpaths"] = allow;
+    }
+    if let Some(deny) = deny {
+        input["sandbox"]["exec_denied_paths"] = deny;
+    }
+    input
+}
+
+/// The forms of row 1 of design 37 § 6 that the wire crate's lexical rule answers at the
+/// member's address, and `null`, which the decoder refuses: each with the address it is answered
+/// at. Sixty-five entries is one past `MAX_EXEC_SUBPATHS`, 4,096 bytes one past
+/// `MAX_EXEC_LIST_ENTRY_BYTES`.
+fn lexical_list_forms() -> Vec<(&'static str, Option<Value>, Option<Value>, &'static str)> {
+    let sixty_five: Vec<String> = (0..65).map(|index| format!("tools/t{index}")).collect();
+    vec![
+        ("null", Some(Value::Null), None, "input"),
+        (
+            "sixty-five",
+            Some(json!(sixty_five)),
+            None,
+            EXEC_SUBPATHS_ADDRESS,
+        ),
+        (
+            "empty-entry",
+            Some(json!([""])),
+            None,
+            EXEC_SUBPATHS_ADDRESS,
+        ),
+        (
+            "over-long-entry",
+            Some(json!(["a".repeat(4096)])),
+            None,
+            EXEC_SUBPATHS_ADDRESS,
+        ),
+        (
+            "duplicate",
+            Some(json!(["bin", "bin"])),
+            None,
+            EXEC_SUBPATHS_ADDRESS,
+        ),
+        (
+            "deny-duplicate",
+            Some(json!(["bin"])),
+            Some(json!(["bin/x", "bin/x"])),
+            EXEC_DENIED_PATHS_ADDRESS,
+        ),
+    ]
+}
+
+/// Row 4 of design 37 § 6 on a daemon started without `--exec-gate`, on both lanes: both facts
+/// absent and no `withheld`, so an exec start naming an allow-list, and one naming both lists,
+/// is `confinement.fact-unserved` (501) at the allow-list, the bundle's vector answer, recorded
+/// as refused. A session start naming the same is that answer on the delegated lane; on the
+/// portable lane the session's own check answers first, `session.confinement-unavailable`.
+///
+/// Called by the journey, whose daemon proves no list on either lane and whose other cases name
+/// no list. Five cases on each lane.
+async fn check_exec_lists_unserved(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    delegated: bool,
+) -> usize {
+    const NAME: &str = "runtime exec lists unserved without a helper";
+    let mut passed = 0;
+    let (status, machine) = daemon
+        .call(
+            "GET",
+            "/v1/machine",
+            "req_exec_lists_unserved_machine",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    for fact in EXEC_LIST_FACTS {
+        assert!(
+            machine["result"]["facts"].get(fact).is_none(),
+            "a daemon without --exec-gate proves no list: {machine}"
+        );
+    }
+    assert!(
+        machine["result"].get("withheld").is_none(),
+        "nothing was withheld where no helper was configured: {machine}"
+    );
+    passed += 1;
+
+    // The allow-list's vector, as published.
+    let allow = VectorStart::of("allow-list-fact-unserved", workspace, snapshot);
+    expect_refused_as(
+        daemon,
+        &allow.path,
+        (&allow.operation, &allow.request_id),
+        &allow.input,
+        allow.expected_status,
+        &allow.expected_body,
+    )
+    .await;
+    passed += 1;
+
+    // Both lists: the allow-list's fact is read first, so the answer is the allow-list's.
+    let both = VectorStart::of("deny-list-fact-unserved", workspace, snapshot);
+    expect_refused_as(
+        daemon,
+        &both.path,
+        (&both.operation, &both.request_id),
+        &both.input,
+        allow.expected_status,
+        &allow.expected_error_for(&both.operation, &both.request_id),
+    )
+    .await;
+    passed += 1;
+
+    for (index, start) in [&allow, &both].into_iter().enumerate() {
+        let operation = format!("01JDESIGN37UNSERVEDSESS{index}");
+        let request_id = format!("req_exec_lists_unserved_session_{index}");
+        if delegated {
+            expect_refused_as(
+                daemon,
+                "/v1/sessions",
+                (&operation, &request_id),
+                &start.as_session(),
+                allow.expected_status,
+                &allow.expected_error_for(&operation, &request_id),
+            )
+            .await;
+        } else {
+            expect_refused_at(
+                daemon,
+                "/v1/sessions",
+                (&operation, &request_id),
+                &start.as_session(),
+                (501, "session.confinement-unavailable", "session"),
+            )
+            .await;
+        }
+        passed += 1;
+    }
+    println!("{NAME}: executed");
+    passed
+}
+
+/// Rows 1 to 3 of design 37 § 6, which the daemon answers before any fact is read, so both
+/// lanes give one answer on an exec start: an empty allow-list and a deny-list without an
+/// allow-list are the bundle's vector answers, each lexical form of row 1 is
+/// `request.schema-invalid`, and a retried start with other lists is
+/// `operation.request-conflict`. A session start: the delegated lane answers the same rows; the
+/// portable lane answers `null` as `request.schema-invalid` (the decoder) and every other form
+/// `session.confinement-unavailable` (the session's own check, which runs first). Each recorded
+/// as refused. Six cases on each lane.
+#[allow(clippy::too_many_lines)] // One case per row, in the order the daemon checks them.
+async fn check_exec_list_shape(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    delegated: bool,
+) -> usize {
+    let mut passed = 0;
+    let empty = VectorStart::of("empty-allow-list-is-refused", workspace, snapshot);
+    let deny_only = VectorStart::of(
+        "deny-list-without-allow-list-is-refused",
+        workspace,
+        snapshot,
+    );
+    for start in [&empty, &deny_only] {
+        expect_refused_as(
+            daemon,
+            &start.path,
+            (&start.operation, &start.request_id),
+            &start.input,
+            start.expected_status,
+            &start.expected_body,
+        )
+        .await;
+        passed += 1;
+    }
+
+    let plain = ExecInput::new(workspace, snapshot, &["/usr/bin/true"], false).build();
+    for (form, allow, deny, address) in lexical_list_forms() {
+        let operation = format!("01JDESIGN37LEXICAL{}", form.to_ascii_uppercase());
+        let request_id = format!("req_exec_lists_lexical_{form}");
+        expect_refused_at(
+            daemon,
+            "/v1/execs",
+            (&operation, &request_id),
+            &with_lists(plain.clone(), allow, deny),
+            (422, "request.schema-invalid", address),
+        )
+        .await;
+    }
+    passed += 1;
+
+    // A retried start replays its refusal; the same operation with other lists is a conflict,
+    // and the record stays the refusal it was.
+    let (status, replayed) = daemon
+        .call(
+            "POST",
+            &empty.path,
+            "req_exec_lists_replay",
+            Some(&mutation(&empty.operation, &empty.input)),
+        )
+        .await;
+    assert_eq!(status, empty.expected_status, "{replayed}");
+    assert_eq!(
+        replayed["error"], empty.expected_body["error"],
+        "{replayed}"
+    );
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                &empty.path,
+                "req_exec_lists_conflict",
+                Some(&mutation(
+                    &empty.operation,
+                    &with_lists(empty.input.clone(), Some(json!(["/usr/bin"])), None),
+                )),
+            )
+            .await,
+        409,
+        "operation.request-conflict",
+    );
+    assert_eq!(
+        ledger_row(daemon, &empty.operation, "req_exec_lists_conflict_ledger").await["state"],
+        "refused"
+    );
+    passed += 1;
+
+    // A session start: `null` is the decoder's on both lanes.
+    let operation = "01JDESIGN37SESSIONNULL001";
+    expect_refused_at(
+        daemon,
+        "/v1/sessions",
+        (operation, "req_exec_lists_session_null"),
+        &session_with_exec_field(
+            with_lists(plain.clone(), Some(Value::Null), None),
+            "wait",
+            json!(false),
+        ),
+        (422, "request.schema-invalid", "input"),
+    )
+    .await;
+    passed += 1;
+
+    // Every other form: the rows themselves on the delegated lane, the session's own refusal on
+    // the portable one.
+    let mut forms = vec![
+        (
+            "empty",
+            Some(json!([])),
+            None,
+            Some(&empty),
+            EXEC_SUBPATHS_ADDRESS,
+        ),
+        (
+            "deny-only",
+            None,
+            Some(json!(["tools/unsafe"])),
+            Some(&deny_only),
+            EXEC_DENIED_PATHS_ADDRESS,
+        ),
+    ];
+    for (form, allow, deny, address) in lexical_list_forms() {
+        if form != "null" {
+            forms.push((form, allow, deny, None, address));
+        }
+    }
+    for (form, allow, deny, vector, address) in forms {
+        let operation = format!("01JDESIGN37SESSION{}", form.to_ascii_uppercase());
+        let request_id = format!("req_exec_lists_session_{form}");
+        let input =
+            session_with_exec_field(with_lists(plain.clone(), allow, deny), "wait", json!(false));
+        match (delegated, vector) {
+            (true, Some(vector)) => {
+                expect_refused_as(
+                    daemon,
+                    "/v1/sessions",
+                    (&operation, &request_id),
+                    &input,
+                    vector.expected_status,
+                    &vector.expected_error_for(&operation, &request_id),
+                )
+                .await;
+            }
+            (true, None) => {
+                expect_refused_at(
+                    daemon,
+                    "/v1/sessions",
+                    (&operation, &request_id),
+                    &input,
+                    (422, "request.schema-invalid", address),
+                )
+                .await;
+            }
+            (false, _) => {
+                expect_refused_at(
+                    daemon,
+                    "/v1/sessions",
+                    (&operation, &request_id),
+                    &input,
+                    (501, "session.confinement-unavailable", "session"),
+                )
+                .await;
+            }
+        }
+    }
+    passed += 1;
+    passed
+}
+
+/// The workspace files the delegated cases run: `bin/tool` and `bin/denied` beneath the listed
+/// directory, `other/tool` outside it, each a copy of the host's `true`.
+fn stage_listed_programs(directory: &Path) {
+    for (parent, name) in [("bin", "tool"), ("bin", "denied"), ("other", "tool")] {
+        std::fs::create_dir_all(directory.join(parent)).expect("program directory");
+        std::fs::copy(base_tool("true"), directory.join(parent).join(name)).expect("copy true");
+    }
+}
+
+/// The acceptance's script: a listed program runs (0), an unlisted one fails with `EACCES`
+/// (126), and the run ends executing the denied program beneath the listed directory, which
+/// fails the same way.
+const LISTED_SCRIPT: &str = "bin/tool; echo $?; other/tool; echo $?; exec bin/denied";
+/// What [`LISTED_SCRIPT`] prints before its last execution.
+const LISTED_STDOUT: &str = "0\n126\n";
+
+/// The allow-list and deny-list of the acceptance, as sent and as echoed.
+fn acceptance_lists() -> (Value, Value) {
+    (json!(["bin"]), json!(["bin/denied"]))
+}
+
+/// Requires `record` to be a run held to the acceptance's lists that ended with status 126
+/// after printing [`LISTED_STDOUT`], with two executions refused by `EACCES` on its stderr.
+async fn expect_listed_run(daemon: &Daemon, record: &Value) {
+    let (allow, deny) = acceptance_lists();
+    assert_eq!(record["exit"]["code"], 126, "{record}");
+    for side in ["requested", "applied"] {
+        assert_eq!(record[side]["exec_subpaths"], allow, "{side}: {record}");
+        assert_eq!(record[side]["exec_denied_paths"], deny, "{side}: {record}");
+    }
+    let id = text(&record["id"]);
+    let stdout = decoded(&read_output(daemon, &id, "stdout").await);
+    assert_eq!(String::from_utf8_lossy(&stdout), LISTED_STDOUT, "{record}");
+    let stderr =
+        String::from_utf8_lossy(&decoded(&read_output(daemon, &id, "stderr").await)).into_owned();
+    assert_eq!(
+        stderr.matches("Permission denied").count(),
+        2,
+        "the unlisted and the denied program each failed with EACCES: {stderr}"
+    );
+}
+
+/// The delegated lane, on a daemon started with `--exec-gate` naming the static helper: both
+/// facts published; an exec start and a session start each held to an allow-list and a
+/// deny-list; a start without the members; rows 5 to 8 once each, and row 6 again for a
+/// start with a capsule, whose program no list can name; rows 1 to 3 again
+/// ([`check_exec_list_shape`]); and one start with a Git writable root and an allow-list.
+/// Sixteen cases.
+#[allow(clippy::too_many_lines)] // One case per row and per start, in the order of design 37 § 12.
+async fn check_confined_exec_lists(
+    daemon: &Daemon,
+    machine: &Value,
+    source: &GitSourceFixture,
+) -> usize {
+    let mut passed = 0;
+    let snapshot = text(&machine["result"]["snapshot"]);
+    for fact in EXEC_LIST_FACTS {
+        assert_eq!(machine["result"]["facts"][fact], true, "{machine}");
+    }
+    assert!(machine["result"].get("withheld").is_none(), "{machine}");
+    println!("runtime exec lists facts: executed");
+    passed += 1;
+
+    let workspace =
+        create_empty_workspace(daemon, "01JDESIGN37LISTEDWORKSPACE", "req_exec_lists_ws").await;
+    stage_listed_programs(&daemon.workspaces.join(&workspace));
+    let sh = base_tool("sh");
+    let (allow, deny) = acceptance_lists();
+
+    // The acceptance on an exec start.
+    let (status, executed) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_exec_lists_exec",
+            Some(&mutation(
+                "01JDESIGN37LISTEDEXEC0001",
+                &with_lists(
+                    ExecInput::new(&workspace, &snapshot, &[&sh, "-c", LISTED_SCRIPT], true)
+                        .build(),
+                    Some(allow.clone()),
+                    Some(deny.clone()),
+                ),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{executed}");
+    assert_eq!(executed["result"]["state"], "exited", "{executed}");
+    expect_listed_run(daemon, &executed["result"]).await;
+    println!("runtime exec lists exec start: executed");
+    passed += 1;
+
+    // The acceptance on a session start: the session's exec record is held to the same lists.
+    let session_script = format!("read line; {LISTED_SCRIPT}");
+    let (status, session) = daemon
+        .call(
+            "POST",
+            "/v1/sessions",
+            "req_exec_lists_session",
+            Some(&mutation(
+                "01JDESIGN37LISTEDSESSION1",
+                &session_with_exec_field(
+                    with_lists(
+                        ExecInput::new(&workspace, &snapshot, &[&sh, "-c", &session_script], false)
+                            .build(),
+                        Some(allow.clone()),
+                        Some(deny.clone()),
+                    ),
+                    "wait",
+                    json!(false),
+                ),
+            )),
+        )
+        .await;
+    assert_eq!(status, 202, "{session}");
+    let (terminal, observed) = run_session_to_exit(daemon, &session, |_| true).await;
+    assert_eq!(terminal["exit"]["code"], 126, "{terminal}");
+    expect_listed_run(daemon, &observed).await;
+    println!("runtime exec lists session start: executed");
+    passed += 1;
+
+    // A start without the members: neither its request nor its record names a list.
+    let (status, plain) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_exec_lists_plain",
+            Some(&mutation(
+                "01JDESIGN37LISTEDPLAIN001",
+                &ExecInput::new(&workspace, &snapshot, &["/usr/bin/true"], true).build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{plain}");
+    assert_eq!(plain["result"]["exit"], EXITED_CLEANLY(), "{plain}");
+    for side in ["requested", "applied"] {
+        for member in ["exec_subpaths", "exec_denied_paths"] {
+            assert!(
+                plain["result"][side].get(member).is_none(),
+                "{side}.{member}: {plain}"
+            );
+        }
+    }
+    println!("runtime exec lists start without the members: executed");
+    passed += 1;
+
+    // Row 5: a pty session held to a list, the bundle's vector answer. Rows 5 to 8 are the
+    // driver's: the operation was accepted and the refusal is its recorded end (D23).
+    let pty = VectorStart::of("pty-session-is-unserved", &workspace, &snapshot);
+    expect_answer_recorded(
+        daemon,
+        &pty.path,
+        (&pty.operation, &pty.request_id),
+        &pty.input,
+        (pty.expected_status, &pty.expected_body),
+        RECORDED_BY_THE_DRIVER,
+    )
+    .await;
+    println!("runtime exec lists pty session: executed");
+    passed += 1;
+
+    // Rows 6 to 8: the driver's, each at its row's code, status and address, with a message
+    // that names what the request sent.
+    for (name, vector, sent) in [
+        (
+            "runtime exec lists entry unrepresentable",
+            "entry-unrepresentable-is-refused",
+            "\"tools/../bin\"",
+        ),
+        (
+            "runtime exec lists entry undeclared",
+            "entry-undeclared-is-refused",
+            "\"/opt/tools\"",
+        ),
+        (
+            "runtime exec lists program unlisted",
+            "denied-program-is-refused",
+            "\"/usr/bin/true\"",
+        ),
+    ] {
+        let start = VectorStart::of(vector, &workspace, &snapshot);
+        let expected = &start.expected_body["error"];
+        let error = expect_error_recorded(
+            daemon,
+            &start.path,
+            (&start.operation, &start.request_id),
+            &start.input,
+            (
+                start.expected_status,
+                expected["code"].as_str().expect("code"),
+                expected["address"].as_str().expect("address"),
+            ),
+            RECORDED_BY_THE_DRIVER,
+        )
+        .await;
+        assert_eq!(error["class"], expected["class"], "{name}: {error}");
+        assert!(
+            text(&error["message"]).contains(sent),
+            "{name}: the message names {sent}: {error}"
+        );
+        println!("{name}: executed");
+        passed += 1;
+    }
+
+    // Row 6 for a start with a capsule: its program lies beneath the capsule mount, `/runtime`,
+    // which is no location a list may name, and the program is judged before the entries
+    // (design 37 § 16). Nothing runs. The capsule is the released inline-capsule vector's,
+    // whose manifest is computed here by the published rule first.
+    let capsule =
+        released_vector("0.29.0", "inline-capsule-unserved-without-the-fact")["action"]["request"]
+            ["body"]["input"]["capsule"]
+            .clone();
+    assert_eq!(
+        capsule_manifest(&capsule),
+        text(&capsule["manifest_sha256"]),
+        "the capsule's manifest is its digest by the published rule"
+    );
+    let mut capsule_start = with_lists(
+        ExecInput::new(&workspace, &snapshot, &["/runtime/run"], false).build(),
+        Some(json!(["/runtime"])),
+        None,
+    );
+    capsule_start["capsule"] = capsule;
+    let error = expect_error_recorded(
+        daemon,
+        "/v1/execs",
+        ("01JDESIGN37LISTEDCAPSULE1", "req_exec_lists_capsule"),
+        &capsule_start,
+        (422, "exec.sandbox-path-unrepresentable", "argv"),
+        RECORDED_BY_THE_DRIVER,
+    )
+    .await;
+    assert!(
+        text(&error["message"]).contains("\"/runtime/run\""),
+        "the message names the program: {error}"
+    );
+    println!("runtime exec lists capsule start: executed");
+    passed += 1;
+
+    passed += check_exec_list_shape(daemon, &workspace, &snapshot, true).await;
+    println!("{EXEC_LIST_SHAPE_NAME}: executed");
+
+    passed += check_exec_list_git_root(daemon, &workspace, &snapshot, source).await;
+    println!("runtime exec lists git root: executed");
+    passed
+}
+
+/// The manifest digest of an inline capsule by the published rule (`hashing.json`,
+/// `b10x.execution-capsule.v1`): each field framed by its length as four big-endian bytes, the
+/// domain, the entrypoint, then per file its path, role, `1` or `0` and content digest.
+fn capsule_manifest(capsule: &Value) -> String {
+    let mut framed = Vec::new();
+    let mut frame = |field: &[u8]| {
+        framed.extend_from_slice(&u32::try_from(field.len()).expect("field").to_be_bytes());
+        framed.extend_from_slice(field);
+    };
+    frame(b"b10x.execution-capsule.v1");
+    frame(text(&capsule["entrypoint"]).as_bytes());
+    for file in capsule["files"].as_array().expect("files") {
+        frame(text(&file["path"]).as_bytes());
+        frame(text(&file["role"]).as_bytes());
+        frame(if file["executable"] == true {
+            b"1"
+        } else {
+            b"0"
+        });
+        frame(text(&file["sha256"]).as_bytes());
+    }
+    sha256_hex(&framed)
+}
+
+/// One start with a Git writable root and an allow-list naming a directory of it: a program
+/// beneath the listed directory of the checkout runs, and one beside it fails with `EACCES`.
+async fn check_exec_list_git_root(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    source: &GitSourceFixture,
+) -> usize {
+    let (status, created) = daemon
+        .call_headed(
+            "POST",
+            "/v1/workspaces",
+            "req_exec_lists_checkout",
+            &[("x-b10x-workspace-source-authorization", "fixture-authority")],
+            Some(&mutation(
+                "01JDESIGN37LISTEDCHECKOUT",
+                &source.create_input(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let checkout = text(&created["result"]["id"]);
+    stage_listed_programs(&daemon.workspaces.join(&checkout));
+    let listed = format!("{EXEC_LIST_GIT_MOUNT}/bin");
+    let script =
+        format!("{EXEC_LIST_GIT_MOUNT}/bin/tool; echo $?; exec {EXEC_LIST_GIT_MOUNT}/other/tool");
+    let sh = base_tool("sh");
+    let (status, executed) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_exec_lists_git",
+            Some(&mutation(
+                "01JDESIGN37LISTEDGITROOT1",
+                &with_lists(
+                    ExecInput::new(workspace, snapshot, &[&sh, "-c", &script], true)
+                        .writable_roots(
+                            json!([{ "workspace": checkout, "mount": EXEC_LIST_GIT_MOUNT }]),
+                        )
+                        .build(),
+                    Some(json!([listed])),
+                    None,
+                ),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{executed}");
+    let record = &executed["result"];
+    assert_eq!(record["exit"]["code"], 126, "{executed}");
+    assert_eq!(
+        record["applied"]["exec_subpaths"],
+        json!([listed]),
+        "{executed}"
+    );
+    let id = text(&record["id"]);
+    let stdout = decoded(&read_output(daemon, &id, "stdout").await);
+    assert_eq!(String::from_utf8_lossy(&stdout), "0\n", "{executed}");
+    let stderr =
+        String::from_utf8_lossy(&decoded(&read_output(daemon, &id, "stderr").await)).into_owned();
+    assert!(
+        stderr.contains("Permission denied"),
+        "the unlisted program in the Git root failed with EACCES: {stderr}"
+    );
+    1
+}
+
+/// The case of [`EXEC_LIST_DELEGATED_NAMES`] the portable lane runs too.
+const EXEC_LIST_SHAPE_NAME: &str = "runtime exec lists shape";
+
+/// Prints every delegated case of the executable lists as absent, with `cause`; the shape case
+/// too, unless the portable lane runs it.
+fn exec_lists_absent(cause: &str, shape_runs: bool) {
+    for name in EXEC_LIST_DELEGATED_NAMES {
+        if !(shape_runs && name == EXEC_LIST_SHAPE_NAME) {
+            println!("{name}: ABSENT ({cause})");
+        }
+    }
+}
+
+/// The executable lists (design 37), on both lanes, on a daemon of their own. Portable: no
+/// helper and no confinement, so rows 1 to 3 are held ([`check_exec_list_shape`]); the journey
+/// holds row 4. Delegated: the daemon is started with `--exec-gate` naming
+/// [`EXEC_GATE_VARIABLE`] and declares a Git source ([`check_confined_exec_lists`]). Without the
+/// helper, or where the open withheld a fact, the delegated cases are absent: each prints its
+/// `ABSENT` line and nothing is counted or reported passed (invariant 3).
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_clean_room_holds_runs_to_executable_lists() {
+    const PART: &str = "the executable lists";
+    let delegated = DelegatedCgroup::acquire();
+    let temporary = clean_room("substrate-exec-lists-");
+    let Some(cgroup) = delegated.as_ref() else {
+        exec_lists_absent(&format!("{CGROUP_ROOT_VARIABLE} is unset"), true);
+        let daemon = Daemon::start(temporary.path(), None, &[], &[], &[], false).await;
+        let snapshot = capability_snapshot(&daemon, "req_exec_lists_machine").await;
+        let workspace =
+            create_empty_workspace(&daemon, "01JDESIGN37SHAPEWORKSPACE", "req_exec_lists_ws").await;
+        let passed = check_exec_list_shape(&daemon, &workspace, &snapshot, false).await;
+        println!("{EXEC_LIST_SHAPE_NAME}: executed");
+        daemon.close().await;
+        EXEC_LIST_CASES.assert_passed(PART, passed, false);
+        return;
+    };
+    let Some(gate) = named_path(EXEC_GATE_VARIABLE) else {
+        exec_lists_absent(&format!("{EXEC_GATE_VARIABLE} is unset"), false);
+        return;
+    };
+    let source = GitSourceFixture::start();
+    let mut extra = source.arguments();
+    extra.push("--exec-gate".to_owned());
+    extra.push(gate.display().to_string());
+    let daemon = Daemon::start_with_arguments(
+        temporary.path(),
+        Some(cgroup.path()),
+        &[],
+        &[],
+        &[],
+        false,
+        &[],
+        &extra,
+    )
+    .await;
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_exec_lists_machine", None)
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    if EXEC_LIST_FACTS
+        .iter()
+        .any(|fact| machine["result"]["facts"].get(*fact).is_none())
+    {
+        exec_lists_absent(
+            &format!(
+                "the open withheld the executable-list facts: {}",
+                machine["result"]["withheld"]
+            ),
+            false,
+        );
+        daemon.close().await;
+        return;
+    }
+    let passed = check_confined_exec_lists(&daemon, &machine, &source).await;
+    daemon.close().await;
+    drop(source);
+    EXEC_LIST_CASES.assert_passed(PART, passed, true);
+}
+
+/// Design 37 § 7: a daemon told to serve the lists with a helper the driver refuses does not
+/// start. Started with `--exec-gate` naming a dynamically linked build of the helper, it exits
+/// non-zero naming `config.exec-gate-invalid` and never creates its socket. Not a runtime vector:
+/// no request is answered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dynamically_linked_helper_stops_the_daemon_before_it_listens() {
+    const NAME: &str = "runtime exec lists dynamic helper";
+    let Some(helper) = named_path(EXEC_GATE_DYNAMIC_VARIABLE) else {
+        println!("{NAME}: ABSENT ({EXEC_GATE_DYNAMIC_VARIABLE} is unset)");
+        return;
+    };
+    let temporary = clean_room("substrate-dynamic-gate-");
+    let root = temporary.path();
+    let socket = root.join("dynamic.sock");
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        Command::new(daemon_binary())
+            .args([
+                "--socket",
+                &socket.display().to_string(),
+                "--state",
+                &root.join("dynamic.db").display().to_string(),
+                "--workspaces",
+                &root.join("dynamic-workspaces").display().to_string(),
+                "--deployment",
+                "dep_dynamic_gate",
+                "--allow-uid",
+                &nix::unistd::getuid().as_raw().to_string(),
+                "--exec-gate",
+                &helper.display().to_string(),
+            ])
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await
+    .expect("the daemon with a dynamic helper timed out")
+    .expect("the daemon's output");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the daemon started: {error}");
+    assert!(error.contains("config.exec-gate-invalid"), "{error}");
+    assert!(error.contains("PT_INTERP"), "{error}");
+    assert!(!socket.exists(), "the daemon listened");
+    println!("{NAME}: executed");
+}
+
+// ---------------------------------------------------------------------------------------------
 // The lane
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 136;
-const DELEGATED_CASES: usize = 201;
+const PORTABLE_CASES: usize = 147;
+const DELEGATED_CASES: usize = 222;
 
 /// The cases one test function of a lane executes.
 ///
@@ -8114,8 +9086,8 @@ struct LaneCases {
 
 /// [`runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket`].
 const JOURNEY_CASES: LaneCases = LaneCases {
-    portable: 127,
-    delegated: 174,
+    portable: 132,
+    delegated: 179,
 };
 /// [`runtime_clean_room_serves_waited_execs_past_the_retained_bound`]. An exec runs only confined,
 /// so the portable lane has neither exec-retention case.
@@ -8138,6 +9110,12 @@ const GIT_ROOT_CASES: LaneCases = LaneCases {
     portable: 3,
     delegated: 8,
 };
+/// [`runtime_clean_room_holds_runs_to_executable_lists`]: rows 1 to 3 of design 37 § 6 on both
+/// lanes, and on the delegated lane the runs held to the lists and rows 5 to 8.
+const EXEC_LIST_CASES: LaneCases = LaneCases {
+    portable: 6,
+    delegated: 16,
+};
 
 // The parts are the whole lane: this file does not compile when their counts and a lane's
 // inventory disagree.
@@ -8147,6 +9125,7 @@ const _: () = assert!(
         + ABANDONED_EXEC_CASES.portable
         + ADOPTED_WORKSPACE_CASES.portable
         + GIT_ROOT_CASES.portable
+        + EXEC_LIST_CASES.portable
         == PORTABLE_CASES,
     "the portable counts of the lane's test functions do not sum to PORTABLE_CASES"
 );
@@ -8156,6 +9135,7 @@ const _: () = assert!(
         + ABANDONED_EXEC_CASES.delegated
         + ADOPTED_WORKSPACE_CASES.delegated
         + GIT_ROOT_CASES.delegated
+        + EXEC_LIST_CASES.delegated
         == DELEGATED_CASES,
     "the delegated counts of the lane's test functions do not sum to DELEGATED_CASES"
 );
@@ -8282,7 +9262,7 @@ async fn runtime_clean_room_drives_a_daemon_that_declares_a_git_source() {
 }
 
 /// The journey: startup and dual-daemon refusals and every case that shares the one daemon and
-/// the one workspace. The lane's other parts are the four test functions above.
+/// the one workspace. The lane's other parts are the five other test functions that report a count.
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     let delegated = DelegatedCgroup::acquire();
@@ -8379,7 +9359,8 @@ const NAMESPACE_DESTROY: Duration = Duration::from_mins(3);
 /// which it is on every cluster this lane has run on (design 34 § 10.3 O3). Of ADR 0052's root
 /// page it runs the eight cases the wire alone can set up ([`check_root_page`]); a FIFO, a
 /// symbolic link and `.git` at the root are absent here, because no route of this lane makes one.
-const NAMESPACE_CASES: usize = 64;
+/// Of design 37 it runs the one case that both executable-list facts are absent.
+const NAMESPACE_CASES: usize = 65;
 
 /// The shipped daemon over the Kubernetes namespace driver, through its Unix socket: the same
 /// wire the other lanes assert, against a cluster. Unset, the lane is absent: nothing runs and
@@ -8432,6 +9413,14 @@ async fn check_namespace_journey(daemon: &Daemon) -> usize {
         "confinement.no-egress published without an observed probe: {machine}"
     );
     let snapshot = text(&machine["result"]["snapshot"]);
+    executed += 1;
+
+    // Design 37 § 7: the namespace driver proves no executable list and withholds nothing, so a
+    // start that names one is the daemon's row 4, without a line of driver code.
+    for fact in EXEC_LIST_FACTS {
+        assert!(facts.get(fact).is_none(), "{fact} published: {machine}");
+    }
+    assert!(machine["result"].get("withheld").is_none(), "{machine}");
     executed += 1;
 
     let operation = "01JNAMESPACELANECREATE01";
