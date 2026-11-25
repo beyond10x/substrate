@@ -2173,53 +2173,6 @@ async fn every_integer_window_the_pty_resize_branch_declares_out_of_bounds_earns
     );
 }
 
-/// One attach handshake that is refused before the upgrade, with its refusal body.
-///
-/// `Handshake::open` next door keeps only the status line; a refusal's code lives in the body.
-async fn refused_attach(address: SocketAddr, path: &str) -> (u16, Value) {
-    let mut stream = TcpStream::connect(address)
-        .await
-        .expect("connect attach client");
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
-    );
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .expect("write attach handshake");
-    let mut head = Vec::new();
-    while !head.ends_with(b"\r\n\r\n") {
-        assert!(head.len() < 16 * 1_024, "bounded response head");
-        let mut byte = [0_u8; 1];
-        stream
-            .read_exact(&mut byte)
-            .await
-            .expect("read response head");
-        head.push(byte[0]);
-    }
-    let head = String::from_utf8(head).expect("ASCII response head");
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|value| value.parse::<u16>().ok())
-        .expect("HTTP status");
-    let length: usize = head
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
-        })
-        .expect("a refusal carries a content-length");
-    let mut body = vec![0_u8; length];
-    stream
-        .read_exact(&mut body)
-        .await
-        .expect("read refusal body");
-    (status, serde_json::from_slice(&body).expect("JSON refusal"))
-}
-
 /// Every refusal a pty attach can raise has a row in the register that says it lists them all.
 ///
 /// `refusals.json`'s own title is "Every refusal a session can raise, and what a client does with
@@ -2250,7 +2203,7 @@ async fn every_refusal_a_pty_attach_can_raise_has_a_row_in_the_register() {
     let (session_id, _exec) = harness.start_pty().await;
     let path = format!("/v1/sessions/{session_id}/attach");
     let _held = harness.attach(&path).await;
-    let (status, refusal) = refused_attach(harness.server.address, &path).await;
+    let (status, refusal) = refused_upgrade(harness.server.address, &path).await;
     assert_eq!(status, 409, "a second attach is refused: {refusal}");
     let code = refusal["error"]["code"]
         .as_str()
@@ -2555,7 +2508,62 @@ async fn a_client_sequence_with_a_zero_fractional_part_is_inside_the_published_v
     );
 }
 
+/// The most bytes the body of a refused upgrade may declare. A refusal is one small JSON object.
+const MAX_REFUSAL_BODY_BYTES: usize = 64 * 1_024;
+
+/// The status and the declared body length of the response head of a refused upgrade.
+///
+/// A length over [`MAX_REFUSAL_BODY_BYTES`] fails here, before a byte of the body is read.
+fn refusal_head(head: &str) -> (u16, usize) {
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .expect("HTTP handshake status");
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())?
+        })
+        .expect("a refusal carries a content-length");
+    assert!(
+        length <= MAX_REFUSAL_BODY_BYTES,
+        "a refusal body of {length} bytes is over the bound of {MAX_REFUSAL_BODY_BYTES}"
+    );
+    (status, length)
+}
+
+#[test]
+fn a_refusal_head_names_its_status_and_its_declared_length() {
+    assert_eq!(
+        refusal_head(
+            "HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: 131\r\n\r\n"
+        ),
+        (409, 131)
+    );
+    assert_eq!(
+        refusal_head(&format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: {MAX_REFUSAL_BODY_BYTES}\r\n\r\n"
+        )),
+        (429, MAX_REFUSAL_BODY_BYTES)
+    );
+}
+
+#[test]
+#[should_panic(expected = "is over the bound of 65536")]
+fn a_refusal_whose_declared_body_is_over_the_bound_is_not_read() {
+    refusal_head(&format!(
+        "HTTP/1.1 409 Conflict\r\nContent-Length: {}\r\n\r\n",
+        MAX_REFUSAL_BODY_BYTES + 1
+    ));
+}
+
 /// Reads the bounded JSON failure returned when a WebSocket upgrade is refused.
+///
+/// `Handshake::open` keeps only the status line; a refusal's code lives in the body.
 async fn refused_upgrade(address: SocketAddr, path: &str) -> (u16, Value) {
     let mut stream = TcpStream::connect(address)
         .await
@@ -2577,21 +2585,8 @@ async fn refused_upgrade(address: SocketAddr, path: &str) -> (u16, Value) {
             .expect("read refused-upgrade head");
         head.push(byte[0]);
     }
-    let head = std::str::from_utf8(&head).expect("ASCII handshake response");
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|value| value.parse::<u16>().ok())
-        .expect("HTTP handshake status");
-    let length = head
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())?
-        })
-        .expect("a refusal carries a bounded JSON body");
+    let (status, length) =
+        refusal_head(std::str::from_utf8(&head).expect("ASCII handshake response"));
     let mut body = vec![0_u8; length];
     stream
         .read_exact(&mut body)
