@@ -454,6 +454,9 @@ async fn remote_https_requires_exact_tls_and_refreshes_one_invalid_credential() 
         panic!("expired authority lost its named refusal: {error}");
     };
     assert_eq!(refusal.code, "auth.authority-invalid");
+    // The daemon waits up to 5 s at SIGTERM for its open TLS connections to end, and the
+    // client keeps one open for reuse.
+    drop((workspace, client));
     fixture.stop().await;
 }
 

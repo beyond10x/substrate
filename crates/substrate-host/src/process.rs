@@ -10203,25 +10203,42 @@ mod tests {
     #[test]
     fn every_probe_sandbox_carries_the_user_namespace_posture() {
         let directory = tempfile::tempdir().expect("a scratch root");
-        let (backend, log) = recording_backend(directory.path());
+        // Each probe records through a backend of its own and runs on a thread of its own.
+        let recorder = |name: &str| {
+            let scratch = directory.path().join(name);
+            std::fs::create_dir(&scratch).expect("a scratch directory of the probe's own");
+            recording_backend(&scratch)
+        };
+        let (terminal_backend, terminal_log) = recorder("terminal");
+        let (hangup_backend, hangup_log) = recorder("hangup");
+        let (aperture_backend, aperture_log) = recorder("aperture");
+        let (terminal, hangup, aperture) = std::thread::scope(|scope| {
+            let terminal = scope.spawn(|| crate::pty::mechanism_is_provable(&terminal_backend));
+            let hangup = scope.spawn(|| crate::pty::observe_sandboxed_hangup(&hangup_backend));
+            let aperture = scope.spawn(|| crate::egress::mechanism_is_provable(&aperture_backend));
+            (
+                terminal.join().expect("the terminal probe"),
+                hangup.join().expect("the hangup probe"),
+                aperture.join().expect("the egress probe"),
+            )
+        });
         assert!(
-            !crate::pty::mechanism_is_provable(&backend),
+            !terminal,
             "a backend that records and refuses cannot prove a terminal"
         );
         assert_eq!(
-            crate::pty::observe_sandboxed_hangup(&backend),
-            None,
+            hangup, None,
             "a backend that records and refuses cannot prove a hangup"
         );
         assert!(
-            !crate::egress::mechanism_is_provable(&backend),
+            !aperture,
             "a backend that records and refuses cannot prove an aperture"
         );
-        assert_recorded_posture(
-            "the two pty probes and the egress probe",
-            &recorded_sandboxes(&log),
-            3,
-        );
+        let sandboxes: Vec<Vec<String>> = [terminal_log, hangup_log, aperture_log]
+            .iter()
+            .flat_map(|log| recorded_sandboxes(log))
+            .collect();
+        assert_recorded_posture("the two pty probes and the egress probe", &sandboxes, 3);
     }
 
     /// The secondary guard, and the only one that can see a site no case drives: **no source file

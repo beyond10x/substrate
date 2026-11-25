@@ -1105,6 +1105,48 @@ async fn facts_after(play: Play, check: Option<Value>) -> CapabilityFacts {
     snapshot.facts
 }
 
+/// Runs every case at once, each on a thread and a current-thread runtime of its own, and answers
+/// their results in the order given. The cases share nothing: each starts its own fake API server
+/// and driver, and a [`CapturedLog`] a case starts holds the lines of that case's thread only. A
+/// case that panics panics here, with its own message.
+async fn apart<T, C, F>(cases: Vec<C>) -> Vec<T>
+where
+    T: Send + 'static,
+    C: FnOnce() -> F + Send + 'static,
+    F: std::future::Future<Output = T>,
+{
+    let running: Vec<_> = cases
+        .into_iter()
+        .map(|case| {
+            tokio::task::spawn_blocking(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("a runtime of the case's own")
+                    .block_on(case())
+            })
+        })
+        .collect();
+    let mut answers = Vec::with_capacity(running.len());
+    for case in running {
+        answers.push(
+            case.await
+                .unwrap_or_else(|failed| std::panic::resume_unwind(failed.into_panic())),
+        );
+    }
+    answers
+}
+
+/// [`facts_after`] of every run at once, in the order given.
+async fn facts_apart(runs: Vec<(Play, Option<Value>)>) -> Vec<CapabilityFacts> {
+    apart(
+        runs.into_iter()
+            .map(|(play, check)| move || facts_after(play, check))
+            .collect(),
+    )
+    .await
+}
+
 /// § 6.2 and § 6.4: a probe whose Pod ended with its frames and bounds, whose heartbeat stood
 /// still after the end, and whose three egress attempts all failed publishes design 34 § 6.4's
 /// neutral set, beside the seven families; the facts lapse with the proof.
@@ -1251,11 +1293,11 @@ async fn no_egress_is_absent_unless_all_three_attempts_failed_at_the_named_addre
         egress: blocked(),
     };
     let check = || Some(check_with_host(SERVICE_HOST));
-    let facts = facts_after(Play::observing(&held, Heartbeat::Absent), check()).await;
-    assert_eq!(facts.confinement_no_egress, Some(true), "the control");
-    assert_eq!(facts.confinement_whole_tree_kill, None);
-
-    let mut cases: Vec<(String, Play, Option<Value>)> = Vec::new();
+    let mut cases: Vec<(String, Play, Option<Value>)> = vec![(
+        "the control".to_owned(),
+        Play::observing(&held, Heartbeat::Absent),
+        check(),
+    )];
     let mut with = |why: &str, change: &dyn Fn(&mut Vec<EgressAttempt>)| {
         let mut egress = blocked();
         change(&mut egress);
@@ -1323,8 +1365,15 @@ async fn no_egress_is_absent_unless_all_three_attempts_failed_at_the_named_addre
             check(),
         ));
     }
-    for (why, play, check) in cases {
-        let facts = facts_after(play, check).await;
+    let (whys, runs): (Vec<String>, Vec<(Play, Option<Value>)>) = cases
+        .into_iter()
+        .map(|(why, play, check)| (why, (play, check)))
+        .unzip();
+    let mut observed = whys.into_iter().zip(facts_apart(runs).await);
+    let (_, facts) = observed.next().expect("the control ran");
+    assert_eq!(facts.confinement_no_egress, Some(true), "the control");
+    assert_eq!(facts.confinement_whole_tree_kill, None);
+    for (why, facts) in observed {
         assert_eq!(facts.confinement_no_egress, None, "{why}");
         assert_eq!(families(&facts), [Some(true); 7], "{why}");
     }
@@ -1568,22 +1617,27 @@ async fn d332_trace_two_three_timeouts_withhold_no_egress() {
 /// D333: one timeout among two local denials is still silence, and withholds the fact.
 #[tokio::test]
 async fn one_timeout_among_local_denials_withholds_no_egress() {
-    for position in 0..3 {
-        let mut outcomes = [
-            (EgressOutcome::Denied, Some(EPERM), 0),
-            (EgressOutcome::Denied, Some(EACCES), 0),
-            (EgressOutcome::Denied, Some(EPERM), 0),
-        ];
-        outcomes[position] = (EgressOutcome::TimedOut, None, 3_000);
-        let observation = Observation {
-            heartbeat: true,
-            egress: traced(outcomes),
-        };
-        let facts = facts_after(
-            Play::observing(&observation, Heartbeat::Stopped),
-            Some(check_with_host(SERVICE_HOST)),
-        )
-        .await;
+    let positions = 0..3;
+    let runs = positions
+        .clone()
+        .map(|position| {
+            let mut outcomes = [
+                (EgressOutcome::Denied, Some(EPERM), 0),
+                (EgressOutcome::Denied, Some(EACCES), 0),
+                (EgressOutcome::Denied, Some(EPERM), 0),
+            ];
+            outcomes[position] = (EgressOutcome::TimedOut, None, 3_000);
+            let observation = Observation {
+                heartbeat: true,
+                egress: traced(outcomes),
+            };
+            (
+                Play::observing(&observation, Heartbeat::Stopped),
+                Some(check_with_host(SERVICE_HOST)),
+            )
+        })
+        .collect();
+    for (position, facts) in positions.zip(facts_apart(runs).await) {
         assert_eq!(facts.confinement_no_egress, None, "timeout at {position}");
     }
 }
@@ -1593,6 +1647,8 @@ async fn one_timeout_among_local_denials_withholds_no_egress() {
 /// they do not prove the attempt was stopped inside the Pod.
 #[tokio::test]
 async fn one_no_route_attempt_among_local_denials_withholds_no_egress() {
+    let mut cases = Vec::new();
+    let mut runs = Vec::new();
     for errno in [ENETUNREACH, EHOSTUNREACH] {
         for (position, elapsed_ms) in [(0, 0), (1, 0), (2, 0), (2, 3_000)] {
             let mut outcomes = [
@@ -1605,16 +1661,18 @@ async fn one_no_route_attempt_among_local_denials_withholds_no_egress() {
                 heartbeat: true,
                 egress: traced(outcomes),
             };
-            let facts = facts_after(
+            cases.push((errno, position, elapsed_ms));
+            runs.push((
                 Play::observing(&observation, Heartbeat::Stopped),
                 Some(check_with_host(SERVICE_HOST)),
-            )
-            .await;
-            assert_eq!(
-                facts.confinement_no_egress, None,
-                "errno {errno} at {position} after {elapsed_ms} ms"
-            );
+            ));
         }
+    }
+    for ((errno, position, elapsed_ms), facts) in cases.into_iter().zip(facts_apart(runs).await) {
+        assert_eq!(
+            facts.confinement_no_egress, None,
+            "errno {errno} at {position} after {elapsed_ms} ms"
+        );
     }
 }
 
@@ -1830,7 +1888,7 @@ async fn refused_at_once(status: u16, message: &str, expected: &str) {
 /// tried again, and the probe passes once the API admits it.
 #[tokio::test]
 async fn a_handshake_answered_anything_but_401_or_403_is_retried_until_the_api_admits_it() {
-    for (status, message) in [
+    let refusals: [(u16, &'static str); 5] = [
         (
             400,
             "pod snl-01jabcdefghjkmnpqrstvwxyz0-keeper does not have a host assigned",
@@ -1839,20 +1897,29 @@ async fn a_handshake_answered_anything_but_401_or_403_is_retried_until_the_api_a
         (408, "the request timed out"),
         (429, "too many requests"),
         (503, "the API is unavailable"),
-    ] {
-        let rig = rig(Child::Exact, None).await;
-        rig.fake.refuse_exec(status, message);
-        let fake = Arc::clone(&rig.fake);
-        let admit = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(1_200)).await;
-            fake.admit_exec();
-        });
-        rig.driver
-            .probe()
-            .await
-            .unwrap_or_else(|refused| panic!("{status} is retried: {refused}"));
-        admit.await.expect("the exec is admitted");
-    }
+    ];
+    apart(
+        refusals
+            .into_iter()
+            .map(|(status, message)| {
+                move || async move {
+                    let rig = rig(Child::Exact, None).await;
+                    rig.fake.refuse_exec(status, message);
+                    let fake = Arc::clone(&rig.fake);
+                    let admit = tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(1_200)).await;
+                        fake.admit_exec();
+                    });
+                    rig.driver
+                        .probe()
+                        .await
+                        .unwrap_or_else(|refused| panic!("{status} is retried: {refused}"));
+                    admit.await.expect("the exec is admitted");
+                }
+            })
+            .collect(),
+    )
+    .await;
 }
 
 /// Adversary cases for D337 S6a: the reason code the probe Pod's failed run names, on the other
@@ -2272,6 +2339,16 @@ mod d339 {
         log.warnings()
     }
 
+    /// [`warnings_after`] of every run at once, each with its own log, in the order given.
+    async fn warnings_apart(runs: Vec<(Play, Option<Value>)>) -> Vec<Vec<String>> {
+        apart(
+            runs.into_iter()
+                .map(|(play, check)| move || warnings_after(play, check))
+                .collect(),
+        )
+        .await
+    }
+
     fn assert_not_proved(warnings: &[String], fact: &str, why: &str) {
         let stated = format!(" {fact} was not proved: {why}");
         assert!(
@@ -2326,12 +2403,6 @@ mod d339 {
         let no_egress = substrate_wire::CONFINEMENT_NO_EGRESS_FACT;
         let whole_tree_kill = substrate_wire::CONFINEMENT_WHOLE_TREE_KILL_FACT;
         let check = || Some(check_with_host(SERVICE_HOST));
-
-        let unreported = warnings_after(Play::of(Child::Exact), check()).await;
-        for fact in [no_egress, whole_tree_kill] {
-            assert_not_proved(&unreported, fact, "the probe child reported no observation");
-        }
-
         let observation = Observation {
             heartbeat: true,
             egress: blocked(),
@@ -2340,60 +2411,76 @@ mod d339 {
             child: Child::Expanded,
             ..Play::observing(&observation, Heartbeat::Stopped)
         };
-        let expanded = warnings_after(expanded, check()).await;
-        for fact in [no_egress, whole_tree_kill] {
-            assert_not_proved(&expanded, fact, "the argv did not read back byte for byte");
-        }
-
-        let unread =
-            warnings_after(Play::observing(&observation, Heartbeat::Absent), check()).await;
-        assert_not_proved(&unread, whole_tree_kill, "the keeper reads no heartbeat");
-
         let never_moved = Observation {
             heartbeat: false,
             egress: blocked(),
         };
-        let still =
-            warnings_after(Play::observing(&never_moved, Heartbeat::Stopped), check()).await;
-        assert_not_proved(
-            &still,
-            whole_tree_kill,
-            "the probe child never saw its grandchild's heartbeat move",
-        );
-
-        let no_host = warnings_after(
-            Play::observing(&observation, Heartbeat::Stopped),
-            Some(json!({
-                "openat2_beneath": true,
-                "symlink_escape_refused": true,
-                "atomic_replace": true,
-            })),
-        )
-        .await;
-        assert_not_proved(
-            &no_host,
-            no_egress,
-            "the keeper states no Kubernetes Service host",
-        );
-
         let mut reached = blocked();
         reached[2].outcome = EgressOutcome::Reached;
         let reached = Observation {
             heartbeat: true,
             egress: reached,
         };
-        let reached = warnings_after(Play::observing(&reached, Heartbeat::Stopped), check()).await;
+        let runs = vec![
+            (Play::of(Child::Exact), check()),
+            (expanded, check()),
+            (Play::observing(&observation, Heartbeat::Absent), check()),
+            (Play::observing(&never_moved, Heartbeat::Stopped), check()),
+            (
+                Play::observing(&observation, Heartbeat::Stopped),
+                Some(json!({
+                    "openat2_beneath": true,
+                    "symlink_escape_refused": true,
+                    "atomic_replace": true,
+                })),
+            ),
+            (Play::observing(&reached, Heartbeat::Stopped), check()),
+            (
+                Play::of(Child::Exact),
+                Some(json!({ "openat2_beneath": true })),
+            ),
+        ];
+        let [
+            unreported,
+            expanded,
+            unread,
+            still,
+            no_host,
+            reached,
+            openat2_only,
+        ]: [Vec<String>; 7] = warnings_apart(runs)
+            .await
+            .try_into()
+            .expect("seven runs, seven logs");
+
+        for fact in [no_egress, whole_tree_kill] {
+            assert_not_proved(&unreported, fact, "the probe child reported no observation");
+        }
+
+        for fact in [no_egress, whole_tree_kill] {
+            assert_not_proved(&expanded, fact, "the argv did not read back byte for byte");
+        }
+
+        assert_not_proved(&unread, whole_tree_kill, "the keeper reads no heartbeat");
+
+        assert_not_proved(
+            &still,
+            whole_tree_kill,
+            "the probe child never saw its grandchild's heartbeat move",
+        );
+
+        assert_not_proved(
+            &no_host,
+            no_egress,
+            "the keeper states no Kubernetes Service host",
+        );
+
         assert_not_proved(
             &reached,
             no_egress,
             "an egress attempt was not denied inside the Pod",
         );
 
-        let openat2_only = warnings_after(
-            Play::of(Child::Exact),
-            Some(json!({ "openat2_beneath": true })),
-        )
-        .await;
         for fact in ["workspace.guarded-io", "workspace.atomic-replace"] {
             assert_not_proved(&openat2_only, fact, "the keeper's check did not prove it");
         }
