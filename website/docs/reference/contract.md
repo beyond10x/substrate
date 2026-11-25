@@ -81,7 +81,7 @@ like any other directory. Send the segment as written: a client that removes dot
 `/files/` and gets 404. Every other file route refuses `.` with `workspace.path-escape`. A daemon
 that predates the root page answers that code too, and a client may then fall back to the tree.
 
-Release `0.27.0` advertises `substrate-wire/0.28.0` in `x-b10x-contract` and its inner
+Release `0.27.0` advertises `substrate-wire/0.29.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest, because it identifies the distribution package and not
 the inner contract manifest.
@@ -90,7 +90,7 @@ the inner contract manifest.
 `/v1/sessions` in bundle `0.15.0`, and no `/v1/pipe-sessions` compatibility alias is served.
 
 Frozen compatibility declarations and route/schema details are in the
-[0.28.0 bundle](https://github.com/beyond10x/substrate/tree/0.27.0/contracts/substrate-wire/0.28.0).
+[0.29.0 bundle](https://github.com/beyond10x/substrate/tree/0.27.0/contracts/substrate-wire/0.29.0).
 See [system model and derivation](../concepts/model.md) for which artifacts are generated and
 [status](../status.md) for release maturity.
 

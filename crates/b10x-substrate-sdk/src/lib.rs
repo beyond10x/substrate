@@ -2546,7 +2546,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.28.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.29.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(
@@ -2696,7 +2696,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.28.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.29.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(
@@ -2860,7 +2860,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.28.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.29.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(
@@ -3004,7 +3004,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.28.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.29.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(
@@ -3163,7 +3163,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.28.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.29.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(
@@ -3338,7 +3338,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.28.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.29.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(
@@ -3537,7 +3537,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.28.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.29.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(
@@ -3743,7 +3743,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let machine = serde_json::to_vec(
             serde_json::from_str::<Value>(include_str!(
-                "../../../contracts/substrate-wire/0.28.0/vectors/http/machine-probe.json"
+                "../../../contracts/substrate-wire/0.29.0/vectors/http/machine-probe.json"
             ))
             .expect("machine vector")
             .pointer("/expected/response/body")
@@ -3789,7 +3789,7 @@ mod tests {
             .into(),
         };
         let exec_vector = result_of(include_str!(
-            "../../../contracts/substrate-wire/0.28.0/vectors/http/exec-get.json"
+            "../../../contracts/substrate-wire/0.29.0/vectors/http/exec-get.json"
         ));
         let exec_of = |word: &str| {
             let mut observed = exec_vector.clone();
@@ -3802,7 +3802,7 @@ mod tests {
             }
         };
         let session_vector = result_of(include_str!(
-            "../../../contracts/substrate-wire/0.28.0/vectors/http/pipe-session-start.json"
+            "../../../contracts/substrate-wire/0.29.0/vectors/http/pipe-session-start.json"
         ));
         let session_of = |word: &str| {
             let mut observed = session_vector.clone();
