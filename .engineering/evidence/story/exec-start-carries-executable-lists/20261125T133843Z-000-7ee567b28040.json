@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T13:38:43Z",
+  "actor": "agent:substrate",
+  "artifact": "story:exec-start-carries-executable-lists",
+  "kind": "story",
+  "revision": 20,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "release-lanes.yml, job Confinement lane (scripts/delegated-lane.sh), commit e7faf3b1d6, 222 delegated cases, release 0.28.0",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/45620955579"
+  }
+}

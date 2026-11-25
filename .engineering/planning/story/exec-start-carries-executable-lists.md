@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:exec-start-carries-executable-lists
 kind: story
-status: draft
+status: implemented
 title: An exec start carries the executable lists on the wire
 summary: 'A successor bundle at the next free version: start fields for the allow-list and deny-list, the applied record and named refusals, so a run keeps its lists on a remote daemon.'
 owner: substrate
@@ -52,7 +52,11 @@ scope:
   path: xtask/src/bundle
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 20
+revision: 23
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-25T15:33:46Z", actor: "agent:substrate", revision: 21, decided_on: {"recorded":{"test_result":1,"review_outcome":4}}}
+- {from: "proposed", to: "active", at: "2026-11-25T15:33:46Z", actor: "agent:substrate", revision: 22, decided_on: {"recorded":{"test_result":1,"review_outcome":4}}}
+- {from: "active", to: "implemented", at: "2026-11-25T15:33:46Z", actor: "agent:substrate", revision: 23, decided_on: {"recorded":{"test_result":1,"review_outcome":4}}}
 ---
 # Story: An exec start carries the executable lists on the wire
 
