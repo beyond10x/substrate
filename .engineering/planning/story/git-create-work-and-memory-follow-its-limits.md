@@ -25,7 +25,7 @@ scope:
   path: vendor
 - confidence: inferred
   path: xtask/src
-revision: 7
+revision: 8
 ---
 # Story: the work and the memory of a Git create follow its limits
 
@@ -118,3 +118,14 @@ one id). Three reviews, each with its cases in the tree:
   quotas and are proved at the fetch step.
 
 Open after the merge: the release that carries this change, which the acceptance names.
+
+## The report to the project that publishes `gix-pack` (2026-11-25)
+
+Sent on 2026-11-25, after release 0.27.0, as
+<https://github.com/GitoxideLabs/gitoxide/issues/3244>: opened by the bot on the operator's
+pick, relayed by the operator's session. It asks for an optional budget for the objects that
+wait while an index is written and offers the patch of `vendor/gix-pack-0.74.2`. An answer of
+the maintainers that asks for more is put to the operator before anything is sent.
+
+The link goes into `CHANGELOG.md` and `vendor/gix-pack-0.74.2/README.substrate.md` with the
+next change that carries code (`story:exec-start-carries-executable-lists`, item 7).
