@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.28.0] — 2026-11-25
+
 ### Added
 
 - An exec start and a session start carry an executable allow-list and deny-list (design 37):
