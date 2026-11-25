@@ -443,7 +443,7 @@ already ahead of `0.4.0` — `ExecStartInput::read_only_roots` (the `ExecStartIn
 `crates/substrate-wire/src/lib.rs`) has no `0.4.0` schema — and no bound sits *on* a type as a
 derive attribute. The bounds the schemas state are free constants: the wire crate's own
 `pub const MAX_…`/`MIN_…` items (`grep -c '^pub const \(MAX\|MIN\)_' crates/substrate-wire/src/lib.rs`
-= 61), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
+= 65), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
 host-local literals their enforcement sites hold — `PIPE_MAX_FRAME_BYTES`,
 `PIPE_MAX_INPUT_BYTES` and `PIPE_MAX_QUEUED_FRAMES` in `crates/substrate-daemon/src/app.rs`, and
 `PIPE_FRAME_BYTES` and `PIPE_QUEUED_FRAMES` in `crates/substrate-host/src/process.rs`.
@@ -468,7 +468,7 @@ a list, and the six lexical writable-root refusals (422) of ADR 0038 with
 `exec.writable-roots-host-unserved` and `exec.writable-roots-git-unserved` (501), which both lanes
 answer for a host root the daemon did not declare and for every Git root, and the portable lane
 also for the one host root the runner declares, which it cannot prove without confinement — across
-136 cases, and its delegated lane 201, whose four writable-root cases bind that declared root and
+147 cases, and its delegated lane 222, whose four writable-root cases bind that declared root and
 check the host side: the write lands, its parent and sibling do not change, a working directory
 beneath the mount runs there, and the declared path swapped for a symlink is
 `exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and nine roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 8}` (bundle `0.27.0`), eight roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a ninth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a
@@ -498,6 +498,35 @@ publishes the families and properties the `linux` adapter proved and never an ad
 `request.schema-invalid` (422), each recorded as refused; the delegated lane also runs one admitted
 start whose applied record echoes `requires`, and refuses a session start requiring
 `network-ingress`.
+Both lanes also hold design 37's executable lists (bundle `0.29.0`). The journey's daemon has no
+`--exec-gate`: it publishes neither `confinement.exec-subpaths` nor
+`confinement.exec-denied-paths` and no `withheld`, and an exec start naming an allow-list, and
+one naming both lists, is `confinement.fact-unserved` (501) at the member, each compared with
+its vector. A session start naming a list gets that answer on the delegated lane and
+`session.confinement-unavailable` (501) on the portable one, which serves no session and so
+never reads the lists. A sixth lane function,
+`runtime_clean_room_holds_runs_to_executable_lists`, runs the shape case on both lanes:
+`exec.sandbox-exec-subpaths-empty` and `confinement.exec-denied-paths-without-subpaths` compared
+with their vectors, `null`, 65 entries, an empty entry, an entry of 4,096 bytes and a duplicate
+in either list as `request.schema-invalid`, and a retried start with other lists as a request conflict. On the
+delegated lane its daemon is started with `--exec-gate` naming the static helper the lane exports
+as `SUBSTRATE_EXEC_GATE`: both facts are published; an exec start and a session start each run
+a listed program, fail an unlisted one and a denied one beneath the listed directory with
+`EACCES`, end with status 126 and echo both lists in the requested and the applied record; a
+start without the members has a record without them; a `pty` session with a list is
+`session.pty-unserved`; `exec.sandbox-path-unrepresentable`,
+`exec.sandbox-exec-subpath-undeclared` (also for an entry beneath the capsule mount) and
+`exec.sandbox-program-unlisted` are answered once each at their row's address; and one start
+holds a Git writable root beside an allow-list. Each of these cases prints
+`runtime exec lists <name>: executed`, or `: ABSENT (<cause>)` where the delegated root or the
+helper is missing or the open withheld a fact; `scripts/delegated-lane.sh` requires the thirteen
+`executed` lines by name, takes no `: ABSENT (` line of the runner, and compares the inventory
+the functions print with `DELEGATED_CASES` in the source. One more test of the binary,
+`a_dynamically_linked_helper_stops_the_daemon_before_it_listens`, starts the daemon with the
+copy `SUBSTRATE_EXEC_GATE_DYNAMIC` names and requires `config.exec-gate-invalid`, an exit
+status other than 0 and no socket; it answers no request and is counted in no lane.
+`exec.sandbox-place-unserved` is published and not executed: no lane has a volume whose place
+it refuses.
 Both totals include
 one route/refusal probe for every operation in the promoted registry (the seven host-process routes
 of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on
@@ -517,8 +546,9 @@ absent and a symlinked one refused `exec.workdir-missing` before dispatch, and a
 refused `exec.aperture-undeclared` for an undeclared name, run with two apertures each reporting its
 `listen` address, and refused `exec.aperture-host-listed-twice` for `localhost` listed second
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Each
-lane spans five test functions of that binary, so that none outlasts the 60 s test budget: the
-journey, the two exec-retention cases (delegated only), the adopted workspace and writable Git roots.
+lane spans six test functions of that binary, so that none outlasts the 60 s test budget: the
+journey, the two exec-retention cases (delegated only), the adopted workspace, writable Git roots
+and the executable lists.
 Each starts a daemon of its own and asserts its own count (`LaneCases`); the file does not compile
 unless the counts sum to the two totals, and `scripts/delegated-lane.sh` refuses a run whose
 functions did not report the whole delegated inventory. Its delegated lane runs only when
@@ -714,8 +744,9 @@ entries is `confinement.exec-subpaths-exceeded`; the wire answers the same list
 **The runner has a third lane, the namespace lane.** It runs only when
 `SUBSTRATE_VECTORS_KUBERNETES_CONFIG` names a namespace driver's kubeconfig. It starts the shipped
 daemon with `--driver kubernetes` on its Unix socket, as deployment `dep_namespace_vectors`, and
-runs `NAMESPACE_CASES` (64) once. These are selected by the facts a kind cluster publishes: a
-probed snapshot with `confinement.no-egress` absent, the workspace and file routes, the promoted
+runs `NAMESPACE_CASES` (65) once. These are selected by the facts a kind cluster publishes: a
+probed snapshot with `confinement.no-egress` absent and both executable-list facts absent
+(design 37), the workspace and file routes, the promoted
 route inventory, the eight root-page cases the wire alone sets up (ADR 0052; a FIFO, a symbolic
 link and `.git` at the root are absent, because no route of this lane makes one),
 `exec.sandbox-unavailable` (501) for an exec, and a destroy that reaches 404.

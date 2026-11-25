@@ -253,6 +253,28 @@ open in this section:
 All four follow rules this document already states, so they were written without a question to
 the stakeholder. Session `sdc` may reopen them with the six of § 15.
 
+**Amended on 2026-11-25, with the story's code** (D18). Two points the review of the host
+driver's change found open in the table above:
+
+- **Rows 6 and 9 are answered at the member a declared mount was declared in.** A declared
+  mount the view cannot carry is `exec.sandbox-path-unrepresentable` at `read_only_roots`,
+  `read_only_files` or `writable_roots`; the cell of row 6 above names the list's member and
+  `argv` only. The driver holds the addresses of rows 6 to 9 as one closed type (`At` in
+  `crates/substrate-host/src/exec_gate.rs`): the two list members, `argv`, the three members
+  of a declared mount and `workspace`. Rows 6 and 9 of `EXEC_LIST_REFUSALS` hold all seven,
+  and one case walks the type against the table. `workspace` is the address of the
+  workspace's own mount and of the host's workspace root. A wire start's workspace is always
+  mounted at `/workspace`, so no wire start is refused row 6 there.
+- **A wire start's message names a writable location by its path in the view.** The workspace
+  root is named `/workspace` and a declared writable root by its mount. A writable root of the
+  host's configuration that the start does not bind has no path in the view and is named by
+  the words "a writable root this host declares". Rows 3 and 4, where the driver answers them
+  for a wire start, take the wire crate's text: row 3 the table's message, row 4 what
+  `exec_lists_fact_refusal` computes.
+
+Both follow the rule above that a wire start's message names no host path, so they were
+written without a question to the stakeholder. Session `sdc` may reopen them.
+
 ## 7. The daemon
 
 **One flag.** `--exec-gate <path>` names the helper and sets `HostConfig.exec_gate`. It is
@@ -437,6 +459,19 @@ applied record echoes both lists.
 - Every new test is timed before it is added. The delegated cases start one daemon per lane
   function, as today; none starts a build.
 
+**Amended on 2026-11-25, with the story's code** (D19). The portable row of the table holds
+for an exec start. A session start on a host that serves no session is
+`session.confinement-unavailable` (501) before its lists are read, as before this story: the
+daemon checks a session's own fields first (`validate_pipe_session_input` in
+`crates/substrate-daemon/src/app/operations.rs`). The portable lane is such a host. Its
+session starts that name a list assert that code, and `null` in a member is still
+`request.schema-invalid`, the decoder's answer. Rows 1 to 4 on a session start are held by the
+daemon's unit cases (`crates/substrate-daemon/src/app/tests/exec_lists.rs`) and by the
+delegated lane: the journey's daemon has no `--exec-gate` and answers row 4 on both starts,
+and the daemon with the helper answers rows 1 to 3 on both. The lane's cases are in a sixth
+function of the runner, `runtime_clean_room_holds_runs_to_executable_lists`, and the totals
+are 147 portable, 222 delegated and 65 namespace cases.
+
 Design 35's cases are not repeated on the wire. What a list stops and does not stop is proved
 on the adapter; the wire cases prove that the request reaches that mechanism and that the
 record says so.
@@ -473,6 +508,8 @@ record says so.
 | D15 | the release image and the chart are a story of their own. Q5 |
 | D16 | the lists count toward the result reserve as sent; no bound is lowered to make every admitted list fit |
 | D17 | on a wire start a list entry is addressed at `sandbox.<member>`; the wire crate's refusal table holds a message for rows 2, 3 and 5; a session start has the exec start's addresses; on the wire the message of row 9 names no file-system type; the line per withheld entry is the host driver's own (§ 6 and § 7, amended with the story's plan) |
+| D18 | rows 6 and 9 are answered at one of seven members, the member a declared mount was declared in among them; a wire start's message names a writable location by its path in the view (§ 6, amended with the story's code) |
+| D19 | a session start on a host that serves no session stays `session.confinement-unavailable` before its lists are read; rows 1 to 4 on a session start are held by the daemon's unit cases and the delegated lane (§ 12, amended with the story's code) |
 
 ## 15. Questions with more than one answer
 

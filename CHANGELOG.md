@@ -60,10 +60,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-- A confinement profile of the adapter API with more than 64 `exec_subpaths` entries is refused
-  `confinement.exec-subpaths-exceeded` (422), on every adapter, before any fact is read. Such a
-  profile was admitted before.
-- Six public Rust types gain a member, and none is `#[non_exhaustive]`: a consumer that writes
+- **Breaking (`b10x-substrate-host` adapter API, design 37):** a confinement profile with more
+  than 64 `exec_subpaths` entries is refused `confinement.exec-subpaths-exceeded` (422), on
+  every adapter, before any fact is read. Such a profile was admitted before.
+- **Breaking (`b10x-substrate-wire` and `b10x-substrate-host` public API, design 37):** six
+  public Rust types gain a member, and none is `#[non_exhaustive]`: a consumer that writes
   one as a struct literal, or matches an enum without a wildcard, adds a line. In
   `b10x-substrate-wire`: `ConfinementRequest` and `AppliedConfinement` gain `exec_subpaths`
   (`Option<Vec<String>>`) and `exec_denied_paths` (`Vec<String>`), `CapabilitySnapshot` and
