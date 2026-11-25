@@ -4212,8 +4212,8 @@ pub struct ExecListRefusal {
     /// Each address it is answered at; a session start has the exec start's.
     pub addresses: &'static [&'static str],
     /// The fixed message, or `None` where the message is computed (row 4,
-    /// [`exec_lists_fact_refusal`]) or is the driver's and holds a path the request sent (rows 6
-    /// to 9).
+    /// [`exec_lists_fact_refusal`]) or is the driver's and names a path of the run's view (rows
+    /// 6 to 9).
     pub message: Option<&'static str>,
 }
 
@@ -4277,6 +4277,7 @@ pub const EXEC_LIST_REFUSALS: [ExecListRefusal; 8] = [
             "read_only_roots",
             "read_only_files",
             "writable_roots",
+            "workspace",
         ],
         message: None,
     },

@@ -754,7 +754,7 @@ async fn a_root_whose_place_cannot_be_established_refuses_a_listed_start_only() 
     let message = error.to_string();
     for holds in [
         "file-system-unlisted proc",
-        "ext4, overlay, tmpfs",
+        "ext4, overlay, tmpfs, xfs",
         "/opt/p",
     ] {
         assert!(message.contains(holds), "{message}");

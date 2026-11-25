@@ -97,9 +97,11 @@ confinement/mod.rs: pub const LOCAL_REFUSED: &str = "confinement.local-refused";
 confinement/mod.rs: pub const LOCAL_REASON_MISSING: &str = "confinement.local-reason-missing";
 confinement/mod.rs: pub const IMAGE_UNPINNED: &str = "confinement.image-unpinned";
 confinement/mod.rs: pub const RESERVED_FIELD_UNSERVED: &str = "confinement.reserved-field-unserved";
-confinement/mod.rs: pub const EXEC_DENIED_PATHS_WITHOUT_SUBPATHS: &str = "confinement.exec-denied-paths-without-subpaths";
+confinement/mod.rs: pub const EXEC_DENIED_PATHS_WITHOUT_SUBPATHS: &str = substrate_wire::CONFINEMENT_EXEC_DENIED_PATHS_WITHOUT_SUBPATHS;
+confinement/mod.rs: pub const EXEC_SUBPATHS_EXCEEDED: &str = "confinement.exec-subpaths-exceeded";
 confinement/mod.rs: pub const EXEC_DENIED_PATHS_EXCEEDED: &str = "confinement.exec-denied-paths-exceeded";
-confinement/mod.rs: pub const MAX_EXEC_DENIED_PATHS: usize = 64;
+confinement/mod.rs: pub use substrate_wire::MAX_EXEC_DENIED_PATHS;
+confinement/mod.rs: pub use substrate_wire::MAX_EXEC_SUBPATHS;
 confinement/mod.rs: pub const WORKSPACE_REQUIRED: &str = "confinement.workspace-required";
 confinement/mod.rs: pub const RENDER_UNSERVED: &str = "confinement.render-unserved";
 confinement/mod.rs: pub const WRITABLE_SUBTREE_GIT: &str = "confinement.writable-subtree-git";
@@ -126,6 +128,7 @@ confinement/mod.rs: enum ConfinementError > LocalReasonMissing {adapter: Adapter
 confinement/mod.rs: enum ConfinementError > ImageUnpinned {adapter: AdapterName},
 confinement/mod.rs: enum ConfinementError > ReservedFieldUnserved {field: ReservedField},
 confinement/mod.rs: enum ConfinementError > ExecDeniedPathsWithoutSubpaths {adapter: AdapterName},
+confinement/mod.rs: enum ConfinementError > ExecSubpathsExceeded {adapter: AdapterName},
 confinement/mod.rs: enum ConfinementError > ExecDeniedPathsExceeded {adapter: AdapterName},
 confinement/mod.rs: enum ConfinementError > Driver(#[from] DriverError),
 confinement/mod.rs: impl ConfinementError > pub fn code(&self) -> &'static str
@@ -516,6 +519,8 @@ substrate-wire/src/lib.rs: enum ConfinementProperty > PrivateTmpdir,
 substrate-wire/src/lib.rs: impl ConfinementProperty > pub const ALL: [Self; 8] = [Self::PathsAreHostPaths, Self::WholeTreeKill, Self::IpcSocketAllowlist, Self::IpcSignalsContained, Self::SealedPaths, Self::ExecSubpaths, Self::ExecDeniedPaths, Self::PrivateTmpdir];
 substrate-wire/src/lib.rs: impl ConfinementProperty > pub const fn name(self) -> &'static str
 substrate-wire/src/lib.rs: impl ConfinementProperty > pub const fn fact(self) -> &'static str
+substrate-wire/src/lib.rs: pub const MAX_EXEC_SUBPATHS: usize = 64;
+substrate-wire/src/lib.rs: pub const MAX_EXEC_DENIED_PATHS: usize = 64;
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)] pub enum WithheldFactName
 substrate-wire/src/lib.rs: enum WithheldFactName > #[serde(rename = "confinement.exec-subpaths")] ExecSubpaths,
 substrate-wire/src/lib.rs: enum WithheldFactName > #[serde(rename = "confinement.exec-denied-paths")] ExecDeniedPaths,

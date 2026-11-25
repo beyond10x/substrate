@@ -20,7 +20,7 @@
 //! | `ipc_socket_allowlist` | the floor: every exec installs ADR 0039's seccomp socket filter or does not start |
 //! | `ipc_signals_contained` | the floor with a pid namespace |
 //! | `stdin_pipe`, `output_live` | the floor: the session path's pipes, through bubblewrap |
-//! | `exec_subpaths` | the floor, and the driver's probe held a run to an allow-list with the helper `HostConfig.exec_gate` names ([`ExecListProof`], design 35). Not where the open withheld it for a path on a file-system type other than `ext4`, `overlay` and `tmpfs`: the proof's `withheld` then says which path and type (D27) |
+//! | `exec_subpaths` | the floor, and the driver's probe held a run to an allow-list with the helper `HostConfig.exec_gate` names ([`ExecListProof`], design 35). Not where the open withheld it for a path on a file-system type other than `ext4`, `overlay`, `tmpfs` and `xfs`: the proof's `withheld` then says which path and type (D27) |
 //! | `exec_denied_paths` | `exec_subpaths`, and a second probe held a run to both lists, with one deny entry naming its file only through a second mount and one naming a file in a mount beneath a listed directory (design 35 § 9, D30) |
 //!
 //! **`exec_denied_paths` on `linux`** (design 35 § 8). A denied path gets no execute right: not
@@ -45,8 +45,8 @@
 //! mount table. Where a mount beneath a denied directory, or beneath a listed directory of a
 //! start with a deny-list, cannot be compared (it is covered, or its root was removed), the
 //! start is refused `exec.sandbox-place-unserved` before dispatch; so it is for a mount of a
-//! type outside `ext4`, `overlay` and `tmpfs` beneath a denied directory. A start with an
-//! allow-list alone asks none of this.
+//! type outside `ext4`, `overlay`, `tmpfs` and `xfs` beneath a denied directory. A start
+//! with an allow-list alone asks none of this.
 //!
 //! **`exec_subpaths` on `linux`** (design 35). A profile with a non-empty list is held to its
 //! literal program and the list: a Landlock ruleset, applied inside the sandbox by
@@ -149,8 +149,10 @@ impl LinuxRequest {
 /// What a host driver's probe proved of the executable lists at open (design 35 D14): the second
 /// argument of [`proof`].
 ///
-/// Host-private. The capability snapshot publishes none of it, and its digest binds it: the
-/// value is part of what the snapshot identity is computed over.
+/// The capability snapshot publishes the two facts it proves and, in `withheld`, each
+/// distinct fact, field and cause of its entries without their paths (design 37 §§ 5 and 8);
+/// the rest is host-private. The snapshot's digest binds all of it: the value is part of what
+/// the snapshot identity is computed over.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct ExecListProof {
     /// One throwaway run under the helper `HostConfig.exec_gate` names executed what its
@@ -267,9 +269,10 @@ mod imp {
     }
 
     /// The families and facts a host driver's capability snapshot proves, and of the executable
-    /// lists what its probe proved beside the snapshot (design 35 D14): the snapshot's own
-    /// `confinement.exec-subpaths` is the published wire fact and stays absent. What the open
-    /// withheld is copied into the proof, and a fact an entry names is not proved (D27).
+    /// lists what its probe proved beside the snapshot (design 35 D14), which the snapshot
+    /// publishes as `confinement.exec-subpaths` and `confinement.exec-denied-paths` by the same
+    /// clauses (design 37 § 5). What the open withheld is copied into the proof, and a fact an
+    /// entry names is not proved (D27).
     pub fn proof(machine: &CapabilitySnapshot, exec_lists: &ExecListProof) -> AdapterFacts {
         let facts = &machine.facts;
         let floor = facts.exec_argv_only == Some(true) && facts.exec_namespaces.is_some();
@@ -1175,7 +1178,7 @@ mod imp {
                 path: "/data/workspaces".to_owned(),
                 file_system: file_system.map(str::to_owned),
             };
-            let entries = vec![entry(Some("xfs")), entry(None)];
+            let entries = vec![entry(Some("btrfs")), entry(None)];
             let facts = proof(
                 &floor(),
                 &ExecListProof {
@@ -1208,7 +1211,7 @@ mod imp {
                         "cause": "file-system-unlisted",
                         "address": "config.workspace_root",
                         "path": "/data/workspaces",
-                        "file_system": "xfs",
+                        "file_system": "btrfs",
                     },
                     {
                         "fact": "exec_subpaths",

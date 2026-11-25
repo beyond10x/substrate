@@ -348,6 +348,7 @@ fn the_refusal_table_has_rows_2_to_9_of_section_6() {
                     "read_only_roots",
                     "read_only_files",
                     "writable_roots",
+                    "workspace",
                 ][..],
                 false
             ),

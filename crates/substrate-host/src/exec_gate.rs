@@ -45,10 +45,10 @@
 //! place cannot be established there is a named cause, one of nine (D26):
 //! `mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`, `mount-id-unreported`,
 //! `mount-row-missing`, `mount-row-repeated`, `mount-root-deleted`, `mount-point-mismatch` and
-//! `file-system-unlisted`, the last for a file-system type other than `ext4`, `overlay` and
-//! `tmpfs`. A start answers [`PLACE_UNSERVED`] for each of them. The open places every path
-//! before it answers ([`open_places`] returns what could not be placed as data): one cause that
-//! refuses anywhere is [`EXEC_GATE_UNSERVED`]; with none, every path whose cause is
+//! `file-system-unlisted`, the last for a file-system type other than `ext4`, `overlay`,
+//! `tmpfs` and `xfs`. A start answers [`PLACE_UNSERVED`] for each of them. The open places
+//! every path before it answers ([`open_places`] returns what could not be placed as data): one
+//! cause that refuses anywhere is [`EXEC_GATE_UNSERVED`]; with none, every path whose cause is
 //! `file-system-unlisted` or `mount-id-unreported` becomes an entry of the adapter's proof
 //! ([`FactWithheld`]), and a profile with a list is refused `confinement.fact-unserved` with it.
 //!
@@ -88,8 +88,8 @@ pub(crate) const EXEC_GATE_INVALID: &str = "config.exec-gate-invalid";
 /// `mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`, `mount-row-missing`,
 /// `mount-row-repeated`, `mount-root-deleted`, `mount-point-mismatch` or `mount-covered`. The
 /// other two of the ten, `file-system-unlisted` (a file-system type other than `ext4`,
-/// `overlay` and `tmpfs`) and `mount-id-unreported`, do not refuse the open: they withhold the
-/// facts (D27, [`FactWithheld`]).
+/// `overlay`, `tmpfs` and `xfs`) and `mount-id-unreported`, do not refuse the open: they
+/// withhold the facts (D27, [`FactWithheld`]).
 pub(crate) const EXEC_GATE_UNSERVED: &str = "config.exec-gate-unserved";
 /// A start whose profile carries an executable list needs a place this host cannot establish
 /// (D26): of the program, of an entry, or of the host source of a declared mount. 501, before
@@ -98,9 +98,9 @@ pub(crate) const EXEC_GATE_UNSERVED: &str = "config.exec-gate-unserved";
 /// one of the ten causes: `mount-table-unreadable`, `mount-table-unparsable`,
 /// `path-unopenable`, `mount-id-unreported`, `mount-row-missing`, `mount-row-repeated`,
 /// `mount-root-deleted`, `mount-point-mismatch`, `mount-covered`, or `file-system-unlisted`
-/// with the type, for a file-system type other than `ext4`, `overlay` and `tmpfs`. The
+/// with the type, for a file-system type other than `ext4`, `overlay`, `tmpfs` and `xfs`. The
 /// address is the field at fault.
-pub(crate) const PLACE_UNSERVED: &str = "exec.sandbox-place-unserved";
+pub(crate) const PLACE_UNSERVED: &str = substrate_wire::EXEC_SANDBOX_PLACE_UNSERVED;
 
 const ADDRESS: &str = "config.exec_gate";
 const WORKSPACE_ROOT: &str = "config.workspace_root";
@@ -197,8 +197,76 @@ pub(crate) fn start_unplaced(address: &str, why: &Unestablished) -> DriverError 
 
 /// [`start_unplaced`] for an entry of the deny-list, or its nearest existing ancestor: address
 /// `exec_denied_paths`.
+#[cfg(test)]
 pub(crate) fn denied_unplaced(why: &Unestablished) -> DriverError {
     start_unplaced(DENIED, why)
+}
+
+/// Whose start the lists are, and so how a refusal of them is addressed and worded (design 37
+/// § 6, amended).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Caller {
+    /// The adapter API. Its profile names the lists `exec_subpaths` and `exec_denied_paths`,
+    /// and [`PLACE_UNSERVED`] says what the driver read: the path, the cause and, for a type
+    /// outside the list, the type and the served types ([`start_unplaced`]).
+    Adapter,
+    /// A wire start. Its `sandbox` names the lists `sandbox.exec_subpaths` and
+    /// `sandbox.exec_denied_paths`, and [`PLACE_UNSERVED`] names a path of the run's view and
+    /// the cause's name only: a mount's type field can hold text its mounter chose, and a host
+    /// path is not a client's to read (design 37 § 8). The operator reads both in the driver's
+    /// own line.
+    Wire,
+}
+
+impl Caller {
+    /// The address of a refused allow-list entry.
+    pub(crate) const fn entry(self) -> &'static str {
+        match self {
+            Self::Adapter => ENTRY,
+            Self::Wire => substrate_wire::EXEC_SUBPATHS_ADDRESS,
+        }
+    }
+
+    /// The address of a refused deny-list entry.
+    pub(crate) const fn denied(self) -> &'static str {
+        match self {
+            Self::Adapter => DENIED,
+            Self::Wire => substrate_wire::EXEC_DENIED_PATHS_ADDRESS,
+        }
+    }
+
+    /// [`PLACE_UNSERVED`] at `address`, for `why`. `view` is the path of the run's view the
+    /// start was being placed for: an entry, the program or a declared mount as the request
+    /// wrote it, or a mount of the view. A wire start's message names it in place of the path
+    /// `why` holds, which for a mount beneath it is a mount point of the host's table.
+    pub(crate) fn unplaced(self, address: &str, view: &str, why: &Unestablished) -> DriverError {
+        match self {
+            Self::Adapter => start_unplaced(address, why),
+            Self::Wire => {
+                let cause = why.cause.name();
+                let what = match why.asked {
+                    substrate_exec_gate::place::Asked::Place => {
+                        format!("cannot establish the place of {view}: {cause}")
+                    }
+                    substrate_exec_gate::place::Asked::Attachment => {
+                        format!(
+                            "cannot establish where a mount beneath {view} is attached: {cause}"
+                        )
+                    }
+                };
+                DriverError::unserved(
+                    PLACE_UNSERVED,
+                    format!("This host cannot hold the run to its executable list: {what}."),
+                    address,
+                )
+            }
+        }
+    }
+
+    /// [`Self::unplaced`] for the place of a path of the view, which `why` holds.
+    fn unplaced_here(self, address: &str, why: &Unestablished) -> DriverError {
+        self.unplaced(address, &why.path, why)
+    }
 }
 
 /// A place the open needs and could not establish, as data (D26): whose configuration field
@@ -873,14 +941,16 @@ pub(crate) fn class_of(source: &Reach, writable: &[Location]) -> Class {
 /// [`PLACE_UNSERVED`], with `address` naming the field the mount was declared in: for a source
 /// whose own place cannot be established, which is never classed `follow` for want of an
 /// answer (D24, D26), and for a source classed `beneath` with a mount beneath it whose root
-/// cannot be taken as a place.
+/// cannot be taken as a place. `source` is named by the path of its mount in the view, which a
+/// wire start's message names for both ([`Caller::unplaced`]).
 pub(crate) fn writable_source(
+    caller: Caller,
     address: &str,
     source: &Opened,
     writable: &[Location],
     tree: &MountTree,
 ) -> Result<Option<Location>, DriverError> {
-    let unplaced = |why: Unestablished| start_unplaced(address, &why);
+    let unplaced = |why: Unestablished| caller.unplaced(address, &source.path, &why);
     let place = tree.table().place_of(source).map_err(unplaced)?;
     if class_of(&tree.reaches_as_written(&place), writable) == Class::Follow {
         return Ok(None);
@@ -903,10 +973,12 @@ pub(crate) fn classed(
     writable: &[Location],
     tree: &MountTree,
 ) -> Result<Class, DriverError> {
-    Ok(match writable_source(address, source, writable, tree)? {
-        Some(_) => Class::Beneath,
-        None => Class::Follow,
-    })
+    Ok(
+        match writable_source(Caller::Adapter, address, source, writable, tree)? {
+            Some(_) => Class::Beneath,
+            None => Class::Follow,
+        },
+    )
 }
 
 /// The mounts of one run's view an executable path may lie in, as the start pinned them.
@@ -1066,11 +1138,12 @@ impl Unfollowed {
     }
 
     /// The refusal of the start: `exec.sandbox-path-unrepresentable` for a path at fault, and
-    /// [`PLACE_UNSERVED`] with the cause for a link or a directory that has no place.
-    fn refusal(self, text: &str, address: &str) -> DriverError {
+    /// [`PLACE_UNSERVED`] with the cause for a link or a directory that has no place, named by
+    /// its path in the view.
+    fn refusal(self, text: &str, address: &str, caller: Caller) -> DriverError {
         match self {
             Self::Refused(why) | Self::Absent(why) => unrepresentable(text, why, address),
-            Self::Unplaced(why) => start_unplaced(address, &why),
+            Self::Unplaced(why) => caller.unplaced_here(address, &why),
         }
     }
 }
@@ -1137,6 +1210,7 @@ fn file_identity(descriptor: &OwnedFd) -> Option<(libc::dev_t, libc::ino_t)> {
 
 /// Where a path of the view is on the host: its place, the mount the kernel reported for what
 /// was opened, and for a file its device and inode.
+#[cfg_attr(test, derive(Clone))]
 struct Sighted {
     place: Place,
     /// The ID of the mount the place was read from: the mount a walk of the path is on.
@@ -1165,6 +1239,8 @@ struct Reached {
 /// One start's view, as the driver will mount it, and what it needs to place a host path.
 struct Mounts<'a> {
     list: Vec<Mount<'a>>,
+    /// Whose start this is: how its refusals are addressed and worded.
+    caller: Caller,
     /// Every host location a run can write: the workspace root and each declared writable root,
     /// whether or not this start mounts them, what this start binds writable, and the source
     /// of every mount classed `beneath`.
@@ -1242,6 +1318,7 @@ impl<'a> Shown<'a> {
 ///
 /// As [`writable_source`].
 fn class_together(
+    caller: Caller,
     shown: &[Shown<'_>],
     locations: &mut Vec<Location>,
     tree: &MountTree,
@@ -1253,7 +1330,8 @@ fn class_together(
             if *class == Class::Beneath {
                 continue;
             }
-            if let Some(location) = writable_source(mount.address, &mount.opened, locations, tree)?
+            if let Some(location) =
+                writable_source(caller, mount.address, &mount.opened, locations, tree)?
             {
                 locations.push(location);
                 *class = Class::Beneath;
@@ -1269,31 +1347,44 @@ fn class_together(
 /// Every host location a run can write, placed on `tree` with what it reaches (D30): the
 /// workspace root and each declared writable root, then the workspace and the writable roots
 /// this start binds.
+///
+/// The first two are paths of the host's configuration. A wire start's refusal names, for the
+/// workspace root, the workspace's mount, which lies in it, and for a declared writable root,
+/// which this start may not bind and so may have no path in the view, the field.
 fn writable_locations(
+    caller: Caller,
     view: &View<'_>,
     config: &HostConfig,
     tree: &MountTree,
 ) -> Result<Vec<Location>, DriverError> {
-    let located = |address: &str, opened: Result<Opened, Unestablished>| {
-        let unplaced = |why: Unestablished| start_unplaced(address, &why);
+    let located = |address: &str, named: &str, opened: Result<Opened, Unestablished>| {
+        let unplaced = |why: Unestablished| caller.unplaced(address, named, &why);
         let opened = opened.map_err(unplaced)?;
         let place = tree.table().place_of(&opened).map_err(unplaced)?;
         Location::reaching(&opened.path, &place, tree).map_err(unplaced)
     };
-    let mut locations = vec![located(WORKSPACE, opened_path(&config.workspace_root))?];
+    let workspace = substrate_wire::EXEC_WORKSPACE_MOUNT;
+    let mut locations = vec![located(
+        WORKSPACE,
+        workspace,
+        opened_path(&config.workspace_root),
+    )?];
     for root in &config.writable_roots {
-        locations.push(located("writable_roots", opened_path(&root.path))?);
+        locations.push(located(
+            WRITABLE_MOUNT,
+            "a writable root this host declares",
+            opened_path(&root.path),
+        )?);
     }
     locations.push(located(
         WORKSPACE,
-        Ok(Opened::of_descriptor(
-            view.workspace.as_raw_fd(),
-            substrate_wire::EXEC_WORKSPACE_MOUNT,
-        )),
+        workspace,
+        Ok(Opened::of_descriptor(view.workspace.as_raw_fd(), workspace)),
     )?);
     for root in view.writable_roots {
         locations.push(located(
-            "writable_roots",
+            WRITABLE_MOUNT,
+            root.mount(),
             Ok(Opened::of_descriptor(root.raw_fd(), root.mount())),
         )?);
     }
@@ -1301,11 +1392,11 @@ fn writable_locations(
 }
 
 impl<'a> Mounts<'a> {
-    fn of(view: &View<'a>, config: &HostConfig) -> Result<Self, DriverError> {
+    fn of(view: &View<'a>, config: &HostConfig, caller: Caller) -> Result<Self, DriverError> {
         // The table before any path: D26 names its causes first.
         let table = MountTable::read().map_err(|cause| {
-            start_unplaced(
-                ENTRY,
+            caller.unplaced_here(
+                caller.entry(),
                 &Unestablished {
                     path: substrate_wire::EXEC_WORKSPACE_MOUNT.to_owned(),
                     cause,
@@ -1313,11 +1404,12 @@ impl<'a> Mounts<'a> {
                 },
             )
         })?;
-        // The table as a tree (D30), asked whole before any location is asked what it reaches.
+        // The table as a tree (D30), asked whole before any location is asked what it reaches:
+        // a row of it, for a wire start a mount beneath the view's root.
         let tree = table
             .into_tree()
-            .map_err(|why| start_unplaced(ENTRY, &why))?;
-        let mut locations = writable_locations(view, config, &tree)?;
+            .map_err(|why| caller.unplaced(caller.entry(), "/", &why))?;
+        let mut locations = writable_locations(caller, view, config, &tree)?;
         // In the order D24 lists the writable mounts: the workspace, the writable roots, the
         // mounts classed `beneath`, then the view's own file systems.
         let mut list = vec![fixed_mount(
@@ -1346,7 +1438,7 @@ impl<'a> Mounts<'a> {
                 continue;
             };
             let source = Source::Host(OwnedFd::from(directory));
-            shown.push(Shown::of(ENTRY, path, source, false, eligible));
+            shown.push(Shown::of(caller.entry(), path, source, false, eligible));
         }
         for root in view.read_only_roots {
             let source = Source::Pinned(root.descriptor());
@@ -1368,7 +1460,7 @@ impl<'a> Mounts<'a> {
                 true,
             ));
         }
-        let classes = class_together(&shown, &mut locations, &tree)?;
+        let classes = class_together(caller, &shown, &mut locations, &tree)?;
         list.extend(
             shown
                 .into_iter()
@@ -1388,6 +1480,7 @@ impl<'a> Mounts<'a> {
         list.push(fixed_mount(PROC_MOUNT, Source::Opaque, false, false));
         Ok(Self {
             list,
+            caller,
             locations,
             tree,
         })
@@ -1578,7 +1671,7 @@ impl<'a> Mounts<'a> {
     fn check_followed(&self, text: &str, path: &str, address: &str) -> Result<(), DriverError> {
         let reached = self
             .follow(path, text)
-            .map_err(|why| why.refusal(text, address))?;
+            .map_err(|why| why.refusal(text, address, self.caller))?;
         self.check_reached(text, reached, address).map(drop)
     }
 
@@ -1614,7 +1707,7 @@ impl<'a> Mounts<'a> {
             .tree
             .table()
             .place_of(object)
-            .map_err(|why| start_unplaced(address, &why))?;
+            .map_err(|why| self.caller.unplaced_here(address, &why))?;
         if let Some(location) = shown_location(&place, &self.locations) {
             return Err(refuse(format!(
                 "resolves to {}, which shows {}, a location a run can write",
@@ -1624,7 +1717,7 @@ impl<'a> Mounts<'a> {
         // The end is where no run can write; the way to it is judged last, so a path that
         // ends where a run can write keeps the answer it had.
         if let Some(why) = reached.through {
-            return Err(why.refusal(text, address));
+            return Err(why.refusal(text, address, self.caller));
         }
         Ok(Sighted {
             place,
@@ -1686,9 +1779,10 @@ impl<'a> Mounts<'a> {
     /// ancestor's place and the names after it, and is no file: the ancestor is not what it
     /// denies, and the directory that is to hold it is expanded like any other.
     fn denied(&self, text: &str) -> Result<(Located, Sighted), DriverError> {
-        let (mount, path, rel) = self.eligible(text, DENIED)?;
-        let refuse = |why: String| unrepresentable(text, why, DENIED);
-        let unplaced = |why: Unestablished| denied_unplaced(&why);
+        let denied = self.caller.denied();
+        let (mount, path, rel) = self.eligible(text, denied)?;
+        let refuse = |why: String| unrepresentable(text, why, denied);
+        let unplaced = |why: Unestablished| self.caller.unplaced_here(denied, &why);
         // What was opened, and the names of the entry after it: none for an entry that exists.
         let named = |opened: Sighted, absent: &[String]| Sighted {
             place: absent
@@ -1735,13 +1829,15 @@ impl<'a> Mounts<'a> {
                 loop {
                     match self.follow(&join(&existing), text) {
                         Ok(reached) => {
-                            let sighted = self.check_reached(text, reached, DENIED)?;
+                            let sighted = self.check_reached(text, reached, denied)?;
                             break named(sighted, &all[existing.len()..]);
                         }
                         Err(Unfollowed::Absent(_)) if existing.len() > mount.names.len() => {
                             existing.pop();
                         }
-                        Err(unfollowed) => return Err(unfollowed.refusal(text, DENIED)),
+                        Err(unfollowed) => {
+                            return Err(unfollowed.refusal(text, denied, self.caller));
+                        }
                     }
                 }
             }
@@ -1766,7 +1862,7 @@ impl<'a> Mounts<'a> {
             Class::Follow => {
                 let reached = self
                     .follow(&path, text)
-                    .map_err(|unfollowed| unfollowed.refusal(text, address))?;
+                    .map_err(|unfollowed| unfollowed.refusal(text, address, self.caller))?;
                 self.check_reached(text, reached, address)
             }
             Class::Beneath => {
@@ -1786,7 +1882,7 @@ impl<'a> Mounts<'a> {
                         .tree
                         .table()
                         .place_of(&opened)
-                        .map_err(|why| start_unplaced(address, &why))?,
+                        .map_err(|why| self.caller.unplaced_here(address, &why))?,
                     mount: opened.mount_id,
                     file: file_identity(descriptor),
                 })
@@ -1817,7 +1913,7 @@ impl<'a> Mounts<'a> {
                 self.tree
                     .table()
                     .place_of(&Opened::of_descriptor(end.as_raw_fd(), &path))
-                    .map_err(|why| start_unplaced(address, &why))?;
+                    .map_err(|why| self.caller.unplaced_here(address, &why))?;
             }
             Class::Follow => self.check_followed(text, &path, address)?,
         }
@@ -1912,19 +2008,21 @@ fn check_openable(located: &Located) -> Result<(), String> {
 /// D30's cause where a reach cannot be established: address `exec_denied_paths` for a denied
 /// directory, `exec_subpaths` for a listed one, for a mount of a type outside the list among
 /// the entries of a directory the start expands, and for the root of a mount of a listed
-/// type among them.
+/// type among them. The addresses are `caller`'s, and a wire start's message names the entry
+/// as the request wrote it ([`Caller::unplaced`]).
 fn judge_denied(
     tree: &MountTree,
+    caller: Caller,
     asked: &str,
     program: &Sighted,
     denied: &[(&str, Sighted)],
-    listed: &[Sighted],
+    listed: &[(&str, Sighted)],
 ) -> Result<(), DriverError> {
     let mut reaches = Vec::with_capacity(denied.len());
     for (entry, denied) in denied {
         let reach = tree
             .reaches(&denied.place, Unlisted::Refused)
-            .map_err(|why| denied_unplaced(&why))?;
+            .map_err(|why| caller.unplaced(caller.denied(), entry, &why))?;
         if reach.holds(&program.place) || (program.file.is_some() && program.file == denied.file) {
             return Err(DriverError::refused(
                 PROGRAM_UNLISTED,
@@ -1937,15 +2035,16 @@ fn judge_denied(
         }
         reaches.push(reach);
     }
-    let asked_of = |place: &Place| {
-        tree.reaches(place, Unlisted::Skipped)
-            .map_err(|why| start_unplaced(ENTRY, &why))
-    };
     // D11 step 1, no rule and nothing asked: the place lies in a denied place.
     let denied_place = |place: &Place| reaches.iter().any(|reach| reach.holds(place));
     // D11 step 3: the directory reaches a denied place, so the helper walks its entries.
     let expanded = |reach: &Reach| reaches.iter().any(|denied| reach.overlaps(denied));
-    for entry in listed {
+    for (text, entry) in listed {
+        let unplaced = |why: &Unestablished| caller.unplaced(caller.entry(), text, why);
+        let asked_of = |place: &Place| {
+            tree.reaches(place, Unlisted::Skipped)
+                .map_err(|why| unplaced(&why))
+        };
         if entry.file.is_some() || denied_place(&entry.place) {
             continue;
         }
@@ -1957,7 +2056,7 @@ fn judge_denied(
                 continue;
             }
             if expanded(&asked_of(&odd.holder)?) {
-                return Err(start_unplaced(ENTRY, &odd.unplaced()));
+                return Err(unplaced(&odd.unplaced()));
             }
         }
         // The helper's walk across the mounts of a listed type, mount by mount: the listed
@@ -2015,9 +2114,10 @@ fn shows_a_file(mount_point: &str) -> bool {
 /// [`PROGRAM_UNLISTED`] for a denied program; and [`PLACE_UNSERVED`] where a place cannot be
 /// established, of the program, of an entry of either list or of a deny entry's nearest
 /// existing ancestor, or, on a start with a deny-list, what a denied or a listed directory
-/// reaches.
+/// reaches. An entry is addressed at `caller`'s member for its list ([`Caller`]).
 pub(crate) fn plan(
     gate: &ExecGate,
+    caller: Caller,
     entries: &[String],
     denied: &[String],
     program: &str,
@@ -2031,12 +2131,12 @@ pub(crate) fn plan(
             PROGRAM,
         ));
     }
-    let mounts = Mounts::of(view, config)?;
+    let mounts = Mounts::of(view, config, caller)?;
     let asked = program;
     let program = mounts.located(asked, PROGRAM)?;
     let allow = entries
         .iter()
-        .map(|entry| mounts.located(entry, ENTRY))
+        .map(|entry| mounts.located(entry, caller.entry()))
         .collect::<Result<Vec<_>, _>>()?;
     let mut deny = Vec::with_capacity(denied.len());
     let mut sighted = Vec::new();
@@ -2049,15 +2149,15 @@ pub(crate) fn plan(
         let program = mounts.sighted(asked, PROGRAM)?;
         let listed = entries
             .iter()
-            .map(|entry| mounts.sighted(entry, ENTRY))
-            .collect::<Result<Vec<_>, _>>()?;
-        judge_denied(&mounts.tree, asked, &program, &sighted, &listed)?;
+            .map(|entry| Ok((entry.as_str(), mounts.sighted(entry, caller.entry())?)))
+            .collect::<Result<Vec<_>, DriverError>>()?;
+        judge_denied(&mounts.tree, caller, asked, &program, &sighted, &listed)?;
     }
     // The helper opens the loader as a `follow` path and refuses one in a writable mount; the
     // same answer here, before dispatch, instead of exit status 125 after it.
     if let Some(loader) = gate.loader() {
-        check_length(loader).map_err(|why| unrepresentable(loader, why, ENTRY))?;
-        mounts.check_followed(loader, loader, ENTRY)?;
+        check_length(loader).map_err(|why| unrepresentable(loader, why, caller.entry()))?;
+        mounts.check_followed(loader, loader, caller.entry())?;
     }
     let writable = mounts.writable();
     for root in &writable {

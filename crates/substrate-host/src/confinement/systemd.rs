@@ -1646,7 +1646,7 @@ mod imp {
                     cause: "file-system-unlisted",
                     address: "config.workspace_root",
                     path: "/data/workspaces".to_owned(),
-                    file_system: Some("xfs".to_owned()),
+                    file_system: Some("btrfs".to_owned()),
                 },
                 super::super::super::FactWithheld {
                     fact: Fact::ExecSubpaths,

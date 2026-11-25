@@ -91,15 +91,24 @@ pub const LOCAL_REFUSED: &str = "confinement.local-refused";
 pub const LOCAL_REASON_MISSING: &str = "confinement.local-reason-missing";
 pub const IMAGE_UNPINNED: &str = "confinement.image-unpinned";
 pub const RESERVED_FIELD_UNSERVED: &str = "confinement.reserved-field-unserved";
-/// A profile sets `exec_denied_paths` beside an empty `exec_subpaths` (design 35 D13).
+/// A profile sets `exec_denied_paths` beside an empty `exec_subpaths` (design 35 D13): the
+/// wire's code, which a start answers too (design 37 § 6, row 3).
 pub const EXEC_DENIED_PATHS_WITHOUT_SUBPATHS: &str =
-    "confinement.exec-denied-paths-without-subpaths";
+    substrate_wire::CONFINEMENT_EXEC_DENIED_PATHS_WITHOUT_SUBPATHS;
+/// A profile sets more than [`MAX_EXEC_SUBPATHS`] allow entries (design 37 § 2): a profile and
+/// a start have one bound. The wire answers a list over it `request.schema-invalid` and never
+/// reaches this code.
+pub const EXEC_SUBPATHS_EXCEEDED: &str = "confinement.exec-subpaths-exceeded";
 /// A profile sets more than [`MAX_EXEC_DENIED_PATHS`] deny entries (design 35 D10).
 pub const EXEC_DENIED_PATHS_EXCEEDED: &str = "confinement.exec-denied-paths-exceeded";
-/// The most entries `ConfinementProfile.exec_denied_paths` holds (design 35 D10). It bounds
-/// the size of a profile and of the helper's argument list, not a start's cost, which
-/// follows the size of the directories that hold a denied path.
-pub const MAX_EXEC_DENIED_PATHS: usize = 64;
+/// The most entries `ConfinementProfile.exec_denied_paths` holds (design 35 D10), the wire's
+/// bound of `sandbox.exec_denied_paths` (design 37 § 2). It bounds the size of a profile and of
+/// the helper's argument list, not a start's cost, which follows the size of the directories
+/// that hold a denied path.
+pub use substrate_wire::MAX_EXEC_DENIED_PATHS;
+/// The most entries `ConfinementProfile.exec_subpaths` holds, the wire's bound of
+/// `sandbox.exec_subpaths` (design 37 § 2).
+pub use substrate_wire::MAX_EXEC_SUBPATHS;
 /// A start whose profile names no workspace: a run needs a directory to start in.
 pub const WORKSPACE_REQUIRED: &str = "confinement.workspace-required";
 /// A `render` the adapter cannot reproduce faithfully without acquiring run-time material.
@@ -295,6 +304,11 @@ pub enum ConfinementError {
     )]
     ExecDeniedPathsWithoutSubpaths { adapter: AdapterName },
     #[error(
+        "confinement.exec-subpaths-exceeded: the profile for {adapter:?} lists more than \
+         {MAX_EXEC_SUBPATHS} executable paths"
+    )]
+    ExecSubpathsExceeded { adapter: AdapterName },
+    #[error(
         "confinement.exec-denied-paths-exceeded: the profile for {adapter:?} denies more than \
          {MAX_EXEC_DENIED_PATHS} paths"
     )]
@@ -314,6 +328,7 @@ impl ConfinementError {
             Self::ImageUnpinned { .. } => IMAGE_UNPINNED,
             Self::ReservedFieldUnserved { .. } => RESERVED_FIELD_UNSERVED,
             Self::ExecDeniedPathsWithoutSubpaths { .. } => EXEC_DENIED_PATHS_WITHOUT_SUBPATHS,
+            Self::ExecSubpathsExceeded { .. } => EXEC_SUBPATHS_EXCEEDED,
             Self::ExecDeniedPathsExceeded { .. } => EXEC_DENIED_PATHS_EXCEEDED,
             Self::Driver(error) => error.code,
         }
@@ -326,6 +341,7 @@ impl ConfinementError {
             Self::LocalReasonMissing { .. }
             | Self::ImageUnpinned { .. }
             | Self::ExecDeniedPathsWithoutSubpaths { .. }
+            | Self::ExecSubpathsExceeded { .. }
             | Self::ExecDeniedPathsExceeded { .. } => 422,
             Self::AdapterUnserved { .. }
             | Self::FamilyUnserved { .. }
@@ -949,15 +965,20 @@ fn reserved(profile: &ConfinementProfile) -> Result<(), ConfinementError> {
     Ok(())
 }
 
-/// Design 35 D13 and D10: a deny-list beside an empty allow-list, and one over its bound. Both
-/// read the profile's two lists and no adapter fact, so every adapter answers them alike, before
-/// `confinement.fact-unserved`.
+/// Design 35 D13 and D10, design 37 § 6: a deny-list beside an empty allow-list, and either
+/// list over its bound. Each reads the profile's two lists and no adapter fact, so every
+/// adapter answers them alike, before `confinement.fact-unserved`.
 fn denied_paths_shape(
     adapter: &AdapterName,
     profile: &ConfinementProfile,
 ) -> Result<(), ConfinementError> {
     if !profile.exec_denied_paths.is_empty() && profile.exec_subpaths.is_empty() {
         return Err(ConfinementError::ExecDeniedPathsWithoutSubpaths {
+            adapter: adapter.clone(),
+        });
+    }
+    if profile.exec_subpaths.len() > MAX_EXEC_SUBPATHS {
+        return Err(ConfinementError::ExecSubpathsExceeded {
             adapter: adapter.clone(),
         });
     }
@@ -2329,6 +2350,41 @@ mod tests {
         }
     }
 
+    /// Design 37 § 2: the allow-list holds at most `MAX_EXEC_SUBPATHS` entries, the wire's
+    /// bound. 64 are admitted and 65 are refused by name, on an adapter that proves the fact
+    /// and on `local`, before `confinement.fact-unserved` is asked.
+    #[test]
+    fn an_allow_list_over_its_bound_is_refused_by_name() {
+        fn borrowed(owned: &[String]) -> Vec<&str> {
+            owned.iter().map(String::as_str).collect()
+        }
+        assert_eq!(MAX_EXEC_SUBPATHS, 64);
+        let entries = |count: usize| -> Vec<String> {
+            (0..count)
+                .map(|index| format!("bin/tool-{index}"))
+                .collect()
+        };
+        let (admitted, _) = admit_with_lists(&linux_with_lists(true), &borrowed(&entries(64)), &[]);
+        admitted.expect("64 entries");
+        for facts in [
+            linux_with_lists(true),
+            linux_without_lists(Vec::new()),
+            local::proof(true),
+        ] {
+            let (refused, records) = admit_with_lists(&facts, &borrowed(&entries(65)), &[]);
+            let error = refused.expect_err("65 entries");
+            assert!(
+                matches!(&error, ConfinementError::ExecSubpathsExceeded { .. }),
+                "{error:?}"
+            );
+            assert_eq!(
+                (error.code(), error.status()),
+                ("confinement.exec-subpaths-exceeded", 422)
+            );
+            assert_eq!(records[0]["code"], error.code());
+        }
+    }
+
     /// Design 35 D27: a profile with a list on an adapter whose open withheld the fact is
     /// refused `confinement.fact-unserved`, and the refusal repeats the proof's first entry for
     /// that fact: the cause, the path, the configuration field and the file-system type.
@@ -2337,11 +2393,11 @@ mod tests {
         let first = withheld_entry(
             "config.workspace_root",
             "/var/lib/b10x-substrate/workspaces",
-            Some("xfs"),
+            Some("btrfs"),
         );
         let facts = linux_without_lists(vec![
             first.clone(),
-            withheld_entry("config.exec_gate", "/usr", Some("xfs")),
+            withheld_entry("config.exec_gate", "/usr", Some("btrfs")),
         ]);
         let (refused, records) = admit_listing(&facts, &["bin"]);
         let error = refused.expect_err("a list on an adapter that withheld the fact");
@@ -2366,8 +2422,8 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "confinement.fact-unserved: Linux did not prove ExecSubpaths: file-system-unlisted: \
-             /var/lib/b10x-substrate/workspaces (config.workspace_root) is on xfs; the lists \
-             are served on ext4, overlay and tmpfs"
+             /var/lib/b10x-substrate/workspaces (config.workspace_root) is on btrfs; the lists \
+             are served on ext4, overlay, tmpfs and xfs"
         );
 
         // The audit record keeps its shape: the code and the fact, and no new member. It is the

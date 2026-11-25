@@ -134,8 +134,8 @@ pub struct ConfinementProfile {
     ///   `substrate-exec-gate: cannot read the directory "<path>": <cause>`, with the
     ///   directory's path in the run's view as a quoted string. An earlier run of the
     ///   workspace can cause it by taking the read permission from such a directory;
-    /// - a mount of a file-system type other than `ext4`, `overlay` and `tmpfs` that is an
-    ///   entry of a directory the start expands is `exec.sandbox-place-unserved` (501)
+    /// - a mount of a file-system type other than `ext4`, `overlay`, `tmpfs` and `xfs` that
+    ///   is an entry of a directory the start expands is `exec.sandbox-place-unserved` (501)
     ///   before dispatch. A start expands only the directories on the way to a deny entry,
     ///   so the same mount one directory further from the entry refuses nothing;
     /// - a hard link to a denied program that already exists elsewhere beneath a listed path

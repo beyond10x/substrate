@@ -269,14 +269,18 @@ pub(crate) struct AdapterStart {
 /// out without writing so.
 ///
 /// Two constructors and no public field. [`Self::of`] is the adapter's and carries every entry
-/// of the admitted profile. `wire` is what the three wire sites of [`ProcessRuntime`] write: no
-/// list, because a wire start has no field for one. **`wire` has no visibility modifier**, so it
-/// is private to this module: `crate::confinement::linux` and the crate root, where the
+/// of the admitted profile, refused at the profile's fields `exec_subpaths` and
+/// `exec_denied_paths`. `requested` is what the three wire sites of [`ProcessRuntime`] write:
+/// the lists of the start's `sandbox` (design 37 § 7), refused at the wire's members
+/// `sandbox.exec_subpaths` and `sandbox.exec_denied_paths` (§ 6, amended); `argv` and a
+/// declared mount's member are the same on both. **`requested` has no visibility modifier**, so
+/// it is private to this module: `crate::confinement::linux` and the crate root, where the
 /// adapter's path runs, cannot name it, and a call from either does not compile.
 #[derive(Debug)]
 pub(crate) struct ExecLists {
     subpaths: Vec<String>,
     denied: Vec<String>,
+    caller: crate::exec_gate::Caller,
 }
 
 impl ExecLists {
@@ -285,15 +289,27 @@ impl ExecLists {
         Self {
             subpaths: admitted.profile().exec_subpaths.clone(),
             denied: admitted.profile().exec_denied_paths.clone(),
+            caller: crate::exec_gate::Caller::Adapter,
         }
     }
 
-    /// No list: what a wire start carries, which has no field for one (design 35 § 15).
-    fn wire() -> Self {
-        Self {
-            subpaths: Vec::new(),
-            denied: Vec::new(),
+    /// The lists a wire start's `sandbox` names, as it names them. An absent allow-list is no
+    /// list. A present and empty one is refused here, by the daemon's row 2 of design 37 § 6:
+    /// the driver never takes it for no list, which would run every program of the view.
+    fn requested(sandbox: &substrate_wire::ConfinementRequest) -> Result<Self, DriverError> {
+        if sandbox.exec_subpaths.as_ref().is_some_and(Vec::is_empty) {
+            let [row, ..] = substrate_wire::EXEC_LIST_REFUSALS;
+            return Err(DriverError::refused(
+                row.code,
+                row.message.unwrap_or_default(),
+                substrate_wire::EXEC_SUBPATHS_ADDRESS,
+            ));
         }
+        Ok(Self {
+            subpaths: sandbox.exec_subpaths.clone().unwrap_or_default(),
+            denied: sandbox.exec_denied_paths.clone(),
+            caller: crate::exec_gate::Caller::Wire,
+        })
     }
 
     /// A list of `entries`, for the cases that have no admitted profile at hand.
@@ -302,6 +318,7 @@ impl ExecLists {
         Self {
             subpaths: entries.iter().map(|entry| (*entry).to_owned()).collect(),
             denied: Vec::new(),
+            caller: crate::exec_gate::Caller::Adapter,
         }
     }
 
@@ -328,6 +345,11 @@ impl ExecLists {
     pub(crate) fn subpaths(&self) -> &[String] {
         &self.subpaths
     }
+
+    /// Whose start the lists are: the addresses a refused entry is answered at.
+    pub(crate) fn caller(&self) -> crate::exec_gate::Caller {
+        self.caller
+    }
 }
 
 /// One start's executable gate (design 35 D20, D24): a fresh read-only descriptor of the helper's
@@ -343,15 +365,11 @@ pub(crate) struct GateStart {
 /// Design 35 D29: a start with an executable list and a controlling terminal. Taking the
 /// terminal needs `setsid --ctty` between bubblewrap and the program, and on a listed start
 /// nothing runs in the view before the helper applied the list. The code is the one a pty
-/// start has always answered where the driver cannot give a confined process a terminal.
+/// start has always answered where the driver cannot give a confined process a terminal. The
+/// text is the wire's, row 5 of design 37 § 6.
 fn listed_terminal_unserved() -> DriverError {
-    DriverError::unserved(
-        substrate_wire::SESSION_PTY_UNSERVED,
-        "A run held to an executable list is given no controlling terminal: taking one needs a \
-         program before the helper, and nothing runs in the run's view before the list is \
-         applied.",
-        "mode",
-    )
+    let [_, _, _, row, ..] = substrate_wire::EXEC_LIST_REFUSALS;
+    DriverError::unserved(row.code, row.message.unwrap_or_default(), "mode")
 }
 
 /// Design 35 D29: on a start with an executable list the driver owns one more mount of the
@@ -1050,6 +1068,10 @@ impl ProcessRuntime {
         workspace: &Path,
         input: &ExecStartInput,
     ) -> DispatchOutcome<ExecObservation> {
+        let lists = match ExecLists::requested(&input.sandbox) {
+            Ok(lists) => lists,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
         self.start_inner(
             id,
             workspace,
@@ -1057,7 +1079,7 @@ impl ProcessRuntime {
             input,
             None,
             AdapterStart::default(),
-            &ExecLists::wire(),
+            &lists,
         )
         .await
     }
@@ -1086,6 +1108,10 @@ impl ProcessRuntime {
         git_roots: &[crate::GitRootBinding],
         input: &ExecStartInput,
     ) -> DispatchOutcome<ExecObservation> {
+        let lists = match ExecLists::requested(&input.sandbox) {
+            Ok(lists) => lists,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
         self.start_inner(
             id,
             workspace,
@@ -1093,7 +1119,7 @@ impl ProcessRuntime {
             input,
             None,
             AdapterStart::default(),
-            &ExecLists::wire(),
+            &lists,
         )
         .await
     }
@@ -1196,6 +1222,10 @@ impl ProcessRuntime {
                 SessionMode::Pty => input.window,
             },
         };
+        let lists = match ExecLists::requested(&input.exec.sandbox) {
+            Ok(lists) => lists,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
         // A session keeps the head of what it forwarded live (design 29 § 6).
         self.start_inner(
             id,
@@ -1204,7 +1234,7 @@ impl ProcessRuntime {
             &input.exec,
             Some(settings),
             AdapterStart::default(),
-            &ExecLists::wire(),
+            &lists,
         )
         .await
     }
@@ -1224,7 +1254,7 @@ impl ProcessRuntime {
             return Err(DriverError::refused(
                 crate::confinement::EXEC_DENIED_PATHS_WITHOUT_SUBPATHS,
                 "A run with an executable deny-list needs an allow-list beside it.",
-                "exec_denied_paths",
+                lists.caller().denied(),
             ));
         }
         if !(self.exec_gate.is_some() && self.exec_subpaths_proved) {
@@ -1232,7 +1262,7 @@ impl ProcessRuntime {
                 crate::confinement::FACT_UNSERVED,
                 "This host did not prove an executable allow-list, so a run that carries one is \
                  not started.",
-                "exec_subpaths",
+                lists.caller().entry(),
             ));
         }
         if !lists.denied().is_empty() && !self.exec_denied_paths_proved {
@@ -1240,7 +1270,7 @@ impl ProcessRuntime {
                 crate::confinement::FACT_UNSERVED,
                 "This host did not prove an executable deny-list, so a run that carries one is \
                  not started.",
-                "exec_denied_paths",
+                lists.caller().denied(),
             ));
         }
         Ok(())
@@ -1280,6 +1310,7 @@ impl ProcessRuntime {
         let program = input.argv.first().map_or("", String::as_str);
         let planned = crate::exec_gate::plan(
             gate,
+            lists.caller(),
             lists.subpaths(),
             lists.denied(),
             program,
@@ -1737,8 +1768,11 @@ impl ProcessRuntime {
             // found before the spawn. One removed after it is named on the observation by
             // `record_workdir_missing`, beside this record.
             workdir: input.workdir.clone(),
-            exec_subpaths: None,
-            exec_denied_paths: Vec::new(),
+            // Held to, as sent (design 37 § 4): `gate_start` refused every list this run could
+            // not be held to. An adapter start's lists are its profile's, which its own record
+            // names, and its wire request names none.
+            exec_subpaths: input.sandbox.exec_subpaths.clone(),
+            exec_denied_paths: input.sandbox.exec_denied_paths.clone(),
         };
         let resource = Exec {
             unrecorded_output: pipe_settings
@@ -9400,8 +9434,10 @@ mod tests {
         let (plain, _, _) = gated_runtime(other.path(), None);
         let access = read_write(&workspace);
         let input = pty_exec_input(&snapshot);
+        // What a wire start without the members builds (design 37 § 7).
+        let no_list = ExecLists::requested(&input.sandbox).expect("a start without the members");
         let gate = gated
-            .gate_start(&ExecLists::wire(), &input, &access, &[], &[], &[])
+            .gate_start(&no_list, &input, &access, &[], &[], &[])
             .expect("a start without a list asks nothing");
         assert!(gate.is_none(), "a start without a list has no gate");
         let unnumbered = |argv: Vec<String>| -> Vec<String> {
@@ -9506,7 +9542,7 @@ mod tests {
         assert_eq!(error.address.as_deref(), Some("mode"), "{error}");
         assert!(!absent.exists(), "the start created its workspace");
 
-        let DispatchOutcome::NotDispatched(error) = start(ExecLists::wire()).await else {
+        let DispatchOutcome::NotDispatched(error) = start(ExecLists::listing(&[])).await else {
             panic!("a start with an identity admission refuses was dispatched");
         };
         assert_eq!(error.code, "exec.identity-invalid", "{error}");
@@ -9609,9 +9645,14 @@ mod tests {
                         .render(&workspace, &input, &ExecLists::listing(&["bin"]))
                         .expect_err("a render of the same start"),
                 );
-                let unlisted =
-                    not_dispatched(&runtime, &workspace, NO_IDENTITY, &input, ExecLists::wire())
-                        .await;
+                let unlisted = not_dispatched(
+                    &runtime,
+                    &workspace,
+                    NO_IDENTITY,
+                    &input,
+                    ExecLists::listing(&[]),
+                )
+                .await;
                 assert_eq!(
                     unlisted.code, "exec.identity-invalid",
                     "{mount}: {unlisted}"
@@ -9643,7 +9684,7 @@ mod tests {
                 assert_eq!(error.code, "exec.identity-invalid", "{mount}: {error}");
             }
             let input = (kind.declare)(pty_exec_input(&snapshot), "/");
-            for lists in [ExecLists::listing(&["bin"]), ExecLists::wire()] {
+            for lists in [ExecLists::listing(&["bin"]), ExecLists::listing(&[])] {
                 let error = not_dispatched(&runtime, &workspace, "ex_above", &input, lists).await;
                 assert_eq!(error.code, kind.at_the_root, "{}: {error}", kind.address);
                 assert_eq!(error.address.as_deref(), Some(kind.address), "{error}");
@@ -9704,29 +9745,138 @@ mod tests {
         assert_eq!(error.class, crate::DriverErrorClass::Refused, "{error}");
     }
 
-    /// **The wire constructor is named at exactly the three wire sites** (design 35 D22): a wire
-    /// exec start, a start with Git roots and a session start. Outside this module the compiler
-    /// refuses the call, because `ExecLists::wire` has no visibility modifier; inside it a
-    /// fourth site fails here until design 35 is revisited.
+    /// **The constructor that reads a start's `sandbox` is written at exactly the three wire
+    /// sites** (design 37 § 7, design 35 D22): a wire exec start, a start with Git roots and a
+    /// session start, each with its own start's `sandbox`. The constructor of no list, `wire`,
+    /// is gone. Outside this module the compiler refuses the call, because
+    /// `ExecLists::requested` has no visibility modifier; inside it a fourth site fails here.
     #[test]
-    fn the_wire_constructor_is_named_at_exactly_the_three_wire_sites() {
+    fn the_constructor_that_reads_the_sandbox_is_written_at_exactly_the_three_wire_sites() {
         let source = include_str!("process.rs");
         let production = source
             .split("\n#[cfg(test)]\nmod tests {")
             .next()
             .expect("the code before the tests");
         assert_ne!(production.len(), source.len(), "the tests were not found");
-        let call = ["ExecLists", "::", "wire", "()"].concat();
-        assert_eq!(
-            production.matches(&call).count(),
-            3,
-            "ExecLists::wire() is written at another number of sites than the three wire paths"
-        );
-        // And it stays private to this module: no `pub` in front of it.
-        assert_eq!(production.matches("\n    fn wire() -> Self {").count(), 1);
         assert!(
-            !production.contains("pub(crate) fn wire()") && !production.contains("pub fn wire()")
+            !production.contains(&["fn ", "wire", "("].concat()),
+            "the constructor of no list is in the production source"
         );
+        let call = |argument: &str| ["ExecLists", "::", "requested", "(", argument, ")"].concat();
+        assert_eq!(
+            production
+                .matches(&["ExecLists", "::", "requested", "("].concat())
+                .count(),
+            3,
+            "ExecLists::requested is written at another number of sites than the three wire paths"
+        );
+        assert_eq!(production.matches(&call("&input.sandbox")).count(), 2);
+        assert_eq!(production.matches(&call("&input.exec.sandbox")).count(), 1);
+        // And it stays private to this module: no `pub` in front of it.
+        let definition = ["\n    fn ", "requested", "("].concat();
+        assert_eq!(production.matches(&definition).count(), 1);
+        assert!(!production.contains(&["pub(crate) fn ", "requested", "("].concat()));
+        assert!(!production.contains(&["pub fn ", "requested", "("].concat()));
+    }
+
+    /// **A wire start's refused entry is addressed at the wire's member, an adapter start's at
+    /// the profile's** (design 37 § 6, amended): the driver's own answers to a list it cannot
+    /// serve, on the same runtime and the same start, once with the lists in the start's
+    /// `sandbox` and once in the adapter's `ExecLists`. A present and empty allow-list is the
+    /// daemon's row 2, answered by the driver too, never taken for no list.
+    #[tokio::test]
+    async fn a_wire_start_is_refused_at_the_wire_members_and_an_adapter_start_at_the_profiles() {
+        async fn wire(runtime: &ProcessRuntime, input: &ExecStartInput) -> crate::DriverError {
+            let DispatchOutcome::NotDispatched(error) = runtime
+                .start("ex_wire", Path::new("/nonexistent"), input)
+                .await
+            else {
+                panic!("a wire start the driver cannot serve was dispatched");
+            };
+            error
+        }
+        async fn adapter(
+            runtime: &ProcessRuntime,
+            input: &ExecStartInput,
+            lists: ExecLists,
+        ) -> crate::DriverError {
+            not_dispatched(
+                runtime,
+                Path::new("/nonexistent"),
+                "ex_adapter",
+                input,
+                lists,
+            )
+            .await
+        }
+        let assert_at = |error: &crate::DriverError, code: &str, address: &str| {
+            assert_eq!(error.code, code, "{error}");
+            assert_eq!(error.address.as_deref(), Some(address), "{error}");
+        };
+        let root = tempfile::tempdir().expect("a root");
+        let (runtime, _, snapshot) = gated_runtime(root.path(), None);
+        let mut listed = pty_exec_input(&snapshot);
+        listed.sandbox.exec_subpaths = Some(vec!["bin".to_owned()]);
+        let fact = crate::confinement::FACT_UNSERVED;
+        assert_at(
+            &wire(&runtime, &listed).await,
+            fact,
+            "sandbox.exec_subpaths",
+        );
+        assert_at(
+            &adapter(&runtime, &listed, ExecLists::listing(&["bin"])).await,
+            fact,
+            "exec_subpaths",
+        );
+
+        let root = tempfile::tempdir().expect("a root");
+        let (runtime, _, snapshot) = gated_runtime(root.path(), Some(true));
+        let mut both = pty_exec_input(&snapshot);
+        both.sandbox.exec_subpaths = Some(vec!["bin".to_owned()]);
+        both.sandbox.exec_denied_paths = vec!["bin/tool".to_owned()];
+        assert_at(
+            &wire(&runtime, &both).await,
+            fact,
+            "sandbox.exec_denied_paths",
+        );
+        assert_at(
+            &adapter(
+                &runtime,
+                &both,
+                ExecLists::listing_and_denying(&["bin"], &["bin/tool"]),
+            )
+            .await,
+            fact,
+            "exec_denied_paths",
+        );
+
+        let runtime = runtime.proving_exec_denied_paths(true);
+        let mut alone = pty_exec_input(&snapshot);
+        alone.sandbox.exec_denied_paths = vec!["bin/tool".to_owned()];
+        let without = crate::confinement::EXEC_DENIED_PATHS_WITHOUT_SUBPATHS;
+        assert_at(
+            &wire(&runtime, &alone).await,
+            without,
+            "sandbox.exec_denied_paths",
+        );
+        assert_at(
+            &adapter(
+                &runtime,
+                &alone,
+                ExecLists::listing_and_denying(&[], &["bin/tool"]),
+            )
+            .await,
+            without,
+            "exec_denied_paths",
+        );
+
+        let mut empty = pty_exec_input(&snapshot);
+        empty.sandbox.exec_subpaths = Some(Vec::new());
+        let error = wire(&runtime, &empty).await;
+        let [row, ..] = substrate_wire::EXEC_LIST_REFUSALS;
+        assert_at(&error, row.code, "sandbox.exec_subpaths");
+        assert_eq!(error.class, crate::DriverErrorClass::Refused, "{error}");
+        assert_eq!(Some(error.message.as_str()), row.message, "{error}");
     }
 
     /// **The base view carries `/etc/alternatives`** (issue #223, ADR 0049 decision 1): on a
