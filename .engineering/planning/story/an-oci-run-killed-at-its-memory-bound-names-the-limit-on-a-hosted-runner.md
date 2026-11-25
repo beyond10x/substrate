@@ -2,16 +2,19 @@
 format: aep.planning-md/3
 id: story:an-oci-run-killed-at-its-memory-bound-names-the-limit-on-a-hosted-runner
 kind: story
-status: draft
+status: active
 title: An oci run killed at its memory bound names the memory limit on a hosted runner
-summary: 'Hosted gate, second sighting: signal 9 with limit None after the one-second re-read of the runtime''s state'
+summary: 'Hosted gate, three sightings in two days: signal 9 with limit None after the one-second re-read of the runtime''s state'
 tags:
 - defect
 - flaky
 relations:
 - decomposes: epic:runs-are-governed-and-limit-hits-are-events
 - informed_by: story:run-observation-names-the-limit-that-ended-it
-revision: 1
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-25T16:29:13Z", actor: "agent:substrate", revision: 4}
+- {from: "proposed", to: "active", at: "2026-11-25T16:29:14Z", actor: "agent:substrate", revision: 5}
 ---
 # Story: an oci run killed at its memory bound names the memory limit on a hosted runner
 
@@ -47,6 +50,13 @@ made one read. Since that day the monitor reads the runtime's state again for on
 the first read holds no `OOMKilled` (D7's `oci` rule). The run above ended with signal 9 and the
 state held no flag within that second. 3,774 of the run's 3,775 cases passed.
 
+The third sighting is of the same day: the gate of the push of `main` at `224e1e5ffd`, run
+45644944907, attempt 1, job 139325324759. The case printed `the run ended after 1.466541576s`
+and failed in the same assertion with the same observation.
+
+The case's profile bounds the run at 2,000 ms of wall time, and both failed runs ended before
+it (1.62 s and 1.47 s), so neither kill was the monitor's own.
+
 ## Why it matters
 
 - A consumer reads `limit` to tell a memory-bound kill from another kill. Here the kill is
@@ -61,7 +71,8 @@ state held no flag within that second. 3,774 of the run's 3,775 cases passed.
 - Whether the runtime's flag was late by more than a second or never set. Design 36 names both
   as possible: Docker sets the flag when the OOM event arrives, and the watcher sends no event
   when the cgroup is removed before it reads `memory.events`.
-- How often the case fails on a hosted runner. Two sightings are recorded; no rate was measured.
+- How often the case fails on a hosted runner. Three sightings in two days are recorded; no
+  rate was measured.
 - Whether another source the adapter can read states the kill: the runtime's event stream, or
   the container's cgroup counter before the runtime removes it.
 
@@ -69,7 +80,9 @@ state held no flag within that second. 3,774 of the run's 3,775 cases passed.
 
 1. Measure first, on a hosted runner and outside the gate: the case's shape repeated, with the
    time from the exit to the flag, and the count of runs with no flag at all. The run is recorded
-   in the planning store, never added as a test or a CI step.
+   in the planning store, never added as a test or a CI step. It is one job on a standard hosted
+   runner, started from a branch that is not merged; a larger runner is not used
+   (`approval-record:requester-answers-d100-2026-11-25`).
 2. From the measurement, amend design 36 D7's `oci` rule before code (invariant 8): a longer
    read, a second source, or an observation that says the limit could not be read.
 3. The gate's case keeps its assertion. It is not loosened and gets no retry.
