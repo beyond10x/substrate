@@ -4,7 +4,7 @@ id: story:code-scanning-check-is-green-for-test-code
 kind: story
 status: draft
 title: The code-scanning check of a pull request is green when it touches test code
-revision: 2
+revision: 3
 ---
 # Story: the code-scanning check of a pull request is green when it touches test code
 
@@ -62,8 +62,7 @@ An alert in shipped code: it is a finding and goes the way `SECURITY.md` says.
 
 ## The owner's decision and the wiring (2026-11-25)
 
-The owner picked, at his terminal at about 10:00 CET, relayed by the operator's session: "A:
-scanner skips test paths". The option's text: a pull request adds a CodeQL configuration that
+The repository owner's pick (2026-11-25): "A: scanner skips test paths". The option's text: a pull request adds a CodeQL configuration that
 ignores test files (`crates/*/tests/**`, `**/tests.rs`); test code is no longer scanned, shipped
 code is scanned as before; the open test alerts close by themselves. No alert is dismissed.
 
@@ -86,7 +85,7 @@ Settings, Repository, Custom properties). On that day the organization had no cu
 | type | Text |
 | value for `substrate` | `remote=beyond10x/substrate@main:.github/codeql/codeql-config.yml` |
 
-The value names the file on `main` (the operator's session, 2026-11-25: value A), so a pull
+The value names the file on `main` (the repository owner's pick, 2026-11-25), so a pull
 request cannot change what its own scan skips, and a branch that does not hold the file is
 analysed the same. Order: the pull request is merged first, then the property is set; it applies
 at the next analysis. Until the property is set the file changes nothing.
