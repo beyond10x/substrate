@@ -63,8 +63,9 @@ Consumers today, each pin read from its manifest on the default branch on 2026-1
 | mantle | `crates/mantle/Cargo.toml` @ `fc141b9` | `b10x-substrate-sdk` | rev `65304ed` (tag `0.7.10`) |
 
 The tagged Substrate releases are software releases, not the similarly numbered historical contract
-bundles. The current development bundle is `substrate-wire/0.28.0` (`ADVERTISED_CONTRACT_BUNDLE` in
-`crates/substrate-wire/src/lib.rs`), which no release publishes yet; releases `0.22.0` to
+bundles. The current development bundle is `substrate-wire/0.29.0` (`ADVERTISED_CONTRACT_BUNDLE` in
+`crates/substrate-wire/src/lib.rs`), which no release publishes yet; release `0.27.0` published
+`0.28.0`, releases `0.22.0` to
 `0.26.0` published `0.27.0`, release `0.21.0` published `0.26.0`, the
 `0.16.1` and `0.17.0` release workflows pin `0.25.0`, and release `0.15.0` published `0.24.0`. None is stable.
 Kubernetes, Docker and

@@ -1198,7 +1198,8 @@ one (S1). A mount hidden by a later mount keeps its row and is never reported fo
 can be opened (S2). `mount-row-missing` and `mount-row-repeated` refuse the two tables in which
 the ID does not name exactly one row.
 
-**The closed list of file-system types** is `ext4`, `overlay` and `tmpfs`. These are the types
+**The closed list of file-system types** is `ext4`, `overlay` and `tmpfs`, and since 2026-11-25
+`xfs` (§ 3.14). These are the types
 the rule was observed to hold on, with the same lists on each (§ 3.9). The list is a constant
 beside the place function. Adding a type is a change to this document, backed by the lists of
 § 3.9 run on that type.
@@ -1206,7 +1207,7 @@ beside the place function. Adding a type is a change to this document, backed by
 - **What is compared** is the type field of the path's row: the first field after the ` - `
   separator, as exact text. For a bind mount it is the type of the file system the mount shows.
 - **A type outside the list** is `file-system-unlisted`, whatever else is true of the path. The
-  refusal names the path, the type and the three listed types.
+  refusal names the path, the type and the listed types.
 - **`overlay`** was probed twice: mounted in a user namespace, and as the root of a container
   that Docker mounted (F1 to F9). In both, every layer was on one ext4 file system.
 - **`btrfs`** is outside the list. Its subvolumes are the case where `st_dev` of a file and the
@@ -1355,12 +1356,13 @@ pub struct FactWithheld {
 }
 ```
 
-The refusal then reads, for a workspace volume on `xfs`:
+The refusal then reads, for a workspace volume on `btrfs` (amended 2026-11-25: the example named
+`xfs`, which is listed since § 3.14):
 
 ```text
 confinement.fact-unserved: Linux did not prove ExecSubpaths: file-system-unlisted:
-/var/lib/b10x-substrate/workspaces (config.workspace_root) is on xfs; the lists are served
-on ext4, overlay and tmpfs
+/var/lib/b10x-substrate/workspaces (config.workspace_root) is on btrfs; the lists are served
+on ext4, overlay, tmpfs and xfs
 ```
 
 It is one line; it is broken here for the page. Its code and status do not change
@@ -1456,7 +1458,8 @@ in-process embedder that runs in a container now.
   volume. On `ext4` the lists are served. **On `xfs` or `btrfs` the adapter opens, serves no
   list, and says why**: the proof names the path and the type, and every profile with a list
   is refused `confinement.fact-unserved` with them (D27). `xfs` is probed before the wire story
-  is planned (C); `btrfs` stays outside the list.
+  is planned (C); `btrfs` stays outside the list. Amended 2026-11-25: the probe ran (§ 3.14),
+  `xfs` is listed and its volumes serve the lists; the sentence holds for `btrfs`.
 - **The daemon's `/tmp`** is an `emptyDir` without a medium in the chart
   (`statefulset.yaml:294-295`, `:321-323`): a directory of the node's own file system, whose
   type no file states. The probes' temporary directory lies there, so the same holds for it.
@@ -1473,6 +1476,8 @@ in-process embedder that runs in a container now.
 (`website/docs/guides/deployment.md:205-213`):
 
 > The executable lists are served only on ext4, overlay and tmpfs volumes today.
+
+Amended 2026-11-25: the guide's sentence names `xfs` too, as design 37 § 11 writes it.
 
 - Not under `deploy/helm/substrate`: `values.yaml` has no comment line today, the directory has
   no README, and `templates/NOTES.txt` prints what an install did. The guide is where the
@@ -2345,7 +2350,8 @@ was run on the probe host (§ 3.7); the paths are that host's.
   then refused. On the probe host `npm`, `sh` and the rustup proxies are links (T5, T10).
 - **A missing entry shows as `Permission denied`** naming the program the tool could not start
   (T2, T3, T7), or as `bad interpreter` for a script (T12).
-- **The file systems the lists are served on are `ext4`, `overlay` and `tmpfs`** (D26). The
+- **The file systems the lists are served on are `ext4`, `overlay` and `tmpfs`** (D26), and
+  since 2026-11-25 `xfs` (§ 3.14). The
   helper's file, the workspace root, every declared writable root, the base directories, the
   temporary directory and every root a listed start declares must lie on one of them.
   - With `exec_gate` set and one of the first five elsewhere, for example a workspace volume on

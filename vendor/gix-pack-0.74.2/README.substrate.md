@@ -152,6 +152,8 @@ change must still do in the new source, file by file:
 - each of the four ends as `traverse::Error::OutOfMemory`, the error a create names
   `workspace.git-storage-limit`.
 
-The copy is removed with the update whose published `gix-pack` passes the cases unchanged.
+The copy is removed with the update whose published `gix-pack` passes the cases unchanged. The
+request for these counts in the published crate is
+<https://github.com/GitoxideLabs/gitoxide/issues/3244>.
 
 The upstream crate's licences remain in `LICENSE-APACHE` and `LICENSE-MIT`.
