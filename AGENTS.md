@@ -905,6 +905,22 @@ part of this rule and still runs on every pull request.
 `xtask/tests/planning_only_classification.rs` executes both steps offline against throwaway
 repositories, and fails when Rust source names a listed Markdown file.
 
+**The code-scanning analysis skips two patterns of test code.**
+[`.github/codeql/codeql-config.yml`](.github/codeql/codeql-config.yml) is the repository's second
+path list: `crates/*/tests/**` and `**/tests.rs` (the owner's decision, 2026-11-25: "A: scanner
+skips test paths"). Shipped code is scanned as before. The repository runs CodeQL's default
+setup, which has no workflow here and reads the file only where the organization's repository
+property `github-codeql-config-file` (type Text) names it; an organization owner sets that
+property, never a pull request. Its value for this repository is
+`remote=beyond10x/substrate@main:.github/codeql/codeql-config.yml`, the file as `main` holds it, so
+a pull request cannot change what its own scan skips; until the property is set the file changes
+nothing (`story:code-scanning-check-is-green-for-test-code`). The last three cases of `xtask/tests/planning_only_classification.rs` hold the file
+to those two patterns and nothing else, and refuse a matched path that is compiled into a shipped
+binary: a `tests.rs` whose parent does not declare it under `#[cfg(test)]`, a manifest that builds
+a target other than `[[test]]` from a `tests/` directory, and a `#[path]` or `include!` in a
+crate's scanned source that takes code from one. A test module under another name (`*_tests.rs`, a
+file under `src/**/tests/`) is still scanned. Nobody dismisses an alert.
+
 The monorepo-era cross-component suite (`scripts/check-local.sh` at the predecessor's root) no longer
 applies here.
 
