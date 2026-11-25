@@ -1,10 +1,12 @@
 # Design 37: the executable lists on the wire
 
-Status: draft of 2026-11-25, not accepted. Written against `main` at `c5f0b8716`. Serves
-`story:exec-start-carries-executable-lists` of
-`epic:runs-are-governed-and-limit-hits-are-events`. The stakeholder of that story is the session
-`sdc`; § 15 lists the six questions that have more than one defensible answer, each with the
-choice this document is written with.
+Status: accepted on 2026-11-25 by the operator's session, on the default of each of the six
+questions of § 15
+(`approval-record:operators-session-answers-the-questions-of-design-37-2026-11-25`). The
+stakeholder of the story, the session `sdc`, was not running and may reopen any of the six.
+Written against `main` at `c5f0b8716`. Serves `story:exec-start-carries-executable-lists` of
+`epic:runs-are-governed-and-limit-hits-are-events`. § 15 lists the six questions that have more
+than one defensible answer, each with the choice this document is written with.
 
 It adds a successor contract bundle, `substrate-wire/0.29.0`, with no new route: two optional
 members on the `sandbox` of an exec start, the same two on the applied record, one new
@@ -366,13 +368,14 @@ The lists are served where every place of the open lies on `ext4`, `overlay` or 
 (`LISTED_FILE_SYSTEMS`). Two obligations come with the wire:
 
 - **The xfs probe** (design 35 D27, C; the story's check). Before the story is planned, cases F1
-  to F7 of design 35 § 3.9 run on an xfs volume in the quota fixture's container, and the run is
-  recorded in design 35. `xfs` joins the list only if every case holds; `btrfs` stays refused by
-  name. The fixture's image has neither `mkfs.xfs` nor bubblewrap today, so the probe adds both
-  to a probe image of its own and changes no committed file. This document does not depend on
-  the result: an added type changes `LISTED_FILE_SYSTEMS` and one sentence, no wire byte.
-- **The deployment guide** says, in § *Before you install*: "The executable lists are served only
-  on ext4, overlay and tmpfs volumes today.", with the list as it stands when the story merges.
+  to F7 of design 35 § 3.9 run on an xfs volume, and the run is recorded in design 35. `xfs`
+  joins the list only if every case holds; `btrfs` stays refused by name. It ran on 2026-11-25
+  (design 35 § 3.14): every sub-case gave the right answer on `xfs`, 38 of 38, as on the `ext4`
+  control. By the rule `xfs` joins `LISTED_FILE_SYSTEMS`, and the story's change set carries the
+  constant, its test and every sentence that names the types. No wire byte depends on it.
+- **The deployment guide** says, in § *Before you install*, which volumes serve the lists, with
+  the list as it stands when the story merges: "The executable lists are served only on ext4,
+  overlay, tmpfs and xfs volumes today."
 
 ## 12. How it is proved
 
@@ -407,7 +410,7 @@ record says so.
 ## 13. Order of work
 
 1. This document is accepted and merged before any code of the story (`AGENTS.md` invariant 8).
-2. The xfs probe runs and is recorded in design 35 (§ 11).
+2. The xfs probe runs and is recorded in design 35 (§ 11). Done on 2026-11-25, design 35 § 3.14.
 3. The story is planned and its critics read it.
 4. One change set: the wire crate, the host driver's three starts and `publish_confinement`, the
    daemon's flag and checks, bundle `0.29.0` with its module and gate line, the runtime vectors,
@@ -440,6 +443,14 @@ record says so.
 
 Each is the stakeholder's (`approval-record:stakeholder-decides-for-the-operator-2026-11-21`).
 The first option is the one this document is written with.
+
+**Answered on 2026-11-25: A for all six, by the operator's session on default.** The
+stakeholder, session `sdc`, was not running, so the six went to the operator's session as one
+selection with A as the default, and it took A
+(`approval-record:operators-session-answers-the-questions-of-design-37-2026-11-25`). The answers
+are that session's, not the stakeholder's: `sdc` may reopen any of them when it runs again. A
+reopened answer is a revision of this document before the bundle is cut, and a successor bundle
+after.
 
 **Q1. Where do the members stand?**
 
@@ -520,7 +531,8 @@ The first option is the one this document is written with.
   (design 35 § 11, § 20).
 - An explicitly empty allow-list that means the program only
   (`story:explicitly-empty-exec-subpaths-means-the-program-only`).
-- Whether `xfs` enters the list (§ 11): the probe decides it, by the rule design 35 wrote.
+- Whether `xfs` enters the list (§ 11) was not decided by this document: the probe decided it,
+  by the rule design 35 wrote, and `xfs` enters.
 - `withheld` for any other fact.
 
 ## 18. Not read
