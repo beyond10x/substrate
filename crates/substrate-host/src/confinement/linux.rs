@@ -537,6 +537,8 @@ mod imp {
                     apertures,
                     profile: SandboxProfile::Workspace,
                     required: true,
+                    exec_subpaths: None,
+                    exec_denied_paths: Vec::new(),
                 },
                 limits: ExecLimits {
                     timeout_ms: bounds.timeout_ms,
@@ -1130,6 +1132,7 @@ mod imp {
                     }),
                     ..CapabilityFacts::default()
                 },
+                withheld: Vec::new(),
             }
         }
 
@@ -1487,6 +1490,8 @@ mod imp {
                         apertures: Vec::new(),
                         profile: SandboxProfile::Workspace,
                         required: true,
+                        exec_subpaths: None,
+                        exec_denied_paths: Vec::new(),
                     },
                     applied: None,
                     exit: (state != ExecState::Running).then_some(substrate_wire::ExecExit {

@@ -2356,6 +2356,8 @@ mod tests {
                 apertures: Vec::new(),
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             limits: substrate_wire::ExecLimits {
                 timeout_ms: 5_000,

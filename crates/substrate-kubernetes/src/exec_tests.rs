@@ -282,6 +282,8 @@ fn input(argv: &[&str]) -> ExecStartInput {
             apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         },
         limits: ExecLimits {
             timeout_ms: 10_000,

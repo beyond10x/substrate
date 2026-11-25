@@ -193,6 +193,8 @@ impl Driver for Fixture {
                     network: AppliedNetwork::None,
                     profile: SandboxProfile::Workspace,
                     capsule: None,
+                    exec_subpaths: None,
+                    exec_denied_paths: Vec::new(),
                 }),
                 exit: None,
                 usage: None,

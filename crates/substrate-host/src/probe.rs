@@ -296,6 +296,7 @@ pub(crate) fn probe_host(
         // ADR 0036 S2: published only when the composition root proved the host-process
         // supervisor's cgroups usable and serves the personal Unix socket alone.
         process_host: config.host_processes.then_some(true),
+        confinement_exec_denied_paths: None,
     };
     let mut facts = facts;
     publish_confinement(&mut facts);
@@ -319,6 +320,7 @@ pub(crate) fn probe_host(
             probed_at,
             valid_until: None,
             facts,
+            withheld: Vec::new(),
         },
         exec_lists,
     })
@@ -1673,6 +1675,7 @@ mod tests {
                 probed_at: Utc::now(),
                 valid_until: None,
                 facts: facts.clone(),
+                withheld: Vec::new(),
             },
             &ExecListProof {
                 subpaths: probe_held,

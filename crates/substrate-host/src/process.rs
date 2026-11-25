@@ -1737,6 +1737,8 @@ impl ProcessRuntime {
             // found before the spawn. One removed after it is named on the observation by
             // `record_workdir_missing`, beside this record.
             workdir: input.workdir.clone(),
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         };
         let resource = Exec {
             unrecorded_output: pipe_settings
@@ -5459,6 +5461,8 @@ mod tests {
                     apertures: Vec::new(),
                     profile: SandboxProfile::Workspace,
                     required: true,
+                    exec_subpaths: None,
+                    exec_denied_paths: Vec::new(),
                 },
                 applied: None,
                 exit: None,
@@ -5506,6 +5510,8 @@ mod tests {
                 read_only_files: Vec::new(),
                 secret_slots: Vec::new(),
                 workdir: workdir.map(str::to_owned),
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             });
             observation.stdout = stdout.to_vec();
             observation.stderr = stderr.to_vec();
@@ -5585,6 +5591,8 @@ mod tests {
             apertures: apertures.iter().map(|name| (*name).to_owned()).collect(),
             profile: SandboxProfile::Workspace,
             required: true,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         }
     }
 
@@ -5722,6 +5730,8 @@ mod tests {
             apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         };
         let error =
             ProcessRuntime::select_apertures(&config, Some(&published), &sandbox, Some(&[]))
@@ -5805,6 +5815,7 @@ mod tests {
             probed_at: chrono::Utc::now(),
             valid_until: None,
             facts: CapabilityFacts::default(),
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(config.clone(), capability).expect("runtime");
         let bytes = b"#!/bin/sh\nprintf capsule";
@@ -5886,6 +5897,7 @@ mod tests {
             probed_at: chrono::Utc::now(),
             valid_until: None,
             facts: CapabilityFacts::default(),
+            withheld: Vec::new(),
         };
         ProcessRuntime::new(config.clone(), capability.clone()).expect("reconciles stale capsule");
         assert_eq!(
@@ -5942,6 +5954,7 @@ mod tests {
                 probed_at: chrono::Utc::now(),
                 valid_until: None,
                 facts: CapabilityFacts::default(),
+                withheld: Vec::new(),
             },
         )
         .err()
@@ -5979,6 +5992,7 @@ mod tests {
                 exec_output_limit_bytes: Some(65_536),
                 ..CapabilityFacts::default()
             },
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let input = ExecStartInput {
@@ -6000,6 +6014,8 @@ mod tests {
                 apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -6043,6 +6059,7 @@ mod tests {
                 confinement_family_audit: Some(true),
                 ..CapabilityFacts::default()
             },
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(HostConfig::minimum("/does/not/exist"), capability)
             .expect("runtime");
@@ -6217,6 +6234,7 @@ mod tests {
                 exec_output_limit_bytes: Some(65_536),
                 ..CapabilityFacts::default()
             },
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let input = ExecStartInput {
@@ -6291,6 +6309,7 @@ mod tests {
                 exec_output_limit_bytes: Some(65_536),
                 ..CapabilityFacts::default()
             },
+            withheld: Vec::new(),
         };
         let mut config = HostConfig::minimum(root.path());
         config.bubblewrap = std::env::current_exe().expect("test executable");
@@ -6314,6 +6333,8 @@ mod tests {
                 apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -6405,6 +6426,7 @@ mod tests {
                 probed_at: chrono::Utc::now(),
                 valid_until: None,
                 facts: facts(published),
+                withheld: Vec::new(),
             };
             let mut config = HostConfig::minimum(root.path());
             config.bubblewrap = std::env::current_exe().expect("test executable");
@@ -6480,6 +6502,7 @@ mod tests {
                 sessions_pty: Some(true),
                 ..CapabilityFacts::default()
             },
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let mut input = pty_exec_input(&snapshot);
@@ -6596,6 +6619,8 @@ mod tests {
                 apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -7030,6 +7055,7 @@ mod tests {
             probed_at: chrono::Utc::now(),
             valid_until: None,
             facts: CapabilityFacts::default(),
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(HostConfig::minimum("/does/not/exist"), capability)
             .expect("runtime");
@@ -7149,6 +7175,7 @@ mod tests {
             probed_at: chrono::Utc::now(),
             valid_until: None,
             facts: CapabilityFacts::default(),
+            withheld: Vec::new(),
         }
     }
 
@@ -7977,6 +8004,7 @@ mod tests {
                 exec_output_limit_bytes: Some(65_536),
                 ..CapabilityFacts::default()
             },
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
 
@@ -8502,6 +8530,7 @@ mod tests {
                 exec_output_limit_bytes: Some(65_536),
                 ..CapabilityFacts::default()
             },
+            withheld: Vec::new(),
         }
     }
 
@@ -8951,6 +8980,7 @@ mod tests {
             probed_at: chrono::Utc::now(),
             valid_until: None,
             facts: CapabilityFacts::default(),
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
@@ -9003,6 +9033,7 @@ mod tests {
             probed_at: chrono::Utc::now(),
             valid_until: None,
             facts: CapabilityFacts::default(),
+            withheld: Vec::new(),
         };
         let held = gate.map(|_| {
             Arc::new(ExecGate::seal(b"a stand-in for the helper", None).expect("sealed bytes"))
@@ -9774,6 +9805,7 @@ mod tests {
             probed_at: chrono::Utc::now(),
             valid_until: None,
             facts: CapabilityFacts::default(),
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
@@ -9858,6 +9890,7 @@ mod tests {
             probed_at: chrono::Utc::now(),
             valid_until: None,
             facts: CapabilityFacts::default(),
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
@@ -9951,6 +9984,7 @@ mod tests {
             probed_at: chrono::Utc::now(),
             valid_until: None,
             facts: CapabilityFacts::default(),
+            withheld: Vec::new(),
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let mut input = pty_exec_input(&snapshot);
@@ -10037,6 +10071,7 @@ mod tests {
             probed_at: chrono::Utc::now(),
             valid_until: None,
             facts,
+            withheld: Vec::new(),
         };
         let mut input = pty_exec_input(&snapshot);
         input.read_only_roots = vec![substrate_wire::ReadOnlyRoot {
@@ -10408,6 +10443,7 @@ mod adversary_unknown_exec_retry {
                 exec_output_limit_bytes: Some(65_536),
                 ..CapabilityFacts::default()
             },
+            withheld: Vec::new(),
         }
     }
 
@@ -10431,6 +10467,8 @@ mod adversary_unknown_exec_retry {
                 apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -10588,6 +10626,8 @@ mod limit_tests {
                     apertures: Vec::new(),
                     profile: substrate_wire::SandboxProfile::Workspace,
                     required: true,
+                    exec_subpaths: None,
+                    exec_denied_paths: Vec::new(),
                 },
                 applied: None,
                 exit: None,

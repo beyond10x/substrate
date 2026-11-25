@@ -97,6 +97,7 @@ fn runtime(host: &Host) -> ProcessRuntime {
             exec_workspace_scoped_write: Some(true),
             ..CapabilityFacts::default()
         },
+        withheld: Vec::new(),
     };
     ProcessRuntime::new(config, capability).expect("runtime")
 }
@@ -121,6 +122,8 @@ fn input(workspace: &str, access: WorkspaceAccess) -> ExecStartInput {
             apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         },
         limits: ExecLimits {
             timeout_ms: 5_000,

@@ -541,6 +541,8 @@ fn seed_ready_pipe_session(state_path: &Path, origin: &str) {
                 apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             applied: None,
             exit: None,
@@ -1471,7 +1473,7 @@ async fn development_static_bearer_refuses_non_loopback_binding() {
 /// `substrate_refusals_total`, plus one series per refusal code the wire crate names and `other`,
 /// plus the host daemon's one `substrate_adapter_info` series (ADR 0048 D7).
 /// `app::health::tests` pins the same number against the catalogue itself.
-const OPS_SERIES_MAXIMUM: usize = 587;
+const OPS_SERIES_MAXIMUM: usize = 593;
 
 struct OpsAnswer {
     status: u16,

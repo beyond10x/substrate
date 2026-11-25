@@ -1696,6 +1696,8 @@ fn running(id: &str, input: &ExecStartInput, pod: &str) -> ExecObservation {
                 secret_slots: Vec::new(),
                 workdir: None,
                 writable_roots: Vec::new(),
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             }),
             exit: None,
             usage: None,

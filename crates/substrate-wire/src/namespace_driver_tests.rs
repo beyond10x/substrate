@@ -81,6 +81,7 @@ fn a_namespace_snapshot_round_trips() {
             confinement_no_egress: Some(true),
             ..CapabilityFacts::default()
         },
+        withheld: Vec::new(),
     };
     let rendered = serde_json::to_value(&snapshot).expect("snapshot serialises");
     assert_eq!(rendered["driver"], "kubernetes");

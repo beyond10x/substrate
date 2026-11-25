@@ -867,6 +867,7 @@ mod tests {
             probed_at: chrono::DateTime::UNIX_EPOCH,
             valid_until: None,
             facts,
+            withheld: Vec::new(),
         })
     }
 

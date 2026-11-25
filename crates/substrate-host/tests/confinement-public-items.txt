@@ -485,6 +485,7 @@ substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub config_generation: u6
 substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub probed_at: DateTime<Utc>,
 substrate-wire/src/lib.rs: struct CapabilitySnapshot > #[serde(skip_serializing_if = "Option::is_none")] pub valid_until: Option<DateTime<Utc>>,
 substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub facts: CapabilityFacts,
+substrate-wire/src/lib.rs: struct CapabilitySnapshot > #[serde(default, skip_serializing_if = "Vec::is_empty")] pub withheld: Vec<WithheldFact>,
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] pub enum HostDriverKind
 substrate-wire/src/lib.rs: enum HostDriverKind > #[serde(rename = "host")] Host,
 substrate-wire/src/lib.rs: enum HostDriverKind > #[serde(rename = "kubernetes")] Kubernetes,
@@ -510,10 +511,34 @@ substrate-wire/src/lib.rs: enum ConfinementProperty > IpcSocketAllowlist,
 substrate-wire/src/lib.rs: enum ConfinementProperty > IpcSignalsContained,
 substrate-wire/src/lib.rs: enum ConfinementProperty > SealedPaths,
 substrate-wire/src/lib.rs: enum ConfinementProperty > ExecSubpaths,
+substrate-wire/src/lib.rs: enum ConfinementProperty > ExecDeniedPaths,
 substrate-wire/src/lib.rs: enum ConfinementProperty > PrivateTmpdir,
-substrate-wire/src/lib.rs: impl ConfinementProperty > pub const ALL: [Self; 7] = [Self::PathsAreHostPaths, Self::WholeTreeKill, Self::IpcSocketAllowlist, Self::IpcSignalsContained, Self::SealedPaths, Self::ExecSubpaths, Self::PrivateTmpdir];
+substrate-wire/src/lib.rs: impl ConfinementProperty > pub const ALL: [Self; 8] = [Self::PathsAreHostPaths, Self::WholeTreeKill, Self::IpcSocketAllowlist, Self::IpcSignalsContained, Self::SealedPaths, Self::ExecSubpaths, Self::ExecDeniedPaths, Self::PrivateTmpdir];
 substrate-wire/src/lib.rs: impl ConfinementProperty > pub const fn name(self) -> &'static str
 substrate-wire/src/lib.rs: impl ConfinementProperty > pub const fn fact(self) -> &'static str
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)] pub enum WithheldFactName
+substrate-wire/src/lib.rs: enum WithheldFactName > #[serde(rename = "confinement.exec-subpaths")] ExecSubpaths,
+substrate-wire/src/lib.rs: enum WithheldFactName > #[serde(rename = "confinement.exec-denied-paths")] ExecDeniedPaths,
+substrate-wire/src/lib.rs: impl WithheldFactName > pub const ALL: [Self; 2] = [Self::ExecSubpaths, Self::ExecDeniedPaths];
+substrate-wire/src/lib.rs: impl WithheldFactName > pub const fn fact(self) -> &'static str
+substrate-wire/src/lib.rs: impl WithheldFactName > pub const fn property(self) -> ConfinementProperty
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)] #[serde(rename_all = "kebab-case")] pub enum WithheldCause
+substrate-wire/src/lib.rs: enum WithheldCause > FileSystemUnlisted,
+substrate-wire/src/lib.rs: enum WithheldCause > MountIdUnreported,
+substrate-wire/src/lib.rs: impl WithheldCause > pub const ALL: [Self; 2] = [Self::FileSystemUnlisted, Self::MountIdUnreported];
+substrate-wire/src/lib.rs: impl WithheldCause > pub const fn name(self) -> &'static str
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)] pub enum WithheldAddress
+substrate-wire/src/lib.rs: enum WithheldAddress > #[serde(rename = "config.exec_gate")] ExecGate,
+substrate-wire/src/lib.rs: enum WithheldAddress > #[serde(rename = "config.workspace_root")] WorkspaceRoot,
+substrate-wire/src/lib.rs: enum WithheldAddress > #[serde(rename = "config.writable_roots")] WritableRoots,
+substrate-wire/src/lib.rs: impl WithheldAddress > pub const ALL: [Self; 3] = [Self::ExecGate, Self::WorkspaceRoot, Self::WritableRoots];
+substrate-wire/src/lib.rs: impl WithheldAddress > pub const fn name(self) -> &'static str
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct WithheldFact
+substrate-wire/src/lib.rs: struct WithheldFact > pub fact: WithheldFactName,
+substrate-wire/src/lib.rs: struct WithheldFact > pub cause: WithheldCause,
+substrate-wire/src/lib.rs: struct WithheldFact > pub address: WithheldAddress,
+substrate-wire/src/lib.rs: impl Ord for WithheldFact
+substrate-wire/src/lib.rs: impl PartialOrd for WithheldFact
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct CapabilityFacts
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.pull", skip_serializing_if = "Option::is_none")] pub events_pull: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.stream", skip_serializing_if = "Option::is_none")] pub events_stream: Option<bool>,
@@ -554,6 +579,7 @@ substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinemen
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.ipc-signals-contained", default, skip_serializing_if = "Option::is_none")] pub confinement_ipc_signals_contained: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.sealed-paths", default, skip_serializing_if = "Option::is_none")] pub confinement_sealed_paths: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.exec-subpaths", default, skip_serializing_if = "Option::is_none")] pub confinement_exec_subpaths: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.exec-denied-paths", default, skip_serializing_if = "Option::is_none")] pub confinement_exec_denied_paths: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "confinement.private-tmpdir", default, skip_serializing_if = "Option::is_none")] pub confinement_private_tmpdir: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.workspace-scoped-write", skip_serializing_if = "Option::is_none")] pub exec_workspace_scoped_write: Option<bool>,
 substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.cgroup-limits", skip_serializing_if = "Option::is_none")] pub exec_cgroup_limits: Option<CgroupLimitFacts>,

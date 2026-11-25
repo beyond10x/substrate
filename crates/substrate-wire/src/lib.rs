@@ -1863,6 +1863,22 @@ pub struct ConfinementRequest {
     /// as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<ConfinementRequires>,
+    /// The executable allow-list (design 37 § 2): the run executes its program and what these
+    /// entries admit, and nothing else (design 35 § 4). Absent is no list, and is skipped, so an
+    /// unchanged start hashes as it always did; `null` is refused when the start is read. A
+    /// present list is checked by [`validate_exec_lists`], and a present, empty one is refused
+    /// [`EXEC_SANDBOX_EXEC_SUBPATHS_EMPTY`] (design 37 § 3).
+    #[serde(
+        default,
+        deserialize_with = "present_list",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_subpaths: Option<Vec<String>>,
+    /// The executable deny-list (design 37 § 2): what these entries name does not execute, and a
+    /// denied path wins (design 35 § 8). Skipped when empty, so an explicit empty list reads as
+    /// an absent one, as `apertures` does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_denied_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1911,6 +1927,18 @@ pub struct AppliedConfinement {
     /// (design 30 § 4.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<ConfinementRequires>,
+    /// The start's `sandbox.exec_subpaths`, echoed exactly when it named an allow-list, in the
+    /// request's order and spelling (design 37 § 4). No place an entry resolved to is published.
+    #[serde(
+        default,
+        deserialize_with = "present_list",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_subpaths: Option<Vec<String>>,
+    /// The start's `sandbox.exec_denied_paths`, echoed exactly when it named a deny entry
+    /// (design 37 § 4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_denied_paths: Vec<String>,
 }
 
 /// A writable mount outside `/workspace` a start asks for (ADR 0038), a closed union of two kinds.
@@ -3740,6 +3768,12 @@ pub struct CapabilitySnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub valid_until: Option<DateTime<Utc>>,
     pub facts: CapabilityFacts,
+    /// Why a fact this deployment was configured to prove is absent from `facts` (design 37
+    /// § 8): each distinct entry once, in the order [`withheld_facts`] writes, at most
+    /// [`MAX_WITHHELD_FACTS`]. Absent when empty, so a snapshot without one keeps its bytes. An
+    /// entry carries no host path and no file-system type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld: Vec<WithheldFact>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3842,6 +3876,8 @@ pub const CONFINEMENT_IPC_SIGNALS_CONTAINED_FACT: &str = "confinement.ipc-signal
 pub const CONFINEMENT_SEALED_PATHS_FACT: &str = "confinement.sealed-paths";
 /// `confinement.exec-subpaths`: exec admitted by declared subpath, not only by literal program.
 pub const CONFINEMENT_EXEC_SUBPATHS_FACT: &str = "confinement.exec-subpaths";
+/// `confinement.exec-denied-paths`: what a deny-list names does not execute (design 37 § 5).
+pub const CONFINEMENT_EXEC_DENIED_PATHS_FACT: &str = "confinement.exec-denied-paths";
 /// `confinement.private-tmpdir`: a per-run temporary directory no other run sees.
 pub const CONFINEMENT_PRIVATE_TMPDIR_FACT: &str = "confinement.private-tmpdir";
 
@@ -3925,20 +3961,23 @@ pub enum ConfinementProperty {
     IpcSignalsContained,
     SealedPaths,
     ExecSubpaths,
+    ExecDeniedPaths,
     PrivateTmpdir,
 }
 
 impl ConfinementProperty {
     /// Every property in the `Fact` order of `spec/confinement/confinement.yaml`: the order the
-    /// daemon refuses in, and exactly the enum bundle `0.26.0` publishes for
-    /// `sandbox.requires.facts`.
-    pub const ALL: [Self; 7] = [
+    /// daemon refuses in, and the enum bundle `0.26.0` publishes for `sandbox.requires.facts`,
+    /// with `exec-denied-paths` after `exec-subpaths` (design 37 § 5), which bundles `0.26.0` to
+    /// `0.28.0` do not name.
+    pub const ALL: [Self; 8] = [
         Self::PathsAreHostPaths,
         Self::WholeTreeKill,
         Self::IpcSocketAllowlist,
         Self::IpcSignalsContained,
         Self::SealedPaths,
         Self::ExecSubpaths,
+        Self::ExecDeniedPaths,
         Self::PrivateTmpdir,
     ];
 
@@ -3952,6 +3991,7 @@ impl ConfinementProperty {
             Self::IpcSignalsContained => "ipc-signals-contained",
             Self::SealedPaths => "sealed-paths",
             Self::ExecSubpaths => "exec-subpaths",
+            Self::ExecDeniedPaths => "exec-denied-paths",
             Self::PrivateTmpdir => "private-tmpdir",
         }
     }
@@ -3966,6 +4006,7 @@ impl ConfinementProperty {
             Self::IpcSignalsContained => CONFINEMENT_IPC_SIGNALS_CONTAINED_FACT,
             Self::SealedPaths => CONFINEMENT_SEALED_PATHS_FACT,
             Self::ExecSubpaths => CONFINEMENT_EXEC_SUBPATHS_FACT,
+            Self::ExecDeniedPaths => CONFINEMENT_EXEC_DENIED_PATHS_FACT,
             Self::PrivateTmpdir => CONFINEMENT_PRIVATE_TMPDIR_FACT,
         }
     }
@@ -3992,8 +4033,9 @@ pub struct ConfinementRequires {
     pub facts: Option<Vec<ConfinementProperty>>,
 }
 
-/// Decodes a `requires` list that is present: the schema states `type: array`, so `null` is
-/// refused rather than read as an absent list; an absent member stays `None`.
+/// Decodes an optional list that is present (a `requires` list, `exec_subpaths`): the schema
+/// states `type: array`, so `null` is refused rather than read as an absent list; an absent
+/// member stays `None`.
 fn present_list<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
 ) -> Result<Option<Vec<T>>, D::Error> {
@@ -4085,6 +4127,310 @@ pub fn confinement_requires_refusal(
                 fact_row.message.replace("{name}", property.name()),
             )
         })
+}
+
+/// The most entries `sandbox.exec_subpaths` holds (design 37 § 2).
+pub const MAX_EXEC_SUBPATHS: usize = 64;
+/// The most entries `sandbox.exec_denied_paths` holds (design 37 § 2, design 35 D10).
+pub const MAX_EXEC_DENIED_PATHS: usize = 64;
+/// The most bytes of one entry of either executable list (design 37 § 2): a path in the view on
+/// `linux` has at most this many.
+pub const MAX_EXEC_LIST_ENTRY_BYTES: usize = 4_095;
+/// The most entries a capability snapshot's `withheld` holds (design 37 § 8): one for each fact,
+/// cause and address [`WithheldFactName`], [`WithheldCause`] and [`WithheldAddress`] name.
+pub const MAX_WITHHELD_FACTS: usize = 12;
+
+/// The address of an exec start's allow-list, and of a refusal of it (design 37 § 2 and § 6). A
+/// session start checks its `exec` with the exec start's function, so it has the same address.
+pub const EXEC_SUBPATHS_ADDRESS: &str = "sandbox.exec_subpaths";
+/// The address of an exec start's deny-list, and of a refusal of it (design 37 § 2 and § 6).
+pub const EXEC_DENIED_PATHS_ADDRESS: &str = "sandbox.exec_denied_paths";
+
+/// Checks the lexical rules of the two executable lists of a start's `sandbox` that a schema
+/// states (design 37 § 2): at most [`MAX_EXEC_SUBPATHS`] and [`MAX_EXEC_DENIED_PATHS`] entries,
+/// no entry empty or longer than [`MAX_EXEC_LIST_ENTRY_BYTES`] bytes, and no entry twice in one
+/// list. The allow-list is checked first. Every rule decided by place or by the view is the
+/// driver's (design 37 § 6), and a present, empty allow-list is
+/// [`EXEC_SANDBOX_EXEC_SUBPATHS_EMPTY`], which the daemon answers after this.
+///
+/// # Errors
+///
+/// [`WireValidationError::ExecListExceeded`], [`WireValidationError::ExecListEntryInvalid`] or
+/// [`WireValidationError::ExecListEntryDuplicate`], each with the member's address. The daemon
+/// answers all three `request.schema-invalid` (422).
+pub fn validate_exec_lists(sandbox: &ConfinementRequest) -> Result<(), WireValidationError> {
+    let lists = [
+        (
+            sandbox.exec_subpaths.as_deref().unwrap_or_default(),
+            MAX_EXEC_SUBPATHS,
+            EXEC_SUBPATHS_ADDRESS,
+        ),
+        (
+            sandbox.exec_denied_paths.as_slice(),
+            MAX_EXEC_DENIED_PATHS,
+            EXEC_DENIED_PATHS_ADDRESS,
+        ),
+    ];
+    for (entries, bound, address) in lists {
+        if entries.len() > bound {
+            return Err(WireValidationError::ExecListExceeded { address });
+        }
+        if entries
+            .iter()
+            .any(|entry| entry.is_empty() || entry.len() > MAX_EXEC_LIST_ENTRY_BYTES)
+        {
+            return Err(WireValidationError::ExecListEntryInvalid { address });
+        }
+        if entries.iter().collect::<BTreeSet<_>>().len() != entries.len() {
+            return Err(WireValidationError::ExecListEntryDuplicate { address });
+        }
+    }
+    Ok(())
+}
+
+/// A start's allow-list is present and empty (design 37 § 3).
+pub const EXEC_SANDBOX_EXEC_SUBPATHS_EMPTY: &str = "exec.sandbox-exec-subpaths-empty";
+/// A start names a deny entry and no allow-list (design 35 D13, design 37 § 6).
+pub const CONFINEMENT_EXEC_DENIED_PATHS_WITHOUT_SUBPATHS: &str =
+    "confinement.exec-denied-paths-without-subpaths";
+/// An entry or the program the view cannot carry (design 35 § 12, design 37 § 6).
+pub const EXEC_SANDBOX_PATH_UNREPRESENTABLE: &str = "exec.sandbox-path-unrepresentable";
+/// An absolute entry outside the locations a list may name (design 35, design 37 § 6).
+pub const EXEC_SANDBOX_EXEC_SUBPATH_UNDECLARED: &str = "exec.sandbox-exec-subpath-undeclared";
+/// The program lies in a denied path or is a denied file (design 35 § 8, design 37 § 6).
+pub const EXEC_SANDBOX_PROGRAM_UNLISTED: &str = "exec.sandbox-program-unlisted";
+/// A place the start needs cannot be established (design 35 D26 and D30, design 37 § 6).
+pub const EXEC_SANDBOX_PLACE_UNSERVED: &str = "exec.sandbox-place-unserved";
+
+/// One refusal a start that names an executable list can earn (design 37 § 6): its code, its
+/// status, every wire address it is answered at, and its message where the message is a fixed
+/// text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecListRefusal {
+    pub code: &'static str,
+    pub status: u16,
+    /// Each address it is answered at; a session start has the exec start's.
+    pub addresses: &'static [&'static str],
+    /// The fixed message, or `None` where the message is computed (row 4,
+    /// [`exec_lists_fact_refusal`]) or is the driver's and holds a path the request sent (rows 6
+    /// to 9).
+    pub message: Option<&'static str>,
+}
+
+/// Rows 2 to 9 of design 37 § 6, amended, in that order. Rows 2 to 4 are the daemon's, for every
+/// driver; rows 5 to 9 are the host driver's, answered before dispatch. The one place the set is
+/// written down: the bundle check holds each vector to its row.
+pub const EXEC_LIST_REFUSALS: [ExecListRefusal; 8] = [
+    ExecListRefusal {
+        code: EXEC_SANDBOX_EXEC_SUBPATHS_EMPTY,
+        status: 422,
+        addresses: &[EXEC_SUBPATHS_ADDRESS],
+        message: Some("An executable allow-list names at least one entry."),
+    },
+    ExecListRefusal {
+        code: CONFINEMENT_EXEC_DENIED_PATHS_WITHOUT_SUBPATHS,
+        status: 422,
+        addresses: &[EXEC_DENIED_PATHS_ADDRESS],
+        message: Some("An executable deny-list holds only beside an executable allow-list."),
+    },
+    ExecListRefusal {
+        code: CONFINEMENT_FACT_UNSERVED,
+        status: UnservedRefusal::STATUS,
+        addresses: &[EXEC_SUBPATHS_ADDRESS, EXEC_DENIED_PATHS_ADDRESS],
+        message: None,
+    },
+    ExecListRefusal {
+        code: SESSION_PTY_UNSERVED,
+        status: UnservedRefusal::STATUS,
+        addresses: &["mode"],
+        message: Some(
+            "A run held to an executable list is given no controlling terminal: taking one needs \
+             a program before the helper, and nothing runs in the run's view before the list is \
+             applied.",
+        ),
+    },
+    ExecListRefusal {
+        code: EXEC_SANDBOX_PATH_UNREPRESENTABLE,
+        status: 422,
+        addresses: &[EXEC_SUBPATHS_ADDRESS, EXEC_DENIED_PATHS_ADDRESS, "argv"],
+        message: None,
+    },
+    ExecListRefusal {
+        code: EXEC_SANDBOX_EXEC_SUBPATH_UNDECLARED,
+        status: 422,
+        addresses: &[EXEC_SUBPATHS_ADDRESS, EXEC_DENIED_PATHS_ADDRESS],
+        message: None,
+    },
+    ExecListRefusal {
+        code: EXEC_SANDBOX_PROGRAM_UNLISTED,
+        status: 422,
+        addresses: &["argv"],
+        message: None,
+    },
+    ExecListRefusal {
+        code: EXEC_SANDBOX_PLACE_UNSERVED,
+        status: UnservedRefusal::STATUS,
+        addresses: &[
+            EXEC_SUBPATHS_ADDRESS,
+            EXEC_DENIED_PATHS_ADDRESS,
+            "argv",
+            "read_only_roots",
+            "read_only_files",
+            "writable_roots",
+        ],
+        message: None,
+    },
+];
+
+/// Row 4 of design 37 § 6: the refusal a start that names an executable list earns when the
+/// snapshot it names does not prove the list's fact (§ 5), with the address and the message, or
+/// `None` when every named list's fact is proved. The allow-list is read first. The message is
+/// the sentence [`confinement_requires_refusal`] writes for the property. A present allow-list
+/// requires `confinement.exec-subpaths` and a non-empty deny-list `confinement.exec-denied-paths`,
+/// whether or not `requires` names them.
+#[must_use]
+pub fn exec_lists_fact_refusal(
+    sandbox: &ConfinementRequest,
+    facts: &CapabilityFacts,
+) -> Option<(ExecListRefusal, &'static str, String)> {
+    let [_, _, row, ..] = EXEC_LIST_REFUSALS;
+    let [_, fact_row] = CONFINEMENT_UNSERVED_REFUSALS;
+    [
+        (
+            sandbox.exec_subpaths.is_some(),
+            ConfinementProperty::ExecSubpaths,
+            EXEC_SUBPATHS_ADDRESS,
+        ),
+        (
+            !sandbox.exec_denied_paths.is_empty(),
+            ConfinementProperty::ExecDeniedPaths,
+            EXEC_DENIED_PATHS_ADDRESS,
+        ),
+    ]
+    .into_iter()
+    .find(|(named, property, _)| *named && !facts.proves(*property))
+    .map(|(_, property, address)| {
+        (
+            row,
+            address,
+            fact_row.message.replace("{name}", property.name()),
+        )
+    })
+}
+
+/// A fact a capability snapshot's `withheld` gives a cause for (design 37 § 8), written as its
+/// fact name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum WithheldFactName {
+    #[serde(rename = "confinement.exec-subpaths")]
+    ExecSubpaths,
+    #[serde(rename = "confinement.exec-denied-paths")]
+    ExecDeniedPaths,
+}
+
+impl WithheldFactName {
+    /// Every fact, in [`ConfinementProperty::ALL`]'s order: the order entries are written in.
+    pub const ALL: [Self; 2] = [Self::ExecSubpaths, Self::ExecDeniedPaths];
+
+    /// The fact name, as `facts` and `withheld` write it.
+    #[must_use]
+    pub const fn fact(self) -> &'static str {
+        self.property().fact()
+    }
+
+    /// The property whose fact this is.
+    #[must_use]
+    pub const fn property(self) -> ConfinementProperty {
+        match self {
+            Self::ExecSubpaths => ConfinementProperty::ExecSubpaths,
+            Self::ExecDeniedPaths => ConfinementProperty::ExecDeniedPaths,
+        }
+    }
+}
+
+/// Why a fact was withheld (design 37 § 8, design 35 D27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WithheldCause {
+    /// A path of the open lies on a file-system type outside the served list.
+    FileSystemUnlisted,
+    /// The kernel reports no mount ID for a path of the open.
+    MountIdUnreported,
+}
+
+impl WithheldCause {
+    /// Every cause, in the order entries are written in.
+    pub const ALL: [Self; 2] = [Self::FileSystemUnlisted, Self::MountIdUnreported];
+
+    /// The wire word.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::FileSystemUnlisted => "file-system-unlisted",
+            Self::MountIdUnreported => "mount-id-unreported",
+        }
+    }
+}
+
+/// The configuration field whose path caused a fact to be withheld (design 37 § 8). A field is
+/// named, never its path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum WithheldAddress {
+    #[serde(rename = "config.exec_gate")]
+    ExecGate,
+    #[serde(rename = "config.workspace_root")]
+    WorkspaceRoot,
+    #[serde(rename = "config.writable_roots")]
+    WritableRoots,
+}
+
+impl WithheldAddress {
+    /// Every address, in the order entries are written in.
+    pub const ALL: [Self; 3] = [Self::ExecGate, Self::WorkspaceRoot, Self::WritableRoots];
+
+    /// The wire word.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ExecGate => "config.exec_gate",
+            Self::WorkspaceRoot => "config.workspace_root",
+            Self::WritableRoots => "config.writable_roots",
+        }
+    }
+}
+
+/// One entry of a capability snapshot's `withheld` (design 37 § 8): a closed object of three
+/// closed values. Entries order by fact, then address, then cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WithheldFact {
+    pub fact: WithheldFactName,
+    pub cause: WithheldCause,
+    pub address: WithheldAddress,
+}
+
+impl Ord for WithheldFact {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.fact, self.address, self.cause).cmp(&(other.fact, other.address, other.cause))
+    }
+}
+
+impl PartialOrd for WithheldFact {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// A snapshot's `withheld` from the entries a driver kept: each distinct entry once, in the
+/// order fact, address, cause (design 37 § 8). It holds at most [`MAX_WITHHELD_FACTS`] entries
+/// whatever was kept, and is empty, so absent from the snapshot, when nothing was.
+#[must_use]
+pub fn withheld_facts(entries: impl IntoIterator<Item = WithheldFact>) -> Vec<WithheldFact> {
+    entries
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4281,6 +4627,12 @@ pub struct CapabilityFacts {
         skip_serializing_if = "Option::is_none"
     )]
     pub confinement_exec_subpaths: Option<bool>,
+    #[serde(
+        rename = "confinement.exec-denied-paths",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confinement_exec_denied_paths: Option<bool>,
     #[serde(
         rename = "confinement.private-tmpdir",
         default,
@@ -4491,6 +4843,7 @@ impl Default for CapabilityFacts {
             confinement_ipc_signals_contained: None,
             confinement_sealed_paths: None,
             confinement_exec_subpaths: None,
+            confinement_exec_denied_paths: None,
             confinement_private_tmpdir: None,
             exec_workspace_scoped_write: None,
             exec_cgroup_limits: None,
@@ -4549,6 +4902,7 @@ impl CapabilityFacts {
             ConfinementProperty::IpcSignalsContained => self.confinement_ipc_signals_contained,
             ConfinementProperty::SealedPaths => self.confinement_sealed_paths,
             ConfinementProperty::ExecSubpaths => self.confinement_exec_subpaths,
+            ConfinementProperty::ExecDeniedPaths => self.confinement_exec_denied_paths,
             ConfinementProperty::PrivateTmpdir => self.confinement_private_tmpdir,
         };
         matches!(fact, Some(true))
@@ -4859,6 +5213,12 @@ pub enum WireValidationError {
     ConfinementRequiresEmpty,
     #[error("a confinement requirement names one family or property twice")]
     ConfinementRequiresDuplicate,
+    #[error("the executable list at {address} holds more entries than its bound")]
+    ExecListExceeded { address: &'static str },
+    #[error("the executable list at {address} holds an empty entry or one longer than its bound")]
+    ExecListEntryInvalid { address: &'static str },
+    #[error("the executable list at {address} names one entry twice")]
+    ExecListEntryDuplicate { address: &'static str },
     #[error("a file change carries a text longer than its schema admits")]
     FileTextBounds,
 }
@@ -7208,6 +7568,8 @@ mod egress_aperture_tests {
             apertures: Vec::new(),
             profile: super::SandboxProfile::Workspace,
             required: true,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         };
         let rendered = serde_json::to_value(&request).unwrap();
         assert!(
@@ -7312,6 +7674,8 @@ mod egress_aperture_tests {
                 apertures: Vec::new(),
                 profile: super::SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             applied: None,
             exit: None,
@@ -7367,6 +7731,9 @@ mod namespace_driver_tests;
 
 #[cfg(test)]
 mod confinement_facts_tests;
+
+#[cfg(test)]
+mod exec_lists_tests;
 
 #[cfg(test)]
 mod file_text_bound_tests;

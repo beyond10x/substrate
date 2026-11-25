@@ -168,6 +168,8 @@ pub(crate) fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
                 apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             applied: None,
             exit: None,
@@ -5185,6 +5187,8 @@ fn an_exec_binding_a_workspace_as_a_writable_git_root_holds_it_until_terminal() 
             network: substrate_wire::AppliedNetwork::None,
             profile: SandboxProfile::Workspace,
             capsule: None,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         };
     let mut bound = exec("ex_bound", "ws_own", ExecState::Running);
     bound.resource.applied = Some(applied(vec![substrate_wire::AppliedWritableRoot::Git {
@@ -5317,6 +5321,8 @@ fn git_root_workspaces_migrate_from_the_applied_record() {
         network: substrate_wire::AppliedNetwork::None,
         profile: SandboxProfile::Workspace,
         capsule: None,
+        exec_subpaths: None,
+        exec_denied_paths: Vec::new(),
     });
     seed_exec(&store, &scope, &bound);
     seed_exec(

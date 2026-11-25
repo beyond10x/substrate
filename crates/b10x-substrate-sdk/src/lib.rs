@@ -1609,6 +1609,8 @@ impl PipeSessionBuilder {
                 apertures,
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             limits: policy
                 .wire()
@@ -2102,6 +2104,8 @@ impl CommandBuilder {
                 apertures,
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             limits: policy
                 .wire()
@@ -2802,6 +2806,8 @@ mod tests {
                 apertures: Vec::new(),
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             limits: substrate_wire::ExecLimits {
                 timeout_ms: 1_000,

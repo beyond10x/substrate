@@ -531,6 +531,8 @@ mod tests {
                 apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
+                exec_subpaths: None,
+                exec_denied_paths: Vec::new(),
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -746,6 +748,8 @@ mod tests {
             read_only_files: Vec::new(),
             secret_slots: requests.clone(),
             workdir: None,
+            exec_subpaths: None,
+            exec_denied_paths: Vec::new(),
         };
         let applied_json = serde_json::to_string(&applied).expect("applied record");
         assert!(

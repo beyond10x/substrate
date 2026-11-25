@@ -367,6 +367,9 @@ fn widest_applied(input: &ExecStartInput) -> AppliedConfinement {
             .map(widest_applied_root)
             .collect(),
         requires: input.sandbox.requires.clone(),
+        // Design 37 § 4 and § 7: each list is echoed as the request sent it.
+        exec_subpaths: input.sandbox.exec_subpaths.clone(),
+        exec_denied_paths: input.sandbox.exec_denied_paths.clone(),
     }
 }
 
@@ -454,7 +457,8 @@ impl Exec {
     /// workspace, the requested confinement and every applied member that follows the start
     /// (the workspace access, the read-only roots and files, the secret slots, the working
     /// directory, the capsule's digest and entrypoint, each writable root's name and mount, the
-    /// requirement) as sent, and every other member present and at its bound. One applied
+    /// requirement, the executable lists) as sent, and every other member present and at its
+    /// bound. One applied
     /// aperture is counted for each aperture the start selects, and one bound root for each
     /// writable root it declares. The `usage` is the widest of its variants.
     ///
