@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:raise-run-aperture-and-read-only-root-bounds
 kind: story
-status: active
+status: implemented
 title: A run selects up to eight apertures and binds up to eight read-only roots (#236)
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-20T06:56:37Z", actor: "human:unknown", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-20T06:56:38Z", actor: "human:unknown", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-25T19:09:39Z", actor: "agent:substrate", revision: 6, decided_on: {"recorded":{"test_result":1}}}
 ---
 # A run selects up to eight apertures and binds up to eight read-only roots (#236)
 

@@ -2,16 +2,17 @@
 format: aep.planning-md/3
 id: story:planning-only-pull-requests-skip-build-and-test
 kind: story
-status: active
+status: implemented
 title: A planning-only pull request passes its required checks without build or test
 summary: One path list; the required job classifies the changed files and exits 0 for planning and prose
 tags:
 - defect
 - gate
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T21:48:10Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-21T21:48:10Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-25T19:09:38Z", actor: "agent:substrate", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: a planning-only pull request passes its required checks without build or test
 

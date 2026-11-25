@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:ess-pin-0-98-0
 kind: story
-status: draft
+status: archived
 title: The ESS pin moves to 0.98.0
 tags:
 - maintenance
@@ -17,7 +17,9 @@ scope:
   path: crates/substrate-wire/src/generated
 - confidence: cited
   path: spec
-revision: 3
+revision: 4
+transitions:
+- {from: "draft", to: "archived", at: "2026-11-25T19:09:43Z", actor: "agent:substrate", revision: 4}
 ---
 # Story: the ESS pin moves to 0.98.0
 

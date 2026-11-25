@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-writable-roots
 kind: story
-status: active
+status: implemented
 title: The Rust SDK's session and exec builders carry writable roots
 summary: PipeSessionBuilder, pty_session and CommandBuilder (the exec builder) name writable host roots, as the wire has carried since bundle 0.22.0.
 owner: substrate
@@ -10,10 +10,11 @@ tags:
 - sdk
 relations:
 - decomposes: epic:rust-sdk
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-08T18:45:46Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-08T18:45:46Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-25T19:09:41Z", actor: "agent:substrate", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: The Rust SDK's session and exec builders carry writable roots
 
