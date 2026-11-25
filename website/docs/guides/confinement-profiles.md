@@ -349,7 +349,10 @@ The daemon places the helper, the workspace root and each declared writable root
 | `cause` | `file-system-unlisted`, `mount-id-unreported` |
 | `address` | `config.exec_gate`, `config.workspace_root`, `config.writable_roots` |
 
-Each refusal is answered before the program starts and recorded as refused. In the table, list
+Each refusal is answered before the program starts. The daemon answers the first four rows
+before it accepts the operation, which is recorded as `refused`. The host driver answers the
+other five for an accepted operation, whose recorded state is `terminal` with the refusal as
+its error. In the table, list
 stands for `sandbox.exec_subpaths` or `sandbox.exec_denied_paths`, and mount for the member that
 declared a mount:
 
@@ -360,7 +363,7 @@ declared a mount:
 | `confinement.exec-denied-paths-without-subpaths` | 422 | `sandbox.exec_denied_paths` | no allow-list |
 | `confinement.fact-unserved` | 501 | list | the snapshot does not hold the list's fact |
 | `session.pty-unserved` | 501 | `mode` | a `pty` session names an allow-list |
-| `exec.sandbox-path-unrepresentable` | 422 | list, `argv`, mount | the view cannot carry an entry, the program or a mount |
+| `exec.sandbox-path-unrepresentable` | 422 | list, `argv`, mount | the view cannot carry an entry, the program or a mount; at `argv` also every start with a capsule, whose program lies beneath `/runtime` |
 | `exec.sandbox-exec-subpath-undeclared` | 422 | list | an absolute entry outside the eligible locations |
 | `exec.sandbox-program-unlisted` | 422 | `argv` | a deny entry holds the program |
 | `exec.sandbox-place-unserved` | 501 | list, `argv`, mount | a place the start needs cannot be established |

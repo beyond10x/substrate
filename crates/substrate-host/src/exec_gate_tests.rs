@@ -1751,6 +1751,77 @@ fn an_entry_the_view_cannot_carry_is_refused_by_name() {
     println!("exec gate refused entries: executed");
 }
 
+/// Design 37 § 6: the messages bundle `0.29.0` publishes for rows 6 to 8 are the driver's own.
+/// Each of the three vectors' starts is planned as a wire start, and the driver's code, address
+/// and whole message are the vector's.
+#[test]
+fn the_published_messages_of_rows_6_to_8_are_the_drivers() {
+    let staged = Staged::new();
+    if !placed("published messages", staged.root.path()) {
+        return;
+    }
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contracts/substrate-wire/0.29.0/vectors/http");
+    for name in [
+        "exec-lists-entry-unrepresentable-is-refused",
+        "exec-lists-entry-undeclared-is-refused",
+        "exec-lists-denied-program-is-refused",
+    ] {
+        let bytes = std::fs::read(vectors.join(format!("{name}.json"))).expect("the vector");
+        let vector: serde_json::Value = serde_json::from_slice(&bytes).expect("vector JSON");
+        let input = &vector["action"]["request"]["body"]["input"];
+        let list = |member: &str| -> Vec<&str> {
+            input["sandbox"][member]
+                .as_array()
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .map(|entry| entry.as_str().expect("an entry"))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let program = input["argv"][0].as_str().expect("a program");
+        let published = &vector["expected"]["response"]["body"]["error"];
+        let error = staged
+            .plan_wire(
+                &[],
+                &list("exec_subpaths"),
+                &list("exec_denied_paths"),
+                program,
+            )
+            .expect_err("a refused list");
+        assert_eq!(
+            (error.code, error.address.as_deref(), error.message.as_str()),
+            (
+                published["code"].as_str().expect("a code"),
+                published["address"].as_str(),
+                published["message"].as_str().expect("a message"),
+            ),
+            "{name}"
+        );
+    }
+}
+
+/// Design 37 § 16 (D20): a wire start whose program is a capsule's `/runtime/run` is refused at
+/// `argv`, because `/runtime` is no mount a list can name and the program is placed before any
+/// entry. An allow-list that names `/runtime` does not change the answer.
+#[test]
+fn a_wire_start_of_a_capsules_program_is_refused_at_argv() {
+    let staged = Staged::new();
+    if !placed("capsule program", staged.root.path()) {
+        return;
+    }
+    for entries in [&["/runtime"][..], &["/usr/bin"][..]] {
+        assert_refused(
+            staged.plan_wire(&[], entries, &[], "/runtime/run"),
+            PATH_UNREPRESENTABLE,
+            "argv",
+            "\"/runtime/run\" lies in no mount an executable list can name",
+        );
+    }
+}
+
 /// D24, the class comes from the host source: a read-only root whose host directory lies in the
 /// workspace root is opened `beneath`, so a link a run planted in it is refused and the helper
 /// is told the run can write the mount (K10).
@@ -3689,6 +3760,53 @@ fn on_the_wire_a_path_refused_for_a_writable_location_names_no_host_path() {
     let error = refused.refusal("/opt/j/link", Listed::Entry, Caller::Wire);
     assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
     assert!(!error.message.contains("/work/u"), "{error}");
+}
+
+/// **On the wire, a path whose end shows a location a run can write names that location by
+/// its view name, never by its host path** (design 37 § 6: "Their messages name paths of the
+/// view, which the request itself sent, and never a host path"). The location is one of the
+/// host's configuration, as `writable_locations` builds it for a declared writable root this
+/// start does not bind: its `path` is the host's, its `view` the words a wire start names it
+/// by. Added once the root was classed `follow`, as in
+/// `the_walk_asks_for_the_place_of_every_link_and_directory`, and asked through
+/// `check_followed` and so `check_reached`.
+#[test]
+fn on_the_wire_an_end_that_shows_a_writable_location_names_no_host_path() {
+    let staged = Staged::new();
+    if !placed("wire end shows a writable location", staged.root.path()) {
+        return;
+    }
+    let tools = staged.root.path().join("tools");
+    std::fs::create_dir_all(tools.join("dir/inner")).expect("a directory of the root");
+    let host = tools.join("dir").to_str().expect("UTF-8").to_owned();
+    let roots: [(&Path, &str); 1] = [(&tools, "/opt/ro")];
+    let error = staged
+        .asked(
+            &roots,
+            |mounts| {
+                let directory = Opened::of_path(&host).expect("the directory opens");
+                let place = mounts.tree.table().place_of(&directory).expect("placed");
+                let location =
+                    Location::reaching(&host, super::DECLARED_WRITABLE_ROOT, &place, &mounts.tree)
+                        .expect("nothing is mounted beneath it");
+                mounts.locations.push(location);
+                mounts.caller = Caller::Wire;
+            },
+            |mounts| mounts.check_followed("/opt/ro/dir/inner", "/opt/ro/dir/inner", Listed::Entry),
+        )
+        .expect_err("an end that shows a location a run can write");
+    assert_eq!(error.code, PATH_UNREPRESENTABLE, "{error}");
+    assert_eq!(
+        error.address.as_deref(),
+        Some("sandbox.exec_subpaths"),
+        "{error}"
+    );
+    let staged_root = staged.root.path().to_str().expect("UTF-8");
+    assert!(
+        !error.message.contains(staged_root),
+        "a wire refusal names a host path: {error}"
+    );
+    println!("exec gate wire end shows a writable location: executed");
 }
 
 /// What a wire start's [`PLACE_UNSERVED`] must not name: a file-system type, an entry of

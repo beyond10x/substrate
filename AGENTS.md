@@ -515,9 +515,10 @@ a listed program, fail an unlisted one and a denied one beneath the listed direc
 `EACCES`, end with status 126 and echo both lists in the requested and the applied record; a
 start without the members has a record without them; a `pty` session with a list is
 `session.pty-unserved`; `exec.sandbox-path-unrepresentable`,
-`exec.sandbox-exec-subpath-undeclared` (also for an entry beneath the capsule mount) and
-`exec.sandbox-program-unlisted` are answered once each at their row's address; and one start
-holds a Git writable root beside an allow-list. Each of these cases prints
+`exec.sandbox-exec-subpath-undeclared` and `exec.sandbox-program-unlisted` are answered once
+each at their row's address; a start with a capsule and a list is
+`exec.sandbox-path-unrepresentable` at `argv`, because its program lies beneath `/runtime`,
+which no list can name; and one start holds a Git writable root beside an allow-list. Each of these cases prints
 `runtime exec lists <name>: executed`, or `: ABSENT (<cause>)` where the delegated root or the
 helper is missing or the open withheld a fact; `scripts/delegated-lane.sh` requires the thirteen
 `executed` lines by name, takes no `: ABSENT (` line of the runner, and compares the inventory
@@ -730,7 +731,10 @@ a configuration address and never a host path (`publish_confinement`,
 fixed message: the daemon answers rows 1 to 4 in `check_exec_lists`
 (`crates/substrate-daemon/src/app/operations.rs`), after `exec.capability-stale` and before every
 other field of the exec, for every driver, and the host driver answers rows 5 to 9 at
-`gate_start`. A session start runs its own checks first, so on a host that serves no session it
+`gate_start`. The ledger records a row of the daemon `refused` and a row of the driver
+`terminal`, with the refusal as the accepted operation's error, as it records every other
+refusal of a driver (design 37 D23); a case or a vector that reads the ledger names the state of
+its row. A session start runs its own checks first, so on a host that serves no session it
 is `session.confinement-unavailable` with a list as without one. The three wire starts of the
 host driver read `sandbox.exec_subpaths` and `sandbox.exec_denied_paths` and are held to them as
 an adapter start is; what differs is the caller (`Caller` in

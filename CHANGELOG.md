@@ -31,8 +31,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (`config.exec_gate`, `config.workspace_root`, `config.writable_roots`), each once. An entry
   carries no host path and no file-system type. A daemon whose open withholds the facts starts
   and serves without them.
-- A start that names a list is refused before the program starts, and recorded as refused, by
-  one of eight codes, the rows of `substrate_wire::EXEC_LIST_REFUSALS`:
+- A start that names a list is refused before the program starts by one of eight codes, the rows of `substrate_wire::EXEC_LIST_REFUSALS`:
   `exec.sandbox-exec-subpaths-empty` (422), `confinement.exec-denied-paths-without-subpaths`
   (422), `confinement.fact-unserved` (501) at `sandbox.exec_subpaths` or
   `sandbox.exec_denied_paths`, `session.pty-unserved` (501) at `mode`,
@@ -40,9 +39,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `exec.sandbox-program-unlisted` (422) and `exec.sandbox-place-unserved` (501). A list over its
   bound, an empty or over-long entry, an entry written twice and `null` are
   `request.schema-invalid` (422) at the member. The daemon checks the lexical rules and the
-  first three codes in that order after `exec.capability-stale`, for every driver; the host
-  driver answers the other five. A message names a path of the run's view and a cause by name,
-  never a host path and never a file-system type.
+  first three codes in that order after `exec.capability-stale`, for every driver, and the
+  operation is recorded as refused; the host driver answers the other five for an accepted
+  operation, whose recorded state is `terminal` with the refusal as its error. A message names a path of the run's view and a cause by name,
+  never a host path and never a file-system type. A start with an execution capsule and a list
+  is `exec.sandbox-path-unrepresentable` at `argv`: its program lies beneath `/runtime`, which
+  no list can name.
 - Contract bundle `substrate-wire/0.29.0` (predecessor `0.28.0`, adds no route, preserves its
   45) publishes the two members on both starts and on the exec record, the fact
   `confinement.exec-denied-paths`, `withheld`, and the eight codes, each with a vector and the
@@ -52,7 +54,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   0.29.0` holds each value to its wire constant and each refusal to its row
   (`xtask/src/bundle/exec_lists.rs`). The daemon, the SDK and the conformance runner advertise
   `substrate-wire/0.29.0` (inner `bundle.json` sha256
-  `702f7bcc67778563aaa8745d8fb7ddd5ad27aec2296a15f7f697f680e8241fb8`). A client that validates
+  `65bde1870351dfb72d4431d2dd88f0f641e91cc814007d01e0a5250517539bfd`). A client that validates
   a capability snapshot or an exec record against a bundle's schema needs the schema of
   `0.29.0`.
 - The executable lists are served on `xfs` beside `ext4`, `overlay` and `tmpfs`

@@ -132,8 +132,17 @@ and "the program only" later.
   refusal's vector. No byte this bundle accepts changes its meaning in that step.
 
 An empty deny-list is not refused. It denies nothing under every reading, so it reads as an
-absent list, is not echoed, and a start that carries it hashes as one without the member. This
-is the rule `apertures` has.
+absent list and is not echoed. This is the rule `apertures` has.
+
+**Amended on 2026-11-25, with the story's code** (D21). This section first said that a start
+with an empty deny-list "hashes as one without the member". It does not, and `apertures` does
+not either: the request hash covers the canonical JSON of the `input` value the client sent
+(`canonical_request_hash_v2` in `decode_mutation`), with every member it wrote and none it
+left out. A retry sends the member
+it sent before. One that adds or drops `"exec_denied_paths": []` is another request and is
+`operation.request-conflict`, as a retry that adds or drops `"apertures": []` is. The Rust SDK
+never writes an empty list. The bundle's description of the member states the reading and the
+echo and makes no claim about the hash.
 
 ## 4. The applied record
 
@@ -190,12 +199,29 @@ profile, and a start that names one gets it or is refused.
 
 ## 6. Refusals
 
-Every row is answered before dispatch and recorded as refused. "Daemon" rows hold for every
+Every row is answered before the program starts, and nothing runs. "Daemon" rows hold for every
 driver; "driver" rows are the host driver's, at `gate_start`.
+
+**Amended on 2026-11-25, with the story's code** (D23). The ledger records the two kinds of row
+in two states, as it does every refusal that existed before the lists:
+
+- rows 1 to 4 are answered before the daemon accepts the operation. The operation is recorded
+  `refused`, and no driver is dispatched;
+- rows 5 to 9 are answered by the driver for an operation the daemon accepted (ADR 0005). The
+  refusal is the operation's error and its recorded state is `terminal`, as for
+  `exec.workdir-missing` and every other refusal of `gate_start`'s neighbours
+  (`complete_dispatch_absence`). The client's answer is the same in both: the status and the
+  error of the row.
+
+This section said "recorded as refused" for every row. The first run of the delegated lane's
+list cases read `terminal` for row 5. The ledger is not changed: one state for a driver's
+refusal is ADR 0005's, and a second one for the lists would be a change of architecture. The
+vectors of rows 5 to 9 state `/probes/operation_state` `terminal`, and
+`check_recorded` in `xtask/src/bundle/exec_lists.rs` holds each row to its state.
 
 | # | code | status | address | when | who |
 |---|---|---|---|---|---|
-| 1 | `request.schema-invalid` | 422 | the member | `null`, more entries than the bound, an empty or over-long entry, an entry twice | daemon; existing code |
+| 1 | `request.schema-invalid` | 422 | the member; `input` for `null` | `null`, more entries than the bound, an empty or over-long entry, an entry twice | daemon; existing code |
 | 2 | `exec.sandbox-exec-subpaths-empty` | 422 | `sandbox.exec_subpaths` | the member is present and empty (§ 3) | daemon; **new** |
 | 3 | `confinement.exec-denied-paths-without-subpaths` | 422 | `sandbox.exec_denied_paths` | a deny entry on a start without an allow-list | daemon; the host's code, published here |
 | 4 | `confinement.fact-unserved` | 501 | `sandbox.exec_subpaths`, `sandbox.exec_denied_paths` | the snapshot does not hold the fact (§ 5) | daemon; existing code, two new addresses |
@@ -315,6 +341,18 @@ of 255 bytes each, adds under 17 KiB.
 **The Kubernetes namespace driver** proves neither fact and enforces nothing (the story's
 boundary). Rows 1 to 4 are the daemon's, so a start that names a list is refused there without
 a line of driver code. A unit test holds its snapshot to both facts absent.
+
+**Amended on 2026-11-25, with the story's code** (D22). Both drivers also answer for
+themselves, so that a caller of a driver that is not the daemon gets the daemon's answer and
+no run starts without its list:
+
+- the namespace driver refuses a start that names a list `confinement.fact-unserved` at the
+  member, the allow-list first, among the members it does not serve (design 34 § 8) and
+  before any request (`unserved` in `exec.rs`);
+- the host driver holds both lists to their wire bounds, row 1, before the empty allow-list
+  and before any entry is located (`ExecLists::requested`).
+
+Neither changes an answer of the daemon, which refuses first.
 
 **The release image and the chart are not changed by this story.** The helper is a static
 binary of this workspace; an image that ships it, and a chart value that names it, are
@@ -510,6 +548,10 @@ record says so.
 | D17 | on a wire start a list entry is addressed at `sandbox.<member>`; the wire crate's refusal table holds a message for rows 2, 3 and 5; a session start has the exec start's addresses; on the wire the message of row 9 names no file-system type; the line per withheld entry is the host driver's own (§ 6 and § 7, amended with the story's plan) |
 | D18 | rows 6 and 9 are answered at one of seven members, the member a declared mount was declared in among them; a wire start's message names a writable location by its path in the view (§ 6, amended with the story's code) |
 | D19 | a session start on a host that serves no session stays `session.confinement-unavailable` before its lists are read; rows 1 to 4 on a session start are held by the daemon's unit cases and the delegated lane (§ 12, amended with the story's code) |
+| D20 | a start with a capsule and a list is row 6 at `argv`: its program lies beneath `/runtime`, which no list can name, and the program is located before the entries (§ 16, amended with the story's code) |
+| D21 | the request hash covers the `input` as sent: a retry that adds or drops an empty deny-list is `operation.request-conflict` (§ 3, amended with the story's code) |
+| D22 | each driver refuses for itself what the daemon refuses first: the namespace driver a start that names a list (row 4), the host driver a list over its wire bounds (row 1) (§ 7, amended with the story's code) |
+| D23 | rows 1 to 4, the daemon's, are recorded `refused`; rows 5 to 9, the driver's, end the accepted operation, recorded `terminal` with the refusal as its error; the ledger is not changed (§ 6, amended with the story's code) |
 
 ## 15. Questions with more than one answer
 
@@ -578,6 +620,16 @@ after.
   on a start with a capsule and an allow-list the capsule's program runs as the start's
   program, and an allow entry beneath `/runtime` is row 7. Not run. The story's implementation
   holds it with one delegated case, and § 17 leaves the other answer to a later story.
+
+  **Amended on 2026-11-25, with the story's code** (D20). The first half of that inference is
+  wrong. `plan` in `exec_gate.rs` locates the program before any entry, and a start with a
+  capsule names its program beneath `/runtime` (`admit_command_shape` requires `argv[0]` to be
+  the capsule's entrypoint there). The program then lies in no mount a list can name, so every
+  start with a capsule and a list is row 6, `exec.sandbox-path-unrepresentable` (422) at
+  `argv`, before dispatch, and nothing runs. An allow entry beneath `/runtime` on a start
+  without a capsule is row 7, as any other absolute entry outside the eligible mounts. The
+  delegated case holds the first: a capsule, the allow-list `["/runtime"]` and the program
+  `/runtime/run` are refused at `argv` with a message that names the program.
 - **The session start's width.** ADR 0053's width function for an exec start counts the
   applied record; that a session start's width counts the same record for its exec is inferred
   from the ADR's table and not read in `result_widths.rs`.
@@ -588,7 +640,8 @@ after.
   from `AGENTS.md`'s lane description, not from a run of this change.
 - **The daemon's request hash covers a new member of `sandbox` without further code.** Inferred
   from how `requires` was added (design 30); the hashing function was not read for this
-  document.
+  document. **Read on 2026-11-25, with the story's code**: it holds, and the same function
+  is why § 3's sentence about an empty deny-list was wrong (D21).
 - **The order of the withheld entries** (§ 8) is this document's choice; the host keeps one
   entry per fact and path today, and the reduction to distinct triples is new code.
 
@@ -598,7 +651,8 @@ after.
   exists (the story's boundary).
 - Enforcement on the Kubernetes namespace driver, and on the `oci` and `pod` adapters
   (`story:executable-lists-on-oci-and-pod`).
-- An entry beneath the capsule mount (§ 16).
+- A run of a capsule's program under a list, and an entry beneath the capsule mount: until a
+  later story decides them, such a start is refused by name (§ 16, D20).
 - A named failure for a helper that stops after dispatch, and a record of a denied execution
   (design 35 § 11, § 20).
 - An explicitly empty allow-list that means the program only

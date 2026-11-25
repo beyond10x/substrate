@@ -92,7 +92,7 @@
     },
     {
       "actual": "/probes/operation_state",
-      "expected": "refused",
+      "expected": "terminal",
       "operator": "equals"
     },
     {

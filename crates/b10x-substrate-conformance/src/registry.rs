@@ -12,7 +12,7 @@ use serde_json::Value;
 /// The contract pair this runner pins, independently of the wire crate's advertised constant.
 pub const PINNED_CONTRACT: &str = "substrate-wire/0.29.0";
 /// The bundle digest of [`PINNED_CONTRACT`].
-pub const PINNED_SHA256: &str = "702f7bcc67778563aaa8745d8fb7ddd5ad27aec2296a15f7f697f680e8241fb8";
+pub const PINNED_SHA256: &str = "65bde1870351dfb72d4431d2dd88f0f641e91cc814007d01e0a5250517539bfd";
 
 const OPERATIONS: &str = include_str!("../../../contracts/substrate-wire/0.29.0/operations.json");
 const HOSTED_ADMISSION: &str =

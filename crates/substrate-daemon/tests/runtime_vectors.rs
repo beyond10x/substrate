@@ -55,7 +55,7 @@ const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
 const ADVERTISED_CONTRACT: &str = "substrate-wire/0.29.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "702f7bcc67778563aaa8745d8fb7ddd5ad27aec2296a15f7f697f680e8241fb8";
+    "65bde1870351dfb72d4431d2dd88f0f641e91cc814007d01e0a5250517539bfd";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -8126,7 +8126,7 @@ const EXEC_LIST_DELEGATED_NAMES: [&str; 11] = [
     "runtime exec lists pty session",
     "runtime exec lists entry unrepresentable",
     "runtime exec lists entry undeclared",
-    "runtime exec lists capsule entry",
+    "runtime exec lists capsule start",
     "runtime exec lists program unlisted",
     "runtime exec lists shape",
     "runtime exec lists git root",
@@ -8212,15 +8212,21 @@ impl VectorStart {
     }
 }
 
+/// How the ledger records a refused start (design 37 D23): a refusal the daemon answers before it
+/// accepts the operation is `refused`; one the driver answers ends the accepted operation, whose
+/// state is `terminal` with the refusal as its error.
+const RECORDED_BY_THE_DAEMON: &str = "refused";
+const RECORDED_BY_THE_DRIVER: &str = "terminal";
+
 /// Sends `input` to `path` under `operation`, requires the answer to be `status` and `body`
-/// exactly, and the operation recorded as refused.
-async fn expect_refused_as(
+/// exactly, and the operation recorded as `recorded`.
+async fn expect_answer_recorded(
     daemon: &Daemon,
     path: &str,
     (operation, request_id): (&str, &str),
     input: &Value,
-    status: u16,
-    body: &Value,
+    (status, body): (u16, &Value),
+    recorded: &str,
 ) {
     let (actual, answer) = daemon
         .call("POST", path, request_id, Some(&mutation(operation, input)))
@@ -8229,19 +8235,40 @@ async fn expect_refused_as(
     assert_eq!(&answer, body, "{operation}");
     assert_eq!(
         ledger_row(daemon, operation, &format!("{request_id}_ledger")).await["state"],
-        "refused",
+        recorded,
         "{operation}"
     );
 }
 
+/// [`expect_answer_recorded`] for a refusal the daemon answers before it accepts the operation.
+async fn expect_refused_as(
+    daemon: &Daemon,
+    path: &str,
+    ids: (&str, &str),
+    input: &Value,
+    status: u16,
+    body: &Value,
+) {
+    expect_answer_recorded(
+        daemon,
+        path,
+        ids,
+        input,
+        (status, body),
+        RECORDED_BY_THE_DAEMON,
+    )
+    .await;
+}
+
 /// Sends `input` to `path` under `operation` and requires `code` with `status` at `address`,
-/// recorded as refused. Returns the error.
-async fn expect_refused_at(
+/// and the operation recorded as `recorded`. Returns the error.
+async fn expect_error_recorded(
     daemon: &Daemon,
     path: &str,
     (operation, request_id): (&str, &str),
     input: &Value,
     (status, code, address): (u16, &str, &str),
+    recorded: &str,
 ) -> Value {
     let response = daemon
         .call("POST", path, request_id, Some(&mutation(operation, input)))
@@ -8249,10 +8276,21 @@ async fn expect_refused_at(
     expect_error_at(&response, status, code, address);
     assert_eq!(
         ledger_row(daemon, operation, &format!("{request_id}_ledger")).await["state"],
-        "refused",
+        recorded,
         "{operation}"
     );
     response.1["error"].clone()
+}
+
+/// [`expect_error_recorded`] for a refusal the daemon answers before it accepts the operation.
+async fn expect_refused_at(
+    daemon: &Daemon,
+    path: &str,
+    ids: (&str, &str),
+    input: &Value,
+    answer: (u16, &str, &str),
+) -> Value {
+    expect_error_recorded(daemon, path, ids, input, answer, RECORDED_BY_THE_DAEMON).await
 }
 
 /// `input` with its `sandbox` naming `allow` and `deny`, each set only where given.
@@ -8611,9 +8649,10 @@ async fn expect_listed_run(daemon: &Daemon, record: &Value) {
 
 /// The delegated lane, on a daemon started with `--exec-gate` naming the static helper: both
 /// facts published; an exec start and a session start each held to an allow-list and a
-/// deny-list; a start without the members; rows 5 to 8 once each, and row 7 for an entry
-/// beneath the capsule mount; rows 1 to 3 again ([`check_exec_list_shape`]); and one start
-/// with a Git writable root and an allow-list. Sixteen cases.
+/// deny-list; a start without the members; rows 5 to 8 once each, and row 6 again for a
+/// start with a capsule, whose program no list can name; rows 1 to 3 again
+/// ([`check_exec_list_shape`]); and one start with a Git writable root and an allow-list.
+/// Sixteen cases.
 #[allow(clippy::too_many_lines)] // One case per row and per start, in the order of design 37 § 12.
 async fn check_confined_exec_lists(
     daemon: &Daemon,
@@ -8712,15 +8751,16 @@ async fn check_confined_exec_lists(
     println!("runtime exec lists start without the members: executed");
     passed += 1;
 
-    // Row 5: a pty session held to a list, the bundle's vector answer.
+    // Row 5: a pty session held to a list, the bundle's vector answer. Rows 5 to 8 are the
+    // driver's: the operation was accepted and the refusal is its recorded end (D23).
     let pty = VectorStart::of("pty-session-is-unserved", &workspace, &snapshot);
-    expect_refused_as(
+    expect_answer_recorded(
         daemon,
         &pty.path,
         (&pty.operation, &pty.request_id),
         &pty.input,
-        pty.expected_status,
-        &pty.expected_body,
+        (pty.expected_status, &pty.expected_body),
+        RECORDED_BY_THE_DRIVER,
     )
     .await;
     println!("runtime exec lists pty session: executed");
@@ -8747,7 +8787,7 @@ async fn check_confined_exec_lists(
     ] {
         let start = VectorStart::of(vector, &workspace, &snapshot);
         let expected = &start.expected_body["error"];
-        let error = expect_refused_at(
+        let error = expect_error_recorded(
             daemon,
             &start.path,
             (&start.operation, &start.request_id),
@@ -8757,6 +8797,7 @@ async fn check_confined_exec_lists(
                 expected["code"].as_str().expect("code"),
                 expected["address"].as_str().expect("address"),
             ),
+            RECORDED_BY_THE_DRIVER,
         )
         .await;
         assert_eq!(error["class"], expected["class"], "{name}: {error}");
@@ -8768,9 +8809,10 @@ async fn check_confined_exec_lists(
         passed += 1;
     }
 
-    // Row 7 for an entry beneath the capsule mount: `/runtime` is no location a list may name
-    // (design 37 § 16). The capsule is the released inline-capsule vector's, whose manifest is
-    // computed here by the published rule first.
+    // Row 6 for a start with a capsule: its program lies beneath the capsule mount, `/runtime`,
+    // which is no location a list may name, and the program is judged before the entries
+    // (design 37 § 16). Nothing runs. The capsule is the released inline-capsule vector's,
+    // whose manifest is computed here by the published rule first.
     let capsule =
         released_vector("0.29.0", "inline-capsule-unserved-without-the-fact")["action"]["request"]
             ["body"]["input"]["capsule"]
@@ -8786,23 +8828,20 @@ async fn check_confined_exec_lists(
         None,
     );
     capsule_start["capsule"] = capsule;
-    let error = expect_refused_at(
+    let error = expect_error_recorded(
         daemon,
         "/v1/execs",
         ("01JDESIGN37LISTEDCAPSULE1", "req_exec_lists_capsule"),
         &capsule_start,
-        (
-            422,
-            "exec.sandbox-exec-subpath-undeclared",
-            EXEC_SUBPATHS_ADDRESS,
-        ),
+        (422, "exec.sandbox-path-unrepresentable", "argv"),
+        RECORDED_BY_THE_DRIVER,
     )
     .await;
     assert!(
-        text(&error["message"]).contains("\"/runtime\""),
-        "the message names the entry: {error}"
+        text(&error["message"]).contains("\"/runtime/run\""),
+        "the message names the program: {error}"
     );
-    println!("runtime exec lists capsule entry: executed");
+    println!("runtime exec lists capsule start: executed");
     passed += 1;
 
     passed += check_exec_list_shape(daemon, &workspace, &snapshot, true).await;

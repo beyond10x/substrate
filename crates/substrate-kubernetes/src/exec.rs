@@ -1552,6 +1552,30 @@ fn unproved(facts: &CapabilityFacts, sandbox: &ConfinementRequest) -> Option<&'s
     })
 }
 
+/// Design 37 § 7: this driver proves neither list's fact and holds no run to a list, so a
+/// start that names one is row 4 of § 6 here as it is in the daemon, the allow-list first.
+fn listed_unserved(sandbox: &ConfinementRequest) -> Option<DriverError> {
+    let listed = [
+        (
+            sandbox.exec_subpaths.is_some(),
+            ConfinementProperty::ExecSubpaths,
+            substrate_wire::EXEC_SUBPATHS_ADDRESS,
+        ),
+        (
+            !sandbox.exec_denied_paths.is_empty(),
+            ConfinementProperty::ExecDeniedPaths,
+            substrate_wire::EXEC_DENIED_PATHS_ADDRESS,
+        ),
+    ];
+    let (_, property, address) = listed.into_iter().find(|(named, ..)| *named)?;
+    let [_, fact] = substrate_wire::CONFINEMENT_UNSERVED_REFUSALS;
+    Some(DriverError::unserved(
+        fact.code,
+        fact.message.replace("{name}", property.name()),
+        address,
+    ))
+}
+
 fn unserved(input: &ExecStartInput) -> Option<DriverError> {
     let refuse = |code: &'static str, message: &str, address: &str| {
         Some(DriverError::unserved(code, message, address))
@@ -1566,6 +1590,9 @@ fn unserved(input: &ExecStartInput) -> Option<DriverError> {
             "Egress apertures are not served by this driver.",
             "aperture",
         );
+    }
+    if let Some(refusal) = listed_unserved(sandbox) {
+        return Some(refusal);
     }
     if !input.secret_slots.is_empty() {
         return refuse(

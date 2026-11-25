@@ -1855,7 +1855,8 @@ impl<'a> Mounts<'a> {
         if let Some(location) = shown_location(&place, &self.locations) {
             return Err(refuse(format!(
                 "resolves to {}, which shows {}, a location a run can write",
-                reached.view, location.path
+                reached.view,
+                location.named(self.caller)
             )));
         }
         // The end is where no run can write; the way to it is judged last, so a path that

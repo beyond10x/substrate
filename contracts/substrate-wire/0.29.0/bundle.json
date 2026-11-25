@@ -232,10 +232,10 @@
   },
   "files": [
     {
-      "byte_length": 4204,
+      "byte_length": 4359,
       "media_type": "application/json",
       "path": "compatibility.json",
-      "sha256": "131c2357eb1d50df17912636035de9bc1941d6c601e4f5d6ad39d7d4fc3f2682"
+      "sha256": "0523914d8e9920eff0d6c5d5fd1213209d31a63429e41d97ff71badf21c5a2bc"
     },
     {
       "byte_length": 74771,
@@ -592,10 +592,10 @@
       "sha256": "42d5874dd5ef62fd0bac3b5cc08a7ebe7a7a1e17d2b666f47d6a9b84f3dc3cfe"
     },
     {
-      "byte_length": 26672,
+      "byte_length": 26841,
       "media_type": "application/json",
       "path": "schemas/common.json",
-      "sha256": "66135bc5ceaa4c619efeb8b62af5111aef76b3140408b90f5c89cbcbfc275e03"
+      "sha256": "21b74ecc519ed62f6e1294b7ee6b562fa9bb81dcb1fcc31df7cb5130ca4e54bb"
     },
     {
       "byte_length": 1275,
@@ -1870,10 +1870,10 @@
       "sha256": "2290acfc0ff48a0ebe9a6fb05f1278487da9765842754b61891bb3d5269d695e"
     },
     {
-      "byte_length": 5212,
+      "byte_length": 5213,
       "media_type": "application/json",
       "path": "vectors/http/exec-lists-denied-program-is-refused.json",
-      "sha256": "db9efee24685ffc9b2adbd9a9ad3a0536fdb41b5a3f6be1dc6d88d71991f96c7"
+      "sha256": "f8235ea676e1dc1ced5e89c45ddc839f085e56d7259e2b4501d91efc6ade1a2b"
     },
     {
       "byte_length": 5247,
@@ -1894,28 +1894,28 @@
       "sha256": "260bfeca4fd16a2b679b6eed599c7623dcab9686abc0b6260cb02421a0937cb7"
     },
     {
-      "byte_length": 5154,
+      "byte_length": 5155,
       "media_type": "application/json",
       "path": "vectors/http/exec-lists-entry-undeclared-is-refused.json",
-      "sha256": "a6b2e799d0c3c93454b55dd56cde20bc61c840e80aa37d8b9c25afcd05ffc0d9"
+      "sha256": "a93321cc7bdc40d456ee14060acea5508a20a7f6128c5dd1a4840003f3eb3958"
     },
     {
-      "byte_length": 5081,
+      "byte_length": 5082,
       "media_type": "application/json",
       "path": "vectors/http/exec-lists-entry-unrepresentable-is-refused.json",
-      "sha256": "1521310d243b973fed15c34e66d66b8118c0f4939f036214bc5e6e5585d4ff7b"
+      "sha256": "a90e939cea46258880d85290a8d255c0373475e04df007e55a0ccf9faf693483"
     },
     {
-      "byte_length": 5169,
+      "byte_length": 5170,
       "media_type": "application/json",
       "path": "vectors/http/exec-lists-place-unserved.json",
-      "sha256": "a6fcd21820c936ed9ac476cc067968a7a169cf5583459c3273e34d257dd6900a"
+      "sha256": "3b27d787b727c74aa670c05da377e93784f69861d2b522182d4ad55043e12087"
     },
     {
-      "byte_length": 5565,
+      "byte_length": 5566,
       "media_type": "application/json",
       "path": "vectors/http/exec-lists-pty-session-is-unserved.json",
-      "sha256": "409b19c93c513f7e0b43b6d1f88a6443db91f22f207fd1d4a736e3c825c14abe"
+      "sha256": "57e876fe35598247a97d321a7093564294160fb66e077effaae27dd6333db8ed"
     },
     {
       "byte_length": 4917,

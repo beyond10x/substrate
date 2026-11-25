@@ -299,7 +299,37 @@ impl ExecLists {
     /// The lists a wire start's `sandbox` names, as it names them. An absent allow-list is no
     /// list. A present and empty one is refused here, by the daemon's row 2 of design 37 § 6:
     /// the driver never takes it for no list, which would run every program of the view.
+    ///
+    /// Before that the lists are held to their wire bounds, row 1 of that table, as the driver
+    /// holds every other member of a start to its lexical rule: a caller that is not the daemon
+    /// gets the same answer, and no entry is located for a list over its bound.
     fn requested(sandbox: &substrate_wire::ConfinementRequest) -> Result<Self, DriverError> {
+        use substrate_wire::WireValidationError::{
+            ExecListEntryDuplicate, ExecListEntryInvalid, ExecListExceeded,
+        };
+
+        match substrate_wire::validate_exec_lists(sandbox) {
+            Ok(()) => {}
+            Err(
+                ExecListExceeded { address }
+                | ExecListEntryInvalid { address }
+                | ExecListEntryDuplicate { address },
+            ) => {
+                return Err(DriverError::refused(
+                    "request.schema-invalid",
+                    "An executable list is over its bound, or holds an empty, over-long or \
+                     repeated entry.",
+                    address,
+                ));
+            }
+            Err(_) => {
+                return Err(DriverError::refused(
+                    "request.schema-invalid",
+                    "The executable lists are not valid.",
+                    "input",
+                ));
+            }
+        }
         if sandbox.exec_subpaths.as_ref().is_some_and(Vec::is_empty) {
             let [row, ..] = substrate_wire::EXEC_LIST_REFUSALS;
             return Err(DriverError::refused(
@@ -9918,6 +9948,54 @@ mod tests {
         assert_at(&error, row.code, "sandbox.exec_subpaths");
         assert_eq!(error.class, crate::DriverErrorClass::Refused, "{error}");
         assert_eq!(Some(error.message.as_str()), row.message, "{error}");
+    }
+
+    /// **A wire start's lists are held to their wire bounds by the driver too, before any entry
+    /// is located** (design 37 § 2, row 1 of § 6): more than `MAX_EXEC_SUBPATHS` or
+    /// `MAX_EXEC_DENIED_PATHS` entries, or an entry over `MAX_EXEC_LIST_ENTRY_BYTES`, is request
+    /// shape, `request.schema-invalid` at the member, as the driver answers the shape of
+    /// `sandbox.requires` (`admit_requires_shape`) and of every other wire member it re-checks.
+    /// Asked on a runtime that proved both lists and a workspace that exists, so nothing but the
+    /// bound can refuse the start first.
+    #[tokio::test]
+    async fn a_wire_start_over_a_list_bound_is_request_shape_before_any_entry_is_located() {
+        let root = tempfile::tempdir().expect("a root");
+        let (runtime, workspace, snapshot) = gated_runtime(root.path(), Some(true));
+        let runtime = runtime.proving_exec_denied_paths(true);
+        let many = |count: usize| {
+            (0..count)
+                .map(|index| format!("e{index}"))
+                .collect::<Vec<_>>()
+        };
+        let mut over_allow = pty_exec_input(&snapshot);
+        over_allow.sandbox.exec_subpaths = Some(many(substrate_wire::MAX_EXEC_SUBPATHS + 1));
+        let mut over_deny = pty_exec_input(&snapshot);
+        over_deny.sandbox.exec_subpaths = Some(vec!["bin".to_owned()]);
+        over_deny.sandbox.exec_denied_paths = many(substrate_wire::MAX_EXEC_DENIED_PATHS + 1);
+        let mut long_entry = pty_exec_input(&snapshot);
+        long_entry.sandbox.exec_subpaths = Some(vec![
+            "e".repeat(substrate_wire::MAX_EXEC_LIST_ENTRY_BYTES + 1),
+        ]);
+        for (case, input, address) in [
+            ("65 allow entries", &over_allow, "sandbox.exec_subpaths"),
+            ("65 deny entries", &over_deny, "sandbox.exec_denied_paths"),
+            (
+                "an entry of 4096 bytes",
+                &long_entry,
+                "sandbox.exec_subpaths",
+            ),
+        ] {
+            let DispatchOutcome::NotDispatched(error) =
+                runtime.start("ex_bound", &workspace, input).await
+            else {
+                panic!("{case}: a wire start over a list bound was dispatched");
+            };
+            assert_eq!(
+                (error.code, error.address.as_deref()),
+                ("request.schema-invalid", Some(address)),
+                "{case}: {error}"
+            );
+        }
     }
 
     /// **The base view carries `/etc/alternatives`** (issue #223, ADR 0049 decision 1): on a

@@ -1037,9 +1037,11 @@ fn check_driver_message(
     }
 }
 
-/// Every refusal is recorded as refused. Rows 2 to 4 are the daemon's and dispatch nothing;
-/// rows 5 to 9 are the driver's and start nothing. Row 9's vector is a design vector, never one
-/// the manifest selects for execution: no lane has a place it refuses.
+/// Design 37 D23. Rows 2 to 4 are the daemon's: it answers before it accepts the operation, which
+/// is recorded as refused, and dispatches nothing. Rows 5 to 9 are the driver's: the operation was
+/// accepted, the refusal is its error, its recorded state is terminal, and nothing started. Row
+/// 9's vector is a design vector, never one the manifest selects for execution: no lane has a
+/// place it refuses.
 fn check_recorded(
     path: &str,
     vector: &Value,
@@ -1049,7 +1051,8 @@ fn check_recorded(
     failures: &mut Vec<String>,
 ) {
     let code = row(number).code;
-    let mut stated = vec![("/probes/operation_state", json!("refused"))];
+    let recorded = if number <= 4 { "refused" } else { "terminal" };
+    let mut stated = vec![("/probes/operation_state", json!(recorded))];
     if number <= 4 {
         stated.push(("/driver/dispatch_count", json!(0)));
         stated.push(("/probes/operation_row_count_delta", json!(1)));
@@ -1396,6 +1399,24 @@ mod tests {
             failures.iter().any(|failure| failure.contains(named)),
             "expected a failure naming {named:?}, got {failures:#?}"
         );
+    }
+
+    /// `MEMBERS` lists a row on a member where the wire table answers the row at the member's
+    /// address, and nowhere else but the two rows its own comment names: row 5, answered at
+    /// `mode` for a start with an allow-list, and row 8, answered at `argv` for a deny entry.
+    #[test]
+    fn the_rows_of_each_member_are_the_wire_tables_addresses() {
+        for (member, elsewhere) in super::MEMBERS.iter().zip([5, 8]) {
+            let address = format!("sandbox.{}", member.name);
+            let mut rows: Vec<usize> = (2..=9)
+                .filter(|number| {
+                    *number == elsewhere
+                        || super::row(*number).addresses.contains(&address.as_str())
+                })
+                .collect();
+            rows.sort_unstable();
+            assert_eq!(member.rows, rows, "{}", member.name);
+        }
     }
 
     #[test]
@@ -1766,14 +1787,23 @@ mod tests {
                 json!("This host cannot hold the run to its executable list.");
         });
         assert_reported(&failures_of(&tree), "is not the wire form of row 9");
-        let tree = edited(PLACE, |vector| {
-            for condition in vector["postconditions"].as_array_mut().expect("conditions") {
-                if condition["actual"] == "/probes/operation_state" {
-                    condition["expected"] = json!("terminal");
+        // D23: a driver's row states `terminal` and a daemon's row `refused`, never the other.
+        for (path, other, stated) in [
+            (PLACE, "refused", "terminal"),
+            (EMPTY, "terminal", "refused"),
+        ] {
+            let tree = edited(path, |vector| {
+                for condition in vector["postconditions"].as_array_mut().expect("conditions") {
+                    if condition["actual"] == "/probes/operation_state" {
+                        condition["expected"] = json!(other);
+                    }
                 }
-            }
-        });
-        assert_reported(&failures_of(&tree), "must state /probes/operation_state");
+            });
+            assert_reported(
+                &failures_of(&tree),
+                &format!("must state /probes/operation_state equals \"{stated}\""),
+            );
+        }
         let tree = edited(PLACE, |vector| {
             vector["setup"][0]["state"]["facts"]
                 .as_object_mut()

@@ -430,6 +430,33 @@ async fn a_retried_start_with_other_lists_is_a_request_conflict() {
     }
 }
 
+/// Design 37 § 3 (D21): the request hash covers the request as sent. An empty deny-list reads as
+/// an absent one, and a retry that adds or drops the member is still another request:
+/// `operation.request-conflict`, as for every other member a start may write or leave out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_that_adds_or_drops_an_empty_deny_list_is_a_request_conflict() {
+    let (_directory, app) = snapshot_app(DEPLOYMENT, serving(false, false));
+    for start in STARTS {
+        let snapshot = snapshot_of(&app);
+        let without = json!({"exec_subpaths": ["/usr/bin"]});
+        let with_empty = json!({"exec_subpaths": ["/usr/bin"], "exec_denied_paths": []});
+        for (first, retried) in [(&without, &with_empty), (&with_empty, &without)] {
+            let operation = operation_id(start);
+            let answered = post(&app, start, &operation, &start.input(&snapshot, first)).await;
+            assert_eq!(answered.0, StatusCode::NOT_IMPLEMENTED, "{:?}", answered.1);
+            let (status, body) =
+                post(&app, start, &operation, &start.input(&snapshot, retried)).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{start:?} {retried}: {body}");
+            assert_eq!(
+                body["error"]["code"], "operation.request-conflict",
+                "{start:?} {retried}: {body}"
+            );
+            let again = post(&app, start, &operation, &start.input(&snapshot, first)).await;
+            assert_eq!(again.1["error"], answered.1["error"], "{start:?}");
+        }
+    }
+}
+
 /// A start without the lists has the request hash it had before they existed: the wire type
 /// skips both members when they are absent, so a client that writes the type sends the bytes it
 /// sent before, and a start that names one hashes otherwise.

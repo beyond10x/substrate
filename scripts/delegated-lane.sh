@@ -812,7 +812,7 @@ for line in \
   'runtime exec lists pty session: executed' \
   'runtime exec lists entry unrepresentable: executed' \
   'runtime exec lists entry undeclared: executed' \
-  'runtime exec lists capsule entry: executed' \
+  'runtime exec lists capsule start: executed' \
   'runtime exec lists program unlisted: executed' \
   'runtime exec lists shape: executed' \
   'runtime exec lists git root: executed' \
