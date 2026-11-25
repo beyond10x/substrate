@@ -44,14 +44,23 @@ struct Executor {
     calls: Mutex<Vec<ExecRequest>>,
     handshake: Mutex<Option<String>>,
     /// The next `fs` call is served and its answer then held past the client's bound: an answer
-    /// lost after the executor acted.
+    /// lost after the executor acted. It is held until the driver sends its next `fs` call, which
+    /// it sends only once it gave up on this answer, or for `stall` when none comes.
     stall_next: AtomicBool,
     stall: Mutex<Duration>,
+    /// Notified at every call, with `calls` as its lock.
+    called: std::sync::Condvar,
+}
+
+/// Whether `call` is an `fs` call.
+fn is_fs(call: &ExecRequest) -> bool {
+    call.command.last().is_some_and(|part| part == "fs")
 }
 
 impl Executor {
     fn answer(&self, request: &ExecRequest) -> ExecAnswer {
         lock(&self.calls).push(request.clone());
+        self.called.notify_all();
         let command: Vec<&str> = request.command.iter().map(String::as_str).collect();
         match command.as_slice() {
             ["/substrate-executor", "version"] => {
@@ -70,7 +79,7 @@ impl Executor {
                 })
                 .expect("the executor writes its answer");
                 if self.stall_next.swap(false, Ordering::SeqCst) {
-                    std::thread::sleep(*lock(&self.stall));
+                    self.hold();
                 }
                 ExecAnswer {
                     stdout,
@@ -84,11 +93,25 @@ impl Executor {
         }
     }
 
+    /// Holds the answer of the `fs` call being served until a later `fs` call arrives, or for
+    /// `stall`.
+    fn hold(&self) {
+        let stall = *lock(&self.stall);
+        let calls = lock(&self.calls);
+        let served = calls.iter().filter(|call| is_fs(call)).count();
+        let _held = self
+            .called
+            .wait_timeout_while(calls, stall, |calls| {
+                calls.iter().filter(|call| is_fs(call)).count() == served
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+
     /// The `fs` calls so far, each as its request header's `op`.
     fn fs_ops(&self) -> Vec<String> {
         lock(&self.calls)
             .iter()
-            .filter(|call| call.command.last().is_some_and(|part| part == "fs"))
+            .filter(|call| is_fs(call))
             .map(|call| {
                 let request: Request =
                     substrate_executor::message::read_request(&mut call.stdin.as_slice())
@@ -187,6 +210,7 @@ fn setup() -> Setup {
         handshake: Mutex::new(None),
         stall_next: AtomicBool::new(false),
         stall: Mutex::new(Duration::ZERO),
+        called: std::sync::Condvar::new(),
     });
     let handler = Arc::clone(&executor);
     fake.set_exec(move |request| handler.answer(&request));

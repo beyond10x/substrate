@@ -62,7 +62,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::os::fd::{AsFd as _, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use substrate_wire::{
     APERTURE_CA_BUNDLE_PATH, APERTURE_HOSTS_PATH, APERTURE_LOOPBACK_ADDRESS, ApertureBytes,
@@ -1373,9 +1373,14 @@ pub(crate) fn mechanism_is_provable(bubblewrap: &Path) -> bool {
     if sentinel.set_nonblocking(true).is_err() {
         return false;
     }
+    // Set once the sandbox has answered. A sandbox that proved the mechanism read the sentinel,
+    // so the responder has returned by then; one that did not will not connect any more, and the
+    // responder does not wait out its deadline for it.
+    let answered = std::sync::Arc::new(AtomicBool::new(false));
+    let sandbox_answered = std::sync::Arc::clone(&answered);
     let responder = std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + PROBE_DEADLINE;
-        while std::time::Instant::now() < deadline {
+        while std::time::Instant::now() < deadline && !sandbox_answered.load(Ordering::Relaxed) {
             match sentinel.accept() {
                 Ok((mut stream, _)) => {
                     use std::io::Write as _;
@@ -1392,6 +1397,7 @@ pub(crate) fn mechanism_is_provable(bubblewrap: &Path) -> bool {
         }
     });
     let proven = probe_through_sandbox(bubblewrap, destination);
+    answered.store(true, Ordering::Relaxed);
     let _ = responder.join();
     proven
 }
@@ -1756,6 +1762,23 @@ mod tests {
         read_sandbox_pid, receive_descriptor, sandbox_pid_from,
     };
     use crate::{DriverError, DriverErrorClass, HostConfig};
+
+    /// A backend that ends before it reports a sandbox ends the probe when it ends: the sentinel's
+    /// responder does not wait out its deadline for a connection no sandbox will make. The
+    /// mechanism is then not provable.
+    #[test]
+    fn a_sandbox_that_ends_at_once_ends_the_probe_before_its_deadline() {
+        let directory = tempfile::tempdir().expect("a scratch directory");
+        let (backend, _log) = crate::process::recording_backend(directory.path());
+        let started = std::time::Instant::now();
+        assert!(!super::mechanism_is_provable(&backend));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < super::PROBE_DEADLINE / 2,
+            "the probe of a backend that exits at once took {elapsed:?}; its deadline is {:?}",
+            super::PROBE_DEADLINE
+        );
+    }
 
     /// The reap of an abandoned forwarder retries only `EINTR`: a wait that fails otherwise, here
     /// `ECHILD` for a child already reaped, ends at once instead of waiting again forever. The
@@ -3602,6 +3625,8 @@ mod tests {
         /// install cannot fill the host's process table.
         struct ForkingNeighbour {
             stop: Arc<AtomicBool>,
+            /// Set by [`ForkingNeighbour::join`]: the children still holding are ended.
+            release: Arc<AtomicBool>,
             handle: Option<std::thread::JoinHandle<usize>>,
         }
 
@@ -3611,6 +3636,8 @@ mod tests {
             fn start(hold: Duration) -> Self {
                 let stop = Arc::new(AtomicBool::new(false));
                 let stopped = Arc::clone(&stop);
+                let release = Arc::new(AtomicBool::new(false));
+                let released = Arc::clone(&release);
                 let hold = libc::c_int::try_from(hold.as_millis()).expect("hold in milliseconds");
                 let handle = std::thread::spawn(move || {
                     let mut children = Vec::new();
@@ -3631,15 +3658,24 @@ mod tests {
                     }
                     for pid in &children {
                         let mut status = 0;
-                        // SAFETY: reaping a child this thread forked.
+                        // SAFETY: reaping a child this thread forked, and ending it first once
+                        // released. Only this thread reaps it, so its pid names it until then.
                         unsafe {
-                            libc::waitpid(*pid, &raw mut status, 0);
+                            while libc::waitpid(*pid, &raw mut status, libc::WNOHANG) == 0 {
+                                if released.load(Ordering::Acquire) {
+                                    libc::kill(*pid, libc::SIGKILL);
+                                    libc::waitpid(*pid, &raw mut status, 0);
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
                         }
                     }
                     children.len()
                 });
                 Self {
                     stop,
+                    release,
                     handle: Some(handle),
                 }
             }
@@ -3649,8 +3685,10 @@ mod tests {
                 self.stop.store(true, Ordering::Release);
             }
 
-            /// Waits for every child, and returns how many there were.
+            /// Ends every child, waits for each, and returns how many there were. A case joins
+            /// once it has read what it observed while the children held their copies.
             fn join(mut self) -> usize {
+                self.release.store(true, Ordering::Release);
                 self.stop();
                 self.handle
                     .take()
