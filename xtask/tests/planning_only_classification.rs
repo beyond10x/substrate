@@ -6,6 +6,10 @@
 //! throwaway Git repositories, and the `Full gate` step's own script against every combination of
 //! results its jobs can report, so a pull request that changes anything outside the list still
 //! needs both gate phases green. Nothing here reaches the network or builds anything.
+//!
+//! The last three cases hold the repository's second path list, the two patterns the
+//! code-scanning analysis skips (`.github/codeql/codeql-config.yml`), to test code: the file is
+//! those two patterns and nothing else, and no path they match is compiled into a shipped binary.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -1282,4 +1286,200 @@ fn a_markdown_file_that_rust_source_names_is_never_planning_only() {
         "Rust source names these Markdown files and {LIST} still lists them; exclude each: {listed:#?}"
     );
     answer.expect("code", "every Markdown file Rust source names");
+}
+
+/// The configuration the code-scanning analysis reads (`AGENTS.md` § *The gate*).
+const SCANNER_CONFIG: &str = ".github/codeql/codeql-config.yml";
+/// The whole file: the analysis skips two patterns of test code and changes nothing else.
+const SCANNER_CONFIG_TEXT: &str = "paths-ignore:\n  - \"crates/*/tests/**\"\n  - \"**/tests.rs\"\n";
+/// The top-level directories that hold Rust source.
+const RUST_ROOTS: [&str; 5] = ["crates", "spec", "test-support", "vendor", "xtask"];
+
+/// Which of the two patterns of [`SCANNER_CONFIG_TEXT`] skips `path`, a repository-relative path.
+fn scanner_skips(path: &str) -> Option<&'static str> {
+    let components: Vec<&str> = path.split('/').collect();
+    if components.len() > 3 && components[0] == "crates" && components[2] == "tests" {
+        Some("crates/*/tests/**")
+    } else if components.last() == Some(&"tests.rs") {
+        Some("**/tests.rs")
+    } else {
+        None
+    }
+}
+
+/// Whether `parent` declares a module `tests`, and every such declaration is compiled for tests
+/// only: one of the attribute lines directly above it is `#[cfg(test)]`.
+fn declares_tests_for_tests_only(parent: &str) -> bool {
+    let lines: Vec<&str> = parent.lines().map(str::trim).collect();
+    let mut declared = false;
+    for (index, line) in lines.iter().enumerate() {
+        if *line != "mod tests;" && !line.ends_with(" mod tests;") {
+            continue;
+        }
+        declared = true;
+        let gated = lines[..index]
+            .iter()
+            .rev()
+            .take_while(|above| above.starts_with("#["))
+            .any(|above| *above == "#[cfg(test)]");
+        if !gated {
+            return false;
+        }
+    }
+    declared
+}
+
+/// Where `line` of shipped source or of a manifest takes code from a `tests/` directory: a
+/// `#[path]` attribute or an `include!`. `include_str!` and `include_bytes!` take data.
+fn compiles_from_a_tests_directory(line: &str) -> bool {
+    let line = line.trim_start();
+    !line.starts_with("//")
+        && line.contains("tests/")
+        && (line.contains("#[path") || line.contains("include!("))
+}
+
+/// The scanner's configuration is the two patterns and nothing else: no query is removed, no
+/// threat model is changed and no third path is skipped without this test changing with it.
+#[test]
+fn the_scanner_configuration_skips_two_test_path_patterns_and_nothing_else() {
+    assert_eq!(repository_file(SCANNER_CONFIG), SCANNER_CONFIG_TEXT);
+    assert_eq!(
+        scanner_skips("crates/substrate-daemon/tests/pipe_session.rs"),
+        Some("crates/*/tests/**")
+    );
+    assert_eq!(
+        scanner_skips("crates/substrate-daemon/tests/processes/events.rs"),
+        Some("crates/*/tests/**")
+    );
+    assert_eq!(
+        scanner_skips("crates/substrate-store/src/backend/tests.rs"),
+        Some("**/tests.rs")
+    );
+    for scanned in [
+        "crates/substrate-daemon/src/app.rs",
+        "crates/substrate-daemon/src/app/tests/exec_lists.rs",
+        "crates/substrate-kubernetes/src/namespace/probe_tests.rs",
+        "crates/tests/lib.rs",
+        "xtask/tests/release_workflow.rs",
+        "xtask/src/main.rs",
+    ] {
+        assert_eq!(scanner_skips(scanned), None, "{scanned} is scanned");
+    }
+}
+
+/// Both sides of the rule the next case applies to every skipped `tests.rs`.
+#[test]
+fn a_tests_module_counts_as_test_code_only_under_cfg_test() {
+    for gated in [
+        "#[cfg(test)]\nmod tests;\n",
+        "pub fn shipped() {}\n\n#[cfg(target_os = \"linux\")]\n#[cfg(test)]\nmod tests;\n",
+        "#[cfg(test)]\n#[allow(clippy::unwrap_used)]\n    mod tests;\n",
+    ] {
+        assert!(declares_tests_for_tests_only(gated), "{gated:?}");
+    }
+    for shipped in [
+        "mod tests;\n",
+        "pub mod tests;\n",
+        "#[cfg(test)]\nmod other;\nmod tests;\n",
+        "#[cfg(test)]\n\nmod tests;\n",
+        "#[cfg(feature = \"tests\")]\npub(crate) mod tests;\n",
+        "#[cfg(test)]\nmod tests;\n#[cfg(unix)]\nmod tests;\n",
+        "mod tests {}\n",
+        "",
+    ] {
+        assert!(!declares_tests_for_tests_only(shipped), "{shipped:?}");
+    }
+    assert!(compiles_from_a_tests_directory(
+        "#[path = \"../tests/support.rs\"]"
+    ));
+    assert!(compiles_from_a_tests_directory(
+        "    include!(\"../tests/generated.rs\");"
+    ));
+    for data in [
+        "    const GOLDEN: &str = include_str!(\"../tests/golden/exec-pod.json\");",
+        "// #[path = \"../tests/support.rs\"]",
+        "#[path = \"support.rs\"]",
+    ] {
+        assert!(!compiles_from_a_tests_directory(data), "{data:?}");
+    }
+}
+
+/// No path the scanner skips is compiled into a shipped binary: a skipped `tests.rs` is a module
+/// its parent declares under `#[cfg(test)]`, no manifest builds a library, a binary or an example
+/// from a `tests/` directory, and no scanned source takes code from one.
+#[test]
+fn no_path_the_scanner_skips_is_compiled_into_a_shipped_binary() {
+    let root = repository_root();
+    let mut sources = Vec::new();
+    for directory in RUST_ROOTS {
+        rust_sources(&root.join(directory), &mut sources);
+    }
+    let mut skipped = [0_usize; 2];
+    let mut wrong = Vec::new();
+    for source in &sources {
+        let relative = source
+            .strip_prefix(&root)
+            .expect("a source of this repository")
+            .to_str()
+            .expect("a UTF-8 path")
+            .replace('\\', "/");
+        match scanner_skips(&relative) {
+            Some("crates/*/tests/**") => skipped[0] += 1,
+            Some(_) => {
+                skipped[1] += 1;
+                let directory = source.parent().expect("a source has a directory");
+                let mut parents = vec![directory.with_extension("rs"), directory.join("mod.rs")];
+                if directory.file_name().is_some_and(|name| name == "src") {
+                    parents = vec![directory.join("lib.rs"), directory.join("main.rs")];
+                }
+                let gated = parents
+                    .iter()
+                    .filter_map(|parent| fs::read_to_string(parent).ok())
+                    .any(|parent| declares_tests_for_tests_only(&parent));
+                if !gated {
+                    wrong.push(format!(
+                        "{relative}: no parent module declares it under #[cfg(test)]"
+                    ));
+                }
+            }
+            None => {
+                let text = fs::read_to_string(source).expect("a readable source");
+                for (number, line) in text.lines().enumerate() {
+                    if relative.starts_with("crates/") && compiles_from_a_tests_directory(line) {
+                        wrong.push(format!(
+                            "{relative}:{}: takes code from a tests directory",
+                            number + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for entry in fs::read_dir(root.join("crates")).expect("the crates directory") {
+        let manifest = entry.expect("a crate entry").path().join("Cargo.toml");
+        let Ok(text) = fs::read_to_string(&manifest) else {
+            continue;
+        };
+        let mut table = String::new();
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('[') {
+                table = line.to_owned();
+            } else if line.starts_with("path") && line.contains("\"tests/") && table != "[[test]]" {
+                wrong.push(format!(
+                    "{}: {table} builds from a tests directory: {line}",
+                    manifest.display()
+                ));
+            }
+        }
+    }
+    assert!(
+        skipped[0] > 0 && skipped[1] > 0,
+        "the walk found no skipped source for one of the two patterns: {skipped:?}"
+    );
+    assert!(
+        wrong.is_empty(),
+        "{SCANNER_CONFIG} skips these paths, and each is compiled into shipped code or reaches \
+         it; change the code or the pattern:\n{}",
+        wrong.join("\n")
+    );
 }

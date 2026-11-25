@@ -4,7 +4,7 @@ id: story:code-scanning-check-is-green-for-test-code
 kind: story
 status: draft
 title: The code-scanning check of a pull request is green when it touches test code
-revision: 1
+revision: 2
 ---
 # Story: the code-scanning check of a pull request is green when it touches test code
 
@@ -59,3 +59,40 @@ excludes is in the repository, and a test or check holds that it names no path o
 ## Not in this story
 
 An alert in shipped code: it is a finding and goes the way `SECURITY.md` says.
+
+## The owner's decision and the wiring (2026-11-25)
+
+The owner picked, at his terminal at about 10:00 CET, relayed by the operator's session: "A:
+scanner skips test paths". The option's text: a pull request adds a CodeQL configuration that
+ignores test files (`crates/*/tests/**`, `**/tests.rs`); test code is no longer scanned, shipped
+code is scanned as before; the open test alerts close by themselves. No alert is dismissed.
+
+What the pull request holds:
+
+- `.github/codeql/codeql-config.yml`: `paths-ignore` with those two patterns, and nothing else.
+- Three cases in `xtask/tests/planning_only_classification.rs`: the file is those two patterns;
+  a `tests` module counts as test code only under `#[cfg(test)]`, both sides; no matched path is
+  compiled into a shipped binary.
+
+What is not a pull request. The repository runs CodeQL's default setup (read 2026-11-25 from
+`GET /repos/beyond10x/substrate/code-scanning/default-setup`: `configured`; languages actions,
+javascript-typescript, python, rust). Default setup reads a configuration file only through an
+organization repository property, which an organization owner creates and sets (organization
+Settings, Repository, Custom properties). On that day the organization had no custom property.
+
+| | |
+|---|---|
+| property name | `github-codeql-config-file` |
+| type | Text |
+| value for `substrate` | `remote=beyond10x/substrate@main:.github/codeql/codeql-config.yml` |
+
+The value names the file on `main` (the operator's session, 2026-11-25: value A), so a pull
+request cannot change what its own scan skips, and a branch that does not hold the file is
+analysed the same. Order: the pull request is merged first, then the property is set; it applies
+at the next analysis. Until the property is set the file changes nothing.
+
+Alerts by pattern, read from the API that day: 27 and 29 to 33 match `crates/*/tests/**`; 23 to
+26 match `**/tests.rs`. Alert 32's place was removed by pull request 300. Alert 22
+(`crates/substrate-kubernetes/src/namespace/probe_tests.rs`) matches neither pattern and stays
+open: the acceptance's first sentence is not met for it, and `*_tests.rs` of step 3 is not part
+of the pick.
