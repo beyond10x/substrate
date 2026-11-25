@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:run-observation-names-the-limit-that-ended-it
 kind: story
-status: active
+status: implemented
 title: A run's observation names the limit that ended it
 summary: RunObservation states the memory, CPU or wall-time limit that ended a run; memory_oom_kills on linux and systemd.
 owner: substrate
@@ -44,10 +44,11 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 11
+revision: 12
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:42Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"review_outcome":5}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:43Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"review_outcome":5}}, correlation: "run-governance-first-slice-accepted"}
+- {from: "active", to: "implemented", at: "2026-11-25T15:33:45Z", actor: "agent:substrate", revision: 12, decided_on: {"recorded":{"test_result":2,"review_outcome":5}}}
 ---
 # Story: A run's observation names the limit that ended it
 

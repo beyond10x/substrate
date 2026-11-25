@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:audit-records-run-end-and-limit
 kind: story
-status: active
+status: implemented
 title: The audit sink receives a record when a run ends, naming the limit that ended it
 summary: 'AuditRecord gains run_ended: one per started run, with the end state, the exit and the limit.'
 owner: substrate
@@ -40,10 +40,11 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:43Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":2}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:43Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"review_outcome":2}}, correlation: "run-governance-first-slice-accepted"}
+- {from: "active", to: "implemented", at: "2026-11-25T15:33:45Z", actor: "agent:substrate", revision: 10, decided_on: {"recorded":{"test_result":2,"review_outcome":2}}}
 ---
 # Story: The audit sink receives a record when a run ends, naming the limit that ended it
 

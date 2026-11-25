@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:explicitly-empty-exec-subpaths-means-the-program-only
 kind: story
-status: draft
+status: archived
 title: An explicitly empty executable allow-list means the program only
 summary: 'exec_subpaths tells absent from empty: absent keeps today''s behaviour, empty holds the run to its program on linux and macos. Design 35 is amended first; decided when the wire story is planned.'
 owner: substrate
@@ -48,7 +48,9 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: xtask/bundle-source
-revision: 6
+revision: 7
+transitions:
+- {from: "draft", to: "archived", at: "2026-11-25T15:33:46Z", actor: "agent:substrate", revision: 7, decided_on: {"recorded":{"review_outcome":3}}}
 ---
 # Story: An explicitly empty executable allow-list means the program only
 

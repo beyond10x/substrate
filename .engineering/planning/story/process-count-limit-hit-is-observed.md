@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:process-count-limit-hit-is-observed
 kind: story
-status: active
+status: implemented
 title: A process-count limit hit is observed and recorded in process
 summary: pids.events max reaches RunObservation and the run_ended audit record on linux and systemd; the wire is story:exec-observation-reports-process-count-hits.
 owner: substrate
@@ -38,10 +38,11 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 14
+revision: 15
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T02:33:43Z", actor: "human:timo", revision: 12, decided_on: {"recorded":{"review_outcome":3}}, correlation: "run-governance-first-slice-accepted"}
 - {from: "proposed", to: "active", at: "2026-11-21T02:33:43Z", actor: "human:timo", revision: 13, decided_on: {"recorded":{"review_outcome":3}}, correlation: "run-governance-first-slice-accepted"}
+- {from: "active", to: "implemented", at: "2026-11-25T15:33:46Z", actor: "agent:substrate", revision: 15, decided_on: {"recorded":{"test_result":2,"review_outcome":3}}}
 ---
 # Story: A process-count limit hit is observed and recorded in process
 
