@@ -1,0 +1,38 @@
+# One measurement for story an-oci-run-killed-at-its-memory-bound-names-the-limit-on-a-hosted-runner,
+# step 1. This workflow exists only on the branch that triggers it. The branch is never merged
+# and opens no pull request, so the workflow is no gate step and no check of any change.
+name: Measure the oci OOM flag
+
+on:
+  push:
+    branches: ['measure/oci-oom-flag']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: measure-oci-oom-flag
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    name: OOM flag after a memory-bound kill
+    # The runner image of the gate's test job, where the three sightings were.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pull the oci lane's pinned image
+        env:
+          OCI_LANE_IMAGE: docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+        run: docker pull "$OCI_LANE_IMAGE"
+      - name: Measure
+        env:
+          OCI_LANE_IMAGE: docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+        run: sh scripts/measure-oci-oom-flag.sh "$OCI_LANE_IMAGE" "$RUNNER_TEMP/oom-flag"
+      - name: Print every run
+        if: always()
+        run: cat "$RUNNER_TEMP/oom-flag/runs.txt"
