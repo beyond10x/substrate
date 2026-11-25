@@ -52,7 +52,7 @@ scope:
   path: xtask/src/bundle
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 19
+revision: 20
 ---
 # Story: An exec start carries the executable lists on the wire
 
@@ -146,8 +146,11 @@ branch.
 4. **The daemon** (§ 6, § 7).
    - The flag `--exec-gate <path>`, which conflicts with `--driver kubernetes`.
    - A helper the open refuses stops the daemon's start. An open that withholds the facts lets
-     the daemon start and writes one line on standard error per withheld entry: cause,
-     configuration field, path, file-system type.
+     the daemon start. The line per withheld entry is the host driver's own, which exists:
+     `Opening::announced` (`crates/substrate-host/src/exec_gate.rs`) writes it at `warn` with
+     fact, cause, address, path and file-system type, and the daemon's log carries it. The
+     daemon writes no second line and reads no host item for it (design 37 § 7, amended with
+     this plan).
    - The checks before dispatch, in the `requires` step after `exec.capability-stale`: the
      lexical rules, the empty allow-list, the deny-list without an allow-list, then the fact,
      the allow-list's first. The driver's rows keep the order of `gate_start`.
@@ -204,25 +207,41 @@ worked at the same time, by at most two agents, each in a worktree of its own.
    48 files hold a `ConfinementRequest` literal, `crates/substrate-host/src/process.rs` among
    them. This step also carries the exhaustive matches over `ConfinementProperty`
    (`crates/substrate-wire/src/confinement_facts_tests.rs`, and
-   `xtask/src/bundle/confinement_facts.rs` with its rule by version of item 5), the
-   regenerated `crates/substrate-host/tests/confinement-public-items.txt`, and the six entries
-   of `REFUSAL_CODES`. Proof: `cargo check --workspace --all-targets --release --locked`, the
-   wire crate's tests, and `cargo xtask check-bundles 0.26.0 0.27.0 0.28.0`.
+   `xtask/src/bundle/confinement_facts.rs` with its rule by version of item 5) and the six
+   entries of `REFUSAL_CODES` (`crates/substrate-daemon/src/app/health.rs`), which no later
+   step writes. The host crate's constants are not rebound here: that is part A's. The list
+   `crates/substrate-host/tests/confinement-public-items.txt` holds the wire crate's items
+   too, so this step regenerates it (`SUBSTRATE_BLESS_PUBLIC_ITEMS=1 cargo test
+   -p b10x-substrate-host --test confinement_public_items`) and runs that target. Proof:
+   `cargo check --workspace --all-targets --release --locked`, the wire crate's tests, that
+   target, and `cargo xtask check-bundles 0.26.0 0.27.0 0.28.0`, which also holds that a
+   start without the lists has the widest result bundle `0.28.0` states. The host crate's
+   library tests are red after this step, in `the_published_set_is_the_linux_adapters_proof`,
+   until part A.
 2. **After step 1, side by side, file sets disjoint:**
-   - A, one agent, item 3 then item 2: `crates/substrate-exec-gate` and
-     `crates/substrate-host`. The two items write the same files (`probe.rs`, `exec_gate.rs`,
-     `lib.rs`, `confinement/mod.rs`, `confinement/linux.rs`). Proof: the library tests of both
-     packages.
+   - A, one agent, item 3 then item 2: `crates/substrate-exec-gate`,
+     `crates/substrate-host` and `crates/b10x-substrate-cli/src/confine.rs`, whose match over
+     `ConfinementError` the host crate's test build compiles. The two items write the same
+     files (`probe.rs`, `exec_gate.rs`, `lib.rs`, `confinement/mod.rs`,
+     `confinement/linux.rs`). A also binds the host's code constants and
+     `MAX_EXEC_DENIED_PATHS` to the wire crate's (item 1), and regenerates the public-items
+     list last. Of item 3, A writes the source and the crate README; the sentences in
+     `AGENTS.md`, `docs/design/35-executable-lists.md` and
+     `website/docs/guides/confinement-profiles.md` are step 5's. Proof: the library tests of
+     both packages and `--test confinement_public_items`.
    - B, item 5 without the pins: `xtask/src/bundle.rs`, `xtask/src/bundle/exec_lists.rs`,
-     `xtask/bundle-source/0.29.0`, `contracts/substrate-wire/0.29.0`, `scripts/gate.sh`.
-     Proof: `cargo xtask check-bundle 0.29.0` and the module's cases.
+     `xtask/src/bundle/session_exec_fields.rs` if the session start's schema check names the
+     members (inferred), `xtask/bundle-source/0.29.0`, `contracts/substrate-wire/0.29.0`,
+     `scripts/gate.sh`. Proof: `cargo xtask check-bundle 0.29.0` and the module's cases.
    - C, item 4: `crates/substrate-daemon/src` (`main.rs`, `runtime.rs`, `app/operations.rs`,
-     `app/sessions.rs`, `app/health.rs`). Proof: the daemon's library tests, and `driver_port`
-     if a file is added.
+     `app/sessions.rs`). `HostConfig::exec_gate` exists, so C changes no file of the host
+     crate. Proof: the daemon's library tests, and `driver_port` if a file is added.
 3. **The pins of the advertised bundle**, which need B's rendered `bundle.json`:
    `ADVERTISED_CONTRACT_BUNDLE` and its digest, and every pin of `0.28.0` as current (*Scope*).
 4. **Item 6**, which reads what steps 1 to 3 produce:
-   `crates/substrate-daemon/tests/runtime_vectors.rs` and `scripts/delegated-lane.sh`.
+   `crates/substrate-daemon/tests/runtime_vectors.rs` and `scripts/delegated-lane.sh`, and
+   `crates/substrate-daemon/tests/contract_vectors.rs` if a vector of `0.29.0` is executed
+   there (inferred; its `0.28.0` cases stay).
 5. **Item 7, one agent, last**: the counts and the bundle range come from step 4, and
    `AGENTS.md`, `CHANGELOG.md` and `STATUS.md` are written once.
 
@@ -283,16 +302,18 @@ Checks:
   adapter's proof with no exception.
 - **The flag.** `every_host_only_flag_conflicts_with_the_kubernetes_driver`
   (`crates/substrate-daemon/src/main.rs`) lists `--exec-gate`. One case of the delegated
-  lane, `a_dynamically_linked_helper_stops_the_daemon_before_it_listens`, not a runtime vector
-  and not in `DELEGATED_CASES`: a daemon started with `--exec-gate`
+  lane, `a_dynamically_linked_helper_stops_the_daemon_before_it_listens`, a test function of
+  `crates/substrate-daemon/tests/runtime_vectors.rs`, not a runtime vector and not in
+  `DELEGATED_CASES`: a daemon started with `--exec-gate`
   naming the dynamically linked helper (`SUBSTRATE_EXEC_GATE_DYNAMIC`) exits non-zero with
   `config.exec-gate-invalid` before it listens. It prints `ABSENT (` where the variable is
   unset, and the lane requires its `executed` line.
 - **`withheld`.** A unit case of the host driver's snapshot on a proof written by hand: one
   entry per distinct fact, address and cause, in the order fact, address, cause; no host path
   and no file-system type; no entry for a fact that is published; no entry when no helper is
-  configured. A unit case of the daemon holds the standard-error line of one withheld entry
-  and that such a daemon starts. Residual, as design 37 § 12 accepts: no lane has a volume
+  configured. A unit case of the host driver holds that an open that withholds returns the
+  entries `Opening::announced` writes, each with its path and file-system type. A case of the
+  daemon holds that a daemon whose driver withholds the facts starts. Residual, as design 37 § 12 accepts: no lane has a volume
   that withholds, so no run holds that a real open fills `withheld`.
 - **Row 9's message on the wire.** A unit case of the host driver holds, for the cause
   `file-system-unlisted` on a mount table written as text: the wire start's refusal names the
@@ -377,8 +398,17 @@ Checks:
 After `story:executable-deny-list`: it carries that story's field and fact. The store's edges
 to `story:process-count-limit-hit-is-observed` and `story:exec-file-changes-are-recorded` were
 set for a shared file, `crates/substrate-host/src/process.rs`. The process count's change to
-that file is on `main` since release 0.27.0; no open branch of the file-change story changes
-it, and this story does not wait for one.
+that file is on `main` since release 0.27.0.
+`story:exec-file-changes-are-recorded` is active and its own *Order* puts this story after
+it, for `spec/confinement/confinement.yaml`, `crates/substrate-host/src/process.rs` and
+`crates/substrate-host/src/probe.rs`; it also names `confinement/facts.rs`,
+`confinement/mod.rs`, `confinement/linux.rs` and the public-items list. This story does not
+wait for it: its design (ADR 0051, branch `design/exec-file-change-record`) is not on `main`
+and waits for the operator's answer on a change of architecture, and session `runbook`, which
+set that order on 2026-11-21, named this story its next gap on 2026-11-24. The file-change
+story takes this story's `main` when it starts, and so does
+`story:exec-file-change-record-on-the-wire`, which cuts its bundle after `0.29.0` and writes
+`crates/substrate-wire/src/lib.rs`, `xtask/src/bundle.rs` and `scripts/gate.sh` too.
 `story:executable-lists-on-oci-and-pod` shares no source file with this story. Both can touch
 `docs/design/35-executable-lists.md` (this story's sentences on the served types) and
 `spec/confinement-suite.json` (only if `check-ess` prints drift here), so the second of the two
@@ -448,5 +478,6 @@ Cited means the symbol or line was read at `main` `7641b34c1`.
   property.
 - `spec/`. No scenario; a regenerated file only if `cargo xtask check-ess` prints drift.
 - `website/docs` (`guides/deployment.md`, `guides/confinement-profiles.md`, `guides/rust-sdk.md`,
-  `concepts/model.md`, `status.md`, `releases.md`), `AGENTS.md`, `README.md`, `STATUS.md`,
+  `concepts/model.md`, `reference/contract.md`, `status.md`, `releases.md`), `AGENTS.md`,
+  `README.md`, `STATUS.md`, `docs/design/35-executable-lists.md` (the served types),
   `CHANGELOG.md`.

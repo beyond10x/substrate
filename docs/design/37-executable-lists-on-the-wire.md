@@ -268,6 +268,11 @@ in the argument parser, as every host-only flag does
 - Set, and the open withholds the facts (design 35 D27): the daemon starts, the snapshot holds
   neither fact and names why (§ 8), and the daemon writes one line per withheld entry to its
   standard error with the cause, the configuration field, the path and the file-system type.
+  **Amended on 2026-11-25** (D17): the line is the host driver's own, which exists. The driver
+  writes it at `warn` when it opens (`Opening::announced`,
+  `crates/substrate-host/src/exec_gate.rs`), with fact, cause, address, path and file-system
+  type, and the daemon's log carries it. The daemon writes no second line: the snapshot holds
+  neither path nor type (§ 8), and the daemon reads no other item of the host driver for it.
 
 **The three starts.** `start`, `start_with_git_roots` and `start_pipe_with_git_roots` take the
 lists from the start's `sandbox` in place of `ExecLists::wire()`. `ExecLists::wire` goes, and the
@@ -467,7 +472,7 @@ record says so.
 | D14 | the published reference text carries design 35's stated limits. Q3 |
 | D15 | the release image and the chart are a story of their own. Q5 |
 | D16 | the lists count toward the result reserve as sent; no bound is lowered to make every admitted list fit |
-| D17 | on a wire start a list entry is addressed at `sandbox.<member>`; the wire crate's refusal table holds a message for rows 2, 3 and 5; a session start has the exec start's addresses; on the wire the message of row 9 names no file-system type (§ 6, amended with the story's plan) |
+| D17 | on a wire start a list entry is addressed at `sandbox.<member>`; the wire crate's refusal table holds a message for rows 2, 3 and 5; a session start has the exec start's addresses; on the wire the message of row 9 names no file-system type; the line per withheld entry is the host driver's own (§ 6 and § 7, amended with the story's plan) |
 
 ## 15. Questions with more than one answer
 

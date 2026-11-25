@@ -8,7 +8,7 @@ relations:
 - decomposes: epic:runs-are-governed-and-limit-hits-are-events
 - depends_on: story:exec-start-carries-executable-lists
 - informed_by: story:daemon-image-serves-exec-or-says-it-cannot
-revision: 1
+revision: 2
 ---
 # Story: The daemon image ships the executable-list helper
 
@@ -82,7 +82,8 @@ Checks:
   between an option of the verb, which puts that file in scope, and a `helm upgrade --set`
   by hand on the lane's cluster, and names the command that reads the snapshot. Both facts
   present and no `withheld` is the pass. A snapshot with `withheld` is not a pass: the run records the cause
-  and the file-system type the daemon's standard-error line names, and the story stays open
+  and the file-system type the host driver's line in the daemon's log names, and the story
+  stays open
   until the guide says on which node volumes the chart serves the lists. No entry joins
   `SCENARIOS`, so the count of the `Chart-lane:` record does not move.
 - **The value off** changes no running daemon: the hosted `chart-lane.yml` scenarios pass
