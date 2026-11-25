@@ -788,9 +788,40 @@ cargo test -p b10x-substrate-daemon --test processes --locked -- --nocapture --t
 # binary still exits 0, so the lines are summed and a run that did not execute the whole
 # inventory fails here. A filter passed to this script therefore ends in that refusal: it shows
 # one function's output and is never a lane run.
+#
+# The executable lists on the wire (design 37): the runner starts the daemon of its function
+# `runtime_clean_room_holds_runs_to_executable_lists` with `--exec-gate` naming the static helper
+# exported above as `SUBSTRATE_EXEC_GATE`, and the case that a dynamically linked helper stops
+# the daemon before it listens reads `SUBSTRATE_EXEC_GATE_DYNAMIC`. Each of those cases prints
+# its own `executed` line, or an `ABSENT (` line where the helper is unset or the open withheld
+# a fact, and the function then reports no delegated count; so the lines are required by name
+# and no `ABSENT` line is taken.
 vectors_log="$(cargo test -p b10x-substrate-daemon --test runtime_vectors \
   -- --nocapture "$@" 2>&1)" || { printf '%s\n' "${vectors_log}" >&2; exit 1; }
 printf '%s\n' "${vectors_log}"
+if grep -qF ': ABSENT (' <<<"${vectors_log}"; then
+  echo "delegated-lane: runtime_vectors reported a case absent" >&2
+  exit 1
+fi
+for line in \
+  'runtime exec lists unserved without a helper: executed' \
+  'runtime exec lists facts: executed' \
+  'runtime exec lists exec start: executed' \
+  'runtime exec lists session start: executed' \
+  'runtime exec lists start without the members: executed' \
+  'runtime exec lists pty session: executed' \
+  'runtime exec lists entry unrepresentable: executed' \
+  'runtime exec lists entry undeclared: executed' \
+  'runtime exec lists capsule entry: executed' \
+  'runtime exec lists program unlisted: executed' \
+  'runtime exec lists shape: executed' \
+  'runtime exec lists git root: executed' \
+  'runtime exec lists dynamic helper: executed'; do
+  if ! grep -qF "${line}" <<<"${vectors_log}"; then
+    echo "delegated-lane: runtime_vectors did not print '${line}'" >&2
+    exit 1
+  fi
+done
 vectors_counted="$(printf '%s\n' "${vectors_log}" \
   | { grep -oE 'passed \(delegated lane\): [0-9]+ of [0-9]+ cases' || true; } \
   | awk '{ ran += $4; inventory = $6 } END { print ran + 0, inventory + 0 }')"
@@ -798,6 +829,15 @@ vectors_ran="${vectors_counted% *}"
 vectors_inventory="${vectors_counted#* }"
 if [[ "${vectors_inventory}" == 0 || "${vectors_ran}" != "${vectors_inventory}" ]]; then
   echo "delegated-lane: the runtime vectors executed ${vectors_ran} delegated cases of an inventory of ${vectors_inventory} (0: no function reported its delegated cases)" >&2
+  exit 1
+fi
+# The inventory the functions printed is the one the source declares, which is the count
+# `release.yml` reads for a `Confinement-lane:` record.
+vectors_source="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/crates/substrate-daemon/tests/runtime_vectors.rs"
+vectors_declared="$(sed -n 's/^const DELEGATED_CASES: usize = \([0-9][0-9]*\);$/\1/p' \
+  "${vectors_source}")"
+if [[ "${vectors_inventory}" != "${vectors_declared}" ]]; then
+  echo "delegated-lane: the runtime vectors reported an inventory of ${vectors_inventory}; the source declares DELEGATED_CASES = '${vectors_declared}'" >&2
   exit 1
 fi
 echo "delegated-lane: the runtime vectors executed ${vectors_ran} of ${vectors_inventory} delegated cases"
