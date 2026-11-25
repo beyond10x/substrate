@@ -333,7 +333,15 @@ fn the_refusal_table_has_rows_2_to_9_of_section_6() {
             (
                 EXEC_SANDBOX_PATH_UNREPRESENTABLE,
                 422,
-                &[EXEC_SUBPATHS_ADDRESS, EXEC_DENIED_PATHS_ADDRESS, "argv"][..],
+                &[
+                    EXEC_SUBPATHS_ADDRESS,
+                    EXEC_DENIED_PATHS_ADDRESS,
+                    "argv",
+                    "read_only_roots",
+                    "read_only_files",
+                    "writable_roots",
+                    "workspace",
+                ][..],
                 false
             ),
             (EXEC_SANDBOX_EXEC_SUBPATH_UNDECLARED, 422, member, false),
