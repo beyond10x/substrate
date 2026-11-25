@@ -214,8 +214,8 @@ An entry names a directory, which admits every file beneath it, or one file:
 - An entry, or the program, whose path in the run's view is longer than 4095 bytes is refused
   `exec.sandbox-path-unrepresentable` (422).
 
-Whether one path lies in another is decided from the host's mount table, on `ext4`, `overlay`
-and `tmpfs`. Where that cannot be established the answer names one of ten causes:
+Whether one path lies in another is decided from the host's mount table, on `ext4`, `overlay`,
+`tmpfs` and `xfs`. Where that cannot be established the answer names one of ten causes:
 `mount-table-unreadable`, `mount-table-unparsable`, `path-unopenable`, `mount-id-unreported`,
 `mount-row-missing`, `mount-row-repeated`, `mount-root-deleted`, `mount-point-mismatch`,
 `mount-covered` or `file-system-unlisted` with the type.
@@ -234,7 +234,7 @@ beneath it that cannot be compared refuses the start, as beneath a workspace.
 One limit is a file system that shows under two device numbers, such as a network file system
 mounted twice with different options or two FUSE mounts of one directory. The comparison of
 mounts cannot see that a read-only root and a writable location hold the same files. The only
-guard is that nothing on a file system other than `ext4`, `overlay` and `tmpfs` is followed.
+guard is that nothing on a file system other than `ext4`, `overlay`, `tmpfs` and `xfs` is followed.
 
 | Where | Cause | Answer |
 |---|---|---|
@@ -272,7 +272,7 @@ deny-list, cannot be compared, the start is `exec.sandbox-place-unserved` (501):
 directory that holds a denied path. For that last case, what decides is where the deny entry is,
 not the mount: the helper expands only the directories on the way to a deny entry.
 
-| A mount of a type other than `ext4`, `overlay` and `tmpfs` | The start |
+| A mount of a type other than `ext4`, `overlay`, `tmpfs` and `xfs` | The start |
 |---|---|
 | at `k/vol`, with `k` listed and `k/tool` denied: `k` is on the way to the deny entry, and its entries are walked one by one | refused |
 | at `far/in/vol`, with `far` listed and `far/tool` denied: `far/in` is not on the way, and gets one rule | runs |
@@ -317,6 +317,63 @@ On `macos` the entries are Seatbelt deny rules after every allow. A hard link to
 program under another path runs. **A limit on `macos`:** the deny rules were read and run only
 in the hosted macOS check, not on a workstation. How Seatbelt matches a deny entry written in
 another letter case on a case-insensitive volume is not verified.
+
+## Executable lists on the wire
+
+From bundle `substrate-wire/0.29.0` a start sent to the daemon carries both lists.
+`sandbox.exec_subpaths` is the allow-list and `sandbox.exec_denied_paths` the deny-list, on
+`POST /v1/execs` and in the `exec` of `POST /v1/sessions`.
+
+| `exec_subpaths` | Effect |
+|---|---|
+| absent | every program of the run's view executes |
+| with entries | the run executes its program and what the entries admit |
+| empty | refused |
+
+- A list holds at most 64 unique entries of 1 to 4,095 bytes.
+- An entry follows the rules of the two sections above for `linux`.
+- A deny-list needs an allow-list.
+- The requested and the applied sandbox of the exec record echo both lists as sent.
+
+The snapshot publishes `confinement.exec-subpaths` and `confinement.exec-denied-paths` where the
+host proved them. A host daemon proves them only when started with `--exec-gate <path>`, the
+absolute path of a statically linked `substrate-exec-gate`.
+
+The daemon places the helper, the workspace root and each declared writable root on `ext4`,
+`overlay`, `tmpfs` or `xfs`. Where it cannot, it starts without the two facts, and the snapshot's
+`withheld` lists each fact with a cause and a configuration address:
+
+| Member | Values |
+|---|---|
+| `fact` | `confinement.exec-subpaths`, `confinement.exec-denied-paths` |
+| `cause` | `file-system-unlisted`, `mount-id-unreported` |
+| `address` | `config.exec_gate`, `config.workspace_root`, `config.writable_roots` |
+
+Each refusal is answered before the program starts and recorded as refused. In the table, list
+stands for `sandbox.exec_subpaths` or `sandbox.exec_denied_paths`, and mount for the member that
+declared a mount:
+
+| Code | Status | Address | When |
+|---|---|---|---|
+| `request.schema-invalid` | 422 | list | `null`, over 64 entries, an empty or over-long entry, an entry twice |
+| `exec.sandbox-exec-subpaths-empty` | 422 | `sandbox.exec_subpaths` | present and empty |
+| `confinement.exec-denied-paths-without-subpaths` | 422 | `sandbox.exec_denied_paths` | no allow-list |
+| `confinement.fact-unserved` | 501 | list | the snapshot does not hold the list's fact |
+| `session.pty-unserved` | 501 | `mode` | a `pty` session names an allow-list |
+| `exec.sandbox-path-unrepresentable` | 422 | list, `argv`, mount | the view cannot carry an entry, the program or a mount |
+| `exec.sandbox-exec-subpath-undeclared` | 422 | list | an absolute entry outside the eligible locations |
+| `exec.sandbox-program-unlisted` | 422 | `argv` | a deny entry holds the program |
+| `exec.sandbox-place-unserved` | 501 | list, `argv`, mount | a place the start needs cannot be established |
+
+The daemon checks the first four in that order after `exec.capability-stale`, for every driver.
+A session start on a host that serves no session is `session.confinement-unavailable` (501)
+first. A message names a path of the run's view and a cause, and no host path.
+
+The limits of the two sections above hold on the wire:
+
+- An admitted interpreter runs any script it can read, and an admitted loader loads any file.
+- A deny-list is exact only where the run cannot write.
+- Another hard link to a denied file beneath a listed path runs when it existed before the start.
 
 ## Build with the macOS developer tools
 
@@ -363,13 +420,14 @@ Admission checks in this order and returns the first refusal it meets:
 |---|---|---|---|
 | 1 | `confinement.reserved-field-unserved` | 501 | a reserved field is set |
 | 2 | `confinement.exec-denied-paths-without-subpaths` | 422 | a deny-list and an empty `exec_subpaths` |
-| 3 | `confinement.exec-denied-paths-exceeded` | 422 | more than 64 deny entries |
-| 4 | `confinement.adapter-unserved` | 501 | the adapter did not open, or the profile's `inner` is not the adapter it wraps |
-| 5 | `confinement.local-reason-missing` | 422 | a declared-insecure adapter and no reason |
-| 6 | `confinement.image-unpinned` | 422 | a digest-pinning adapter and an image not named by digest |
-| 7 | `confinement.local-refused` | 403 | a declared-insecure adapter the host's policy forbids |
-| 8 | `confinement.family-unserved` | 501 | the first family of `needed` not served |
-| 9 | `confinement.fact-unserved` | 501 | the first required fact not proved |
+| 3 | `confinement.exec-subpaths-exceeded` | 422 | more than 64 allow entries |
+| 4 | `confinement.exec-denied-paths-exceeded` | 422 | more than 64 deny entries |
+| 5 | `confinement.adapter-unserved` | 501 | the adapter did not open, or the profile's `inner` is not the adapter it wraps |
+| 6 | `confinement.local-reason-missing` | 422 | a declared-insecure adapter and no reason |
+| 7 | `confinement.image-unpinned` | 422 | a digest-pinning adapter and an image not named by digest |
+| 8 | `confinement.local-refused` | 403 | a declared-insecure adapter the host's policy forbids |
+| 9 | `confinement.family-unserved` | 501 | the first family of `needed` not served |
+| 10 | `confinement.fact-unserved` | 501 | the first required fact not proved |
 
 `error.code()` and `error.status()` return the code and status. A refusal from the host itself,
 met while starting, keeps its own code, such as `exec.workdir-missing`.

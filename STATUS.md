@@ -173,10 +173,10 @@ trust this page.
   any manifest — its `a_flux_dependency_is_refused` and `a_beyond10x_git_dependency_is_refused`
   tests prove each refusal fires. Consumers use a local
   path or exact Git revision; tagged releases publish GitHub and GHCR artifacts, not crates.io.
-  0.28.0 is the current development bundle and every earlier bundle
+  0.29.0 is the current development bundle and every earlier bundle
   directory is frozen; [`scripts/gate.sh`](scripts/gate.sh) runs the four Python bundle checkers
-  plus bounded-parallel `cargo xtask check-bundles` for 0.5.0 through 0.28.0 on every invocation, so a green
-  gate is evidence that all twenty-eight still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb
+  plus bounded-parallel `cargo xtask check-bundles` for 0.5.0 through 0.29.0 on every invocation, so a green
+  gate is evidence that all twenty-nine still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb
   rather than a Python script; the four frozen pairs stay Python as the reproducibility proof of the bundles they
   froze. The one recorded exception to immutability is the 2026-08-24 brand rename, which
   re-rendered every bundle in place (AGENTS.md invariant 6). No development bundle becomes a stable
@@ -275,7 +275,7 @@ trust this page.
   (`contracts/substrate-wire/0.26.0/compatibility.json`), and `0.27.0` preserves them once more,
   moving only the aperture and read-only-root bounds
   (`contracts/substrate-wire/0.27.0/compatibility.json`), and `0.28.0` preserves them, adding
-  the result bound of ADR 0053 (`contracts/substrate-wire/0.28.0/compatibility.json`). Git workspace sources are no longer absent: 0.16.0 added the conditional
+  the result bound of ADR 0053 (`contracts/substrate-wire/0.28.0/compatibility.json`), and `0.29.0` preserves them, adding the executable lists of design 37 (`contracts/substrate-wire/0.29.0/compatibility.json`). Git workspace sources are no longer absent: 0.16.0 added the conditional
   `workspace.git` capability and the two Git observation routes. The
   development session is the sole phase-4 byte-plane slice, in two modes: raw pipes under
   [ADR 0007](adr/0007-protocol-processes-use-raw-pipe-sessions.md) and a terminal under
@@ -291,12 +291,12 @@ bash scripts/gate.sh                                 # the whole bar for main, i
 python3 scripts/check-contract-bundle.py             # 0.1.0 counts
 python3 scripts/check-contract-bundle-0.2.0.py       # 0.2.0 counts
 python3 scripts/check-contract-bundle-0.3.0.py       # 0.3.0 counts
-cargo xtask check-bundle 0.28.0                     # the current Wire contract row
+cargo xtask check-bundle 0.29.0                     # the current Wire contract row
 cargo xtask check-ess                                # the Executable specification row's counts
 aep plan artifact list                               # every artifact status named above
 cargo test --workspace --release --locked -- --nocapture       # the clean-room case inventory
 cargo xtask check-toolchain                          # the pinned channel
-cargo xtask package-bundle 0.28.0 --out <dir>        # the current OCI manifest digest
+cargo xtask package-bundle 0.29.0 --out <dir>        # the current OCI manifest digest
 ```
 
 `cargo nextest run --workspace --release --locked` is the gate's test step and reports its own totals; the

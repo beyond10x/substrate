@@ -96,7 +96,7 @@ refused `confinement.fact-unserved` naming the fact.
 ### Admission order
 
 Admission refuses in a fixed order: a reserved field (`ingress_routes`, `rate_bounds`), a
-deny-list without an allow-list or over its bound, an adapter
+deny-list without an allow-list, either list over its bound, an adapter
 that did not open, a missing reason on a declared-insecure adapter, an unpinned image on a
 digest-pinning adapter, the host's policy against `local`, the first missing family, then the first
 missing fact. The [profile guide](../guides/confinement-profiles.md#refusals) gives each code and

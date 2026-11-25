@@ -224,6 +224,35 @@ first. Rows 5 to 9 keep the order `gate_start` has.
 Message and address of rows 6 to 9 are the driver's as design 35 writes them. Their messages
 name paths of the view, which the request itself sent, and never a host path.
 
+**Amended on 2026-11-25, with the story's plan** (D17). Four points the plan's critics found
+open in this section:
+
+- **A wire start addresses a list entry at the wire's member.** The driver addresses a
+  refused entry at `exec_subpaths` or `exec_denied_paths`, the fields of the adapter API's
+  profile. On a wire start the address is `sandbox.exec_subpaths` or
+  `sandbox.exec_denied_paths`, "the member" of the table above, as rows 2 to 4 have it. `argv`
+  and the member of a declared mount are the same on both. The sentence above, that message
+  and address of rows 6 to 9 are the driver's, holds with this one change of two addresses.
+- **The messages of rows 6 to 9 are not fixed texts.** Each holds a path the request sent.
+  The wire crate's table of these refusals holds code, status and address for every row, and
+  a message for rows 2, 3 and 5; row 4's is computed, as the one of `requires` is.
+- **A session start has the exec start's addresses.** The daemon checks a session's exec with
+  the exec start's own function (`validate_exec_input` in
+  `crates/substrate-daemon/src/app/operations.rs`), whose addresses are relative to the exec:
+  `sandbox.exec_subpaths`, with no `exec.` before it, as `sandbox.requires.facts` is addressed
+  on a session start today.
+- **On the wire, the message of row 9 names no file-system type.** The driver's message for
+  the cause `file-system-unlisted` holds the type field of the mount's row and the list of
+  served types (`describe` in `crates/substrate-host/src/exec_gate.rs`). The wire start's
+  refusal names the path of the view and the cause word only; the adapter API's message is
+  unchanged. The reason is § 8's: a mount's type field can hold text its mounter chose, and the
+  operator reads it in the daemon's own line. It also keeps the released vector of row 9
+  independent of `LISTED_FILE_SYSTEMS`, which § 11 changes in the same story and may change
+  again. No vector message of `0.29.0` names a file-system type.
+
+All four follow rules this document already states, so they were written without a question to
+the stakeholder. Session `sdc` may reopen them with the six of § 15.
+
 ## 7. The daemon
 
 **One flag.** `--exec-gate <path>` names the helper and sets `HostConfig.exec_gate`. It is
@@ -239,6 +268,11 @@ in the argument parser, as every host-only flag does
 - Set, and the open withholds the facts (design 35 D27): the daemon starts, the snapshot holds
   neither fact and names why (§ 8), and the daemon writes one line per withheld entry to its
   standard error with the cause, the configuration field, the path and the file-system type.
+  **Amended on 2026-11-25** (D17): the line is the host driver's own, which exists. The driver
+  writes it at `warn` when it opens (`Opening::announced`,
+  `crates/substrate-host/src/exec_gate.rs`), with fact, cause, address, path and file-system
+  type, and the daemon's log carries it. The daemon writes no second line: the snapshot holds
+  neither path nor type (§ 8), and the daemon reads no other item of the host driver for it.
 
 **The three starts.** `start`, `start_with_git_roots` and `start_pipe_with_git_roots` take the
 lists from the start's `sandbox` in place of `ExecLists::wire()`. `ExecLists::wire` goes, and the
@@ -438,6 +472,7 @@ record says so.
 | D14 | the published reference text carries design 35's stated limits. Q3 |
 | D15 | the release image and the chart are a story of their own. Q5 |
 | D16 | the lists count toward the result reserve as sent; no bound is lowered to make every admitted list fit |
+| D17 | on a wire start a list entry is addressed at `sandbox.<member>`; the wire crate's refusal table holds a message for rows 2, 3 and 5; a session start has the exec start's addresses; on the wire the message of row 9 names no file-system type; the line per withheld entry is the host driver's own (§ 6 and § 7, amended with the story's plan) |
 
 ## 15. Questions with more than one answer
 

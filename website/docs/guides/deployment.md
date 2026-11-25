@@ -152,8 +152,8 @@ listener closes.
 
 The metric set is fixed. Labels are closed sets: listener, route family, outcome class, refusal
 code, check, maintenance task, admission result and confinement adapter. No subject, resource id,
-path, address or credential appears in a label or a value. A scrape carries at most 587 samples on
-a host daemon and at most 587 samples on a daemon running `--driver kubernetes`.
+path, address or credential appears in a label or a value. A scrape carries at most 593 samples on
+a host daemon and at most 593 samples on a daemon running `--driver kubernetes`.
 
 - **Build and readiness:** `substrate_build_info`, `substrate_ready`.
 - **Host daemon only:** `substrate_adapter_info{adapter}`, always `1`, labeled with the
@@ -220,6 +220,13 @@ The chart refuses to render until you supply each of these:
 
 The certificate carries only each pod's host name. `helm template` prints the names, and the chart
 writes them to the ConfigMap `<release>-certificate-names`.
+
+The executable lists are served only on ext4, overlay, tmpfs and xfs volumes today. The daemon
+image holds no `substrate-exec-gate` helper and the chart sets no `--exec-gate`, so a chart
+installation publishes neither `confinement.exec-subpaths` nor `confinement.exec-denied-paths`,
+and a start that names a list is `confinement.fact-unserved` (501). A host daemon serves them
+when it is started with `--exec-gate <path>`; see
+[executable lists on the wire](confinement-profiles.md#executable-lists-on-the-wire).
 
 ### Address one pod, never the Service
 
