@@ -1008,17 +1008,23 @@ the tag's version and the tagged commit, and its executable has no interpreter. 
 whose Dockerfile has no `executor` stage publishes none and says so; a tag push without it is
 refused. It also exports `substrate-daemon` and the
 `b10x-substrate` CLI from that same builder stage (Dockerfile target `release-binaries`) and attaches
-four files to the GitHub release:
+six files to the GitHub release:
 `substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz`,
-`b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz`, `SHA256SUMS` over both, and
+`b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz`, the same two binaries statically
+linked for musl from the stage `release-binaries-musl` of the same pinned `rust` image
+(`substrate-daemon-<version>-x86_64-unknown-linux-musl.tar.gz`,
+`b10x-substrate-<version>-x86_64-unknown-linux-musl.tar.gz`), `SHA256SUMS` over the four, and
 `SHA256SUMS.sigstore.json`, a keyless `cosign sign-blob --bundle` signature by the same workflow
 identity, which `cosign verify-blob` checks before the release is created. The names are a public
 interface that install instructions link to; do not rename them. Before any image tag moves it refuses a binary that needs a glibc
 newer than 2.35 or a shared library outside the set README.md documents, or that does not start in
 a digest-pinned Ubuntu 22.04 image, or an archived daemon that is not byte for byte the daemon of
 the image being published (a recovery run that reuses a published image archives that image's
-daemon). Only a recovery dispatch of a tag whose source predates the `release-binaries` stage
-publishes without the four files, and its release notes and summary say so; a tag push without the
+daemon). Before any image tag moves it also refuses a musl binary with a program interpreter or a
+dynamic section naming a shared library, or one that does not answer `--version` with the
+release's version in a digest-pinned Alpine image (`MUSL_FLOOR_IMAGE`); a recovery of a tag whose
+Dockerfile has no `release-binaries-musl` stage publishes the `gnu` archives alone and says so. Only a recovery dispatch of a tag whose source predates the `release-binaries` stage
+publishes without the binary files, and its release notes and summary say so; a tag push without the
 stage is refused. It refuses — publishing nothing — a tag that is
 not the bare version form (so `0.2.2-rc.0` produces nothing), a lightweight tag, a commit that is not
 an ancestor of `main`, a version that disagrees with `[workspace.package] version`, a commit for
@@ -1190,7 +1196,11 @@ no run, which its notes say. Both steps' refusals are executed offline by
 
 **The hosted lane records.** `.github/workflows/release-lanes.yml` runs the four lanes, each in its
 own job on a GitHub-hosted `ubuntu-24.04` runner, on every push to `main`, on `workflow_dispatch`,
-and on pull requests that change what they build. Each job runs the lane's own command unchanged
+and on pull requests that change what they build. Its fifth job, `musl-binaries`, is no lane and
+records nothing: on an `ubuntu-26.04` runner it builds the stage `release-binaries-musl` and runs
+`release.yml`'s three musl steps, byte for byte (`xtask/tests/release_workflow.rs` holds them equal),
+so a musl break is found on the pull request, and a red job keeps the run from the `success` a
+release requires. Each job runs the lane's own command unchanged
 after root setup steps give the VM what a workstation has (the workflow's header says which and
 why: bubblewrap, socat, an AppArmor `userns` grant for `/usr/bin/bwrap` only and a lingering user
 manager for the confinement lane; `quota_v2` for the quota lane), and records the lane's line as a
