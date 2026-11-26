@@ -1165,8 +1165,6 @@ pub enum RunLimit {
     OutputStall,
 }
 
-/// The order in which a limit is named where more than one is true at a run's end (design 36
-/// D4): the order in which the host driver names its refusal.
 /// Why an ended run names no limit although a bound may have ended it (design 36 D27).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1179,6 +1177,8 @@ pub enum LimitUnread {
     UnattributedKill,
 }
 
+/// The order in which a limit is named where more than one is true at a run's end (design 36
+/// D4): the order in which the host driver names its refusal.
 const LIMIT_ORDER: [RunLimit; 5] = [
     RunLimit::OutputStall,
     RunLimit::EgressBytes,
