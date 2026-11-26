@@ -7,6 +7,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/wait-checks.sh` waits for a pull request's checks or a commit's check runs and exits
+  by what they came to: 0 when every check succeeded or was skipped or neutral, 1 when one
+  ended any other way, 3 when one is still pending at its timeout or none is reported. It is
+  POSIX sh over `gh` and `jq` and only reads. `--from` decides once on a list `gh` printed, and
+  the module `wait_checks` of the `xtask` test binary `bot_scripts` holds each status on lists
+  recorded from this repository.
+
+### Changed
+
+- Every Linux workflow job runs on a runner image named by its version: `ubuntu-26.04` for the
+  gate, the change classification, the chart and namespace lanes, the pages build and the
+  release, and `ubuntu-24.04` for the release lanes, as before. An image moves only with a
+  commit, and `every_job_runs_on_a_runner_image_named_by_its_version` in
+  `xtask/tests/release_workflow.rs` holds the table. The host crate's executable-list lane cases
+  list the directory that holds each tool's file, with every symbolic link followed, so a tool
+  kept as a link out of `/usr/bin` (Ubuntu 26.04's `ln`, `env`, `cat`, `ls` and `mkdir`) is
+  admitted by the directory it lies in. A case in `ess_confinement_linux` stages that layout on
+  any host, without privilege or a mount. The staged-mount cases still run on a workstation
+  only: a hosted runner grants a user namespace no mount.
+
 ## [0.28.0] — 2026-11-25
 
 ### Added
