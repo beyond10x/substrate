@@ -7,7 +7,42 @@ title: The local gate holds what the hosted runner differs in
 summary: Runner images named by version, the 26.04 tool layout held locally, a wait script that exits non-zero on red
 tags:
 - gate
-revision: 3
+scope:
+- confidence: cited
+  path: .github/workflows/chart-lane.yml
+- confidence: cited
+  path: .github/workflows/classify-change.yml
+- confidence: cited
+  path: .github/workflows/gate.yml
+- confidence: cited
+  path: .github/workflows/namespace-lane.yml
+- confidence: cited
+  path: .github/workflows/pages.yml
+- confidence: cited
+  path: .github/workflows/release.yml
+- confidence: cited
+  path: AGENTS.md
+- confidence: inferred
+  path: Cargo.toml
+- confidence: inferred
+  path: Dockerfile
+- confidence: cited
+  path: crates/substrate-host/tests/design35/exec_denied.rs
+- confidence: cited
+  path: crates/substrate-host/tests/design35/exec_lists.rs
+- confidence: cited
+  path: crates/substrate-host/tests/security_exec_gate.rs
+- confidence: cited
+  path: rust-toolchain.toml
+- confidence: inferred
+  path: scripts/delegated-lane.sh
+- confidence: inferred
+  path: scripts/wait-checks.sh
+- confidence: inferred
+  path: xtask/src/toolchain.rs
+- confidence: inferred
+  path: xtask/tests/wait_checks.rs
+revision: 20
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T22:48:54Z", actor: "human:timo", revision: 2, executor: "agent:host-operator"}
 - {from: "proposed", to: "active", at: "2026-11-21T22:48:54Z", actor: "human:timo", revision: 3, executor: "agent:host-operator"}
