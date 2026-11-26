@@ -15,7 +15,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   holding one statically linked executable that runs on any x86_64 Linux, whatever its C
   library. They are built from the Dockerfile's `release-binaries-musl` stage of the same pinned
   image, with OpenSSL compiled in from source; `SHA256SUMS` and its keyless signature cover all
-  four archives. Before any image tag moves, `release.yml` refuses a musl binary with a program
+  four archives. Each musl archive also carries `musl-COPYRIGHT`, the licence and copyright
+  notice of the musl C library linked into its binary, committed unchanged as
+  `licenses/musl-COPYRIGHT`. The musl build selects the packages and targets the `gnu` build
+  selects, so both resolve the same dependency features. Before any image tag moves, `release.yml` refuses a musl binary with a program
   interpreter or a dynamic section naming a shared library, or one that does not answer
   `--version` with the release's version in a digest-pinned Alpine 3.24.4 image; a recovery of
   a tag whose source has no musl stage publishes the `gnu` archives alone and says so. The job

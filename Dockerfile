@@ -107,7 +107,8 @@ COPY --from=builder /out/b10x-substrate /b10x-substrate
 # The two release binaries again for x86_64-unknown-linux-musl, statically linked, from the same
 # pinned image; the gnu stages above do not change. musl-gcc compiles every C dependency, OpenSSL
 # from source through the daemon's musl-only `openssl-sys` `vendored` edge, and sees the Linux UAPI
-# headers that OpenSSL and aws-lc include.
+# headers that OpenSSL and aws-lc include. The build selects the packages and targets the gnu
+# builder selects, so Cargo resolves the same features for both; only the two binaries are kept.
 FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS release-musl-builder
 WORKDIR /src
 ARG CARGO_BUILD_JOBS=2
@@ -126,8 +127,10 @@ RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,s
     find Cargo.toml Cargo.lock crates -path '*/target' -prune -o -type f -exec touch {} + && \
     rustup target add x86_64-unknown-linux-musl && \
     cargo build --locked --release --target x86_64-unknown-linux-musl \
-      -p b10x-substrate-daemon --bin substrate-daemon \
-      -p b10x-substrate-cli --bin b10x-substrate && \
+      -p b10x-substrate-daemon --bin substrate-daemon --bin substrate-container-exec --bin substrate-container-profiles \
+      -p b10x-substrate-mcp --bin substrate-mcp \
+      -p b10x-substrate-cli --bin b10x-substrate \
+      -p b10x-substrate-sdk --example container-pty-check && \
     install -D /src/target/x86_64-unknown-linux-musl/release/substrate-daemon /out/substrate-daemon && \
     install -D /src/target/x86_64-unknown-linux-musl/release/b10x-substrate /out/b10x-substrate
 RUN set -e; for binary in /out/substrate-daemon /out/b10x-substrate; do \
