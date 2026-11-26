@@ -328,6 +328,17 @@ fn value_arg(id: String) -> Arg {
         .value_parser(clap::builder::StringValueParser::new())
 }
 
+/// An `option` source's flag: one value, or with `repeated` one value per occurrence, appended,
+/// and no occurrence is `[]`.
+fn option_arg(field: &str, long: &str, repeated: bool, required: bool) -> Arg {
+    let arg = value_arg(format!("field:{field}")).long(long.to_owned());
+    if repeated {
+        arg.action(ArgAction::Append)
+    } else {
+        arg.required(required)
+    }
+}
+
 fn leaf_command(name: &str, declaration: &Command, callable: &Callable) -> clap::Command {
     let mut command = clap::Command::new(name.to_owned()).about(declaration.about.clone());
     let fields = field_shapes(callable);
@@ -341,11 +352,15 @@ fn leaf_command(name: &str, declaration: &Command, callable: &Callable) -> clap:
         let field = &argument.field;
         let required = !fields[field].optional();
         match &argument.source {
-            ArgumentSource::Option { long } => {
+            ArgumentSource::Option { long, repeated } => {
+                command = command.arg(option_arg(field, long, *repeated, required));
+            }
+            // Present is `true`, absent `false`; it takes no value.
+            ArgumentSource::Flag { long } => {
                 command = command.arg(
-                    value_arg(format!("field:{field}"))
+                    Arg::new(format!("field:{field}"))
                         .long(long.clone())
-                        .required(required),
+                        .action(ArgAction::SetTrue),
                 );
             }
             ArgumentSource::Positional { index } => {
@@ -525,6 +540,7 @@ fn argument_text(
             selected.map(|s| acquired(s, sources, output)).transpose()
         }
         ArgumentSource::Trailing {} => unreachable!("payload reads a trailing list as words"),
+        ArgumentSource::Flag { .. } => unreachable!("payload reads a flag as its presence"),
     }
 }
 
@@ -643,6 +659,16 @@ fn invalid(callable: &Callable, output: OutputMode, adapter_code: &str) -> Proce
     )
 }
 
+/// One argv value read as `shape`: text for a String or enum (a newtype resolves to one), JSON
+/// syntax otherwise.
+fn element(shape: &Shape, text: String) -> Result<Value, serde_json::Error> {
+    if matches!(shape, Shape::String | Shape::Enum { .. }) {
+        Ok(Value::String(text))
+    } else {
+        json_argument(&text)
+    }
+}
+
 fn payload(
     declaration: &Command,
     callable: &Callable,
@@ -657,22 +683,37 @@ fn payload(
     arguments.sort_by_key(|a| matches!(a.source, ArgumentSource::Protected { .. }));
     for argument in arguments {
         let shape = &fields[&argument.field];
-        if matches!(argument.source, ArgumentSource::Trailing {}) {
-            object.insert(
-                argument.field.clone(),
-                trailing_words(&argument.field, matches),
-            );
-            continue;
-        }
-        let Some(text) =
-            argument_text(&argument.source, &argument.field, matches, sources, output)?
-        else {
-            continue;
-        };
-        let value = if matches!(shape.required(), Shape::String | Shape::Enum { .. }) {
-            Value::String(text)
-        } else {
-            json_argument(&text).map_err(|_| invalid(callable, output, "cli_input"))?
+        let id = format!("field:{}", argument.field);
+        let value = match &argument.source {
+            ArgumentSource::Trailing {} => {
+                object.insert(
+                    argument.field.clone(),
+                    trailing_words(&argument.field, matches),
+                );
+                continue;
+            }
+            ArgumentSource::Flag { .. } => Value::Bool(matches.get_flag(&id)),
+            ArgumentSource::Option { repeated: true, .. } => {
+                let Shape::List { of } = shape.required() else {
+                    unreachable!("the binding compiler requires a list under a repeated option")
+                };
+                let mut items = Vec::new();
+                for text in matches.get_many::<String>(&id).into_iter().flatten() {
+                    items.push(
+                        element(of, text.clone())
+                            .map_err(|_| invalid(callable, output, "cli_input"))?,
+                    );
+                }
+                Value::Array(items)
+            }
+            source => {
+                let Some(text) = argument_text(source, &argument.field, matches, sources, output)?
+                else {
+                    continue;
+                };
+                element(shape.required(), text)
+                    .map_err(|_| invalid(callable, output, "cli_input"))?
+            }
         };
         if !shape.accepts(&value) {
             return Err(invalid(callable, output, "cli_input"));
