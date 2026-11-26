@@ -52,7 +52,10 @@ mod quota;
 mod read_only_files;
 #[cfg(target_os = "linux")]
 mod read_only_roots;
-// `renameat2` with `RENAME_NOREPLACE`, also where nix does not wrap it (musl).
+// `memfd_create` as the system call, which every Linux C library serves.
+#[cfg(target_os = "linux")]
+mod memfd;
+// `renameat2` with `RENAME_NOREPLACE` as the system call, which every Linux C library serves.
 #[cfg(target_os = "linux")]
 mod rename;
 pub mod seatbelt;

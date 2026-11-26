@@ -71,6 +71,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `b10x-substrate-host` makes `memfd_create` and `renameat2` as system calls on every Linux C
+  library, so a binary that embeds it links against glibc older than 2.27 and against musl. A
+  unit test of the crate refuses a source file that calls either C library wrapper outside
+  `memfd.rs` and `rename.rs`; on glibc the tests compare the `renameat2` system call with nix's
+  wrapper over twelve cases.
 - The `oci` adapter reads a container's state once after the runtime client returns, and
   publishes the run's end once that read and the removal are done (design 36 D28). Measured on
   a standard hosted runner on 2026-11-25, 610 memory-bound kills: the flag was at the first read

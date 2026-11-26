@@ -426,18 +426,10 @@ pub(crate) struct ExecGate {
 impl ExecGate {
     /// Copies `bytes` into a memfd, seals it and hashes the sealed bytes.
     pub(crate) fn seal(bytes: &[u8], loader: Option<String>) -> io::Result<Self> {
-        // SAFETY: `memfd_create` with a NUL-terminated literal name and plain flags.
-        let descriptor = unsafe {
-            libc::memfd_create(
-                c"substrate-exec-gate".as_ptr(),
-                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-            )
-        };
-        if descriptor < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `memfd_create` returned a descriptor nothing else owns.
-        let memory = unsafe { OwnedFd::from_raw_fd(descriptor) };
+        let memory = crate::memfd::memfd_create(
+            c"substrate-exec-gate",
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )?;
         let mut file = std::fs::File::from(memory);
         file.write_all(bytes)?;
         let memory = OwnedFd::from(file);

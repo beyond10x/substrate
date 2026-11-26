@@ -1,16 +1,18 @@
 //! `renameat2(2)` with `RENAME_NOREPLACE` on every Linux C library the driver is built for.
 //!
-//! nix wraps `renameat2` only for glibc. A glibc build keeps that wrapper; a musl build makes the
-//! same system call itself, with the same arguments and the same errors.
+//! The driver makes the system call itself: nix wraps `renameat2` only for glibc, and glibc
+//! exports it from 2.28 on, so neither a musl build nor a binary linked against an older glibc
+//! has the wrapper. On glibc the tests hold the system call to nix's wrapper, which answers with
+//! the same errors.
 
 use std::path::Path;
 
 use nix::errno::Errno;
 
-/// Renames `source` to `target`, both relative to the working directory, and refuses with
-/// `EEXIST` when `target` exists.
-#[cfg(target_env = "gnu")]
-pub(crate) fn rename_noreplace(source: &Path, target: &Path) -> Result<(), Errno> {
+/// [`rename_noreplace`] through nix's wrapper of the C library's `renameat2`, which the tests
+/// compare it with.
+#[cfg(all(test, target_env = "gnu"))]
+fn rename_noreplace_by_nix(source: &Path, target: &Path) -> Result<(), Errno> {
     nix::fcntl::renameat2(
         nix::fcntl::AT_FDCWD,
         source,
@@ -20,12 +22,9 @@ pub(crate) fn rename_noreplace(source: &Path, target: &Path) -> Result<(), Errno
     )
 }
 
-#[cfg(not(target_env = "gnu"))]
-pub(crate) use rename_noreplace_by_syscall as rename_noreplace;
-
-/// [`rename_noreplace`] as the system call. A glibc build compiles it only for its tests.
-#[cfg(any(test, not(target_env = "gnu")))]
-pub(crate) fn rename_noreplace_by_syscall(source: &Path, target: &Path) -> Result<(), Errno> {
+/// Renames `source` to `target`, both relative to the working directory, and refuses with
+/// `EEXIST` when `target` exists.
+pub(crate) fn rename_noreplace(source: &Path, target: &Path) -> Result<(), Errno> {
     use std::os::unix::ffi::OsStrExt as _;
 
     let source =
@@ -53,11 +52,12 @@ mod tests {
 
     type Rename = fn(&Path, &Path) -> Result<(), Errno>;
 
-    fn both() -> [(&'static str, Rename); 2] {
-        [
-            ("rename_noreplace", rename_noreplace),
-            ("rename_noreplace_by_syscall", rename_noreplace_by_syscall),
-        ]
+    /// The system call, and on glibc nix's wrapper beside it.
+    fn both() -> Vec<(&'static str, Rename)> {
+        let mut forms: Vec<(&'static str, Rename)> = vec![("rename_noreplace", rename_noreplace)];
+        #[cfg(target_env = "gnu")]
+        forms.push(("rename_noreplace_by_nix", rename_noreplace_by_nix));
+        forms
     }
 
     #[test]
@@ -146,11 +146,10 @@ mod tests {
 
     type Setup = fn(&Path) -> (std::path::PathBuf, std::path::PathBuf);
 
-    /// The two forms answer each case alike, as `renameat2(2)` documents it, and leave the
-    /// same tree behind.
-    #[test]
-    fn both_forms_answer_every_case_alike_and_leave_the_same_tree() {
-        let cases: [(&str, Setup, Result<(), Errno>); 12] = [
+    /// Each case by its name, the setup that makes its tree and names source and target, and
+    /// the answer `renameat2(2)` documents for it.
+    fn cases() -> [(&'static str, Setup, Result<(), Errno>); 12] {
+        [
             (
                 "an absent source",
                 |root| (root.join("absent"), root.join("target")),
@@ -245,8 +244,14 @@ mod tests {
                 },
                 Err(Errno::ENAMETOOLONG),
             ),
-        ];
-        for (case, setup, expected) in cases {
+        ]
+    }
+
+    /// The two forms answer each case alike, as `renameat2(2)` documents it, and leave the
+    /// same tree behind.
+    #[test]
+    fn both_forms_answer_every_case_alike_and_leave_the_same_tree() {
+        for (case, setup, expected) in cases() {
             let mut answers = Vec::new();
             for (name, rename) in both() {
                 let root = tempfile::tempdir().expect("temporary directory");
@@ -255,7 +260,9 @@ mod tests {
                 assert_eq!(answer, expected, "{case}: {name}");
                 answers.push((answer, tree(root.path())));
             }
-            assert_eq!(answers[0], answers[1], "{case}: the two forms differ");
+            for pair in answers.windows(2) {
+                assert_eq!(pair[0], pair[1], "{case}: the forms differ");
+            }
         }
     }
 }
