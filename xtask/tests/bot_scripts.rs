@@ -17,6 +17,12 @@
 //! `openssl`, `curl` and `cargo`, and links to the system tools the script uses. No `cargo`
 //! but the stand-in is on that `PATH`. `B10X_BOT_CONFIG`, `B10X_BOT_KEY`, `HOME` and
 //! `XDG_CONFIG_HOME` all name the throwaway directory.
+//!
+//! `scripts/wait-checks.sh`, which only reads, is held by the module `wait_checks` of this
+//! binary: its exit status on recorded check lists.
+
+#[path = "bot_scripts/wait_checks.rs"]
+mod wait_checks;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
