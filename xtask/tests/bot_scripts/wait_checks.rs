@@ -222,3 +222,185 @@ fn the_wait_ends_with_three_when_a_check_is_still_pending_at_its_timeout() {
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(text(&output.stdout).contains("in_progress      Full gate"));
 }
+
+/// What a bounded wait came to: the exit status (`None` when the wait did not end within its
+/// bound and was killed), standard error and the stand-ins' calls.
+struct Bounded {
+    code: Option<i32>,
+    ended: bool,
+    stderr: String,
+    calls: Vec<String>,
+}
+
+/// Runs the script under `shell` with `arguments`, a stand-in `gh` that answers its n-th call
+/// with the n-th of `answers` (the last one again after that; an answer `FAIL` exits 1 with
+/// gh's message), and a stand-in `sleep` that records its argument and returns at once. The
+/// run is killed when it has not ended after `bound`.
+fn bounded(
+    shell: &str,
+    answers: &[&str],
+    arguments: &[&str],
+    bound: std::time::Duration,
+) -> Bounded {
+    let tree = tempfile::tempdir().expect("a temporary directory");
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stand-in directory");
+    for (index, answer) in answers.iter().enumerate() {
+        fs::write(tree.path().join(format!("answer-{}", index + 1)), answer).expect("an answer");
+    }
+    let calls = tree.path().join("calls");
+    executable(
+        &bin.join("gh"),
+        &format!(
+            "#!/bin/sh\nprintf 'gh %s\\n' \"$*\" >> '{calls}'\nn=$(grep -c '^gh ' '{calls}')\n\
+             [ \"$n\" -le {last} ] || n={last}\nanswer='{root}/answer-'\"$n\"\n\
+             if [ \"$(cat \"$answer\")\" = FAIL ]; then\n\
+             echo 'GraphQL: Could not resolve to a PullRequest with the number of 999999.' >&2\n\
+             exit 1\nfi\ncat \"$answer\"\n",
+            calls = calls.display(),
+            last = answers.len(),
+            root = tree.path().display(),
+        ),
+    );
+    executable(
+        &bin.join("sleep"),
+        &format!(
+            "#!/bin/sh\nprintf 'sleep %s\\n' \"$*\" >> '{calls}'\n",
+            calls = calls.display()
+        ),
+    );
+    let mut child = Command::new(shell)
+        .arg(script())
+        .args(arguments)
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the shell runs wait-checks.sh");
+    let started = std::time::Instant::now();
+    let ended = loop {
+        if child.try_wait().expect("the wait's state").is_some() {
+            break true;
+        }
+        if started.elapsed() > bound {
+            child.kill().expect("the wait is killed");
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let output = child.wait_with_output().expect("wait-checks.sh ends");
+    let calls = fs::read_to_string(&calls)
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default();
+    Bounded {
+        code: if ended { output.status.code() } else { None },
+        ended,
+        stderr: text(&output.stderr),
+        calls,
+    }
+}
+
+/// `sh`, and `dash` and `bash` where the host has them: the script says it is POSIX sh.
+fn shells() -> Vec<String> {
+    let mut shells = vec!["sh".to_owned()];
+    for name in ["dash", "bash"] {
+        if let Some(path) = ["/usr/bin", "/bin"]
+            .iter()
+            .map(|directory| Path::new(directory).join(name))
+            .find(|path| path.is_file())
+        {
+            shells.push(path.to_str().expect("UTF-8").to_owned());
+        }
+    }
+    shells
+}
+
+/// A check that ended at startup, or went stale, has ended and did not succeed: the header
+/// names `stale` among the outcomes that exit 1, and the commit form exits 1 for both. In the
+/// pull-request form `gh pr checks --json name,state,bucket` (gh 2.102, `aggregateChecks`)
+/// files `STARTUP_FAILURE` and `STALE` under the bucket `pending`, so a status read from the
+/// bucket alone waits for a check that will never run again and ends with 3 at the timeout.
+#[test]
+fn a_startup_failure_or_a_stale_check_exits_one_in_both_forms() {
+    for (form, list) in [
+        (
+            "check runs, startup_failure",
+            r#"{"check_runs":[{"conclusion":"startup_failure","name":"Gate: tests and Clippy","status":"completed"}],"total_count":1}"#,
+        ),
+        (
+            "check runs, stale",
+            r#"{"check_runs":[{"conclusion":"stale","name":"Gate: tests and Clippy","status":"completed"}],"total_count":1}"#,
+        ),
+        (
+            "pull request, STARTUP_FAILURE as gh buckets it",
+            r#"[{"bucket":"pending","name":"Gate: tests and Clippy","state":"STARTUP_FAILURE"}]"#,
+        ),
+        (
+            "pull request, STALE as gh buckets it",
+            r#"[{"bucket":"pending","name":"Gate: tests and Clippy","state":"STALE"}]"#,
+        ),
+    ] {
+        let (code, stdout) = from_file(list);
+        assert_eq!(code, Some(1), "{form}: {stdout}");
+    }
+}
+
+/// `--interval 0` is accepted, and `--timeout` still bounds the wait: a check that stays
+/// pending ends the wait with 3 once the timeout has passed, whatever the interval.
+#[test]
+fn a_zero_interval_still_ends_at_the_timeout() {
+    let run = bounded(
+        "sh",
+        &[PR_PENDING],
+        &["--interval", "0", "--timeout", "1", "12"],
+        std::time::Duration::from_secs(3),
+    );
+    assert!(
+        run.ended,
+        "the wait did not end within 3 s; gh was asked {} times",
+        run.calls
+            .iter()
+            .filter(|call| call.starts_with("gh "))
+            .count()
+    );
+    assert_eq!(run.code, Some(3), "{}", run.stderr);
+}
+
+/// An interval written with a leading zero is the number its digits name, as `number` admits
+/// it: one pending answer, one sleep, one green answer, exit 0, in every shell.
+#[test]
+fn an_interval_with_a_leading_zero_waits_and_decides_like_its_number() {
+    for shell in shells() {
+        let run = bounded(
+            &shell,
+            &[PR_PENDING, PR_GREEN],
+            &["--interval", "08", "--timeout", "100", "303"],
+            std::time::Duration::from_secs(10),
+        );
+        assert!(run.ended, "{shell}: {:?}", run.calls);
+        assert_eq!(
+            run.code,
+            Some(0),
+            "{shell}: {}\n{:?}",
+            run.stderr,
+            run.calls
+        );
+    }
+}
+
+/// A pull request `gh` cannot read on any ask (a number that names none, no login, an API
+/// that refuses) is not a pull request whose checks have not started: the status says the
+/// list was unreadable (2), not "no check is reported, ask again" (3).
+#[test]
+fn a_pull_request_gh_never_reads_is_not_reported_as_one_without_checks() {
+    let run = bounded(
+        "sh",
+        &["FAIL"],
+        &["--interval", "1", "--timeout", "3", "999999"],
+        std::time::Duration::from_secs(5),
+    );
+    assert!(run.ended, "{:?}", run.calls);
+    assert_eq!(run.code, Some(2), "{}\n{:?}", run.stderr, run.calls);
+}
