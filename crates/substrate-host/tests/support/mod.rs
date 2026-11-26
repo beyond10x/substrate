@@ -1838,8 +1838,10 @@ pub const USAGE_BOUNDS: confinement::ProcessBounds = confinement::ProcessBounds 
 /// Design 36 § 8, story 4, the story's acceptance, on an adapter that reads the usage: admits
 /// `profile` with a sink and runs [`USAGE_RUN`] under it. The ended observation names no limit
 /// and carries a wall time and a CPU time of at least one second each, a peak memory of at least
-/// 64 MiB and a peak process count of at least eight; its one `run_ended` carries the same
-/// `usage`. Returns the ended observation; prints `<name>: executed`.
+/// 64 MiB and a peak process count of at least eight, each at most what [`USAGE_BOUNDS`] lets
+/// the run reach, so a figure read from a wider group or in another unit fails; its one
+/// `run_ended` carries the same `usage`. Returns the ended observation; prints
+/// `<name>: executed`.
 pub async fn usage_of_a_run(
     name: &str,
     adapter: &Arc<dyn ConfinementAdapter>,
@@ -1877,16 +1879,32 @@ pub async fn usage_of_a_run(
         .usage
         .unwrap_or_else(|| panic!("{name}: the ended run carries no usage: {ended:?}"));
     println!("{name}: {usage:?}");
-    let at_least = |figure: Option<u64>, least: u64, what: &str| {
+    let within = |figure: Option<u64>, least: u64, most: u64, what: &str| {
         assert!(
-            figure.is_some_and(|value| value >= least),
-            "{name}: {what} {figure:?} is not at least {least}: {ended:?}"
+            figure.is_some_and(|value| (least..=most).contains(&value)),
+            "{name}: {what} {figure:?} is not within {least}..={most}: {ended:?}"
         );
     };
-    at_least(usage.wall_time_us, 1_000_000, "wall_time_us");
-    at_least(usage.cpu_time_us, 1_000_000, "cpu_time_us");
-    at_least(usage.memory_peak_bytes, 64 << 20, "memory_peak_bytes");
-    at_least(usage.processes_peak, 8, "processes_peak");
+    let bound_us = USAGE_BOUNDS.timeout_ms * 1_000;
+    within(usage.wall_time_us, 1_000_000, bound_us, "wall_time_us");
+    within(
+        usage.cpu_time_us,
+        1_000_000,
+        USAGE_BOUNDS.cpu_millis * 1_000,
+        "cpu_time_us",
+    );
+    within(
+        usage.memory_peak_bytes,
+        64 << 20,
+        USAGE_BOUNDS.memory_bytes,
+        "memory_peak_bytes",
+    );
+    within(
+        usage.processes_peak,
+        8,
+        u64::from(USAGE_BOUNDS.processes),
+        "processes_peak",
+    );
     let record = recorded.run_ended(name).await;
     assert_eq!(
         record["usage"],
