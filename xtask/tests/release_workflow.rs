@@ -4370,63 +4370,172 @@ fn the_hosted_lanes_workflow_runs_each_lane_and_records_its_trailer() {
     assert!(pin(LANES_WORKFLOW).is_some());
 }
 
+/// Where the jobs of one workflow file run.
+#[derive(Debug, PartialEq, Eq)]
+enum Runners {
+    /// Each job's `runs-on`, in file order.
+    Images(&'static [&'static str]),
+    /// Every job calls a reusable workflow of another repository, pinned by commit, and runs on
+    /// the runner that workflow names; the file names none.
+    PinnedWorkflowOfAnotherRepository,
+}
+
 /// The runner image of every job of every workflow, by workflow file, as `AGENTS.md` § *The
-/// gate* states it. A workflow that only calls a workflow of another repository names none.
-const RUNNER_IMAGES: [(&str, &[&str]); 10] = [
-    ("b10x-docs-site.yml", &[]),
-    ("chart-lane.yml", &["ubuntu-26.04"; 2]),
-    ("classify-change.yml", &["ubuntu-26.04"]),
-    ("gate.yml", &["ubuntu-26.04"; 4]),
-    ("macos.yml", &["macos-15"]),
-    ("namespace-lane.yml", &["ubuntu-26.04"]),
-    ("pages.yml", &["ubuntu-26.04"]),
-    ("release-lanes.yml", &["ubuntu-24.04"; 4]),
-    ("release.yml", &["ubuntu-26.04"; 2]),
-    ("shared-gates.yml", &[]),
+/// gate* states it.
+const RUNNER_IMAGES: [(&str, Runners); 10] = [
+    (
+        "b10x-docs-site.yml",
+        Runners::PinnedWorkflowOfAnotherRepository,
+    ),
+    ("chart-lane.yml", Runners::Images(&["ubuntu-26.04"; 2])),
+    ("classify-change.yml", Runners::Images(&["ubuntu-26.04"])),
+    ("gate.yml", Runners::Images(&["ubuntu-26.04"; 4])),
+    ("macos.yml", Runners::Images(&["macos-15"])),
+    ("namespace-lane.yml", Runners::Images(&["ubuntu-26.04"])),
+    ("pages.yml", Runners::Images(&["ubuntu-26.04"])),
+    ("release-lanes.yml", Runners::Images(&["ubuntu-24.04"; 4])),
+    ("release.yml", Runners::Images(&["ubuntu-26.04"; 2])),
+    (
+        "shared-gates.yml",
+        Runners::PinnedWorkflowOfAnotherRepository,
+    ),
 ];
 
-/// Every job runs on an image named by its version, so an image moves only with a commit here:
-/// no `runs-on` names a `-latest` label, and each workflow's jobs run on the images
-/// [`RUNNER_IMAGES`] lists for it, in file order. A workflow the table does not name fails.
-#[test]
-fn every_job_runs_on_a_runner_image_named_by_its_version() {
-    let directory = repository_root().join(".github/workflows");
-    let mut found: Vec<(String, Vec<String>)> = fs::read_dir(&directory)
+/// The workflow files of `directory`, `*.yml` and `*.yaml`, by file name.
+fn workflow_files(directory: &Path) -> Vec<(String, PathBuf)> {
+    let mut files: Vec<(String, PathBuf)> = fs::read_dir(directory)
         .expect("the workflows directory")
         .map(|entry| entry.expect("a workflow entry").path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "yml"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "yml" || extension == "yaml")
+        })
         .map(|path| {
-            let text = fs::read_to_string(&path).expect("a workflow");
-            let images = text
-                .lines()
-                .filter_map(|line| line.trim().strip_prefix("runs-on:"))
-                .map(|image| image.trim().to_owned())
-                .collect();
             let name = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .expect("a UTF-8 file name")
                 .to_owned();
-            (name, images)
+            (name, path)
         })
         .collect();
-    found.sort();
-    for (workflow, images) in &found {
-        for image in images {
+    files.sort();
+    files
+}
+
+/// The value of each `runs-on:` line of `workflow`, in file order, without a trailing
+/// `# comment`.
+fn runs_on_values(workflow: &str) -> Vec<String> {
+    workflow
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("runs-on:"))
+        .map(|value| {
+            value
+                .split_once(" #")
+                .map_or(value, |(value, _)| value)
+                .trim()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Whether `image` names a runner image by its version: no `-latest` label, a digit in it.
+fn names_its_version(image: &str) -> bool {
+    !image.ends_with("-latest") && image.chars().any(|c| c.is_ascii_digit())
+}
+
+/// The job-level `uses:` values of `workflow` that call a reusable workflow of another
+/// repository pinned by a full commit: `<owner>/<name>/.github/workflows/<file>@<40 hex>`, with
+/// `<owner>/<name>` not this repository.
+fn pinned_workflows_of_other_repositories(workflow: &str) -> (usize, usize) {
+    let calls: Vec<&str> = workflow
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("uses:"))
+        .map(str::trim)
+        .filter(|value| value.contains("/.github/workflows/"))
+        .collect();
+    let pinned = calls
+        .iter()
+        .filter(|value| {
+            let Some((path, commit)) = value.split_once('@') else {
+                return false;
+            };
+            let repository: Vec<&str> = path.splitn(3, '/').take(2).collect();
+            !path.starts_with("./")
+                && repository.len() == 2
+                && repository.join("/") != "beyond10x/substrate"
+                && commit.len() == 40
+                && commit
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        })
+        .count();
+    (calls.len(), pinned)
+}
+
+/// A trailing comment is not part of a `runs-on` value, so a `-latest` label is judged with a
+/// version in its comment beside it; files of both YAML extensions are workflows.
+#[test]
+fn a_runs_on_value_is_judged_without_its_comment_in_files_of_both_extensions() {
+    let values = runs_on_values(
+        "jobs:\n  a:\n    runs-on: ubuntu-latest # 26.04\n  b:\n    runs-on: ubuntu-26.04 # pinned\n  c:\n    runs-on: macos-15\n",
+    );
+    assert_eq!(values, ["ubuntu-latest", "ubuntu-26.04", "macos-15"]);
+    assert!(!names_its_version(&values[0]), "{values:?}");
+    assert!(names_its_version(&values[1]) && names_its_version(&values[2]));
+
+    let tree = tempfile::tempdir().expect("a temporary directory");
+    for name in ["a.yml", "b.yaml", "c.txt", "d.yml.orig"] {
+        fs::write(tree.path().join(name), "").expect("a staged file");
+    }
+    let names: Vec<String> = workflow_files(tree.path())
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(names, ["a.yml", "b.yaml"]);
+
+    let (calls, pinned) = pinned_workflows_of_other_repositories(
+        "    uses: owner/site/.github/workflows/x.yml@c870d2c8fa1d62c15c066a9bc382015091575734\n    uses: owner/site/.github/workflows/x.yml@main\n    uses: ./.github/workflows/y.yml\n    uses: beyond10x/substrate/.github/workflows/z.yml@c870d2c8fa1d62c15c066a9bc382015091575734\n    uses: actions/checkout@v4\n",
+    );
+    assert_eq!((calls, pinned), (4, 1));
+}
+
+/// Every job runs on an image named by its version, so an image moves only with a commit here:
+/// no `runs-on` names a `-latest` label, and each workflow's jobs run on the images
+/// [`RUNNER_IMAGES`] lists for it, in file order. A workflow the table marks as calling a
+/// pinned workflow of another repository names no `runs-on`, and each of its calls is such a
+/// workflow. A workflow the table does not name fails.
+#[test]
+fn every_job_runs_on_a_runner_image_named_by_its_version() {
+    let found = workflow_files(&repository_root().join(".github/workflows"));
+    let names: Vec<&str> = found.iter().map(|(name, _)| name.as_str()).collect();
+    let expected: Vec<&str> = RUNNER_IMAGES.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names, expected, "the workflow files the table names");
+    for ((workflow, path), (_, runners)) in found.iter().zip(&RUNNER_IMAGES) {
+        let text = fs::read_to_string(path).expect("a workflow");
+        let images = runs_on_values(&text);
+        for image in &images {
             assert!(
-                !image.ends_with("-latest") && image.chars().any(|c| c.is_ascii_digit()),
+                names_its_version(image),
                 "{workflow}: runs-on {image:?} does not name its image by version"
             );
         }
+        match runners {
+            Runners::Images(expected) => {
+                assert_eq!(
+                    images, *expected,
+                    "{workflow}: the runner image of each job"
+                );
+            }
+            Runners::PinnedWorkflowOfAnotherRepository => {
+                assert!(images.is_empty(), "{workflow}: {images:?}");
+                let (calls, pinned) = pinned_workflows_of_other_repositories(&text);
+                assert!(
+                    calls > 0 && calls == pinned,
+                    "{workflow}: {pinned} of {calls} reusable-workflow calls name another \
+                     repository and a full commit"
+                );
+            }
+        }
     }
-    let expected: Vec<(String, Vec<String>)> = RUNNER_IMAGES
-        .iter()
-        .map(|(workflow, images)| {
-            (
-                (*workflow).to_owned(),
-                images.iter().map(|image| (*image).to_owned()).collect(),
-            )
-        })
-        .collect();
-    assert_eq!(found, expected, "the runner image of each workflow's jobs");
 }

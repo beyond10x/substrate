@@ -630,19 +630,25 @@ runs the driver's own start under `/usr/bin/strace`, which `release-lanes.yml` i
 absent, so refused by the lane, without it. **An entry admits a file by where the file itself
 lies**: a symbolic link in a listed directory that points outside it is not admitted
 (`limit_a_link_in_a_listed_directory_that_points_outside_it_is_not_admitted` in the helper's
-`gate` root). **Every job names its runner image by version**, so an image moves only with a
-commit here: `gate.yml`, `classify-change.yml`, `chart-lane.yml`, `namespace-lane.yml`,
-`pages.yml` and `release.yml` run on `ubuntu-26.04`, where `ln`, `env`, `cat`, `ls` and `mkdir`
-in `/usr/bin` are links into `/usr/lib/cargo/bin/coreutils`; `release-lanes.yml` runs on
-`ubuntu-24.04` and `macos.yml` on `macos-15`; `b10x-docs-site.yml` and `shared-gates.yml` only
-call workflows of other repositories, which name their own.
+`gate` root). **Every job names its runner image by version**, so the release of an image
+moves only with a commit here; a versioned label still receives the image's weekly updates, so
+the version names the release, not the exact image: `gate.yml`, `classify-change.yml`,
+`chart-lane.yml`, `namespace-lane.yml`, `pages.yml` and `release.yml` run on `ubuntu-26.04`,
+where `ln`, `env`, `cat`, `ls` and `mkdir` in `/usr/bin` are links into
+`/usr/lib/cargo/bin/coreutils`; `release-lanes.yml` runs on `ubuntu-24.04` and `macos.yml` on
+`macos-15`. `b10x-docs-site.yml` and `shared-gates.yml` name no runner: each job calls a
+reusable workflow of another repository, pinned by commit, which names its own. The one
+exception to the rule is `b10x-docs-site.yml`: its job runs in the pinned reusable workflow of
+the website repository, which names `ubuntu-latest`, and this repository cannot change it.
 `every_job_runs_on_a_runner_image_named_by_its_version` in `xtask/tests/release_workflow.rs`
-holds that table. The host crate's lane cases list the directory that holds each tool's file,
-the parent of its path with every symbolic link followed (`holding_directories` in
+holds that table over every `*.yml` and `*.yaml` workflow, reading a `runs-on` value without
+its trailing comment. The host crate's lane cases list the directory that holds each tool's
+file, the parent of its path with every symbolic link followed (`holding_directories` in
 `crates/substrate-host/tests/design35/tool_directories.rs`, which `base_directories()` calls),
 so a tool kept as a link out of `/usr/bin` is admitted by the directory its file lies in;
 `a_tool_reached_by_a_link_is_listed_by_the_directory_that_holds_its_file` in
-`ess_confinement_linux` stages that layout on any host, without privilege or a mount. Those cases need Landlock ABI 2
+`ess_confinement_linux` holds `holding_directories` on a staged directory of such links, on any
+host, without privilege or a mount; it runs no confined start. Those cases need Landlock ABI 2
 (Linux 5.19) and the workspace root, `/usr`, `/bin`, `/lib`, `/lib64` and the temporary directory
 on `ext4`, `overlay`, `tmpfs` or `xfs`; the preload cases and the stand-in helpers also need a C
 compiler named `cc` that links statically. Without the
@@ -866,21 +872,26 @@ when the run is a planning-only pull request (next paragraph). The
 toolchain is pinned by `rust-toolchain.toml`, not by whatever `stable` is that day: bumping it is
 **one commit** that moves `rust-toolchain.toml`, the `rust-version` in `Cargo.toml` and the
 `Dockerfile` builder tag together, and `cargo xtask check-toolchain` fails the gate when the three
-disagree. The channel names a minor release, `1.97`, and no patch: the `Dockerfile`'s builder
-image is pinned by digest, which fixes the patch of the forge's release build, and naming the
-patch in the three files would move that tag to an image whose digest is pinned only with it;
-rustup resolves `1.97` to the newest `1.97` patch on a workstation and on a hosted runner alike.
+disagree. The channel names a minor release, `1.97`, and no patch. An installed `1.97`
+toolchain stays on its patch until `rustup update`, while a hosted runner installs the newest
+`1.97` patch; on 2026-11-26 both are 1.97.1. The channel stays because `check-toolchain`
+requires the same text in all three files, and moving the `Dockerfile` to a `1.97.1` tag needs
+a new image digest, which was not verified.
 Read the gate's own exit status, never a pipeline's (`gate.sh 2>&1 | tail` reports
 `tail`'s status, not the gate's).
 
 **`scripts/wait-checks.sh` waits for the checks of a pull request (`<number>`) or the check
-runs of a commit (`--commit <sha>`) and exits by what they came to**: 0 when every check
-succeeded or was skipped or neutral, 1 when one ended any other way (failure, cancelled, timed
-out, action required), 3 when one is still pending at its `--timeout` or none is reported, 2
-for a usage error. It prints each check with its outcome, only reads, is POSIX sh over `gh` and
-`jq`, and starts without the `slot` prefix. `--from <file>|-` decides once on a list `gh`
-printed; the module `wait_checks` of `xtask/tests/bot_scripts.rs` holds each status on lists
-recorded from this repository.
+runs of a commit (`--commit <sha>`, 7 to 40 hex digits) and exits by what they came to**: 0
+when every check succeeded or was skipped or neutral, 1 when one ended any other way (failure,
+error, cancelled, timed out, action required, startup failure, stale), 3 when one is still
+pending at its `--timeout` or none is reported, 2 for a usage error, a list of neither form, or
+a `gh` that failed on three asks in a row or on the last ask before the timeout, whose last
+error line it prints. The outcome is a check's `state`, never gh's `bucket`, which files a
+startup failure and a stale check as pending. `--timeout` is wall time, whatever the
+`--interval`, and a number is read as decimal with its leading zeros dropped. It prints each
+check with its outcome, only reads, is POSIX sh over `gh` and `jq`, and starts without the
+`slot` prefix. `--from <file>|-` decides once on a list `gh` printed; the module `wait_checks`
+of `xtask/tests/bot_scripts.rs` holds each status on lists recorded from this repository.
 
 **A change that adds or moves a file under `crates/substrate-daemon/src/` runs
 `cargo test -p b10x-substrate-daemon --release --locked --test driver_port` before it is pushed.**
