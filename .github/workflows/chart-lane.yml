@@ -45,7 +45,7 @@ env:
 jobs:
   static:
     name: Chart static checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -92,7 +92,7 @@ jobs:
   cluster:
     name: Chart cluster scenarios
     needs: static
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
       contents: read

@@ -35,7 +35,7 @@ env:
 jobs:
   static:
     name: Namespace lane static checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read

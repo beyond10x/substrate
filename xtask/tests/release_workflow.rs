@@ -4369,3 +4369,64 @@ fn the_hosted_lanes_workflow_runs_each_lane_and_records_its_trailer() {
     assert_eq!(pin(LANES_WORKFLOW), pin(chart_lane));
     assert!(pin(LANES_WORKFLOW).is_some());
 }
+
+/// The runner image of every job of every workflow, by workflow file, as `AGENTS.md` § *The
+/// gate* states it. A workflow that only calls a workflow of another repository names none.
+const RUNNER_IMAGES: [(&str, &[&str]); 10] = [
+    ("b10x-docs-site.yml", &[]),
+    ("chart-lane.yml", &["ubuntu-26.04"; 2]),
+    ("classify-change.yml", &["ubuntu-26.04"]),
+    ("gate.yml", &["ubuntu-26.04"; 4]),
+    ("macos.yml", &["macos-15"]),
+    ("namespace-lane.yml", &["ubuntu-26.04"]),
+    ("pages.yml", &["ubuntu-26.04"]),
+    ("release-lanes.yml", &["ubuntu-24.04"; 4]),
+    ("release.yml", &["ubuntu-26.04"; 2]),
+    ("shared-gates.yml", &[]),
+];
+
+/// Every job runs on an image named by its version, so an image moves only with a commit here:
+/// no `runs-on` names a `-latest` label, and each workflow's jobs run on the images
+/// [`RUNNER_IMAGES`] lists for it, in file order. A workflow the table does not name fails.
+#[test]
+fn every_job_runs_on_a_runner_image_named_by_its_version() {
+    let directory = repository_root().join(".github/workflows");
+    let mut found: Vec<(String, Vec<String>)> = fs::read_dir(&directory)
+        .expect("the workflows directory")
+        .map(|entry| entry.expect("a workflow entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "yml"))
+        .map(|path| {
+            let text = fs::read_to_string(&path).expect("a workflow");
+            let images = text
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("runs-on:"))
+                .map(|image| image.trim().to_owned())
+                .collect();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("a UTF-8 file name")
+                .to_owned();
+            (name, images)
+        })
+        .collect();
+    found.sort();
+    for (workflow, images) in &found {
+        for image in images {
+            assert!(
+                !image.ends_with("-latest") && image.chars().any(|c| c.is_ascii_digit()),
+                "{workflow}: runs-on {image:?} does not name its image by version"
+            );
+        }
+    }
+    let expected: Vec<(String, Vec<String>)> = RUNNER_IMAGES
+        .iter()
+        .map(|(workflow, images)| {
+            (
+                (*workflow).to_owned(),
+                images.iter().map(|image| (*image).to_owned()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(found, expected, "the runner image of each workflow's jobs");
+}
