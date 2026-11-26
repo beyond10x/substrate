@@ -143,7 +143,8 @@ commands has at least one scenario among the 74 authored. All 79 scenarios pass 
   which the model decides without a source.
 - The audit record of a refusal (`ProfileRefused`): an adapter-test obligation, above.
 - The limit that ended a run, the kill `oci` states where it names none (D27), its OOM and
-  process-limit counts, and the `run_ended` audit record
+  process-limit counts, its usage (wall time, CPU time, peak memory, peak processes; § 3a), and
+  the `run_ended` audit record
   ([design 36](../../docs/design/36-limit-hits.md) D25): the model has no run entity, so the
   per-adapter rows of design 36 and the adapters' lane cases hold them. The process-limit count
   has cases on `local`, `linux`, `systemd` around `local`, `oci`, `pod` and `macos`; none runs

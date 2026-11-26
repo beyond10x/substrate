@@ -619,7 +619,7 @@ async fn a_local_run_that_exits_0_names_no_limit_and_no_oom_count() {
 
 /// Design 36 § 8, story 2: `local` reads no count of refused process creations (D14), so
 /// `process_limit_hits` is absent on an observation while the run runs, on the ended observation
-/// and on the run's `run_ended` record.
+/// and on the run's `run_ended` record. Nor does it read a usage (D36).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_local_run_reports_no_process_limit_hits_on_its_observations_or_its_run_ended() {
     let adapter = local();
@@ -637,15 +637,18 @@ async fn a_local_run_reports_no_process_limit_hits_on_its_observations_or_its_ru
         .expect("started");
     let observed = adapter.observe(&run).await.expect("observed");
     assert_eq!(observed.process_limit_hits, None, "{observed:?}");
+    assert_eq!(observed.usage, None, "{observed:?}");
     let ended = tokio::time::timeout(std::time::Duration::from_secs(10), adapter.wait(&run))
         .await
         .expect("the run ends")
         .expect("waited");
     assert_eq!(ended.state, RunState::Ended, "{ended:?}");
     assert_eq!(ended.process_limit_hits, None, "{ended:?}");
+    assert_eq!(ended.usage, None, "{ended:?}");
     let record = recorded.run_ended("local process limit hits").await;
     assert!(record.get("process_limit_hits").is_none(), "{record}");
     assert!(record.get("limit_unread").is_none(), "{record}");
+    assert!(record.get("usage").is_none(), "{record}");
 }
 
 /// The profile every `run_ended` case of this file starts from: `local` in `workspace`.

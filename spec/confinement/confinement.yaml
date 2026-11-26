@@ -317,11 +317,12 @@ commands:
   # an outcome that reports an error (`refusal_mutated_state`), so the refusal's audit record is
   # not in this model; each error carries the adapter and the name it refuses, and the adapter's
   # own tests hold the audit record.
-  # UNMAPPED: the ended observation's `limit`, `limit_unread`, `memory_oom_kills` and
-  # `process_limit_hits`, and the `run_ended` audit record (design 36 D25, D27). The model has no
-  # run entity, and a scenario cannot start a program or reach a bound, so no step could produce
-  # these values. They are held by the per-adapter rows of design 36 (D7, D8, D14, D27) and by
-  # each adapter lane's cases (design 36 § 8).
+  # UNMAPPED: the ended observation's `limit`, `limit_unread`, `memory_oom_kills`,
+  # `process_limit_hits` and `usage` (`wall_time_us`, `cpu_time_us`, `memory_peak_bytes`,
+  # `processes_peak`), and the `run_ended` audit record (design 36 D25, D27, § 3a). The model has
+  # no run entity, and a scenario cannot start a program, reach a bound or use a resource, so no
+  # step could produce these values. They are held by the per-adapter rows of design 36 (D7, D8,
+  # D14, D27, D36) and by each adapter lane's cases (design 36 § 8).
   - name: substrate.confinement.AdmitProfile
     input:
       - {name: adapter, type: substrate.confinement.AdapterName}

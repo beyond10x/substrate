@@ -35,6 +35,11 @@ use substrate_host::confinement::{
     OutputDelivery, ReadOnlyFile, RunState, StdinMode, linux::LinuxRequest,
 };
 
+#[path = "design35/tool_directories.rs"]
+mod tool_directories;
+
+use tool_directories::holding_directories;
+
 /// Where the driver binds the helper's bytes in a run's view.
 const GATE: &str = "/.substrate-exec-gate";
 
@@ -364,7 +369,11 @@ async fn security2_a_value_of_a_listed_run_is_readable_where_an_unlisted_run_sho
             .map(str::to_owned)
             .collect()
     };
-    let grep = text(tool("grep").parent().expect("a directory"));
+    let [grep] = <[String; 1]>::try_from(holding_directories(
+        &[Path::new("/usr/bin"), Path::new("/bin")],
+        &["grep"],
+    ))
+    .expect("one directory");
     let (_, unlisted, stderr) = run(
         &lane.adapter,
         &profile(&lane.workspace, &[]),

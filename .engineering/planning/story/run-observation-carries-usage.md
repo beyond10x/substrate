@@ -15,6 +15,8 @@ relations:
 - depends_on: story:process-count-limit-hit-is-observed
 scope:
 - confidence: cited
+  path: crates/substrate-host/src/confinement
+- confidence: cited
   path: crates/substrate-host/src/confinement/linux.rs
 - confidence: inferred
   path: crates/substrate-host/src/confinement/local.rs
@@ -34,8 +36,18 @@ scope:
   path: crates/substrate-host/src/process.rs
 - confidence: cited
   path: crates/substrate-host/tests/confinement-public-items.txt
+- confidence: cited
+  path: crates/substrate-host/tests/ess_confinement_linux.rs
 - confidence: inferred
+  path: crates/substrate-host/tests/ess_confinement_local.rs
+- confidence: cited
+  path: crates/substrate-host/tests/ess_confinement_systemd.rs
+- confidence: cited
   path: docs/design/36-limit-hits.md
+- confidence: inferred
+  path: scripts/delegated-lane.sh
+- confidence: inferred
+  path: spec/confinement
 - confidence: inferred
   path: spec/confinement-suite.json
 - confidence: inferred
@@ -44,7 +56,7 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 9
+revision: 16
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T03:08:31Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":3}}, correlation: "sdc-accepts-usage-and-file-changes-2026-11-21"}
 - {from: "proposed", to: "active", at: "2026-11-21T03:08:31Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"review_outcome":3}}, correlation: "sdc-accepts-usage-and-file-changes-2026-11-21"}

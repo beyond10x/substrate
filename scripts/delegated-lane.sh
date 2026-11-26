@@ -203,7 +203,10 @@ require_executed sandbox_parity \
 # memory limit into its profile's sink. The `process limit hits` lines are its story 2: a run
 # over its process bound counts the refused creations on its ended observation and on its
 # `run_ended`, a run under it counts zero on both, and `observe` of the first run while it still
-# runs counts above zero.
+# runs counts above zero. The `usage` lines are design 36 § 3a: a run that sleeps one second in
+# eight processes, allocates 64 MiB and spends one second of CPU carries at least each figure on
+# its ended observation and its `run_ended`, and a run its timeout ended carries both the limit
+# and its usage.
 require_executed ess_confinement_linux \
   'ESS confinement linux scoped write: executed' \
   'ESS confinement linux scoped git: executed' \
@@ -277,14 +280,21 @@ require_executed ess_confinement_linux \
   'ESS confinement linux run ended memory: executed' \
   'ESS confinement linux process limit hits over: executed' \
   'ESS confinement linux process limit hits under: executed' \
-  'ESS confinement linux process limit hits running: executed'
+  'ESS confinement linux process limit hits running: executed' \
+  'ESS confinement linux usage: executed' \
+  'ESS confinement linux usage limit: executed'
 # Design 36, story 1: the limit that ended a run, around `local` from the scope's own watch and
 # the run cgroup's OOM count, around `linux` from the driver. Story 3: one `run_ended` per run
 # nobody observes, around each inner adapter, with the outer adapter's name. Story 2: around
 # `local`, the run cgroup's count of refused process creations, above zero over the bound, on
 # `observe` while the run runs and on its end, and zero under it, on the ended observation and
-# on `run_ended`.
+# on `run_ended`. Design 36 § 3a: the usage run around `local`, read by the end task from the
+# run cgroup and its own clock, and beside the timeout's limit; around `linux`, the inner
+# driver's figures, relabelled.
 require_executed ess_confinement_systemd \
+  'ESS confinement systemd local usage: executed' \
+  'ESS confinement systemd local usage limit: executed' \
+  'ESS confinement systemd linux usage: executed' \
   'ESS confinement systemd local limits memory: executed' \
   'ESS confinement systemd local limits cpu time: executed' \
   'ESS confinement systemd local limits wall time: executed' \

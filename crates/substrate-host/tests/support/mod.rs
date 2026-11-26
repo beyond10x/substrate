@@ -1815,3 +1815,154 @@ pub async fn under_the_process_bound(
     assert_eq!(record["process_limit_hits"], 0, "{name}: {record}");
     println!("{name} under: executed");
 }
+
+/// Design 36 § 8, story 4: the run of the usage cases. Eight `sleep 1` start at once, so the run
+/// lasts at least one second and holds at least eight processes; `dd` reads 64 MiB of
+/// `/dev/zero` into one buffer it allocates; a subshell spins until `ulimit -t 1` ends it by
+/// `SIGXCPU` at one second of its own CPU time, whatever the load of the host. The shell then
+/// waits for the eight and exits 0.
+pub const USAGE_RUN: &str = "for i in 1 2 3 4 5 6 7 8; do sleep 1 & done; \
+     dd if=/dev/zero of=/dev/null bs=64M count=1 iflag=fullblock 2>/dev/null; \
+     ( ulimit -t 1; while :; do :; done ) 2>/dev/null; wait";
+
+/// Bounds that leave [`USAGE_RUN`] room for all of it: ten seconds of wall and CPU time, so the
+/// CPU rate of `linux` is one whole core (design 36 D7, the note on `linux`), 256 MiB and 32
+/// processes.
+pub const USAGE_BOUNDS: confinement::ProcessBounds = confinement::ProcessBounds {
+    timeout_ms: 10_000,
+    processes: 32,
+    memory_bytes: 256 << 20,
+    cpu_millis: 10_000,
+};
+
+/// Design 36 § 8, story 4, the story's acceptance, on an adapter that reads the usage: admits
+/// `profile` with a sink and runs [`USAGE_RUN`] under it. The ended observation names no limit
+/// and carries a wall time and a CPU time of at least one second each, a peak memory of at least
+/// 64 MiB and a peak process count of at least eight, each at most what [`USAGE_BOUNDS`] lets
+/// the run reach, so a figure read from a wider group or in another unit fails; its one
+/// `run_ended` carries the same `usage`. Returns the ended observation; prints
+/// `<name>: executed`.
+pub async fn usage_of_a_run(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: ConfinementProfile,
+) -> confinement::RunObservation {
+    let (sink, mut recorded) = recorded();
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..profile
+        })
+        .expect("admitted");
+    let began = std::time::Instant::now();
+    let run = adapter
+        .start(&admitted, &sh(USAGE_RUN))
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(20), adapter.wait(&run))
+        .await
+        .unwrap_or_else(|_| panic!("{name}: the run outlived its bounds"))
+        .expect("waited");
+    println!("{name}: the run ended after {:?}", began.elapsed());
+    assert_eq!(
+        ended.state,
+        confinement::RunState::Ended,
+        "{name}: {ended:?}"
+    );
+    assert_eq!(
+        ended.exit.and_then(|exit| exit.code),
+        Some(0),
+        "{name}: {ended:?}"
+    );
+    assert_eq!(ended.limit, None, "{name}: {ended:?}");
+    let usage = ended
+        .usage
+        .unwrap_or_else(|| panic!("{name}: the ended run carries no usage: {ended:?}"));
+    println!("{name}: {usage:?}");
+    let within = |figure: Option<u64>, least: u64, most: u64, what: &str| {
+        assert!(
+            figure.is_some_and(|value| (least..=most).contains(&value)),
+            "{name}: {what} {figure:?} is not within {least}..={most}: {ended:?}"
+        );
+    };
+    let bound_us = USAGE_BOUNDS.timeout_ms * 1_000;
+    within(usage.wall_time_us, 1_000_000, bound_us, "wall_time_us");
+    within(
+        usage.cpu_time_us,
+        1_000_000,
+        USAGE_BOUNDS.cpu_millis * 1_000,
+        "cpu_time_us",
+    );
+    within(
+        usage.memory_peak_bytes,
+        64 << 20,
+        USAGE_BOUNDS.memory_bytes,
+        "memory_peak_bytes",
+    );
+    within(
+        usage.processes_peak,
+        8,
+        u64::from(USAGE_BOUNDS.processes),
+        "processes_peak",
+    );
+    let record = recorded.run_ended(name).await;
+    assert_eq!(
+        record["usage"],
+        serde_json::to_value(usage).expect("a usage serializes"),
+        "{name}: {record}"
+    );
+    assert!(record.get("limit").is_none(), "{name}: {record}");
+    println!("{name}: executed");
+    ended
+}
+
+/// Design 36 § 8, story 4, on an adapter that reads the usage: admits `profile` with a sink,
+/// whose bounds the case sets to a timeout of one second, and runs `sleep 30` under it. The
+/// ended observation names `WallTime` and carries a wall time of at least one second; its one
+/// `run_ended` carries the same limit and the same `usage`. Prints `<name> limit: executed`.
+pub async fn usage_beside_a_limit(
+    name: &str,
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: ConfinementProfile,
+) {
+    let (sink, mut recorded) = recorded();
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            process_bounds: Some(confinement::ProcessBounds {
+                timeout_ms: 1_000,
+                cpu_millis: 1_000,
+                ..USAGE_BOUNDS
+            }),
+            ..profile
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &sh("sleep 30"))
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(20), adapter.wait(&run))
+        .await
+        .unwrap_or_else(|_| panic!("{name}: the run outlived its timeout"))
+        .expect("waited");
+    assert_eq!(
+        ended.limit,
+        Some(confinement::RunLimit::WallTime),
+        "{name}: {ended:?}"
+    );
+    let usage = ended
+        .usage
+        .unwrap_or_else(|| panic!("{name}: the limited run carries no usage: {ended:?}"));
+    assert!(
+        usage.wall_time_us.is_some_and(|wall| wall >= 1_000_000),
+        "{name}: {usage:?}"
+    );
+    let record = recorded.run_ended(name).await;
+    assert_eq!(record["limit"], "wall_time", "{name}: {record}");
+    assert_eq!(
+        record["usage"],
+        serde_json::to_value(usage).expect("a usage serializes"),
+        "{name}: {record}"
+    );
+    println!("{name} limit: executed");
+}

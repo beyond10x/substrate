@@ -29,6 +29,11 @@ use substrate_host::confinement::{
 };
 use substrate_host::{Driver as _, HostConfig, HostDriver};
 
+#[path = "design35/tool_directories.rs"]
+mod tool_directories;
+
+use tool_directories::holding_directories;
+
 /// Where the driver binds the helper's bytes in a run's view.
 const GATE: &str = "/.substrate-exec-gate";
 
@@ -71,15 +76,13 @@ fn text(path: &Path) -> String {
     path.to_str().expect("UTF-8").to_owned()
 }
 
-/// The directories that hold the tools the cases run, as list entries.
+/// The directories that hold the files of the tools the cases run, as list entries
+/// (`holding_directories`: an entry admits a file by where the file itself lies).
 fn base_directories() -> Vec<String> {
-    let mut directories: Vec<String> = ["sh", "true", "env", "sort", "ls", "readlink", "chmod"]
-        .iter()
-        .map(|name| text(tool(name).parent().expect("a directory")))
-        .collect();
-    directories.sort();
-    directories.dedup();
-    directories
+    holding_directories(
+        &[Path::new("/usr/bin"), Path::new("/bin")],
+        &["sh", "true", "env", "sort", "ls", "readlink", "chmod"],
+    )
 }
 
 fn config(host: &Path, cgroup_root: &Path, gate: Option<PathBuf>) -> HostConfig {
