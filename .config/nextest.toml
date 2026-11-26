@@ -21,3 +21,7 @@ test-group = "oci-runtime"
 [[profile.default.overrides]]
 filter = "package(b10x-substrate-host) & (binary(ess_confinement_systemd) | binary(security_review_systemd) | binary(adversary_systemd))"
 test-group = "systemd-user-manager"
+
+[[profile.default.overrides]]
+filter = "package(b10x-substrate-host) & test(=git::materialization_tests::create_bounds_tests::review2_create_bounds_tests::an_indexer_keeps_no_more_for_an_entry_stored_behind_another_than_its_table_counts)"
+success-output = "immediate"

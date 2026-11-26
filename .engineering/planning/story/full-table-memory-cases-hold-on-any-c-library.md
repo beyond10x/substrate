@@ -5,7 +5,7 @@ kind: story
 status: draft
 title: The full-table memory cases hold the indexer to its count on any C library
 summary: The peak-RSS figure moves with the glibc allocator by more than the case's margin
-revision: 1
+revision: 2
 ---
 # Story: the full-table memory cases hold the indexer to its count on any C library
 
@@ -50,3 +50,6 @@ keeps and what the table counts.
 The cases pass on glibc 2.34 and on the hosted runner's glibc in every run of a repeat
 measurement recorded in the planning store, and fail when the indexer keeps one entry's bytes
 more than its table counts.
+
+The quarantine of that case on glibc older than 2.43 (its `QUARANTINED` line and the
+`success-output` override in `.config/nextest.toml`) is removed by this story.
