@@ -4,8 +4,8 @@
 # refusal `exec.sandbox-unavailable` (501) instead of confining anything. The delegated lane
 # needs the runner to sit *inside* a delegated
 # cgroup subtree carrying `cpu`/`memory`/`pids`, plus bubblewrap (README.md § "Serving exec"),
-# which a hosted GitHub runner does not provide — the ubuntu-24.04 image README lists no
-# bubblewrap among its installed apt packages, and the step below probes rather than assumes.
+# which a hosted GitHub runner does not provide — the runner image is not assumed to carry
+# bubblewrap or a delegated subtree, and the step below probes rather than assumes.
 # This workflow therefore reports the delegated lane **absent**, never passed —
 # invariant 3: a missing isolation guarantee is a named refusal, never silent degradation.
 # `release-lanes.yml` sets the lane's prerequisites up on a hosted runner and runs it there for
@@ -43,7 +43,7 @@ jobs:
     needs: [classify]
     if: ${{ !cancelled() && needs.classify.outputs.change != 'planning-only' }}
     name: "Gate: tests and Clippy"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -104,7 +104,7 @@ jobs:
           echo "$RUNNER_TEMP/nextest-bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/nextest-bin/cargo-nextest" nextest --version
 
-      # Probed, not assumed: the ubuntu-24.04 image README lists no bubblewrap among its installed
+      # Probed, not assumed: the runner image need not carry bubblewrap among its installed
       # apt packages, and a hosted runner is not inside a delegated cgroup subtree. This step
       # records what is actually there so the log carries evidence rather than a claim.
       - name: Report execution lanes
@@ -164,7 +164,7 @@ jobs:
     needs: [classify]
     if: ${{ !cancelled() && needs.classify.outputs.change != 'planning-only' }}
     name: "Gate: static checks"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -223,7 +223,7 @@ jobs:
     name: Full gate
     needs: [classify, gate-tests, gate-static]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -256,7 +256,7 @@ jobs:
     needs: [classify]
     if: ${{ !cancelled() && needs.classify.outputs.change != 'planning-only' }}
     name: Pod lane
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read

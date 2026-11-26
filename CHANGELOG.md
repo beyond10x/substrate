@@ -20,6 +20,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `a_sigkill_no_source_explains_names_no_limit_and_is_stated` and the monitor's cases in
   `confinement::oci::tests`, the record's JSON case in `confinement::tests`, and the `oci` lane
   case `ESS confinement oci unattributed kill`, a command that sends `SIGKILL` to itself.
+- `scripts/wait-checks.sh` waits for a pull request's checks or a commit's check runs and exits
+  by what they came to: 0 when every check succeeded or was skipped or neutral, 1 when one
+  ended any other way (a startup failure and a stale check included), 3 when one is still
+  pending at its timeout, which is wall time, or none is reported, and 2 when `gh` fails on
+  three asks in a row. It is POSIX sh over `gh` and `jq` and only reads. `--from` decides once
+  on a list `gh` printed, and the module `wait_checks` of the `xtask` test binary `bot_scripts`
+  holds each status on lists recorded from this repository.
 
 ### Changed
 
@@ -29,6 +36,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   in 482 and at no later read within 5 s in the other 128. The `oci` lane's memory case passes
   with either of the two ends design 36 allows, `memory`, or no limit and `unattributed_kill`,
   and prints which it read; any other end fails it.
+- Every Linux workflow job runs on a runner image named by its version: `ubuntu-26.04` for the
+  gate, the change classification, the chart and namespace lanes, the pages build and the
+  release, and `ubuntu-24.04` for the release lanes, as before. The Ubuntu release a job runs on
+  moves only with a commit; the image's weekly updates still arrive. `every_job_runs_on_a_runner_image_named_by_its_version` in
+  `xtask/tests/release_workflow.rs` holds the table. The documentation site's job runs in the
+  website repository's reusable workflow, pinned by commit, which names its own runner. The
+  host crate's executable-list lane cases list the directory that holds each tool's file, with
+  every symbolic link followed, so a tool kept as a link out of `/usr/bin` (Ubuntu 26.04's
+  `ln`, `env`, `cat`, `ls` and `mkdir`) is admitted by the directory it lies in. A case in
+  `ess_confinement_linux` holds that rule on a staged directory of links, on any host, without
+  privilege or a mount. The staged-mount cases still run on a workstation only: a hosted runner
+  grants a user namespace no mount.
 
 ## [0.28.0] — 2026-11-25
 

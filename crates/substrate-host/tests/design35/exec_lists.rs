@@ -28,6 +28,13 @@ use substrate_host::seatbelt::{EXEC_SUBPATH_UNDECLARED, PATH_UNREPRESENTABLE};
 
 #[path = "exec_denied.rs"]
 mod denied;
+#[path = "tool_directories.rs"]
+mod tool_directories;
+
+use tool_directories::holding_directories;
+
+/// Where the cases look for a base tool, in this order.
+const TOOL_DIRECTORIES: [&str; 2] = ["/usr/bin", "/bin"];
 
 /// Where the driver binds the helper's bytes in a run's view.
 const GATE: &str = "/.substrate-exec-gate";
@@ -42,7 +49,7 @@ fn helper() -> PathBuf {
 
 /// The host's copy of a base tool, where this distribution keeps it.
 fn tool(name: &str) -> PathBuf {
-    ["/usr/bin", "/bin"]
+    TOOL_DIRECTORIES
         .iter()
         .map(|directory| Path::new(directory).join(name))
         .find(|path| path.is_file())
@@ -53,16 +60,65 @@ fn text(path: &Path) -> String {
     path.to_str().expect("UTF-8").to_owned()
 }
 
-/// The directories that hold the shell and the base tools the cases run, as list entries.
+/// The tools of [`base_directories`].
+const BASE_TOOLS: [&str; 9] = ["sh", "true", "mv", "ln", "rm", "mkdir", "cp", "stat", "cat"];
+
+/// The directories that hold the files of the shell and the base tools the cases run, as list
+/// entries ([`holding_directories`]).
 fn base_directories() -> Vec<String> {
-    let mut directories: Vec<String> =
-        ["sh", "true", "mv", "ln", "rm", "mkdir", "cp", "stat", "cat"]
-            .iter()
-            .map(|name| text(tool(name).parent().expect("a directory")))
-            .collect();
-    directories.sort();
-    directories.dedup();
-    directories
+    holding_directories(&TOOL_DIRECTORIES.map(Path::new), &BASE_TOOLS)
+}
+
+/// The rule [`base_directories`] follows, held on any host with no privilege: a directory
+/// staged with the shape of Ubuntu 26.04's `/usr/bin`, whose `ln` and `mv` are symbolic links
+/// to files of another directory and whose `cat` is a link to a link, lists that other
+/// directory, and lists its own only for the tool that is a file of it. A case that lists the
+/// directory of the link instead admits no tool reached through it.
+#[test]
+fn a_tool_reached_by_a_link_is_listed_by_the_directory_that_holds_its_file() {
+    let staged = tempfile::tempdir().expect("a staged root");
+    let bin = staged.path().join("usr/bin");
+    let coreutils = staged.path().join("usr/lib/cargo/bin/coreutils");
+    let alternatives = staged.path().join("etc/alternatives");
+    for directory in [&bin, &coreutils, &alternatives] {
+        std::fs::create_dir_all(directory).expect("a staged directory");
+    }
+    for name in ["ln", "mv", "cat", "sh"] {
+        let file = if name == "sh" {
+            bin.join(name)
+        } else {
+            coreutils.join(name)
+        };
+        std::fs::write(&file, "").expect("a staged tool");
+    }
+    for name in ["ln", "mv"] {
+        std::os::unix::fs::symlink(
+            Path::new("../lib/cargo/bin/coreutils").join(name),
+            bin.join(name),
+        )
+        .expect("a link out of the directory");
+    }
+    std::os::unix::fs::symlink(
+        "../../usr/lib/cargo/bin/coreutils/cat",
+        alternatives.join("cat"),
+    )
+    .expect("the second link");
+    std::os::unix::fs::symlink("../../etc/alternatives/cat", bin.join("cat"))
+        .expect("the first link");
+    let canonical = |path: &Path| text(&std::fs::canonicalize(path).expect("staged"));
+
+    assert_eq!(
+        holding_directories(&[&bin], &["ln", "mv", "cat"]),
+        [canonical(&coreutils)],
+        "tools that are links out of the searched directory"
+    );
+    let mut both = vec![canonical(&bin), canonical(&coreutils)];
+    both.sort();
+    assert_eq!(
+        holding_directories(&[&bin], &["sh", "ln"]),
+        both,
+        "a file of the searched directory beside a link out of it"
+    );
 }
 
 fn open_with(
@@ -1388,13 +1444,9 @@ async fn the_runs_variables_reach_the_program_as_they_were_given() {
     };
     let cat = text(&tool("cat"));
     let wc = text(&tool("wc"));
-    let mut directories = base_directories();
-    for name in ["cat", "wc"] {
-        let directory = text(tool(name).parent().expect("a directory"));
-        if !directories.contains(&directory) {
-            directories.push(directory);
-        }
-    }
+    let mut tools = BASE_TOOLS.to_vec();
+    tools.push("wc");
+    let directories = holding_directories(&TOOL_DIRECTORIES.map(Path::new), &tools);
     let entries: Vec<&str> = directories.iter().map(String::as_str).collect();
     let profile = listed(&lane.workspace, &entries);
     let unlisted = listed(&lane.workspace, &[]);

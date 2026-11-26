@@ -123,7 +123,7 @@ env:
 jobs:
   preflight:
     name: Preflight
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 240
     permissions:
       contents: read
@@ -1060,7 +1060,7 @@ jobs:
   release:
     name: Build, sign and publish daemon, MCP adapter, executor, release binaries and development bundle
     needs: preflight
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # A release build is cold with respect to earlier runs. Within this job, one pinned builder
     # stage compiles both binaries once and the two minimal runtime targets reuse that exact stage;
     # no cache from an earlier release is an input to an artifact an operator is asked to verify.
