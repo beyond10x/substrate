@@ -1671,17 +1671,18 @@ jobs:
           esac
           for archive in "${archives[@]}"; do
             stem=${archive%.tar.gz}
+            mkdir -p "${BINARY_DIST}/stage/${stem}"
             case "$stem" in
               *"-${VERSION}-${MUSL_TARGET}")
                 binary=${stem%"-${VERSION}-${MUSL_TARGET}"}
                 built="${BINARY_DIST}/musl/${binary}"
+                install -m 0644 licenses/musl-COPYRIGHT "${BINARY_DIST}/stage/${stem}/"
                 ;;
               *)
                 binary=${stem%"-${VERSION}-${BINARY_TARGET}"}
                 built="${BINARY_DIST}/bin/${binary}"
                 ;;
             esac
-            mkdir -p "${BINARY_DIST}/stage/${stem}"
             install -m 0755 "$built" "${BINARY_DIST}/stage/${stem}/${binary}"
             install -m 0644 LICENSE THIRD_PARTY_LICENSES.html README.md "${BINARY_DIST}/stage/${stem}/"
             tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${epoch}" \
@@ -2343,10 +2344,12 @@ jobs:
           | runs on | any x86_64 Linux, whatever its C library |
 
           Both are built for \`${MUSL_TARGET}\` from a stage of the same pinned image and linked
-          statically; each archive holds the binary and the same three files. Before release this
-          workflow refused either one with a program interpreter or a needed shared library, and
-          started both with \`--version\` in \`${MUSL_FLOOR_IMAGE}\`. \`SHA256SUMS\` and its
-          signature above cover them. They keep musl's own allocator.
+          statically; each archive holds the binary, the same three files and
+          \`musl-COPYRIGHT\`, the licence and copyright notice of the musl C library linked into
+          the binary. Before release this workflow refused either one with a program interpreter
+          or a needed shared library, and started both with \`--version\` in
+          \`${MUSL_FLOOR_IMAGE}\`. \`SHA256SUMS\` and its signature above cover them. They keep
+          musl's own allocator.
 
           NOTES
           ;;
@@ -2693,9 +2696,26 @@ jobs:
           EXECUTOR_DIGEST: ${{ steps.executor-build.outputs.digest }}
         run: |
           case "$BINARIES" in
-            true) binaries_row="\`${BINARY_TARGET}\` and \`${MUSL_TARGET}\` (${MUSL:-<undecided>}), SHA256SUMS \`${SUMS_DIGEST:-<not built>}\`" ;;
+            true)
+              case "$MUSL" in
+                true) targets="\`${BINARY_TARGET}\` and \`${MUSL_TARGET}\`" ;;
+                false) targets="\`${BINARY_TARGET}\` only: the tagged source has no release-binaries-musl stage" ;;
+                *) targets="\`${BINARY_TARGET}\`; \`${MUSL_TARGET}\` <undecided>" ;;
+              esac
+              binaries_row="${targets}, SHA256SUMS \`${SUMS_DIGEST:-<not built>}\`"
+              ;;
             false) binaries_row="not published: the tagged source has no release-binaries stage" ;;
             *) binaries_row="<undecided>" ;;
+          esac
+          case "$EXECUTOR" in
+            true) executor_row="\`${EXECUTOR_IMAGE}:${VERSION}\`" ;;
+            false) executor_row="not published: the tagged source has no executor stage" ;;
+            *) executor_row="\`${EXECUTOR_IMAGE}:${VERSION}\` <undecided>" ;;
+          esac
+          case "$CHART" in
+            present) chart_row="\`${CHART_IMAGE}:${VERSION}\`" ;;
+            absent) chart_row="not published: the tagged source has no chart" ;;
+            *) chart_row="\`${CHART_IMAGE}:${VERSION}\` <undecided>" ;;
           esac
           {
             echo "### Release ${VERSION}"
@@ -2708,10 +2728,10 @@ jobs:
             echo "| bundle digest | \`${BUNDLE_DIGEST:-<not built>}\` |"
             echo "| disposable MCP image | \`${MCP_IMAGE}:${VERSION}\` |"
             echo "| MCP digest | \`${MCP_DIGEST:-<not built>}\` |"
-            echo "| executor image | \`${EXECUTOR_IMAGE}:${VERSION}\` (${EXECUTOR:-<undecided>}) |"
+            echo "| executor image | ${executor_row} |"
             echo "| executor digest | \`${EXECUTOR_DIGEST:-<not built>}\` |"
             echo "| release binaries | ${binaries_row} |"
-            echo "| Kubernetes chart | \`${CHART_IMAGE}:${VERSION}\` (${CHART:-<undecided>}) |"
+            echo "| Kubernetes chart | ${chart_row} |"
             echo "| chart digest | \`${CHART_DIGEST:-<not built>}\` |"
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"

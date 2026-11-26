@@ -250,7 +250,48 @@ fn release_compiles_both_runtime_binaries_once() {
     // The fourth is the static musl build of the two release binaries, which no image copies.
     let (_, musl) = dockerfile_stage("release-musl-builder");
     assert_eq!(musl.matches("cargo build --locked --release").count(), 1);
-    assert!(!musl.contains("b10x-substrate-mcp"), "{musl}");
+    // It selects what the gnu builder selects, so Cargo resolves the same features for the
+    // dependencies of both builds (the daemon's musl-only `openssl-sys` edge aside), and no image
+    // takes a binary from it.
+    let selection = |stage: &str| -> Vec<String> {
+        let words: Vec<&str> = stage
+            .split_once("cargo build --locked --release")
+            .expect("the stage's release build")
+            .1
+            .split_once(" &&")
+            .expect("the build command ends")
+            .0
+            .split_whitespace()
+            .filter(|word| *word != "\\")
+            .collect();
+        let mut kept = Vec::new();
+        let mut words = words.into_iter();
+        while let Some(word) = words.next() {
+            if word == "--target" {
+                assert_eq!(words.next(), Some("x86_64-unknown-linux-musl"), "{stage}");
+            } else {
+                kept.push(word.to_owned());
+            }
+        }
+        kept
+    };
+    assert_eq!(selection(musl), selection(builder));
+    assert!(
+        musl.contains("--target x86_64-unknown-linux-musl"),
+        "{musl}"
+    );
+    let installed: Vec<&str> = musl
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("install -D "))
+        .collect();
+    assert_eq!(
+        installed,
+        [
+            "/src/target/x86_64-unknown-linux-musl/release/substrate-daemon /out/substrate-daemon && \\",
+            "/src/target/x86_64-unknown-linux-musl/release/b10x-substrate /out/b10x-substrate",
+        ],
+        "the musl stage keeps the two release binaries alone"
+    );
     assert_eq!(
         DOCKERFILE
             .matches("COPY --from=release-musl-builder ")
@@ -2098,6 +2139,25 @@ fn the_musl_archives_carry_the_notice_of_the_c_library_linked_into_them() {
     );
 }
 
+/// The notice a musl archive carries is musl's own `COPYRIGHT` file, unchanged: the one of musl
+/// 1.2.5, the `libc.a` Rust 1.97's `x86_64-unknown-linux-musl` target links statically, and of
+/// musl 1.2.3, Debian 12's `musl-dev`, whose headers `musl-gcc` compiles the C dependencies
+/// against. The two tags hold the same bytes.
+#[test]
+fn the_musl_notice_is_the_copyright_file_of_musl_byte_for_byte() {
+    use sha2::Digest as _;
+    let notice = fs::read(repository_root().join("licenses/musl-COPYRIGHT")).expect("notice");
+    assert_eq!(
+        hex::encode(sha2::Sha256::digest(&notice)),
+        "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af"
+    );
+    let text = String::from_utf8(notice).expect("utf-8 notice");
+    assert!(text.contains("Copyright © 2005-2020 Rich Felker, et al."));
+    assert!(text.contains(
+        "The above copyright notice and this permission notice shall be\nincluded in all copies"
+    ));
+}
+
 /// Writes an executable `name` holding `script` into `tools`.
 fn tool(tools: &Path, name: &str, script: &str) {
     let path = tools.join(name);
@@ -2820,6 +2880,107 @@ fn the_release_notes_and_summaries_name_the_musl_archives() {
     assert!(step_block("Release summary").contains("${MUSL_TARGET}"));
 }
 
+/// Runs the lines of the release summary step that compose its table rows, before the table is
+/// written, with the given presence answers, and returns the binaries, executor and chart rows.
+fn release_summary_rows(binaries: &str, musl: &str, executor: &str, chart: &str) -> [String; 3] {
+    let script = step_script("Release summary");
+    let rows = script
+        .split_once("\n{\n")
+        .expect("the summary composes its rows before it writes the table")
+        .0;
+    assert!(!rows.contains("${{"), "{rows}");
+    let output = std::process::Command::new("bash")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("BINARIES", binaries)
+        .env("MUSL", musl)
+        .env("EXECUTOR", executor)
+        .env("CHART", chart)
+        .env("SUMS_DIGEST", "sha256:sums")
+        .env("BINARY_TARGET", "x86_64-unknown-linux-gnu")
+        .env("MUSL_TARGET", "x86_64-unknown-linux-musl")
+        .env("EXECUTOR_IMAGE", "ghcr.io/example/executor")
+        .env("CHART_IMAGE", "ghcr.io/example/charts/chart")
+        .env("VERSION", TAG)
+        .args([
+            "-euo",
+            "pipefail",
+            "-c",
+            &format!("{rows}\nprintf '%s\\n' \"$binaries_row\" \"$executor_row\" \"$chart_row\"\n"),
+        ])
+        .output()
+        .expect("bash runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 rows");
+    let lines: Vec<String> = stdout.lines().map(str::to_owned).collect();
+    lines.try_into().expect("three rows")
+}
+
+/// The release summary's rows name only what the release publishes: a release whose tagged
+/// source has no musl stage names the gnu target alone, and no row prints a presence answer
+/// (`true`, `false`, `present`, `absent`) beside an artifact's name.
+#[test]
+fn the_release_summary_names_only_the_targets_and_artifacts_it_publishes() {
+    let gnu = "`x86_64-unknown-linux-gnu`";
+    let musl = "`x86_64-unknown-linux-musl`";
+    let executor = format!("`ghcr.io/example/executor:{TAG}`");
+    let chart = format!("`ghcr.io/example/charts/chart:{TAG}`");
+
+    let [binaries_row, executor_row, chart_row] =
+        release_summary_rows("true", "true", "true", "present");
+    assert_eq!(
+        binaries_row,
+        format!("{gnu} and {musl}, SHA256SUMS `sha256:sums`")
+    );
+    assert_eq!(executor_row, executor);
+    assert_eq!(chart_row, chart);
+
+    let [binaries_row, executor_row, chart_row] =
+        release_summary_rows("true", "false", "false", "absent");
+    assert_eq!(
+        binaries_row,
+        format!(
+            "{gnu} only: the tagged source has no release-binaries-musl stage, SHA256SUMS `sha256:sums`"
+        )
+    );
+    assert!(!binaries_row.contains("musl`"), "{binaries_row}");
+    assert_eq!(
+        executor_row,
+        "not published: the tagged source has no executor stage"
+    );
+    assert_eq!(chart_row, "not published: the tagged source has no chart");
+
+    // A step that never answered is undecided, never read as either answer.
+    let [binaries_row, executor_row, chart_row] = release_summary_rows("true", "", "", "");
+    assert_eq!(
+        binaries_row,
+        format!("{gnu}; {musl} <undecided>, SHA256SUMS `sha256:sums`")
+    );
+    assert_eq!(executor_row, format!("{executor} <undecided>"));
+    assert_eq!(chart_row, format!("{chart} <undecided>"));
+
+    let [binaries_row, _, _] = release_summary_rows("false", "false", "true", "present");
+    assert_eq!(
+        binaries_row,
+        "not published: the tagged source has no release-binaries stage"
+    );
+
+    for row in [
+        release_summary_rows("true", "true", "true", "present"),
+        release_summary_rows("true", "false", "false", "absent"),
+    ]
+    .concat()
+    {
+        for answer in ["(true)", "(false)", "(present)", "(absent)"] {
+            assert!(!row.contains(answer), "{row}");
+        }
+    }
+}
+
 #[test]
 fn readme_names_both_release_signing_identities() {
     let readme = fs::read_to_string(repository_root().join("README.md")).expect("README");
@@ -3214,13 +3375,15 @@ fn try_package_release_binaries(
     (output.status.success(), stderr, assets)
 }
 
-/// A tagged source holding the three files every archive carries beside its binary.
+/// A tagged source holding the three files every archive carries beside its binary, and musl's
+/// notice, which a musl archive carries too.
 fn release_source() -> TaggedSource {
     TaggedSource::with_files(
         &[
             ("LICENSE", "licence text\n"),
             ("THIRD_PARTY_LICENSES.html", "<p>notices</p>\n"),
             ("README.md", "# readme\n"),
+            ("licenses/musl-COPYRIGHT", "musl notice\n"),
         ],
         "release",
     )
@@ -3273,7 +3436,8 @@ fn release_archives() -> [(String, &'static str, &'static str); 4] {
 }
 
 /// Asserts that each archive in `assets` holds exactly its binary of its build and the three
-/// documented files, owned by 0/0.
+/// documented files, a musl archive also `musl-COPYRIGHT` as the source holds it, all owned by
+/// 0/0.
 fn assert_archive_contents(assets: &Path, archives: &[(String, &str, &str)]) {
     for (archive, binary, build) in archives {
         let stem = archive.trim_end_matches(".tar.gz");
@@ -3299,11 +3463,24 @@ fn assert_archive_contents(assets: &Path, archives: &[(String, &str, &str)]) {
             format!("{stem}/README.md"),
             format!("{stem}/THIRD_PARTY_LICENSES.html"),
         ];
+        if *build == "musl" {
+            want.push(format!("{stem}/musl-COPYRIGHT"));
+        }
         want.sort_unstable();
         assert_eq!(
             entries, want,
             "{archive} holds exactly the documented files"
         );
+        if *build == "musl" {
+            let notice = std::process::Command::new("tar")
+                .args(["-xzOf"])
+                .arg(assets.join(archive))
+                .arg(format!("{stem}/musl-COPYRIGHT"))
+                .output()
+                .expect("tar runs");
+            assert!(notice.status.success());
+            assert_eq!(notice.stdout, b"musl notice\n", "{archive}");
+        }
         // The gnu archive holds the gnu build and the musl archive the musl build.
         let content = std::process::Command::new("tar")
             .args(["-xzOf"])
@@ -3325,7 +3502,12 @@ fn release_archives_are_deterministic_named_as_documented_and_summed_exactly() {
     let source = release_source();
     let first = package_release_binaries(&source, "true");
     // Input modification times and the wall clock must not reach the archive bytes.
-    for file in ["LICENSE", "THIRD_PARTY_LICENSES.html", "README.md"] {
+    for file in [
+        "LICENSE",
+        "THIRD_PARTY_LICENSES.html",
+        "README.md",
+        "licenses/musl-COPYRIGHT",
+    ] {
         let status = std::process::Command::new("touch")
             .args(["-d", "2001-02-03T04:05:06Z"])
             .arg(source.directory.path().join(file))
