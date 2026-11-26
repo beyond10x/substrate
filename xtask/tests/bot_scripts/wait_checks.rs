@@ -404,3 +404,130 @@ fn a_pull_request_gh_never_reads_is_not_reported_as_one_without_checks() {
     assert!(run.ended, "{:?}", run.calls);
     assert_eq!(run.code, Some(2), "{}\n{:?}", run.stderr, run.calls);
 }
+
+/// The asks gh answered `FAIL` end the wait with 2 only when they are the last ones: three in
+/// a row, or the last ask before the timeout. Its last error line is printed; a failed ask
+/// followed by a list is decided by the list.
+#[test]
+fn gh_failing_ends_the_wait_with_two_only_when_its_last_asks_failed() {
+    let bound = std::time::Duration::from_secs(5);
+    let run = bounded(
+        "sh",
+        &["FAIL", "FAIL", PR_GREEN],
+        &["--interval", "1", "--timeout", "100", "5"],
+        bound,
+    );
+    assert_eq!(run.code, Some(0), "{}\n{:?}", run.stderr, run.calls);
+
+    let run = bounded(
+        "sh",
+        &["FAIL"],
+        &["--interval", "1", "--timeout", "0", "5"],
+        bound,
+    );
+    assert_eq!(run.code, Some(2), "{}\n{:?}", run.stderr, run.calls);
+    assert_eq!(run.calls.len(), 1, "{:?}", run.calls);
+    assert!(
+        run.stderr
+            .contains("Could not resolve to a PullRequest with the number of 999999."),
+        "{}",
+        run.stderr
+    );
+
+    let run = bounded(
+        "sh",
+        &["FAIL", "FAIL", "FAIL", PR_GREEN],
+        &["--interval", "1", "--timeout", "100", "5"],
+        bound,
+    );
+    assert_eq!(run.code, Some(2), "{}\n{:?}", run.stderr, run.calls);
+    let asks = run
+        .calls
+        .iter()
+        .filter(|call| call.starts_with("gh "))
+        .count();
+    assert_eq!(asks, 3, "{:?}", run.calls);
+}
+
+/// gh's answer for a pull request whose checks have not started (`no checks reported on the
+/// '<branch>' branch`, exit 1) is a list without checks, not an unreadable one: the wait goes on
+/// and ends with 3 at its timeout.
+#[test]
+fn a_pull_request_whose_checks_have_not_started_waits_and_ends_with_three() {
+    let tree = tempfile::tempdir().expect("a temporary directory");
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stand-in directory");
+    let calls = tree.path().join("calls");
+    executable(
+        &bin.join("gh"),
+        &format!(
+            "#!/bin/sh\nprintf 'gh %s\\n' \"$*\" >> '{calls}'\n\
+             echo \"no checks reported on the 'story/x' branch\" >&2\nexit 1\n",
+            calls = calls.display()
+        ),
+    );
+    executable(
+        &bin.join("sleep"),
+        &format!(
+            "#!/bin/sh\nprintf 'sleep %s\\n' \"$*\" >> '{calls}'\n",
+            calls = calls.display()
+        ),
+    );
+    let output = run_with(Some(&bin), &["--interval", "1", "--timeout", "4", "5"], "");
+    let calls = fs::read_to_string(&calls).expect("the calls");
+    assert_eq!(output.status.code(), Some(3), "{}", text(&output.stderr));
+    assert_eq!(calls.matches("gh ").count(), 5, "{calls}");
+}
+
+/// A sha is 7 to 40 lower-case hex digits, and a number at most nine decimal digits after its
+/// leading zeros; anything else is a usage error before gh is asked.
+#[test]
+fn a_sha_or_a_number_out_of_its_form_exits_two() {
+    for arguments in [
+        &["--commit", "abc123"][..],
+        &["--commit", &"a".repeat(41)],
+        &["--commit", "ABCDEF1"],
+        &["--interval", "1234567890", "12"],
+        &["--timeout", "99999999999999999999", "12"],
+        &["1234567890"],
+    ] {
+        let tree = tempfile::tempdir().expect("a temporary directory");
+        let asked = tree.path().join("asked");
+        for name in ["gh", "sleep"] {
+            executable(
+                &tree.path().join(name),
+                &format!(
+                    "#!/bin/sh\necho {name} >> '{asked}'\nexit 1\n",
+                    asked = asked.display()
+                ),
+            );
+        }
+        let output = run_with(Some(tree.path()), arguments, "");
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(!asked.exists(), "{arguments:?}: gh or sleep ran");
+    }
+    for arguments in [
+        &[
+            "--interval",
+            "000000000001",
+            "--timeout",
+            "0",
+            "--commit",
+            "abcdef1",
+        ][..],
+        &["--timeout", "0", "--commit", &"a".repeat(40)],
+    ] {
+        let tree = tempfile::tempdir().expect("a temporary directory");
+        executable(
+            &tree.path().join("gh"),
+            &format!("#!/bin/sh\nprintf '%s' '{RUNS_GREEN}'\n"),
+        );
+        let output = run_with(Some(tree.path()), arguments, "");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{arguments:?}: {}",
+            text(&output.stderr)
+        );
+    }
+}
