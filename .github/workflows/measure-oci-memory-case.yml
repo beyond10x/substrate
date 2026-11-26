@@ -1,0 +1,44 @@
+# The repeat measurement of story an-oci-run-killed-at-its-memory-bound-names-the-limit-on-a-hosted-runner.
+# This workflow exists only on the branch that triggers it. The branch is never merged and opens
+# no pull request, so the workflow is no gate step and no check of any change.
+name: Measure the oci memory case
+
+on:
+  push:
+    branches: ['measure/oci-unattributed-repeat']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: measure-oci-memory-case
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    name: oci memory case, repeated
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          rustup toolchain install "$channel" --profile minimal
+      - name: Pull the oci lane's pinned image
+        run: docker pull docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+      - name: Build the oci lane's test binary
+        run: |
+          cargo test -p b10x-substrate-host --release --locked --test ess_confinement_oci --no-run \
+            --message-format json > "$RUNNER_TEMP/build.json"
+          bin=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "ess_confinement_oci" and .executable != null) | .executable' "$RUNNER_TEMP/build.json" | tail -n 1)
+          test -x "$bin"
+          echo "OCI_CASE_BIN=$bin" >> "$GITHUB_ENV"
+      - name: Measure
+        run: sh scripts/measure-oci-memory-case.sh "$OCI_CASE_BIN" "$RUNNER_TEMP/memory-case"
+      - name: Print every run
+        if: always()
+        run: cat "$RUNNER_TEMP/memory-case/runs.txt"
