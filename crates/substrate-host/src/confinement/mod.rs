@@ -428,6 +428,10 @@ pub enum AuditRecord {
         /// The limit that ended the run, where the adapter observed one; absent is "none named".
         #[serde(skip_serializing_if = "Option::is_none")]
         limit: Option<RunLimit>,
+        /// Why no limit is named although a bound may have ended the run (design 36 D27);
+        /// absent is "nothing stated".
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit_unread: Option<LimitUnread>,
         /// Absent where the adapter does not observe it, as on the observation.
         #[serde(skip_serializing_if = "Option::is_none")]
         memory_oom_kills: Option<u64>,
@@ -721,6 +725,7 @@ impl PendingEnd {
             state,
             exit,
             limit,
+            limit_unread,
             memory_oom_kills,
             process_limit_hits,
             ..
@@ -738,6 +743,7 @@ impl PendingEnd {
             },
             exit,
             limit,
+            limit_unread,
             memory_oom_kills,
             process_limit_hits,
         }
@@ -754,6 +760,7 @@ impl PendingEnd {
             state: RunState::Unknown,
             exit: None,
             limit: None,
+            limit_unread: None,
             memory_oom_kills: None,
             process_limit_hits: None,
         }
@@ -1152,6 +1159,18 @@ pub enum RunLimit {
 
 /// The order in which a limit is named where more than one is true at a run's end (design 36
 /// D4): the order in which the host driver names its refusal.
+/// Why an ended run names no limit although a bound may have ended it (design 36 D27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LimitUnread {
+    /// The run's main process ended by `SIGKILL`. The adapter sent none, the embedder asked for
+    /// none, and the source the adapter reads for a memory-bound kill names none. The kernel's
+    /// OOM killer at the run's memory bound is one cause; a kill from another party, or one a
+    /// process of the run sent, are others.
+    UnattributedKill,
+}
+
 const LIMIT_ORDER: [RunLimit; 5] = [
     RunLimit::OutputStall,
     RunLimit::EgressBytes,
@@ -1187,6 +1206,12 @@ pub struct RunObservation {
     /// adapter observed before it lost sight of how the run ended. No adapter derives it from an
     /// exit code or a signal alone.
     pub limit: Option<RunLimit>,
+    /// Why no limit is named although a bound may have ended the run (design 36 D27). `None`
+    /// beside a named limit, while the run runs, on an `Unknown` run, and wherever the adapter
+    /// states nothing. Only `oci` sets it: `UnattributedKill` for a run whose main process ended
+    /// by `SIGKILL` that neither the adapter nor the embedder sent and whose runtime state holds
+    /// no `OOMKilled`. It is no limit: a consumer that counts limit hits counts `limit`.
+    pub limit_unread: Option<LimitUnread>,
     /// Processes of the run the kernel's OOM killer ended, once the run has ended; `None` where
     /// the adapter does not observe it (absent, never zero: invariant 3).
     pub memory_oom_kills: Option<u64>,
@@ -1219,6 +1244,7 @@ impl RunObservation {
             state,
             exit: None,
             limit: None,
+            limit_unread: None,
             memory_oom_kills: None,
             process_limit_hits: None,
         }
@@ -1528,6 +1554,7 @@ mod tests {
             state: RunState::Unknown,
             exit: None,
             limit: None,
+            limit_unread: None,
             memory_oom_kills: None,
             process_limit_hits: None,
         };
@@ -1550,6 +1577,7 @@ mod tests {
                 signal: Some(9),
             }),
             limit: Some(RunLimit::Memory),
+            limit_unread: None,
             memory_oom_kills: Some(1),
             process_limit_hits: Some(0),
         };
@@ -1560,6 +1588,30 @@ mod tests {
                 "inner": "linux", "declared_insecure": REASON, "state": "ended",
                 "exit": {"signal": 9}, "limit": "memory", "memory_oom_kills": 1,
                 "process_limit_hits": 0,
+            })
+        );
+        // Design 36 D27: the stated kill of an `oci` run, beside no limit.
+        let unattributed = AuditRecord::RunEnded {
+            run: RunId::new("ex_2".to_owned()),
+            profile: ProfileId("p1".to_owned()),
+            adapter: AdapterName::Oci,
+            inner: None,
+            declared_insecure: None,
+            state: RunState::Ended,
+            exit: Some(RunExit {
+                code: None,
+                signal: Some(9),
+            }),
+            limit: None,
+            limit_unread: Some(LimitUnread::UnattributedKill),
+            memory_oom_kills: None,
+            process_limit_hits: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&unattributed).expect("serializes"),
+            serde_json::json!({
+                "event": "run_ended", "run": "ex_2", "profile": "p1", "adapter": "oci",
+                "state": "ended", "exit": {"signal": 9}, "limit_unread": "unattributed_kill",
             })
         );
         assert_eq!(
@@ -1764,6 +1816,7 @@ mod tests {
                 state: RunState::Ended,
                 exit: None,
                 limit: None,
+                limit_unread: None,
                 memory_oom_kills: None,
                 process_limit_hits: None,
             },
