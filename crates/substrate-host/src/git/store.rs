@@ -14,7 +14,6 @@ use std::path::Path;
 
 use git2::{ObjectType, Oid};
 use nix::errno::Errno;
-use nix::fcntl::RenameFlags;
 use substrate_wire::StorageLimit;
 
 use super::{failed, object_store};
@@ -707,13 +706,7 @@ fn install(
     if !baselines::is_directory(&stores) {
         return Err(Unwritten::Write);
     }
-    match nix::fcntl::renameat2(
-        nix::fcntl::AT_FDCWD,
-        staging.path(),
-        nix::fcntl::AT_FDCWD,
-        store,
-        RenameFlags::RENAME_NOREPLACE,
-    ) {
+    match crate::rename::rename_noreplace(staging.path(), store) {
         Ok(()) => {}
         Err(Errno::EEXIST | Errno::ENOTEMPTY) => return Err(Unwritten::Exists),
         Err(_) => return Err(Unwritten::Write),

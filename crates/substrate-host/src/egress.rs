@@ -75,6 +75,33 @@ use crate::host_process::pidfd;
 
 /// `_IO(NSIO, 0x1)` from `linux/nsfs.h`: the user namespace that owns a namespace descriptor.
 const NS_GET_USERNS: libc::c_ulong = 0xb701;
+
+/// An `ioctl` request as the C library declares it: `unsigned long` in glibc.
+#[cfg(not(target_env = "musl"))]
+const fn ioctl_request(request: libc::c_ulong) -> libc::c_ulong {
+    request
+}
+
+/// An `ioctl` request as the C library declares it: `int` in musl, the same low 32 bits.
+#[cfg(target_env = "musl")]
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+const fn ioctl_request(request: libc::c_ulong) -> libc::c_int {
+    request as libc::c_int
+}
+
+/// `msg_controllen` and `cmsg_len` as the C library declares them: `size_t` in glibc.
+#[cfg(not(target_env = "musl"))]
+const fn control_length(bytes: usize) -> libc::size_t {
+    bytes
+}
+
+/// `msg_controllen` and `cmsg_len` as the C library declares them: `socklen_t` in musl. Every
+/// caller's control buffer is 64 bytes.
+#[cfg(target_env = "musl")]
+#[allow(clippy::cast_possible_truncation)]
+const fn control_length(bytes: usize) -> libc::socklen_t {
+    bytes as libc::socklen_t
+}
 /// One-millisecond waits before unavailable loopback remains a stage-6 failure.
 const LOOPBACK_READY_ATTEMPTS: usize = 1_000;
 /// Bytes moved per relay iteration, on the forked child's existing stack — never a new
@@ -641,7 +668,7 @@ unsafe fn bind_when_loopback_is_ready(socket: RawFd, address: &libc::sockaddr_in
         request.ifr_name[1] = libc::c_char::from_ne_bytes(*b"o");
         let up = libc::c_short::try_from(libc::IFF_UP).unwrap_or(1);
         for attempt in 0..LOOPBACK_READY_ATTEMPTS {
-            if libc::ioctl(socket, libc::SIOCGIFFLAGS, &raw mut request) != 0 {
+            if libc::ioctl(socket, ioctl_request(libc::SIOCGIFFLAGS), &raw mut request) != 0 {
                 if *libc::__errno_location() == libc::EINTR {
                     continue;
                 }
@@ -712,7 +739,7 @@ fn reaches_from_inside(sandbox_pid: u32, port: u16, sentinel: &[u8]) -> bool {
         return false;
     };
     // SAFETY: an ioctl on a namespace descriptor this process opened.
-    let owner = unsafe { libc::ioctl(netns.as_raw_fd(), NS_GET_USERNS) };
+    let owner = unsafe { libc::ioctl(netns.as_raw_fd(), ioctl_request(NS_GET_USERNS)) };
     if owner < 0 {
         return false;
     }
@@ -769,7 +796,7 @@ unsafe fn probe_from_inside(port: u16, sentinel: &[u8]) -> bool {
         // The same deadline, enforced by the kernel. This runs in a forked child the daemon is
         // about to `waitpid` on, so a read that never returns is a daemon that never starts.
         let timeout = libc::timeval {
-            tv_sec: libc::time_t::try_from(PROBE_DEADLINE.as_secs()).unwrap_or(5),
+            tv_sec: PROBE_DEADLINE.as_secs().try_into().unwrap_or(5),
             tv_usec: 0,
         };
         for option in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
@@ -903,7 +930,7 @@ fn spawn_forwarder(
     // `EPERM`; the namespace that owns the netns is the one the daemon can enter.
     // SAFETY: an ioctl on a namespace descriptor this process opened, returning a new descriptor
     // or -1.
-    let owner = unsafe { libc::ioctl(netns.as_raw_fd(), NS_GET_USERNS) };
+    let owner = unsafe { libc::ioctl(netns.as_raw_fd(), ioctl_request(NS_GET_USERNS)) };
     if owner < 0 {
         return Err(install_failed(
             "owning user namespace",
@@ -1619,16 +1646,16 @@ unsafe fn send_descriptor(socket: RawFd, descriptor: RawFd) -> bool {
         message.msg_iov = &raw mut iov;
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = control.len();
+        message.msg_controllen = control_length(control.len());
         let header = libc::CMSG_FIRSTHDR(&raw const message);
         if header.is_null() {
             return false;
         }
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(4) as usize;
+        (*header).cmsg_len = control_length(libc::CMSG_LEN(4) as usize);
         std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<RawFd>(), descriptor);
-        message.msg_controllen = libc::CMSG_SPACE(4) as usize;
+        message.msg_controllen = control_length(libc::CMSG_SPACE(4) as usize);
         libc::sendmsg(socket, &raw const message, libc::MSG_NOSIGNAL) == 1
     }
 }
@@ -1679,7 +1706,7 @@ fn receive_descriptor(socket: RawFd) -> HelperHandback {
             message.msg_iov = &raw mut iov;
             message.msg_iovlen = 1;
             message.msg_control = control.as_mut_ptr().cast();
-            message.msg_controllen = control.len();
+            message.msg_controllen = control_length(control.len());
             let received = libc::recvmsg(socket, &raw mut message, libc::MSG_CMSG_CLOEXEC);
             if received < 0 && *libc::__errno_location() == libc::EINTR {
                 continue;
@@ -1697,7 +1724,7 @@ fn receive_descriptor(socket: RawFd) -> HelperHandback {
                 || header.is_null()
                 || (*header).cmsg_level != libc::SOL_SOCKET
                 || (*header).cmsg_type != libc::SCM_RIGHTS
-                || (*header).cmsg_len != libc::CMSG_LEN(4) as usize
+                || (*header).cmsg_len != control_length(libc::CMSG_LEN(4) as usize)
                 || !libc::CMSG_NXTHDR(&raw const message, header).is_null()
             {
                 return HelperHandback::Missing;
@@ -2179,7 +2206,12 @@ mod tests {
         let target = super::sockaddr_in(*address.ip(), address.port());
         let netns = std::fs::File::open(format!("/proc/{sandbox_pid}/ns/net")).expect("netns");
         // SAFETY: an ioctl on a namespace descriptor this process opened.
-        let owner = unsafe { libc::ioctl(netns.as_raw_fd(), super::NS_GET_USERNS) };
+        let owner = unsafe {
+            libc::ioctl(
+                netns.as_raw_fd(),
+                super::ioctl_request(super::NS_GET_USERNS),
+            )
+        };
         assert!(owner >= 0, "owning user namespace");
         let netns_fd = netns.as_raw_fd();
         // SAFETY: forked child is single-threaded and calls libc entry points only.
@@ -3007,7 +3039,12 @@ mod tests {
         let target = super::sockaddr_in(*address.ip(), address.port());
         let netns = std::fs::File::open(format!("/proc/{sandbox_pid}/ns/net")).expect("netns");
         // SAFETY: an ioctl on a namespace descriptor this process opened.
-        let owner = unsafe { libc::ioctl(netns.as_raw_fd(), super::NS_GET_USERNS) };
+        let owner = unsafe {
+            libc::ioctl(
+                netns.as_raw_fd(),
+                super::ioctl_request(super::NS_GET_USERNS),
+            )
+        };
         assert!(owner >= 0, "owning user namespace");
         let netns_fd = netns.as_raw_fd();
         // SAFETY: forked child is single-threaded, which `setns(CLONE_NEWUSER)` requires.
