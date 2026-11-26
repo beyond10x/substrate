@@ -904,6 +904,8 @@ impl OciAdapter {
             // It passes `--pids-limit`; the state it reads holds no count of refused creations
             // (design 36 D14).
             process_limit_hits: None,
+            // The state it reads holds no end time and no counter (design 36 D36).
+            usage: None,
         }
     }
 

@@ -60,4 +60,9 @@ pub struct EndOfRun {
     /// ceiling was reached. Read where a stall after the exit replaced that refusal on the record
     /// (design 36 D4, D5).
     pub egress_ceiling_reached: bool,
+    /// What the exec used (design 36 D38): the wall time from the start to the leader's exit
+    /// (D32), and the CPU time, peak memory and peak process count of the exec's cgroup, from the
+    /// terminal sample of a measured exec (D33). Each figure that could not be read is `None`:
+    /// absent, never zero (invariant 3). Reading it refuses nothing (D34).
+    pub usage: crate::confinement::RunUsage,
 }

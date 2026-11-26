@@ -166,7 +166,7 @@ mod imp {
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
         ConfinementProfile, ContractFamily, FACT_ORDER, FAMILY_ORDER, Fact, InnerAdapter,
         OutputEvent, ProcessBounds, RenderedCommand, RunExit, RunId, RunLimit, RunObservation,
-        RunOutput, RunState, named_limit,
+        RunOutput, RunState, RunUsage, named_limit,
     };
     use super::{
         InnerRequest, SESSION_BUS_ENV, SYSTEMD_MAX_TRACKED_RUNS, SYSTEMD_OUTPUT_LIMIT_BYTES,
@@ -820,6 +820,9 @@ mod imp {
         memory_oom_kills: Option<u64>,
         /// `pids.events` `max` of the run's cgroup (design 36 D14). It names no limit (D12).
         process_limit_hits: Option<u64>,
+        /// What the run used, read by the end task with the OOM count (design 36 D36); `None`
+        /// only while the run runs.
+        usage: Option<RunUsage>,
     }
 
     impl EndRead {
@@ -846,7 +849,28 @@ mod imp {
                 limit: named_limit(&reached),
                 memory_oom_kills,
                 process_limit_hits,
+                usage: None,
             }
+        }
+    }
+
+    /// What a run used (design 36 D31, D32, D36): the wall time from the leader's spawn to its
+    /// exit, and `cpu.stat` `usage_usec`, `memory.peak` and `pids.peak` of its cgroup. A figure
+    /// that cannot be read, a removed cgroup's among them, is absent, never zero, and the
+    /// others are kept (D30).
+    fn run_usage(cgroup: &Path, spawned: Instant, exited: Instant) -> RunUsage {
+        let decimal = |name: &str| {
+            std::fs::read_to_string(cgroup.join(name))
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        };
+        RunUsage {
+            wall_time_us: Some(crate::process::wall_time_us(spawned, exited)),
+            cpu_time_us: cpu_usage_micros(cgroup),
+            memory_peak_bytes: decimal("memory.peak"),
+            processes_peak: decimal("pids.peak"),
         }
     }
 
@@ -1229,6 +1253,7 @@ mod imp {
                 limit_unread: None,
                 memory_oom_kills: end.memory_oom_kills,
                 process_limit_hits: end.process_limit_hits,
+                usage: end.usage,
             }
         }
 
@@ -1473,6 +1498,22 @@ mod imp {
     }
 
     impl SystemdLocal {
+        /// Makes room for one more run and creates its cgroup beneath the scope with `bounds`:
+        /// the run's name and its cgroup.
+        fn run_cgroup(
+            &self,
+            bounds: &ProcessBounds,
+        ) -> Result<(String, PathBuf), ConfinementError> {
+            self.reserve()?;
+            let name = format!(
+                "local-{}",
+                ulid::Ulid::generate().to_string().to_ascii_lowercase()
+            );
+            let cgroup = self.scope.join(&name);
+            create_run_cgroup(&cgroup, bounds)?;
+            Ok((name, cgroup))
+        }
+
         /// Starts a run; called from `start`, inside the runtime its tasks are spawned on.
         fn start_run(
             &self,
@@ -1484,13 +1525,9 @@ mod imp {
             Self::check_environment(command)?;
             let directory = Self::directory(admitted)?;
             let (bounds, output_limit) = bounds(admitted.profile())?;
-            self.reserve()?;
-            let name = format!(
-                "local-{}",
-                ulid::Ulid::generate().to_string().to_ascii_lowercase()
-            );
-            let cgroup = self.scope.join(&name);
-            create_run_cgroup(&cgroup, &bounds)?;
+            let (name, cgroup) = self.run_cgroup(&bounds)?;
+            // The run's wall time starts before its leader is spawned (design 36 D32).
+            let spawned = Instant::now();
             let mut child = spawn_in(&cgroup, command, &directory, admitted.profile())
                 .inspect_err(|_| {
                     let _ = std::fs::remove_dir(&cgroup);
@@ -1537,6 +1574,8 @@ mod imp {
             let (end_id, end_reason) = (id.clone(), reason.clone());
             tokio::spawn(async move {
                 let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
+                // The leader exited: its wall time stops here, before the tree is ended (D32).
+                let leader_exited_at = Instant::now();
                 *exited.lock() = true;
                 // As the leader left it, before its tree is killed (design 36 § 3, D14).
                 let refused = process_limit_hits(&tree);
@@ -1558,14 +1597,19 @@ mod imp {
                         closed = false;
                     }
                 }
-                // Read before `drain_tree` removes the cgroup it lives in (design 36 D8).
+                // Read before `drain_tree` removes the cgroup it lives in (design 36 D8). The
+                // usage beside it, after the tree's kill, so its CPU time holds what the tree's
+                // processes used until then; an `Unknown` end keeps it (D35, D36).
                 let memory_oom_kills = oom_kills(&tree);
+                let usage = run_usage(&tree, spawned, leader_exited_at);
                 let drained = drain_tree(&tree, deadline).await && closed;
                 // The run's end, for its standard input too (design 32 § 2).
                 if let Some(writer) = ending.as_ref().and_then(std::sync::Weak::upgrade) {
                     writer.end().await;
                 }
-                let end = EndRead::of(stall.as_ref(), memory_oom_kills, refused, *imposed.lock());
+                let mut end =
+                    EndRead::of(stall.as_ref(), memory_oom_kills, refused, *imposed.lock());
+                end.usage = Some(usage);
                 let ended = Phase::at_end(ended.ok().filter(|_| drained), end);
                 let _ = phase.send(ended);
                 // After the end is published, so neither `wait` nor `observe` waits for it (D20).
@@ -2037,6 +2081,71 @@ mod imp {
                 std::fs::write(&events, contents).expect("events");
                 assert_eq!(process_limit_hits(cgroup.path()), expected, "{contents:?}");
             }
+        }
+
+        /// Design 36 D30, D31, D32, D36 around `local`: the end task's usage is the wall time
+        /// from the spawn to the leader's exit, `cpu.stat` `usage_usec`, `memory.peak` and
+        /// `pids.peak` of the run's cgroup; a figure that cannot be read is absent, never zero,
+        /// and the others are kept; a removed cgroup keeps only the wall time.
+        #[test]
+        fn the_run_cgroups_usage_is_read_figure_by_figure_and_absent_where_unreadable() {
+            let cgroup = tempfile::tempdir().expect("cgroup");
+            for (name, contents) in [
+                ("cpu.stat", "usage_usec 1500000\nuser_usec 1400000\n"),
+                ("memory.peak", "67108864\n"),
+                ("pids.peak", "11\n"),
+            ] {
+                std::fs::write(cgroup.path().join(name), contents).expect("counter");
+            }
+            let spawned = Instant::now();
+            let exited = spawned + Duration::from_millis(1_250);
+            assert_eq!(
+                run_usage(cgroup.path(), spawned, exited),
+                RunUsage {
+                    wall_time_us: Some(1_250_000),
+                    cpu_time_us: Some(1_500_000),
+                    memory_peak_bytes: Some(67_108_864),
+                    processes_peak: Some(11),
+                }
+            );
+            std::fs::write(cgroup.path().join("memory.peak"), "max\n").expect("peak");
+            std::fs::remove_file(cgroup.path().join("pids.peak")).expect("removed");
+            let partial = run_usage(cgroup.path(), spawned, exited);
+            assert_eq!(partial.memory_peak_bytes, None, "{partial:?}");
+            assert_eq!(partial.processes_peak, None, "{partial:?}");
+            assert_eq!(partial.cpu_time_us, Some(1_500_000), "{partial:?}");
+            assert_eq!(
+                run_usage(&cgroup.path().join("gone"), spawned, exited),
+                RunUsage {
+                    wall_time_us: Some(1_250_000),
+                    ..RunUsage::default()
+                }
+            );
+        }
+
+        /// Design 36 D35 around `local`: the observation carries the usage the end task read on
+        /// an ended and on an `Unknown` run, and none while the run runs.
+        #[test]
+        fn the_systemd_local_observation_carries_the_end_tasks_usage() {
+            let id = RunId::new("systemd-local-usage".to_owned());
+            let usage = RunUsage {
+                wall_time_us: Some(1),
+                cpu_time_us: Some(2),
+                memory_peak_bytes: Some(3),
+                processes_peak: None,
+            };
+            let mut end = EndRead::of(None, Some(0), Some(0), None);
+            end.usage = Some(usage);
+            let exit = RunExit {
+                code: Some(0),
+                signal: None,
+            };
+            let ended = SystemdLocal::observation_of(&id, None, Phase::Ended(exit, end));
+            assert_eq!(ended.usage, Some(usage), "{ended:?}");
+            let unknown = SystemdLocal::observation_of(&id, None, Phase::Unknown(end));
+            assert_eq!(unknown.usage, Some(usage), "{unknown:?}");
+            let running = SystemdLocal::observation_of(&id, None, Phase::Running);
+            assert_eq!(running.usage, None, "{running:?}");
         }
     }
 }

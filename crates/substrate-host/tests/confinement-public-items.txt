@@ -138,7 +138,7 @@ confinement/mod.rs: enum AuditRecord > ProfileAdmitted {profile: ProfileId, adap
 confinement/mod.rs: enum AuditRecord > ProfileRefused {adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, code: &'static str, #[serde(skip_serializing_if = "Option::is_none")] family: Option<ContractFamily>, #[serde(skip_serializing_if = "Option::is_none")] fact: Option<Fact>, #[serde(skip_serializing_if = "Option::is_none")] field: Option<ReservedField>},
 confinement/mod.rs: enum AuditRecord > RunStarted {run: RunId, profile: ProfileId, adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, #[serde(skip_serializing_if = "Option::is_none")] declared_insecure: Option<String>, program: String},
 confinement/mod.rs: enum AuditRecord > PrivateTmpdirLeft {run: RunId, profile: ProfileId, adapter: AdapterName, path: String, error: String},
-confinement/mod.rs: enum AuditRecord > #[non_exhaustive] RunEnded {run: RunId, profile: ProfileId, adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, #[serde(skip_serializing_if = "Option::is_none")] declared_insecure: Option<String>, state: RunState, #[serde(skip_serializing_if = "Option::is_none")] exit: Option<RunExit>, #[serde(skip_serializing_if = "Option::is_none")] limit: Option<RunLimit>, #[serde(skip_serializing_if = "Option::is_none")] limit_unread: Option<LimitUnread>, #[serde(skip_serializing_if = "Option::is_none")] memory_oom_kills: Option<u64>, #[serde(skip_serializing_if = "Option::is_none")] process_limit_hits: Option<u64>},
+confinement/mod.rs: enum AuditRecord > #[non_exhaustive] RunEnded {run: RunId, profile: ProfileId, adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, #[serde(skip_serializing_if = "Option::is_none")] declared_insecure: Option<String>, state: RunState, #[serde(skip_serializing_if = "Option::is_none")] exit: Option<RunExit>, #[serde(skip_serializing_if = "Option::is_none")] limit: Option<RunLimit>, #[serde(skip_serializing_if = "Option::is_none")] limit_unread: Option<LimitUnread>, #[serde(skip_serializing_if = "Option::is_none")] memory_oom_kills: Option<u64>, #[serde(skip_serializing_if = "Option::is_none")] process_limit_hits: Option<u64>, #[serde(skip_serializing_if = "Option::is_none")] usage: Option<RunUsage>},
 confinement/mod.rs: #[derive(Clone)] pub struct AuditSink(Arc<dyn Fn(&AuditRecord) + Send + Sync>);
 confinement/mod.rs: impl AuditSink > pub fn new(sink: impl Fn(&AuditRecord) + Send + Sync + 'static) -> Self
 confinement/mod.rs: impl AuditSink > pub fn record(&self, record: &AuditRecord)
@@ -191,6 +191,12 @@ confinement/mod.rs: struct RunObservation > pub limit: Option<RunLimit>,
 confinement/mod.rs: struct RunObservation > pub limit_unread: Option<LimitUnread>,
 confinement/mod.rs: struct RunObservation > pub memory_oom_kills: Option<u64>,
 confinement/mod.rs: struct RunObservation > pub process_limit_hits: Option<u64>,
+confinement/mod.rs: struct RunObservation > pub usage: Option<RunUsage>,
+confinement/mod.rs: #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)] #[non_exhaustive] pub struct RunUsage
+confinement/mod.rs: struct RunUsage > #[serde(skip_serializing_if = "Option::is_none")] pub wall_time_us: Option<u64>,
+confinement/mod.rs: struct RunUsage > #[serde(skip_serializing_if = "Option::is_none")] pub cpu_time_us: Option<u64>,
+confinement/mod.rs: struct RunUsage > #[serde(skip_serializing_if = "Option::is_none")] pub memory_peak_bytes: Option<u64>,
+confinement/mod.rs: struct RunUsage > #[serde(skip_serializing_if = "Option::is_none")] pub processes_peak: Option<u64>,
 confinement/mod.rs: impl RunObservation > pub fn new(run: RunId, adapter: AdapterName, state: RunState) -> Self
 confinement/mod.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub struct RunOutput
 confinement/mod.rs: struct RunOutput > pub stdout: Vec<u8>,

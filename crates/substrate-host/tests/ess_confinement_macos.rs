@@ -325,6 +325,7 @@ async fn a_confined_run_writes_its_workspace_and_reports_how_it_ended() {
     assert_eq!(ended.exit.and_then(|exit| exit.code), Some(3));
     // Design 36 D14: `macos` reads no count of refused process creations.
     assert_eq!(ended.process_limit_hits, None, "{ended:?}");
+    assert_eq!(ended.usage, None, "{ended:?}");
     let output = adapter.output(&run).await.expect("output");
     let sub = std::fs::canonicalize(workspace.path().join("sub")).expect("canonical");
     assert_eq!(
@@ -339,6 +340,7 @@ async fn a_confined_run_writes_its_workspace_and_reports_how_it_ended() {
     // Design 36 D20: the run's end task writes its end after it published it.
     let record = recorded.run_ended("macos run").await;
     assert!(record.get("process_limit_hits").is_none(), "{record}");
+    assert!(record.get("usage").is_none(), "{record}");
     assert_eq!(
         recorded.events(),
         ["profile_admitted", "run_started", "run_ended"]
@@ -372,6 +374,7 @@ async fn a_macos_run_nobody_observes_writes_one_run_ended() {
         record.get("process_limit_hits").is_none(),
         "{NAME}: {record}"
     );
+    assert!(record.get("usage").is_none(), "{NAME}: {record}");
     println!("{NAME}: executed");
 }
 

@@ -15,11 +15,17 @@ question (`approval-record:requester-answers-d101-2026-11-25`): D27 and D28, the
 D7, and the measurement § 12 holds. The amendment serves a fourth story of that epic,
 `story:an-oci-run-killed-at-its-memory-bound-names-the-limit-on-a-hosted-runner`.
 
+Amended on 2026-11-26, against `main` at `34b81f6a25`: § 3a, the usage behind the limits,
+D29 to D38 and Q6 to Q8, for `story:run-observation-carries-usage`, which § 13 named. The
+consumer gave no answer that day; each choice is the default the wave took
+(`approval-record:wave-2026-11-26-substrate`) and can be changed here before the change that
+builds it merges.
+
 It changes no wire byte and no contract bundle: the observation and the audit record are
 substrate-host's confinement API
 ([ADR 0044](../../adr/0044-confinement-is-a-contract-family-served-by-declared-adapters.md)
-decisions 7 and 8). § 10 lists the decisions, § 11 the five questions that have more than one
-defensible answer, § 12 every claim that is inferred and not read in this tree, § 14 what was not
+decisions 7 and 8). § 10 lists the decisions, § 11 the questions that have more than one
+defensible answer (five of 2026-11-24, three of 2026-11-26), § 12 every claim that is inferred and not read in this tree, § 14 what was not
 read.
 
 The requirement, relayed 2026-11-21: "hard limits per run and per action (memory, CPU, wall time,
@@ -424,6 +430,144 @@ The final value is the counter as read when the run's leader had exited. Descend
 directly after the read; a creation refused between the two is not counted. The driver's
 terminal usage sample has the same order today (`run_child`).
 
+## 3a. The usage behind the limits
+
+Added 2026-11-26 for `story:run-observation-carries-usage`. Numbered 3a so that every reference
+to §§ 4 to 14 holds.
+
+What the tree has at `34b81f6a25`. The wire's `ResourceUsage` (`substrate-wire`, `lib.rs`) holds
+`wall_time_us`, `cpu_time_us`, `memory_peak_bytes` and `processes_peak`, among others. The host
+driver fills it only for an exec that asked for `measurements` (`Cgroup::resource_usage` in
+[`process.rs`](../../crates/substrate-host/src/process.rs)), and a measured exec whose counter
+cannot be read is refused `exec.metrics-unavailable`. `linux` asks for no measurements. `systemd`
+around `local` reads `cpu.stat` for its CPU budget and `memory.events`, `pids.events` at the end,
+and no `memory.peak`, `pids.peak` or wall time. No other adapter reads a counter of the run.
+
+**D29. `RunObservation` gains `usage: Option<RunUsage>`, one `#[non_exhaustive]` struct with
+four `Option<u64>` members.**
+
+```rust
+/// What an ended run used (design 36 § 3a).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[non_exhaustive]
+pub struct RunUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wall_time_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_time_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_peak_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processes_peak: Option<u64>,
+}
+```
+
+- `usage` is `None` while the run runs, on every adapter that reads no figure (D36), and on
+  D22's record. It is `Some` on an ended or `Unknown` run of an adapter that reads them.
+- A consumer outside this crate builds one with `RunUsage::default()` and field assignments.
+
+Reason. One member groups the four figures, so a consumer passes them on as one value, and a
+later figure (block I/O, `story:block-io-and-bandwidth-limits`) is a member of `RunUsage` that
+breaks no struct expression and no pattern (Q6).
+
+**D30. A figure that cannot be read leaves that member absent, and only that one.** The other
+members keep what was read. No member is ever zero for a figure that was not read (invariant 3).
+
+Reason. A kernel without `pids.peak` still has `memory.peak` and `cpu.stat`; losing all four for
+one missing file would hide what was read.
+
+**D31. The members are named and counted as the wire's `ResourceUsage` names and counts them.**
+
+| member | unit | source on `linux` and `systemd` |
+|---|---|---|
+| `wall_time_us` | microseconds | the adapter's own clock (D32) |
+| `cpu_time_us` | microseconds | `cpu.stat` `usage_usec` of the run's cgroup |
+| `memory_peak_bytes` | bytes | `memory.peak` of the run's cgroup |
+| `processes_peak` | processes | `pids.peak` of the run's cgroup |
+
+Reason. A daemon client and an embedder read one vocabulary, and no figure is converted.
+
+**D32. Wall time runs from the run's start to its leader's exit, on every adapter that reports
+it.** On `linux` it is the driver's clock from `started_at`, the instant before the driver
+releases the start barrier, to the reap of the leader, whether the leader exited by itself or by
+a bound's kill. On `systemd` around `local` it is the adapter's clock from the spawn of the leader
+to the end task's wait for its exit. The time the adapter then spends draining output and ending
+the tree is not counted.
+
+Reason. The wall-time bound is held against the leader; what follows its exit is the adapter's
+own work and differs per adapter.
+
+**D33. An exec that asked for `measurements` reuses its terminal `ResourceUsage` sample for
+`cpu_time_us`, `memory_peak_bytes` and `processes_peak` instead of reading again.** Where that
+sample failed, the end reads each counter on its own, as `Cgroup::end_of_run` does for the OOM
+and process counts (D9). `wall_time_us` is D32's for every exec, measured or not: a measured
+exec's `RunUsage.wall_time_us` can be lower than its wire `usage.wall_time_us`, by the time between
+the leader's exit and the terminal sample, which the drains take. The wire value does not move.
+
+Reason. One counter is read once at the end, so the observation and the wire record of one
+measured exec never carry two values of it (Q7).
+
+**D34. Reading the usage refuses nothing, names no limit and changes no state.** An unreadable
+figure is no `exec.metrics-unavailable`, does not make the exec `Unknown` and does not reach the
+refusal. `linux` keeps asking the driver for no measurements (§ 1), and the wire's `resource.usage`
+of an exec that asked for none stays absent.
+
+Reason. An embedder that asked for nothing must not be refused for a counter it did not ask for
+(the story's item 2).
+
+**D35. A run that ends `Unknown` carries what was read before its cgroup went; D22's record
+carries no usage.** On `linux` the driver reads the usage with the end's other counters, before
+`reconcile_cgroup`, whatever state it then records. On `systemd` around `local` the end task
+reads it before `drain_tree`, and an `Unknown` phase keeps it. A record of D22 is written when
+the adapter lost sight of the run and read nothing.
+
+Reason. D2 and D18: what the adapter observed is a fact also where the end is not known.
+
+**D36. One row per adapter.**
+
+| adapter | `wall_time_us` | `cpu_time_us` | `memory_peak_bytes` | `processes_peak` | when it is read |
+|---|---|---|---|---|---|
+| `linux` | present | present where `cpu.stat` reads | present where `memory.peak` reads | present where `pids.peak` reads | by `Cgroup::end_of_run`, once the leader exited and both drains ended, before `reconcile_cgroup` kills the tree and removes the cgroup; a measured exec from its terminal sample (D33) |
+| `systemd` around `linux` | `linux`'s | `linux`'s | `linux`'s | `linux`'s | relabelled |
+| `systemd` around `local` | present | present where `cpu.stat` reads | present where `memory.peak` reads | present where `pids.peak` reads | by the run's end task with `oom_kill`: after the tree's kill and before `drain_tree` removes the cgroup, so the CPU time includes what the tree's processes used until their kill |
+| `oci` | absent | absent | absent | absent | `usage` is `None`: the state the monitor reads holds `StartedAt`, read as a flag, and no end time and no counter; the runtime's stats are not read |
+| `pod` | absent | absent | absent | absent | `usage` is `None`: the container status it reads holds `reason`, `exitCode` and `signal`; `startedAt` and `finishedAt` are not read, and the Pod status holds no counter |
+| `local` | absent | absent | absent | absent | `usage` is `None`: no `limits` family and no cgroup (the story's item 4) |
+| `macos` | absent | absent | absent | absent | `usage` is `None`, as `local` |
+
+On `linux` the CPU time is read once the leader exited and both drains ended, before the kill:
+what a process left in the tree uses between that read and its kill is not counted, as D14 says
+of the count. The two peaks are high-water marks and lose nothing to that order.
+
+**D37. The `run_ended` record carries the same `usage`, omitted when absent.**
+`AuditRecord::RunEnded` gains `usage: Option<RunUsage>` with `skip_serializing_if`; within it
+an absent member is omitted. D15's rule holds: the record is built from the ended observation,
+so it carries what `observe` would say. A run on `linux` that its timeout ended:
+
+```json
+{"event":"run_ended","run":"…","profile":"…","adapter":"linux","state":"ended",
+ "exit":{"signal":9},"limit":"wall_time","memory_oom_kills":0,"process_limit_hits":0,
+ "usage":{"wall_time_us":1003512,"cpu_time_us":2210,"memory_peak_bytes":1208320,
+ "processes_peak":3}}
+```
+
+**D38. The host driver's `EndOfRun` (D9) gains `usage: RunUsage`.** It is `Some` on the
+observation exactly where `end_of_run` is, so it is absent while the exec runs, on an observation
+rebuilt from a stored record and on one another driver made. Each member is `None` where its
+figure could not be read. `EndOfRun` is `#[non_exhaustive]`, so the member breaks no consumer
+outside this crate; no public item of the confinement module names `EndOfRun`.
+
+**The specification.** D25 governs: the `UNMAPPED:` block of `spec/confinement/confinement.yaml`
+names `usage` and its four members beside the other members of the ended observation, and
+`spec/confinement/README.md` says so under *Open questions*. No type, command, event or scenario
+is added. The story's item 5 asks for "the field and a scenario"; it is read under D25, as story
+2's sentence was: the model has no run entity, and no scenario could produce a figure.
+
+**Compatibility.** `RunObservation` and the variant `RunEnded` are `#[non_exhaustive]` since D26,
+so the new field breaks no Rust consumer at compile time. A sink that serializes every record and
+refuses unknown members refuses a `run_ended` record with `usage`. `confinement-public-items.txt`
+gains `RunUsage`, its members and the two fields.
+
 ## 4. The `run_ended` audit record
 
 ### The record
@@ -668,7 +812,9 @@ Consequences.
 No file under `contracts/` or `crates/substrate-wire/` changes. `ExecObservation.end_of_run` is a
 member of a host type beside `resource`, not of `Exec`. `cargo xtask check-bundles` reads the
 same bytes as before. The wire's own publication of the process count is
-`story:exec-observation-reports-process-count-hits`.
+`story:exec-observation-reports-process-count-hits`. The usage of § 3a moves no wire byte either:
+`RunUsage` is a host type, and the wire's `ResourceUsage` keeps being published only for an exec
+that asked for measurements (D34).
 
 ## 7. Compatibility for a Rust consumer
 
@@ -816,6 +962,27 @@ which runs the memory case's shape through the changed adapter and counts the ru
 with a named limit, with the stated member, and with neither. The story's acceptance is a count
 of zero for the last. The figures go to the planning store.
 
+### Story 4, the usage (§ 3a)
+
+The lane cases' run sleeps one second in eight processes started at once, allocates 64 MiB in
+one buffer (`dd` with a block of 64 MiB, which the read of `/dev/zero` fills) and spins in a
+subshell whose CPU time is bounded at one second by `ulimit -t 1`, so it spends at least one
+second of CPU whatever the load of the host. Its bounds leave room for all of it: ten seconds of
+wall and CPU time, 256 MiB, 32 processes.
+
+| lane | case | expects |
+|---|---|---|
+| gate's test step | unit, in `process.rs`: the end-of-run read from a cgroup directory written as files | each member `Some` for a readable file, `None` for a missing one, the others kept; a measured end takes its terminal sample's three counters |
+| gate's test step | unit, in `confinement/systemd.rs`: the end task's read from files | the same |
+| gate's test step | unit, in `confinement/linux.rs`: the observation of an ended exec and of a running one | `usage` is `end_of_run`'s on the ended one, `None` on the running one |
+| gate's test step | unit, in `confinement/`: the record's JSON with `usage`, with a member absent, and without | `"usage":{…}` with the absent member omitted, and the member omitted |
+| gate's test step | `ess_confinement_local`: a run that exits 0 | `usage` `None` on the observation and on `run_ended` |
+| delegated | `ess_confinement_linux`: the run above, with a sink | wall time at least 1 s, CPU time at least 1 s, peak memory at least 64 MiB, peak processes at least 8, on the observation and the same `usage` on `run_ended`. This is the story's acceptance |
+| delegated | the same file: a run that sleeps past its timeout of one second, with a sink | `WallTime` and wall time at least 1 s, on the observation and on `run_ended` |
+| `systemd` | `ess_confinement_systemd`, around `local`: the same two cases | the same |
+| `systemd` | the same file, around `linux`: the first case | the same, relabelled `systemd` with `inner: linux` |
+| `oci`, `pod`, `macos` | the existing cases that assert `process_limit_hits` absent | `usage` `None` on the observation and on `run_ended` |
+
 Every change also regenerates
 [`confinement-public-items.txt`](../../crates/substrate-host/tests/confinement-public-items.txt).
 
@@ -833,6 +1000,13 @@ Every change also regenerates
 
 `limit_unread` (D27) is `Some(UnattributedKill)` on `oci` alone, and `None` on every other
 adapter.
+
+| adapter | `usage` (§ 3a) |
+|---|---|
+| `linux` | `Some`, the four members read by the driver before the cgroup is removed (D36) |
+| `systemd` around `linux` | `linux`'s |
+| `systemd` around `local` | `Some`, the four members read by the run's end task (D36) |
+| `oci`, `pod`, `local`, `macos` | `None` |
 
 ## 10. Decisions
 
@@ -866,6 +1040,16 @@ adapter.
 | D26 | `RunObservation` and `AuditRecord` become `#[non_exhaustive]`; `RunObservation::new` (Q2) |
 | D27 | `RunObservation.limit_unread: Option<LimitUnread>`, on the record too; `oci` sets `UnattributedKill` for a `SIGKILL` neither it nor the embedder sent and the runtime's state does not explain; `limit` stays `None` (2026-11-25) |
 | D28 | the `oci` monitor reads the runtime's state once; the one-second re-read is removed (2026-11-25) |
+| D29 | `RunObservation.usage: Option<RunUsage>`, one `#[non_exhaustive]` struct of four `Option<u64>` members, so a later figure breaks no caller (Q6; 2026-11-26) |
+| D30 | a figure that cannot be read leaves that member absent and keeps the others (invariant 3) |
+| D31 | `wall_time_us`, `cpu_time_us`, `memory_peak_bytes`, `processes_peak`, named and counted as the wire's `ResourceUsage` |
+| D32 | wall time runs from the start to the leader's exit, on every adapter that reports it |
+| D33 | a measured exec reuses its terminal sample for the three counters; wall time is D32's for every exec (Q7) |
+| D34 | reading the usage refuses nothing, names no limit and changes no state; `linux` still asks for no measurements |
+| D35 | an `Unknown` run carries what was read before its cgroup went; D22's record carries none |
+| D36 | per adapter: `linux` and `systemd` read the four; `oci`, `pod`, `local`, `macos` `None` (Q8) |
+| D37 | `run_ended` carries the same `usage`, omitted when absent |
+| D38 | `EndOfRun.usage: RunUsage`, host-internal, read with the end's other counters |
 
 ## 11. Questions with more than one answer
 
@@ -916,6 +1100,35 @@ first consumer's session answered all five on 2026-11-24, each with A.
   it.
 - B: nothing is written. Cost: a consumer cannot tell a run that is still running from one whose
   adapter went away; it must time out on its own.
+
+Q6 to Q8 were added on 2026-11-26 with § 3a. The consumer gave no answer that day; A is the
+default the wave took (`approval-record:wave-2026-11-26-substrate`).
+
+**Q6. The shape of the usage.**
+
+- A (chosen): one `#[non_exhaustive]` `RunUsage` with four `Option<u64>` members, as
+  `RunObservation.usage` (D29). Cost: a consumer reads `observation.usage?.cpu_time_us`, one
+  level deeper than the counts beside it.
+- B: four `Option<u64>` fields on `RunObservation` and `RunEnded`, beside `memory_oom_kills`.
+  Cost: every later figure is one more field of each; a consumer that passes the usage on copies
+  each field.
+
+**Q7. The usage of an exec that asked for measurements.**
+
+- A (chosen): the end reuses the terminal `ResourceUsage` sample for the three counters (D33).
+  Cost: its wall time is the driver's clock to the leader's exit and can be lower than the wire's
+  `usage.wall_time_us` of the same exec.
+- B: the end reads every exec's counters on its own, measured or not. Cost: the same counter is
+  read twice at the end of a measured exec, and the observation and the wire record of one exec
+  can carry two values of it.
+
+**Q8. The adapters that read no counter today.**
+
+- A (chosen): `oci`, `pod`, `local` and `macos` leave `usage` `None` (D36; the story's item 4).
+  Cost: no usage on those adapters, not even a wall time their own clocks could give.
+- B: `local` and `macos` report a wall time from their own clocks and `oci` and `pod` read their
+  runtime's figures. Cost: four more reads to design and prove, two of them through a runtime
+  or a cluster API this design has not read (§ 13).
 
 ## 12. Inferred, not observed
 
@@ -990,6 +1203,14 @@ this tree:
 - That the digest in the header of a generated projection covers comments of the YAML (D25).
 - That the Kubernetes API exposes no counter of refused process creations for a Pod. What was
   read: the adapter reads none.
+- For § 3a, from the kernel's `cgroup-v2.rst` and not from its source: that `memory.peak` is the
+  highest `memory.current` of the cgroup since it was created, that `pids.peak` is the highest
+  `pids.current`, and that `cpu.stat` `usage_usec` counts the CPU time of every process that ran
+  in the cgroup, ended ones included. Which kernel release added `pids.peak` was not read; a
+  kernel without it leaves `processes_peak` absent (D30).
+- That `ulimit -t 1` in the lane cases' shell sets `RLIMIT_CPU` and the kernel sends `SIGXCPU`
+  once the process's CPU time reaches one second, so the spinning subshell spends at least one
+  second of CPU and then ends.
 
 ## 13. Not decided here
 
@@ -1004,8 +1225,12 @@ this tree:
 - A run entity in the ESS model, with the ended observation as a command's input and the
   per-adapter rows as its outcomes. It would let the suite hold D7, D8 and D14. It is its own
   story.
-- The usage figures (wall time, CPU time, peak memory, peak process count):
-  `story:run-observation-carries-usage`. It extends `EndOfRun`, `RunObservation` and `RunEnded`.
+- The usage figures (wall time, CPU time, peak memory, peak process count) are decided in § 3a
+  for `story:run-observation-carries-usage`, on `linux` and `systemd`. Not decided: usage on
+  `oci` (the runtime's stats, or its state's start and end times), on `pod` (the kubelet's
+  figures, or the container status's `startedAt` and `finishedAt`), and on `local` and `macos`
+  (their own clocks, `wait4`'s resource usage); usage while a run runs; block I/O and network
+  figures (`story:block-io-and-bandwidth-limits`).
 - The process count on the wire: `story:exec-observation-reports-process-count-hits`.
 - A count on `oci` and `pod`. Reading the container's cgroup from the host is not designed.
 - A cumulative CPU budget on `oci` and `pod`. Both bound a rate today.
