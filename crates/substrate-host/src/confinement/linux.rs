@@ -697,6 +697,7 @@ mod imp {
                         observed.end_of_run,
                     )
                 },
+                limit_unread: None,
                 memory_oom_kills: observed.end_of_run.and_then(|end| end.memory_oom_kills),
                 // The ended count; `observe` reads a running run's own (design 36 D13).
                 process_limit_hits: observed.end_of_run.and_then(|end| end.process_limit_hits),

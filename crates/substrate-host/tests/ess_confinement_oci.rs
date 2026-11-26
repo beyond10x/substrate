@@ -1108,12 +1108,74 @@ async fn an_oci_run_nobody_observes_writes_one_run_ended() {
         "{NAME}: {record}"
     );
     assert!(record.get("limit").is_none(), "{NAME}: {record}");
+    // Design 36 D27: an exit by status states nothing.
+    assert!(record.get("limit_unread").is_none(), "{NAME}: {record}");
     assert!(record.get("memory_oom_kills").is_none(), "{NAME}: {record}");
     // Design 36 D14: `oci` reads no count of refused creations.
     assert!(
         record.get("process_limit_hits").is_none(),
         "{NAME}: {record}"
     );
+    println!("{NAME}: executed");
+}
+
+/// Design 36 § 8, the amendment of 2026-11-25, the `oci` lane: a command that sends `SIGKILL` to
+/// itself, under a memory bound it stays far beneath, ends by signal 9 that neither the adapter
+/// nor the embedder sent, with no `OOMKilled` in the runtime's state. The run names no limit and
+/// states `unattributed_kill` (D27), in the `run_ended` record its monitor writes, which is the
+/// ended observation (D15). This is the end the hosted runner showed for a memory-bound kill
+/// whose flag the runtime left out, made on every host.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oci_run_that_kills_itself_names_no_limit_and_states_the_unattributed_kill() {
+    const NAME: &str = "ESS confinement oci unattributed kill";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    // Bounded as the run-ended case above: 50 s with the open measured.
+    let began = std::time::Instant::now();
+    let adapter = open_lane(&runtime, Vec::new());
+    let left = Duration::from_secs(50)
+        .checked_sub(began.elapsed())
+        .unwrap_or_else(|| panic!("{NAME}: opening the oci adapter took {:?}", began.elapsed()));
+    let (_dir, workspace) = canonical_tempdir();
+    let record = support::one_run_ended_unobserved(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            image: Some(image()),
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 20_000,
+                processes: 8,
+                memory_bytes: 64 << 20,
+                cpu_millis: 20_000,
+            }),
+            ..ConfinementProfile::default()
+        },
+        &Command {
+            argv: vec!["/bin/sh".into(), "-c".into(), "kill -9 $$".into()],
+            env: BTreeMap::new(),
+        },
+        ("oci", None),
+        left,
+    )
+    .await;
+    assert_eq!(record["state"], "ended", "{NAME}: {record}");
+    assert_eq!(
+        record["exit"],
+        serde_json::json!({"signal": 9}),
+        "{NAME}: {record}"
+    );
+    assert!(record.get("limit").is_none(), "{NAME}: {record}");
+    assert_eq!(
+        record["limit_unread"], "unattributed_kill",
+        "{NAME}: {record}"
+    );
+    assert!(record.get("memory_oom_kills").is_none(), "{NAME}: {record}");
     println!("{NAME}: executed");
 }
 
@@ -1179,8 +1241,9 @@ async fn an_oci_run_is_removed_after_a_kill() {
         Some(9),
         "{ended:?}"
     );
-    // Design 36 D7: an embedder's own kill names no limit.
+    // Design 36 D7: an embedder's own kill names no limit, and D27 states nothing for it.
     assert_eq!(ended.limit, None, "{ended:?}");
+    assert_eq!(ended.limit_unread, None, "{ended:?}");
     assert_eq!(
         containers(&runtime, run.as_str()),
         "",
@@ -1231,6 +1294,7 @@ async fn an_oci_run_is_removed_after_its_timeout() {
         Some(confinement::RunLimit::WallTime),
         "{ended:?}"
     );
+    assert_eq!(ended.limit_unread, None, "{ended:?}");
     assert_eq!(ended.memory_oom_kills, None, "{ended:?}");
     // Design 36 D14: nor a count of refused creations.
     assert_eq!(ended.process_limit_hits, None, "{ended:?}");
@@ -1242,9 +1306,12 @@ async fn an_oci_run_is_removed_after_its_timeout() {
     println!("ESS confinement oci timeout: executed");
 }
 
-/// Design 36 § 8, story 1, the `oci` lane: a container whose one process grows past its memory
-/// bound is ended by the kernel, the runtime states `OOMKilled` and the main process ended by a
-/// signal, so the run names `Memory`; `oci` reads no OOM count (D8). Bounded at two seconds.
+/// Design 36 § 8, story 1 and the amendment of 2026-11-25, the `oci` lane: a container whose one
+/// process grows past its memory bound is ended by the kernel. Where the runtime's state holds
+/// `OOMKilled`, the run names `Memory` (D7); where it does not, which a hosted runner showed in
+/// 128 of 610 such runs, the run names no limit and states `UnattributedKill` (D27). Either is
+/// one observation read once; any other fails the case. `oci` reads no OOM count (D8). Bounded
+/// at two seconds.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_oci_run_over_its_memory_bound_names_the_memory_limit() {
     const NAME: &str = "ESS confinement oci limit memory";
@@ -1291,18 +1358,20 @@ async fn an_oci_run_over_its_memory_bound_names_the_memory_limit() {
         .expect("waited");
     println!("{NAME}: the run ended after {:?}", began.elapsed());
     assert_eq!(ended.state, RunState::Ended, "{NAME}: {ended:?}");
-    // The adapter reads the state again for a second when the first read holds no `OOMKilled`
-    // (design 36 D7), so an end that names no limit is a runtime whose state did not hold the
-    // flag a second after the exit.
-    assert_ne!(
-        ended.limit, None,
-        "{NAME}: the runtime's state held no OOMKilled within a second of the exit: {ended:?}"
-    );
     assert_eq!(
-        ended.limit,
-        Some(confinement::RunLimit::Memory),
+        ended.exit.and_then(|exit| exit.signal),
+        Some(9),
         "{NAME}: {ended:?}"
     );
+    match (ended.limit, ended.limit_unread) {
+        (Some(confinement::RunLimit::Memory), None) => {
+            println!("{NAME}: the runtime's state held OOMKilled: Memory");
+        }
+        (None, Some(confinement::LimitUnread::UnattributedKill)) => {
+            println!("{NAME}: the runtime's state held no OOMKilled: the kill is stated");
+        }
+        _ => panic!("{NAME}: neither Memory nor the stated kill: {ended:?}"),
+    }
     assert_eq!(ended.memory_oom_kills, None, "{NAME}: {ended:?}");
     assert_eq!(ended.process_limit_hits, None, "{NAME}: {ended:?}");
     assert_eq!(

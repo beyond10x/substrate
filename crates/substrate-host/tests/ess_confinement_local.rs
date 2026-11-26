@@ -608,9 +608,12 @@ async fn a_local_run_that_exits_0_names_no_limit_and_no_oom_count() {
     assert_eq!(ended.state, RunState::Ended, "{ended:?}");
     assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
     assert_eq!(ended.limit, None, "{ended:?}");
+    // Design 36 D27: only `oci` states a kill it cannot attribute.
+    assert_eq!(ended.limit_unread, None, "{ended:?}");
     assert_eq!(ended.memory_oom_kills, None, "{ended:?}");
     let observed = adapter.observe(&run).await.expect("observed");
     assert_eq!(observed.limit, None, "{observed:?}");
+    assert_eq!(observed.limit_unread, None, "{observed:?}");
     assert_eq!(observed.memory_oom_kills, None, "{observed:?}");
 }
 
@@ -642,6 +645,7 @@ async fn a_local_run_reports_no_process_limit_hits_on_its_observations_or_its_ru
     assert_eq!(ended.process_limit_hits, None, "{ended:?}");
     let record = recorded.run_ended("local process limit hits").await;
     assert!(record.get("process_limit_hits").is_none(), "{record}");
+    assert!(record.get("limit_unread").is_none(), "{record}");
 }
 
 /// The profile every `run_ended` case of this file starts from: `local` in `workspace`.
