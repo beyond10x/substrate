@@ -415,18 +415,13 @@ fn alone() -> bool {
 }
 
 /// Has this process give every allocation of 128 KiB or more back to the system when it is
-/// freed, so that what is resident is what is held, and keep every thread's allocations in one
-/// arena, so that the figure does not depend on how many arenas the C library gives the
-/// indexer's threads.
+/// freed, so that what is resident is what is held.
 fn give_back_what_is_freed() {
     #[cfg(target_env = "gnu")]
     {
         // SAFETY: `mallopt` takes two integers and no pointer.
         let set = unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024) };
         assert_eq!(set, 1, "the allocator keeps the threshold");
-        // SAFETY: as above.
-        let set = unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
-        assert_eq!(set, 1, "the allocator keeps one arena");
     }
 }
 

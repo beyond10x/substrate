@@ -528,18 +528,13 @@ fn a_fetch_of_two_files_with_history_within_its_byte_limit_is_served() {
 
 /// Has this process give every allocation of 128 KiB or more back to the system when it is
 /// freed, so that what is resident is what is held: without it, memory a case freed stays
-/// resident and is used again, and what grows afterwards reads as less than what is held. Every
-/// thread's allocations stay in one arena, so that the figure does not depend on how many arenas
-/// the C library gives the indexer's threads.
+/// resident and is used again, and what grows afterwards reads as less than what is held.
 fn give_back_what_is_freed() {
     #[cfg(target_env = "gnu")]
     {
         // SAFETY: `mallopt` takes two integers and no pointer.
         let set = unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024) };
         assert_eq!(set, 1, "the allocator keeps the threshold");
-        // SAFETY: as above.
-        let set = unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
-        assert_eq!(set, 1, "the allocator keeps one arena");
     }
 }
 
