@@ -2062,6 +2062,42 @@ fn only_a_recovered_tag_that_predates_the_musl_stage_publishes_without_musl_arch
     assert!(position(&format!("- name: {MUSL_SOURCE_STEP}\n")) < position(MUSL_STEPS[0]));
 }
 
+/// A static musl executable holds musl's own object code, whose MIT licence asks that its
+/// copyright notice ("Copyright © 2005-2020 Rich Felker, et al.") be included in every copy. A
+/// musl archive holds its binary and the files the packaging step installs beside it, so one of
+/// those must carry that notice.
+#[test]
+fn the_musl_archives_carry_the_notice_of_the_c_library_linked_into_them() {
+    assert!(
+        DOCKERFILE.contains("FROM scratch AS release-binaries-musl\n"),
+        "the source builds musl release binaries"
+    );
+    let package = step_script("Package the release binaries");
+    let files: Vec<&str> = package
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("install -m 0644 "))
+        .flat_map(str::split_whitespace)
+        .filter(|word| !word.starts_with('"') && !word.starts_with('$'))
+        .collect();
+    assert!(
+        files.contains(&"THIRD_PARTY_LICENSES.html"),
+        "the archives carry the third-party notices: {files:?}"
+    );
+    let root = repository_root();
+    let carrying: Vec<&&str> = files
+        .iter()
+        .filter(|file| {
+            fs::read_to_string(root.join(file))
+                .unwrap_or_default()
+                .contains("Rich Felker")
+        })
+        .collect();
+    assert!(
+        !carrying.is_empty(),
+        "no file a musl archive carries ({files:?}) holds musl's copyright notice"
+    );
+}
+
 /// Writes an executable `name` holding `script` into `tools`.
 fn tool(tools: &Path, name: &str, script: &str) {
     let path = tools.join(name);

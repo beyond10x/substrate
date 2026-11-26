@@ -108,4 +108,154 @@ mod tests {
             assert!(source.is_dir(), "{name}: the source moved");
         }
     }
+
+    /// Every entry beneath `root`, by relative path, with its kind, a file's bytes and a link's
+    /// target.
+    fn tree(root: &Path) -> Vec<(String, String)> {
+        let mut entries = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("read directory") {
+                let path = entry.expect("entry").path();
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("beneath the root")
+                    .display()
+                    .to_string();
+                let metadata = std::fs::symlink_metadata(&path).expect("metadata");
+                let kind = if metadata.file_type().is_symlink() {
+                    format!(
+                        "link {}",
+                        std::fs::read_link(&path).expect("link").display()
+                    )
+                } else if metadata.is_dir() {
+                    pending.push(path);
+                    "directory".to_owned()
+                } else {
+                    format!(
+                        "file {}",
+                        String::from_utf8_lossy(&std::fs::read(&path).expect("file"))
+                    )
+                };
+                entries.push((relative, kind));
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    type Setup = fn(&Path) -> (std::path::PathBuf, std::path::PathBuf);
+
+    /// The two forms answer each case alike, as `renameat2(2)` documents it, and leave the
+    /// same tree behind.
+    #[test]
+    fn both_forms_answer_every_case_alike_and_leave_the_same_tree() {
+        let cases: [(&str, Setup, Result<(), Errno>); 12] = [
+            (
+                "an absent source",
+                |root| (root.join("absent"), root.join("target")),
+                Err(Errno::ENOENT),
+            ),
+            (
+                "a file onto a file",
+                |root| {
+                    std::fs::write(root.join("a"), "a").expect("a");
+                    std::fs::write(root.join("b"), "b").expect("b");
+                    (root.join("a"), root.join("b"))
+                },
+                Err(Errno::EEXIST),
+            ),
+            (
+                "a file onto a directory",
+                |root| {
+                    std::fs::write(root.join("a"), "a").expect("a");
+                    std::fs::create_dir(root.join("d")).expect("d");
+                    (root.join("a"), root.join("d"))
+                },
+                Err(Errno::EEXIST),
+            ),
+            (
+                "an entry onto its own name",
+                |root| {
+                    std::fs::write(root.join("a"), "a").expect("a");
+                    (root.join("a"), root.join("a"))
+                },
+                Err(Errno::EEXIST),
+            ),
+            (
+                "a target whose parent is absent",
+                |root| {
+                    std::fs::write(root.join("a"), "a").expect("a");
+                    (root.join("a"), root.join("absent/target"))
+                },
+                Err(Errno::ENOENT),
+            ),
+            (
+                "a directory into itself",
+                |root| {
+                    std::fs::create_dir_all(root.join("d/sub")).expect("d/sub");
+                    (root.join("d"), root.join("d/sub/moved"))
+                },
+                Err(Errno::EINVAL),
+            ),
+            (
+                "an empty source",
+                |root| (std::path::PathBuf::new(), root.join("target")),
+                Err(Errno::ENOENT),
+            ),
+            (
+                "a file named as a directory",
+                |root| {
+                    std::fs::write(root.join("a"), "a").expect("a");
+                    (root.join("a/"), root.join("target"))
+                },
+                Err(Errno::ENOTDIR),
+            ),
+            (
+                "a path through a file",
+                |root| {
+                    std::fs::write(root.join("a"), "a").expect("a");
+                    (root.join("a/below"), root.join("target"))
+                },
+                Err(Errno::ENOTDIR),
+            ),
+            (
+                "a symbolic link moves itself, not what it names",
+                |root| {
+                    std::fs::create_dir(root.join("d")).expect("d");
+                    std::os::unix::fs::symlink("d", root.join("link")).expect("link");
+                    (root.join("link"), root.join("moved"))
+                },
+                Ok(()),
+            ),
+            (
+                "a dangling symbolic link as the target",
+                |root| {
+                    std::fs::write(root.join("a"), "a").expect("a");
+                    std::os::unix::fs::symlink("absent", root.join("dangling")).expect("link");
+                    (root.join("a"), root.join("dangling"))
+                },
+                Err(Errno::EEXIST),
+            ),
+            (
+                "a target name longer than a name may be",
+                |root| {
+                    std::fs::write(root.join("a"), "a").expect("a");
+                    (root.join("a"), root.join("x".repeat(256)))
+                },
+                Err(Errno::ENAMETOOLONG),
+            ),
+        ];
+        for (case, setup, expected) in cases {
+            let mut answers = Vec::new();
+            for (name, rename) in both() {
+                let root = tempfile::tempdir().expect("temporary directory");
+                let (source, target) = setup(root.path());
+                let answer = rename(&source, &target);
+                assert_eq!(answer, expected, "{case}: {name}");
+                answers.push((answer, tree(root.path())));
+            }
+            assert_eq!(answers[0], answers[1], "{case}: the two forms differ");
+        }
+    }
 }
