@@ -10,6 +10,11 @@ against `main` at `c407457cc`. Serves three stories of
 2. `story:process-count-limit-hit-is-observed` (§ 3),
 3. `story:audit-records-run-end-and-limit` (§ 4).
 
+Amended on 2026-11-25, against `main` at `fe73a2c14`, on the first consumer's answer to one more
+question (`approval-record:requester-answers-d101-2026-11-25`): D27 and D28, the `oci` note of
+D7, and the measurement § 12 holds. The amendment serves a fourth story of that epic,
+`story:an-oci-run-killed-at-its-memory-bound-names-the-limit-on-a-hosted-runner`.
+
 It changes no wire byte and no contract bundle: the observation and the audit record are
 substrate-host's confinement API
 ([ADR 0044](../../adr/0044-confinement-is-a-contract-family-served-by-declared-adapters.md)
@@ -208,17 +213,14 @@ Notes on the rows.
   main process must have ended by a signal as well. The adapter reads an exit status of 129 to
   192 as a signal, and, beside `OOMKilled`, any status outside 0 to 128 (193 to 255, or a
   negative one) as `SIGKILL`, so a main process that itself exits with such a status after a
-  child's OOM kill names `Memory`; one that exits with 0 to 128 names none. The runtime sets the
-  flag when its OOM event for the container arrives, and that may be after the exit that returns
-  the runtime client (amendment of 2026-11-24). The monitor therefore reads the state again,
-  every 50 ms for at most one second, where the first read shows an ended container with exit
-  status 137 and no flag, neither its own deadline nor the stall sent the kill, and the embedder
-  asked for none with `signal(Kill)`; the container is removed after that. Such a run's end is
-  published up to one second later: a read still running when the second is over is dropped,
-  and the state read before it stands. A flag the runtime sets later than that, or never, names
-  no limit (§ 12). So does one set after an embedder's `signal(Kill)` that was asked when the
-  container had ended and so sent nothing: the monitor knows that a kill was asked, not which
-  kill ended the container. An end with another signal status is read once. Where the runtime
+  child's OOM kill names `Memory`; one that exits with 0 to 128 names none. The monitor reads
+  the runtime's state once, after the runtime client returned and before it removes the
+  container (D28, amendment of 2026-11-25; from 2026-11-24 to that day it read the state again
+  for one second where the first read held no flag). A memory-bound kill whose state holds no
+  flag at that read names no limit; the observation then says that the kill is not attributed
+  (D27). So does a flag beside an embedder's `signal(Kill)` that was asked when the container
+  had ended and so sent nothing: the monitor knows that a kill was asked, not which kill ended
+  the container, and D27 states nothing for a kill the embedder asked for. Where the runtime
   client's
   return and the deadline are ready at once, the monitor takes the return. A stall's kill asked
   after the embedder's `signal(Kill)` set its flag, before that call reached the runtime, names
@@ -231,6 +233,89 @@ Notes on the rows.
   its origin so the two are told apart. An embedder's own `signal` names no limit on any adapter.
 - `pod` reads `status.reason` at the end. That the kubelet writes `DeadlineExceeded` there is not
   read in this tree (§ 12); the pod lane's case holds it.
+
+### A kill no source explains
+
+Amendment of 2026-11-25. On a hosted runner the runtime's state held no `OOMKilled` for 128 of
+610 runs that the kernel killed at their memory bound, and no later read held it (§ 12). D7
+forbids naming `Memory` from the signal. Before this amendment such a run's observation was
+that of any other `SIGKILL`: `exit.signal` 9 and nothing else.
+
+**D27. `RunObservation` gains `limit_unread: Option<LimitUnread>`. `oci` sets it for a run whose
+main process ended by `SIGKILL` that no source the adapter reads explains. `limit` stays
+`None`.**
+
+```rust
+/// Why an ended run names no limit although a bound may have ended it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LimitUnread {
+    /// The run's main process ended by `SIGKILL`. The adapter sent none, the embedder asked for
+    /// none, and the source the adapter reads for a memory-bound kill names none.
+    UnattributedKill,
+}
+```
+
+When `oci` sets `Some(UnattributedKill)`. All of these hold at the monitor's one read of the
+runtime's state:
+
+- the container has ended and its exit status is 137, which the adapter reads as signal 9;
+- the state holds no `OOMKilled`;
+- the monitor's own deadline did not fire, and the stall of the live output sent no kill;
+- the embedder asked for no `signal(Kill)`;
+- the run is published as `Ended`, so the runtime client returned and the container was removed.
+
+When the member is `None`, on every adapter:
+
+- beside a named limit: `limit` and `limit_unread` are never both `Some`;
+- while the run runs, and on an `Unknown` run, which carries no exit;
+- for every exit that is not signal 9. A bound's kill is `SIGKILL`; an end by another signal
+  (status 129 to 192 other than 137) is read as before and states nothing;
+- for a kill the adapter or the embedder sent. The deadline's kill names `WallTime`, the stall's
+  `OutputStall`, and an embedder's `signal(Kill)` names nothing and is the embedder's own
+  knowledge.
+
+What the member says. The run was killed, and the adapter read no source that says by whom. It
+is no limit: a consumer that counts limit hits counts `limit`, and reads this member as "a
+bound may have ended this run, and this adapter cannot say". Four causes produce it on `oci`:
+
+1. the kernel's OOM killer at the run's memory bound, where the runtime did not record its event
+   (the measured case);
+2. the kernel's OOM killer under memory pressure of the whole host;
+3. a kill another party sent through the runtime;
+4. a process of the run that sent `SIGKILL` to the run's command. A run can therefore produce
+   the member by itself. It cannot remove it: the monitor decides from the runtime's state and
+   its own flags, none of which the run writes.
+
+Per adapter.
+
+| adapter | `limit_unread` |
+|---|---|
+| `linux`, `systemd` | `None`: the memory row of D7 is the cgroup's own `oom_kill` count, read before the cgroup is removed, so a `SIGKILL` beside a count of zero is known not to be the memory bound's. Where that count could not be read, `memory_oom_kills` is `None` and says so |
+| `oci` | `Some(UnattributedKill)` under the five conditions above, else `None` |
+| `pod` | `None`: unchanged. Whether a container status can lack `OOMKilled` after a memory-bound kill was not measured (§ 13) |
+| `local`, `macos` | `None`: no `limits` family, so no bound of the adapter sends a kill |
+
+Reason for a member of its own, and not a sixth variant of `RunLimit`. `limit` answers "which
+bound ended the run". A variant that means "perhaps one" would make every consumer's match on
+`limit` decide whether it counts as a hit, and D7's rule would no longer hold for the field. The
+enum is `#[non_exhaustive]`: a second reason a later adapter cannot read gets a variant.
+
+Reason for stating it at all, and not leaving `None` beside `None`. The requirement is that
+every limit hit is visible. Where the adapter cannot see one, the observation says that it
+cannot, on the run where that is the case, and a consumer can tell that run from one a signal
+of its own ended.
+
+**D28. The `oci` monitor reads the runtime's state once. The re-read of one second is
+removed.** `OOM_FLAG_WAIT` and the function that waits for the flag go.
+
+Reason. In the measurement no flag arrived after the first read: 482 of 610 states held it at
+the first read, and of the 128 others none held it within 5 s. The re-read named no limit in any
+measured run and published the end of every unattributed kill one second later, the end of a
+command that kills itself included.
+
+What an exact answer on `oci` would take is not decided here (§ 13).
 
 ### `memory_oom_kills`
 
@@ -362,6 +447,9 @@ RunEnded {
     exit: Option<RunExit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<RunLimit>,
+    /// D27, amendment of 2026-11-25.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit_unread: Option<LimitUnread>,
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_oom_kills: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -379,12 +467,22 @@ RunEnded {
   `process_limit_hits`; `story:process-count-limit-hit-is-observed` adds that member.
   `story:run-observation-carries-usage` adds its members to the observation and the record
   together.
+- `story:an-oci-run-killed-at-its-memory-bound-names-the-limit-on-a-hosted-runner` adds
+  `limit_unread` to the observation and the record together (D27). A reader takes a missing
+  `limit_unread` as "nothing stated".
 
 A run on `linux` that its memory bound ended:
 
 ```json
 {"event":"run_ended","run":"…","profile":"…","adapter":"linux","state":"ended",
  "exit":{"signal":9},"limit":"memory","memory_oom_kills":1,"process_limit_hits":0}
+```
+
+A run on `oci` that a kill ended which the adapter cannot attribute (D27):
+
+```json
+{"event":"run_ended","run":"…","profile":"…","adapter":"oci","state":"ended",
+ "exit":{"signal":9},"limit_unread":"unattributed_kill"}
 ```
 
 ### Once per run
@@ -546,7 +644,8 @@ program".
 What the block states, as text:
 
 - the ended observation's `limit`, `memory_oom_kills` and `process_limit_hits`, and the
-  `run_ended` record, are `UNMAPPED`;
+  `run_ended` record, are `UNMAPPED`; the change that adds `limit_unread` (D27) names it in the
+  same block and regenerates the projections in the same change;
 - the reason: the model has no run entity, and a scenario cannot start a program or reach a
   bound, so no step could produce the values;
 - where they are held instead: the per-adapter rows of this document (D7, D8, D14) and each
@@ -604,6 +703,21 @@ In this repository no file outside `crates/substrate-host/src/confinement/` buil
 use single-variant patterns. The consumers outside this repository were not read (§ 14).
 `crates/substrate-host/tests/confinement-public-items.txt` is regenerated in each story's change,
 and each story's `CHANGELOG.md` entry names the break.
+
+The amendment of 2026-11-25 (D27, D28) breaks no Rust consumer at compile time: `RunObservation`
+and the variant `RunEnded` are `#[non_exhaustive]` since D26, so the new field `limit_unread`
+compiles against every pattern with `..` and every `RunObservation::new`, and `LimitUnread` is a
+new public item. What a consumer sees at run time:
+
+| consumer | after the amendment |
+|---|---|
+| reads `limit` of an `oci` run | unchanged in what a value means; a memory-bound kill whose state holds no flag is `None`, as before |
+| reads the new `limit_unread` | `Some(UnattributedKill)` on the `oci` runs of D27, `None` on every other observation |
+| a sink that serializes every record | a `run_ended` record of such a run has one more member, `"limit_unread"`; a reader that refuses unknown members refuses that record |
+| waits for the end of an `oci` run that a kill of unread origin ended | the end is published up to one second earlier (D28) |
+
+The public-items list gains `LimitUnread`, its variant and the field, and the change's
+`CHANGELOG.md` entry names the new record member.
 
 The host driver's `EndOfRun` (D9) is public and `#[non_exhaustive]`, so a field it gains breaks
 no consumer outside this crate. Story 1 gives it two public fields beside `memory_oom_kills`:
@@ -676,6 +790,32 @@ few seconds (D20).
 | `systemd` | around `local` and around `linux`: one run each, nobody observes | one `run_ended` per run, with the outer adapter's name |
 | `oci`, `pod`, `macos` | one run each, nobody observes | one `run_ended` per run |
 
+### The amendment of 2026-11-25, the unattributed kill
+
+| lane | case | expects |
+|---|---|---|
+| gate's test step | unit, in `confinement/oci.rs`: the function that decides the member, over a state with exit status 137 and no flag, where neither the monitor nor the embedder sent a kill | `limit` `None`, `limit_unread` `UnattributedKill`. This is the state the hosted runner showed; the case does not compile before the change |
+| gate's test step | the same function over: the flag set; the deadline fired; the stall's kill; an embedder's `signal(Kill)`; exit status 143; exit status 1; no state read | `limit_unread` `None` in each, with the limit D7 names |
+| gate's test step | unit, in `confinement/`: the record's JSON with the member, and without | `"limit_unread":"unattributed_kill"`, and the member omitted |
+| gate's test step | `ess_confinement_local`: a run that exits 0 | `limit_unread` `None` on the observation and on `run_ended` |
+| `oci` | `ess_confinement_oci`: a command that sends `SIGKILL` to itself, with a memory bound it stays under | `exit.signal` 9, `limit` `None`, `limit_unread` `UnattributedKill`, and one `run_ended` with the same member |
+| `oci` | the same file, the existing memory case: a run that allocates past its memory bound | either `limit` `Memory` with `limit_unread` `None`, or `limit` `None` with `limit_unread` `UnattributedKill`; the case prints which of the two it read. Any other observation fails it |
+| `oci` | the same file, the existing timeout case | `WallTime`, `limit_unread` `None` |
+| delegated | `ess_confinement_linux`, the existing memory case | `Memory`, `limit_unread` `None` |
+
+The self-kill case was probed once on a workstation on 2026-11-25 with the runtime's own client
+and the lane's pinned image (Docker 29.8.2, `--init`): `sh -c 'kill -9 $$'` ended with exit
+status 137 and no `OOMKilled`, and so did a child that killed its parent; `kill -9 1` from inside
+ended nothing.
+
+The memory case's two answers are one deterministic assertion, not a retry: a run of it passes
+or fails on its one observation. How often each answer comes is a rate, and a rate is no test
+([`AGENTS.md`](../../AGENTS.md), § *The gate*). It is measured once after the change, as the
+first measurement was: one job on a standard hosted runner, from a branch that is never merged,
+which runs the memory case's shape through the changed adapter and counts the runs that end
+with a named limit, with the stated member, and with neither. The story's acceptance is a count
+of zero for the last. The figures go to the planning store.
+
 Every change also regenerates
 [`confinement-public-items.txt`](../../crates/substrate-host/tests/confinement-public-items.txt).
 
@@ -691,6 +831,9 @@ Every change also regenerates
 | `local` | `OutputStall` | `None` | `None` | the run's end task |
 | `macos` | `OutputStall` | `None` | `None` | the run's end task |
 
+`limit_unread` (D27) is `Some(UnattributedKill)` on `oci` alone, and `None` on every other
+adapter.
+
 ## 10. Decisions
 
 | # | decision |
@@ -701,7 +844,7 @@ Every change also regenerates
 | D4 | of several true limits the first of output stall, egress bytes, memory, CPU time, wall time is named, on every adapter |
 | D5 | the aperture byte ceiling and the output stall are variants (Q1) |
 | D6 | `linux` maps five refusal codes; every other code is `None` |
-| D7 | per adapter: which limits, from which source; none from an exit or a signal alone |
+| D7 | per adapter: which limits, from which source; none from an exit or a signal alone (the `oci` note amended 2026-11-25) |
 | D8 | `memory_oom_kills` on `linux` and `systemd`; `oci`, `local`, `macos` `None`; `pod` unchanged |
 | D9 | `ExecObservation.end_of_run`, host-internal, read for every exec before the cgroup is removed; an unreadable counter is `None` |
 | D10 | the process count is `pids.events` `max`; the peak is the usage story's |
@@ -721,6 +864,8 @@ Every change also regenerates
 | D24 | no record for a denied execution or connection, none while the run runs |
 | D25 | the specification gains one `UNMAPPED:` block and nothing else |
 | D26 | `RunObservation` and `AuditRecord` become `#[non_exhaustive]`; `RunObservation::new` (Q2) |
+| D27 | `RunObservation.limit_unread: Option<LimitUnread>`, on the record too; `oci` sets `UnattributedKill` for a `SIGKILL` neither it nor the embedder sent and the runtime's state does not explain; `limit` stays `None` (2026-11-25) |
+| D28 | the `oci` monitor reads the runtime's state once; the one-second re-read is removed (2026-11-25) |
 
 ## 11. Questions with more than one answer
 
@@ -794,16 +939,41 @@ this tree:
   for `linux`; it was read, not run.
 - What a container runtime's `OOMKilled` flag covers (the main process or any process of the
   container), and whether the runtime sets a group kill. D7 does not depend on the answer.
-- When a container runtime sets `OOMKilled`, relative to the exit. Seen on a hosted runner on
-  2026-11-24: one of two runs of the `oci` lane's memory case ended by signal 9 with no flag at
-  the one read the monitor then made. On a workstation with Docker 29.8.2, cgroup v2 and runc,
-  330 of 330 containers of that case's shape held the flag at the first read after the client
-  returned, 300 of them started twelve at a time. Read in the sources of Docker and of
-  containerd's cgroup library on that day, not run: Docker sets the flag when the OOM event
-  arrives, whatever the container's state, and the event's watcher sends none when the cgroup is
-  removed before it reads `memory.events`. So a late flag and a missing one are both possible;
-  which of the two the runner showed, and how late a late one is, is not known. The one second
-  of D7's `oci` rule is a choice, not a measurement.
+- When a container runtime sets `OOMKilled`, relative to the exit, on a runtime other than the
+  two measured below. Read in the sources of Docker and of containerd's cgroup library on
+  2026-11-24, not run: Docker sets the flag when the OOM event arrives, whatever the container's
+  state, and the event's watcher sends none when the cgroup is removed before it reads
+  `memory.events`. So a late flag and a missing one are both possible by the sources. Measured
+  (next entry): a missing one, and no late one. D28 rests on that measurement; a runtime that
+  sets the flag late would name no limit and state D27's member.
+- The measurement D27 and D28 rest on, and what it does not cover. One job on a standard hosted
+  runner on 2026-11-25 (run 45659093178: runner image ubuntu-26.04, kernel 7.0.0-1020-azure,
+  4 CPUs, Docker 29.4.2 with the systemd cgroup driver on cgroup v2, runc 1.5.3) ran the `oci`
+  lane's memory case's shape 610 times with the runtime's own client: the arguments the adapter
+  passes to `create`, then `start --attach`, then reads of the container's state for 5 s. The
+  kernel log of the job holds 610 OOM kill lines.
+
+  | phase | runs | flag at the first read | flag at a later read | no flag |
+  |---|---|---|---|---|
+  | one at a time, no load | 60 | 56 | 0 | 4 |
+  | one at a time, beside 8 busy loops | 150 | 113 | 0 | 37 |
+  | four at a time, beside 8 busy loops | 200 | 146 | 0 | 54 |
+  | as the second, with a reader on the host of the container's `memory.events` | 100 | 81 | 0 | 19 |
+  | as the second, the growing process a child of the container's command | 100 | 86 | 0 | 14 |
+  | all | 610 | 482 | 0 | 128 |
+
+  Three more sources were read in the same job. The runtime's `oom` event: sent for 482
+  containers, the same 482 that held the flag, so it is no second source. The reader on the host:
+  it read `oom_kill` above zero in 66 of its 100 runs, and the flag or the reader named the kill
+  in 90 of them, so it is not exact either. A command inside the container that outlives the
+  kill of its child: it read `oom_kill` 1 in its own cgroup in 100 of 100 runs. On a workstation
+  (Docker 29.8.2, the cgroupfs driver on cgroup v2) 330 of 330 containers of the case's shape
+  held the flag at the first read on 2026-11-24, and so did 19 of 19 on 2026-11-25. Not
+  covered: another runner image, another runtime (Podman was not run), a rootless daemon, and a
+  rate over more than one job. The three failures of the gate's case that led here are
+  recorded in the story.
+- That a command which sends `SIGKILL` to itself ends an `oci` run with exit status 137 and no
+  flag on a hosted runner. Probed once on a workstation (§ 8); the `oci` lane's case holds it.
 - That the kubelet writes `status.reason` `DeadlineExceeded` on a Pod it ended for
   `activeDeadlineSeconds`, and how long after the deadline.
 - That a container runtime and the kubelet report a main process killed by signal 9 as exit code
@@ -823,6 +993,14 @@ this tree:
 
 ## 13. Not decided here
 
+- An exact source for a memory-bound kill on `oci`. The one the measurement found exact is a
+  process inside the container that outlives the kill and reads its own cgroup's `oom_kill`
+  (§ 12). It would be a helper the adapter starts inside every run, which is a change of this
+  repository's architecture and needs a design document of its own. It is drafted as
+  `story:an-oci-run-reads-its-memory-kill-from-inside-the-container` and not ordered: no
+  consumer gap needs it today (`approval-record:requester-answers-d101-2026-11-25`).
+- The same question for `pod`: whether a container status can lack `OOMKilled` after a
+  memory-bound kill was not measured, and `pod` states no `limit_unread`.
 - A run entity in the ESS model, with the ended observation as a command's input and the
   per-adapter rows as its outcomes. It would let the suite hold D7, D8 and D14. It is its own
   story.

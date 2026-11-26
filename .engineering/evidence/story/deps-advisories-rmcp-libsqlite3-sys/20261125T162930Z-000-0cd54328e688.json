@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T16:29:30Z",
+  "actor": "agent:substrate",
+  "artifact": "story:deps-advisories-rmcp-libsqlite3-sys",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate.yml, run 45644944907 attempt 2, the push of main at 224e1e5ffd: bash scripts/gate.sh tests and bash scripts/gate.sh static, Full gate success",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/45644944907"
+  }
+}
