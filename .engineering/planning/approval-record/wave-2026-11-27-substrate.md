@@ -7,7 +7,7 @@ title: 'Wave 2026-11-27: an exec''s file changes, and static musl release archiv
 relations:
 - decides: story:exec-file-changes-are-recorded
 - decides: story:release-publishes-static-musl-archives
-revision: 2
+revision: 5
 transitions:
 - {from: "draft", to: "approved", at: "2026-11-26T07:56:20Z", actor: "human:operator", revision: 2}
 ---
@@ -36,7 +36,7 @@ Derived on 2026-11-26 from the accepted stories with
 
 | unit | story | stakeholder | first step |
 |---|---|---|---|
-| U1 | `story:exec-file-changes-are-recorded` | `runbook`, the consumer whose recorder this replaces | an ADR and the ESS model, before any code (invariant 8; a new noun is modelled first) |
+| U1 | `story:exec-file-changes-are-recorded` | the consumer whose recorder this replaces | an ADR and the ESS model, before any code (invariant 8; a new noun is modelled first) |
 | U2 | `story:release-publishes-static-musl-archives` | the repository owner | none: no contract or capability moves |
 
 U1's ADR decides what the story's item 1 lists. Each decision with more than one answer goes to the
@@ -67,5 +67,8 @@ commit; the merges of `main` the strict check asks for; one pull request. No tag
 
 | unit | branch | head | worktree | stage |
 |---|---|---|---|---|
-| U1 | | | | planned |
-| U2 | | | | planned |
+| U1 | `wave/2026-11-27-u1` | `d9aaf08633` and later | `wave-1127-u1` | ADR 0051 accepted; the record built on `linux` and `systemd` around `linux`; round 2 on the ADR's remaining items; not in this pull request |
+| U2 | `wave/2026-11-27-u2` | `92b14351de` | `wave-1127-u2` | adversary pass 1: one failing case and two notes, fixed in round 1; the musl-binaries job of release lanes run 45788384311 built and checked both binaries; merged |
+
+This pull request delivers U2 and the closing moves. U1 stays on its branch and worktree,
+unmerged, and is delivered in a later pull request.

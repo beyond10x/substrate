@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:release-publishes-static-musl-archives
 kind: story
-status: active
+status: implemented
 title: A release publishes static musl archives of the daemon and the CLI
 summary: x86_64-unknown-linux-musl archives beside the gnu ones, static and checked in Alpine; mimalloc only where measured not slower
 scope:
@@ -32,10 +32,11 @@ scope:
   path: crates/substrate-daemon/src/main.rs
 - confidence: inferred
   path: xtask/tests/release_workflow.rs
-revision: 16
+revision: 17
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-26T07:55:49Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-26T07:55:50Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-26T10:17:48Z", actor: "human:operator", revision: 17, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: a release publishes static musl archives of the daemon and the CLI
 

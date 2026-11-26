@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T10:06:31Z",
+  "actor": "human:operator",
+  "artifact": "story:release-publishes-static-musl-archives",
+  "kind": "story",
+  "revision": 16,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Release lanes (release-lanes.yml) on pull request 309 at af51d381b8, job Static musl release binaries: exported both musl binaries from the release-binaries-musl stage, refused none as not statically linked, and both answered --version in the digest-pinned Alpine image; xtask release_workflow 133 passed (archives, SHA256SUMS over four, musl-COPYRIGHT)",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/45788384311"
+  }
+}
