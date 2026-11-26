@@ -9,7 +9,7 @@ relations:
 - decides: story:local-gate-holds-what-the-hosted-runner-differs-in
 - decides: story:test-fifos-made-in-process
 - decides: story:an-oci-run-killed-at-its-memory-bound-names-the-limit-on-a-hosted-runner
-revision: 2
+revision: 3
 transitions:
 - {from: "draft", to: "approved", at: "2026-11-26T04:33:05Z", actor: "human:operator", revision: 2}
 ---
@@ -74,8 +74,10 @@ the story states why the channel stays; the wait script is POSIX sh.
   workspace on `main` at `4301004012` (commit `fd21aacecf`, pull request 222), and the gate run
   45644944907 on `main` at `224e1e5ffd` concluded `success`.
 - `story:an-oci-run-killed-at-its-memory-bound-names-the-limit-on-a-hosted-runner` to
-  `implemented`, after pull request 307 merges and `main`'s gate is green on it: the repeat
-  measurement of run 45750181878 counted 410 runs, 286 `Memory`, 124 stated, 0 neither.
+  `implemented`, once `main`'s gate is green on pull request 307's merge `34b81f6a25`: the repeat
+  measurement of run 45750181878 counted 410 runs, 286 `Memory`, 124 stated, 0 neither. That gate
+  run was still queued when this wave's pull request opened, so the move travels with the two
+  units' moves in the planning-only pull request after the merge.
 
 ## Branches and trees
 
@@ -94,5 +96,13 @@ release.
 
 | unit | branch | head | worktree | stage |
 |---|---|---|---|---|
-| U1 | | | | planned |
-| U3 | | | | planned |
+| U1 | `wave/2026-11-26-u1` | `7b96819f99` | `wave-1126-u1` | adversary pass 1: no failing case, one note fixed; merged as `39afb7e7fa` |
+| U3 | `wave/2026-11-26-u3` | `58473b42e9` | `wave-1126-u3` | adversary pass 1: four failing cases and four notes, fixed in round 1; merged as `d12c20edba` |
+
+Worktrees are managed by the `worktree` CLI under its tree root, each with its own `target/`;
+every build ran on the build pool's remote node, so no `target/` was written locally.
+
+U1's five delegated lane lines (`ESS confinement linux usage`, `… usage limit`,
+`ESS confinement systemd local usage`, `… usage limit`, `ESS confinement systemd linux usage`)
+reported themselves absent on the build node, which has no delegated cgroup root and no user
+manager. The hosted confinement lane of `release-lanes.yml` runs them on the pull request.

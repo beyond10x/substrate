@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T15:25:10Z",
+  "actor": "human:operator",
+  "artifact": "story:test-fifos-made-in-process",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Gate (gate.yml) on main at 224e1e5ffd, push run: success; no Command::new(\"mkfifo\") in the workspace at 4301004012 (FIFOs made in process since fd21aacecf, pull request 222)",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/45644944907"
+  }
+}

@@ -2,16 +2,17 @@
 format: aep.planning-md/3
 id: story:test-fifos-made-in-process
 kind: story
-status: active
+status: implemented
 title: Tests make their FIFOs in process, so a runner's mkfifo cannot fail the gate
 summary: Five test helpers create FIFOs with nix::unistd::mkfifo instead of running the external mkfifo command, which on ubuntu-latest now refuses a non-UTF-8 path.
 owner: substrate
 tags:
 - tests
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-14T20:14:06Z", actor: "human:agent", revision: 3, executor: "human:timo"}
 - {from: "proposed", to: "active", at: "2026-11-14T20:14:06Z", actor: "human:agent", revision: 4, executor: "human:timo"}
+- {from: "active", to: "implemented", at: "2026-11-26T05:36:37Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: Tests make their FIFOs in process
 
