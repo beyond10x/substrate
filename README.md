@@ -198,7 +198,9 @@ client as prebuilt x86_64 Linux binaries:
 |---|---|
 | `substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz` | `substrate-daemon`, `LICENSE`, `THIRD_PARTY_LICENSES.html`, `README.md` |
 | `b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz` | `b10x-substrate`, the same three files |
-| `SHA256SUMS` | the SHA-256 of both archives |
+| `substrate-daemon-<version>-x86_64-unknown-linux-musl.tar.gz` | a static `substrate-daemon`, the same three files, `musl-COPYRIGHT` |
+| `b10x-substrate-<version>-x86_64-unknown-linux-musl.tar.gz` | a static `b10x-substrate`, the same three files, `musl-COPYRIGHT` |
+| `SHA256SUMS` | the SHA-256 of every archive |
 | `SHA256SUMS.sigstore.json` | the keyless `cosign sign-blob` bundle for `SHA256SUMS` |
 
 The release workflow exports both binaries from the Dockerfile's pinned `builder` stage, the stage
@@ -211,6 +213,22 @@ on a stock Ubuntu 22.04 image. Before any image tag moves, the workflow refuses 
 needs a newer glibc or any other shared library, and starts both in a digest-pinned Ubuntu 22.04
 image. A recovery run of a tag whose source predates the `release-binaries` stage publishes no
 archives, no `SHA256SUMS` and no signature, and its release notes say so.
+
+The two `x86_64-unknown-linux-musl` archives hold statically linked builds of the same two
+binaries, from the Dockerfile's `release-binaries-musl` stage of the same pinned image: they run
+on any x86_64 Linux, whatever its C library, and need no shared library at all. OpenSSL is
+compiled into them from source. Before any image tag moves, the workflow refuses either binary
+when it has a program interpreter or a dynamic section naming a shared library, or when it does
+not answer `--version` with the release's version in a digest-pinned Alpine image, which has musl
+and no glibc. The musl C library is linked into them, and each musl archive carries its licence
+and copyright notice as `musl-COPYRIGHT`, the repository's
+[`licenses/musl-COPYRIGHT`](licenses/musl-COPYRIGHT). The musl build selects the packages and
+targets the `gnu` build selects, so both resolve the same dependency features; only `openssl-sys`
+differs, which builds OpenSSL from source for musl. `release-lanes.yml` builds them and runs the
+same checks on every pull request that changes what they build. They keep musl's own allocator:
+mimalloc replaces it only after a recorded measurement shows the binary is not slower with it on its allocation-heavy path. A
+recovery run of a tag whose source predates the musl stage publishes the `gnu` archives alone,
+and its release notes say so.
 
 Verify the signature, then the archives. The certificate identity is the release workflow at the
 ref that ran it, which the release notes print:

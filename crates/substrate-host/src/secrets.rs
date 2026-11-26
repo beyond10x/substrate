@@ -248,19 +248,9 @@ fn seal_with(name: &str, material: &[u8], seals: i32) -> Result<OwnedFd, DriverE
     };
     let memfd_name =
         std::ffi::CString::new(memfd_name(name)).map_err(|_| unsealed("has an unusable name"))?;
-    // SAFETY: `memfd_name` is a NUL-terminated C string that outlives the call, and the returned
-    // descriptor is taken into an `OwnedFd` immediately.
-    let raw = unsafe {
-        libc::memfd_create(
-            memfd_name.as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        )
-    };
-    if raw < 0 {
-        return Err(unsealed("anonymous memory is unavailable"));
-    }
-    // SAFETY: `raw` is a fresh descriptor this call owns and nothing else holds.
-    let memfd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let memfd =
+        crate::memfd::memfd_create(&memfd_name, libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
+            .map_err(|_| unsealed("anonymous memory is unavailable"))?;
     {
         // SAFETY: the file is owned by `memfd` for the length of this block and is not closed by
         // the borrowed `File`, which is forgotten rather than dropped.

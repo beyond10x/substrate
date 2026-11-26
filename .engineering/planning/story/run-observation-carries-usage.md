@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:run-observation-carries-usage
 kind: story
-status: active
+status: implemented
 title: A run's observation carries the usage behind its limits
 summary: The ended RunObservation and the run_ended record carry wall time, CPU time, peak memory and peak process count on linux and systemd; absent on every other adapter.
 owner: substrate
@@ -56,10 +56,11 @@ scope:
   path: spec/confinement/scenarios
 - confidence: inferred
   path: website/docs
-revision: 16
+revision: 17
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T03:08:31Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":3}}, correlation: "sdc-accepts-usage-and-file-changes-2026-11-21"}
 - {from: "proposed", to: "active", at: "2026-11-21T03:08:31Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"review_outcome":3}}, correlation: "sdc-accepts-usage-and-file-changes-2026-11-21"}
+- {from: "active", to: "implemented", at: "2026-11-26T07:55:12Z", actor: "human:operator", revision: 17, decided_on: {"recorded":{"test_result":1,"review_outcome":4}}}
 ---
 # Story: A run's observation carries the usage behind its limits
 

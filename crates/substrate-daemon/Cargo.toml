@@ -59,6 +59,9 @@ ulid.workspace = true
 zeroize.workspace = true
 x509-parser.workspace = true
 
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl-sys.workspace = true
+
 [dev-dependencies]
 # The clean-room runner (tests/runtime_vectors.rs) interrupts the daemon it spawned; `signal`
 # is a test-only feature of the `nix` dependency this crate already carries. `resource` is

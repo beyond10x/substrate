@@ -48,6 +48,7 @@ hyper = { version = "1.7", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["service", "tokio"] }
 libc = "0.2"
 nix = { version = "0.31", features = ["fs", "ioctl", "term", "user"] }
+openssl-sys = { version = "0.9.117", features = ["vendored"] }
 parking_lot = "0.12"
 pulldown-cmark = "0.13"
 rusqlite = { version = "0.41", features = ["bundled"] }

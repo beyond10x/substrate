@@ -52,6 +52,12 @@ mod quota;
 mod read_only_files;
 #[cfg(target_os = "linux")]
 mod read_only_roots;
+// `memfd_create` as the system call, which every Linux C library serves.
+#[cfg(target_os = "linux")]
+mod memfd;
+// `renameat2` with `RENAME_NOREPLACE` as the system call, which every Linux C library serves.
+#[cfg(target_os = "linux")]
+mod rename;
 pub mod seatbelt;
 #[cfg(target_os = "linux")]
 mod seccomp;
@@ -1122,13 +1128,7 @@ impl GitWorkspaceStaging {
         if let Some(quotas) = self.quotas.as_ref() {
             quotas.rename(self.path(), target)?;
         } else {
-            nix::fcntl::renameat2(
-                nix::fcntl::AT_FDCWD,
-                self.path(),
-                nix::fcntl::AT_FDCWD,
-                target,
-                nix::fcntl::RenameFlags::RENAME_NOREPLACE,
-            )?;
+            rename::rename_noreplace(self.path(), target)?;
         }
         // The installed directory and quota now belong to the durable workspace. TempDir still
         // names the absent staging path, so discard that handle without attempting cleanup.

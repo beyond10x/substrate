@@ -5,7 +5,8 @@
 # lane's trailer (`Confinement-lane`, `Quota-lane`, `Chart-lane`, `Namespace-lane`) whose message
 # is `<source-sha> <count> <RFC 3339 UTC>`. `release.yml` reads those annotations from this
 # workflow's own recorded `success` for the tagged commit and checks them exactly as it checks a
-# tag trailer.
+# tag trailer. A fifth job, `musl-binaries`, is no lane: it builds the static musl release
+# binaries and runs `release.yml`'s own checks of them, and records nothing.
 #
 # Setup the lanes need and a fresh hosted VM lacks, each done as root here and nowhere else:
 #   * confinement: bubblewrap and `/usr/bin/socat`; an AppArmor profile granting `userns` to
@@ -294,3 +295,94 @@ jobs:
           record=$(sed -n 's/^Namespace-lane: //p' "$log" | tail -n 1)
           test -n "$record"
           echo "::notice title=Namespace-lane::${record}"
+
+  # Not a lane and no record: the static musl archives a release publishes, built and checked on
+  # every pull request that changes what they build, by the release's own three steps, so a musl
+  # break is found before a tag. A red job here also keeps this workflow's run from `success`.
+  musl-binaries:
+    name: Static musl release binaries
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      BINARY_DIST: target/release-binaries
+      MUSL_TARGET: x86_64-unknown-linux-musl
+      MUSL_FLOOR_IMAGE: alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Read the workspace version
+        run: |
+          set -euo pipefail
+          version=$(awk '/^\[/ { section = $0; next } section == "[workspace.package]" && $1 == "version" { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)
+          test -n "$version"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Export the musl release binaries from the pinned builder stage
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --target release-binaries-musl \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --output "type=local,dest=${BINARY_DIST}/musl" \
+            .
+          ls -l "${BINARY_DIST}/musl"
+
+      # A static executable has no program interpreter, and its dynamic section, where it has one
+      # (static-pie), names no shared library.
+      - name: Refuse musl release binaries that are not statically linked
+        run: |
+          set -euo pipefail
+          for binary in substrate-daemon b10x-substrate; do
+            file="${BINARY_DIST}/musl/${binary}"
+            if ! headers=$(readelf -lW "$file" 2>&1) || ! grep -q '^Program Headers:' <<<"$headers"; then
+              echo "refused: ${binary} (${MUSL_TARGET}) has no program headers readelf can read." >&2
+              exit 1
+            fi
+            if grep -q 'INTERP' <<<"$headers"; then
+              echo "refused: ${binary} (${MUSL_TARGET}) names a program interpreter; it is not statically linked." >&2
+              exit 1
+            fi
+            if ! dynamic=$(readelf -dW "$file" 2>&1); then
+              echo "refused: readelf cannot read the dynamic section of ${binary} (${MUSL_TARGET})." >&2
+              exit 1
+            fi
+            if needed=$(grep '(NEEDED)' <<<"$dynamic"); then
+              echo "refused: ${binary} (${MUSL_TARGET}) needs a shared library: ${needed//$'\n'/; }" >&2
+              exit 1
+            fi
+            echo "${binary} (${MUSL_TARGET}) has no program interpreter and needs no shared library"
+          done
+
+      # Alpine has musl and no glibc loader, which the container proves before it starts a
+      # binary. The answer must be this release's version.
+      - name: Smoke-test the musl release binaries in Alpine
+        run: |
+          set -euo pipefail
+          if ! grep -Eqx '[^@]+@sha256:[0-9a-f]{64}' <<<"$MUSL_FLOOR_IMAGE"; then
+            echo "refused: MUSL_FLOOR_IMAGE '${MUSL_FLOOR_IMAGE}' is not pinned by digest." >&2
+            exit 1
+          fi
+          for binary in substrate-daemon b10x-substrate; do
+            if ! answer=$(docker run --rm --network none --read-only \
+                --volume "${PWD}/${BINARY_DIST}/musl:/release-binaries:ro" \
+                "${MUSL_FLOOR_IMAGE}" \
+                sh -c 'test -e /lib/ld-musl-x86_64.so.1 && test ! -e /lib64/ld-linux-x86-64.so.2 && exec "$@"' \
+                sh "/release-binaries/${binary}" --version); then
+              echo "refused: ${binary} (${MUSL_TARGET}) does not answer --version in ${MUSL_FLOOR_IMAGE}." >&2
+              exit 1
+            fi
+            first=$(head -n 1 <<<"$answer")
+            if [ "$first" != "${binary} ${VERSION}" ]; then
+              echo "refused: ${binary} (${MUSL_TARGET}) answers --version with '${first}', not '${binary} ${VERSION}'." >&2
+              exit 1
+            fi
+            echo "${binary} (${MUSL_TARGET}) answers '${first}' in ${MUSL_FLOOR_IMAGE}"
+          done

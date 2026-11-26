@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T04:43:11Z",
+  "actor": "human:operator",
+  "artifact": "story:an-oci-run-killed-at-its-memory-bound-names-the-limit-on-a-hosted-runner",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Gate (gate.yml) on main at 34b81f6a25, the merge of pull request 307: success, the oci lane's memory case included; repeat measurement run 45750181878: 410 runs, 286 Memory, 124 stated, 0 neither",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/45756977523"
+  }
+}

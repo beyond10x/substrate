@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T07:03:38Z",
+  "actor": "human:operator",
+  "artifact": "story:local-gate-holds-what-the-hosted-runner-differs-in",
+  "kind": "story",
+  "revision": 20,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Gate (gate.yml) on pull request 308 at f60b379096: success; every Linux job ran on ubuntu-26.04 (release lanes on ubuntu-24.04), held by every_job_runs_on_a_runner_image_named_by_its_version; wait_checks cases of bot_scripts green",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/45772526538"
+  }
+}
