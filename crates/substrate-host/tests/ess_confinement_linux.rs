@@ -279,6 +279,8 @@ async fn a_linux_run_over_its_memory_bound_names_the_memory_limit() {
         Some(confinement::RunLimit::Memory),
         "{NAME}: {ended:?}"
     );
+    // Design 36 D27: `linux` reads the cgroup's own count and states nothing.
+    assert_eq!(ended.limit_unread, None, "{NAME}: {ended:?}");
     assert!(
         ended.memory_oom_kills.is_some_and(|kills| kills >= 1),
         "{NAME}: {ended:?}"

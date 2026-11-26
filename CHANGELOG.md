@@ -7,6 +7,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `substrate_host::confinement::LimitUnread` and `RunObservation.limit_unread`, and the member
+  `limit_unread` of the `run_ended` audit record (design 36 D27). An ended `oci` run whose main
+  process ended by `SIGKILL` that neither the adapter nor the embedder sent, and whose runtime
+  state holds no `OOMKilled`, names no limit and states `unattributed_kill`. Every other run on
+  every adapter states nothing, and a run never has both a limit and the statement. The member
+  is no limit: a consumer that counts limit hits counts `limit`. No Rust consumer breaks at
+  compile time (`RunObservation` and `RunEnded` are `#[non_exhaustive]`); a reader of the
+  serialized record that refuses unknown members refuses a record with the new member. Held by
+  `a_sigkill_no_source_explains_names_no_limit_and_is_stated` and the monitor's cases in
+  `confinement::oci::tests`, the record's JSON case in `confinement::tests`, and the `oci` lane
+  case `ESS confinement oci unattributed kill`, a command that sends `SIGKILL` to itself.
+
+### Changed
+
+- The `oci` adapter reads a container's state once after the runtime client returns, and
+  publishes the run's end once that read and the removal are done (design 36 D28). Measured on
+  a standard hosted runner on 2026-11-25, 610 memory-bound kills: the flag was at the first read
+  in 482 and at no later read within 5 s in the other 128. The `oci` lane's memory case passes
+  with either of the two ends design 36 allows, `memory`, or no limit and `unattributed_kill`,
+  and prints which it read; any other end fails it.
+
 ## [0.28.0] — 2026-11-25
 
 ### Added

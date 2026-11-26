@@ -1226,6 +1226,7 @@ mod imp {
                 state,
                 exit,
                 limit: end.limit,
+                limit_unread: None,
                 memory_oom_kills: end.memory_oom_kills,
                 process_limit_hits: end.process_limit_hits,
             }
