@@ -448,6 +448,48 @@ async fn a_linux_run_under_its_process_bound_counts_zero_refused_creations() {
     .await;
 }
 
+// Design 36 § 8, story 4, the story's acceptance: a run that sleeps one second in eight
+// processes, allocates 64 MiB and spends one second of CPU ends with a usage of at least each,
+// read by the driver before it removed the run's cgroup, on the observation and on its
+// `run_ended` (D33, D36, D37).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_carries_the_usage_behind_its_limits() {
+    const NAME: &str = "ESS confinement linux usage";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let ended = support::usage_of_a_run(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            workspace: Some(workspace),
+            process_bounds: Some(support::USAGE_BOUNDS),
+            ..ConfinementProfile::default()
+        },
+    )
+    .await;
+    assert_eq!(ended.adapter, AdapterName::Linux, "{NAME}: {ended:?}");
+}
+
+// Design 36 § 8, story 4: a run its timeout ended carries both the limit and its usage, on the
+// observation and on its `run_ended`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_a_limit_ended_carries_the_limit_and_its_usage() {
+    const NAME: &str = "ESS confinement linux usage";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::usage_beside_a_limit(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            workspace: Some(workspace),
+            ..ConfinementProfile::default()
+        },
+    )
+    .await;
+}
+
 /// Admits `profile`, runs `script` under `/bin/sh -c` and returns its stdout once it ended.
 async fn run_script(
     adapter: &Arc<dyn ConfinementAdapter>,

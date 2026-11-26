@@ -551,6 +551,8 @@ impl MacosAdapter {
             memory_oom_kills: None,
             // No `limits` family, so no process bound to count (design 36 D14).
             process_limit_hits: None,
+            // No `limits` family and no cgroup: no usage (design 36 D36).
+            usage: None,
         }
     }
 

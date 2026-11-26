@@ -439,6 +439,10 @@ pub enum AuditRecord {
         /// read it, as on the observation (design 36 § 3).
         #[serde(skip_serializing_if = "Option::is_none")]
         process_limit_hits: Option<u64>,
+        /// What the run used, as the observation states it (design 36 D37); absent where the
+        /// adapter reads no usage, and within it a figure that was not read is absent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        usage: Option<RunUsage>,
     },
 }
 
@@ -728,6 +732,7 @@ impl PendingEnd {
             limit_unread,
             memory_oom_kills,
             process_limit_hits,
+            usage,
             ..
         } = observation;
         AuditRecord::RunEnded {
@@ -746,6 +751,7 @@ impl PendingEnd {
             limit_unread,
             memory_oom_kills,
             process_limit_hits,
+            usage,
         }
     }
 
@@ -763,6 +769,8 @@ impl PendingEnd {
             limit_unread: None,
             memory_oom_kills: None,
             process_limit_hits: None,
+            // D35: the adapter read nothing.
+            usage: None,
         }
     }
 }
@@ -1229,6 +1237,37 @@ pub struct RunObservation {
     /// `systemd` read it, `oci`, `pod`, `local` and `macos` do not (design 36 D14). A hit ends no
     /// run and sets no `limit`.
     pub process_limit_hits: Option<u64>,
+    /// What the run used (design 36 § 3a). `None` while the run runs and on an adapter that
+    /// reads no usage: `linux` and `systemd` read it, `oci`, `pod`, `local` and `macos` do not
+    /// (D36). `Some` on an ended run of an adapter that reads it, also beside the limit that
+    /// ended it and on an `Unknown` run, with what was read before the run's cgroup was removed
+    /// (D35); within it a figure that could not be read is absent (D30).
+    pub usage: Option<RunUsage>,
+}
+
+/// What an ended run used (design 36 § 3a). Each member is named and counted as the wire's
+/// `ResourceUsage` names and counts it (D31), and is `None` where the adapter could not read that
+/// figure: absent, never zero, and the others are kept (D30, invariant 3).
+///
+/// `#[non_exhaustive]`: outside this crate one is built with [`RunUsage::default`] and field
+/// assignments, so a later figure breaks no caller (D29).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[non_exhaustive]
+pub struct RunUsage {
+    /// Microseconds from the run's start to its leader's exit, whether the leader exited by
+    /// itself or by a bound's kill; the time the adapter then spends draining output and ending
+    /// the tree is not counted (D32).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wall_time_us: Option<u64>,
+    /// Microseconds of CPU time of the run's cgroup, `cpu.stat` `usage_usec`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_time_us: Option<u64>,
+    /// The highest memory use of the run's cgroup, in bytes, `memory.peak`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_peak_bytes: Option<u64>,
+    /// The highest number of processes in the run's cgroup at once, `pids.peak`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processes_peak: Option<u64>,
 }
 
 impl RunObservation {
@@ -1247,6 +1286,7 @@ impl RunObservation {
             limit_unread: None,
             memory_oom_kills: None,
             process_limit_hits: None,
+            usage: None,
         }
     }
 }
@@ -1498,6 +1538,80 @@ mod tests {
         assert_eq!(observation.limit, None);
         assert_eq!(observation.memory_oom_kills, None);
         assert_eq!(observation.process_limit_hits, None);
+        assert_eq!(observation.usage, None);
+    }
+
+    /// Design 36 D29, D30: a usage built from its default has every member absent, and each
+    /// member serializes under the wire's name, an absent one omitted.
+    #[test]
+    fn a_usage_serializes_its_members_under_the_wire_names_and_omits_an_absent_one() {
+        let empty = RunUsage::default();
+        assert_eq!(empty.wall_time_us, None);
+        assert_eq!(empty.cpu_time_us, None);
+        assert_eq!(empty.memory_peak_bytes, None);
+        assert_eq!(empty.processes_peak, None);
+        assert_eq!(
+            serde_json::to_value(empty).expect("serializes"),
+            serde_json::json!({})
+        );
+        let read = RunUsage {
+            wall_time_us: Some(1_000_001),
+            cpu_time_us: Some(1_000_002),
+            memory_peak_bytes: Some(67_108_864),
+            processes_peak: None,
+        };
+        assert_eq!(
+            serde_json::to_value(read).expect("serializes"),
+            serde_json::json!({
+                "wall_time_us": 1_000_001, "cpu_time_us": 1_000_002,
+                "memory_peak_bytes": 67_108_864,
+            })
+        );
+    }
+
+    /// Design 36 D37: the record of an ended observation carries its usage as the observation
+    /// states it, an absent member omitted, and omits `usage` where the observation has none.
+    #[test]
+    fn the_record_of_an_observation_carries_its_usage() {
+        let (admitted, _, _) = admitted_local(true);
+        let run = RunId::new("local-8-1".to_owned());
+        let end = admitted.audit_start(&run, "/bin/true");
+        let pending = end.0.as_ref().expect("a sink");
+        let mut observation = RunObservation::new(run.clone(), AdapterName::Linux, RunState::Ended);
+        observation.exit = Some(RunExit {
+            code: None,
+            signal: Some(9),
+        });
+        observation.limit = Some(RunLimit::WallTime);
+        observation.usage = Some(RunUsage {
+            wall_time_us: Some(1_003_512),
+            cpu_time_us: Some(2_210),
+            memory_peak_bytes: None,
+            processes_peak: Some(3),
+        });
+        assert_eq!(
+            serde_json::to_value(pending.record(observation.clone())).expect("record"),
+            serde_json::json!({
+                "event": "run_ended", "run": "local-8-1", "profile": admitted.id().as_str(),
+                "adapter": "linux", "state": "ended", "exit": {"signal": 9},
+                "limit": "wall_time",
+                "usage": {"wall_time_us": 1_003_512, "cpu_time_us": 2_210, "processes_peak": 3},
+            })
+        );
+        // Design 36 D35: an `Unknown` run keeps what was read.
+        observation.state = RunState::Unknown;
+        observation.exit = None;
+        assert_eq!(
+            serde_json::to_value(pending.record(observation.clone())).expect("record")["usage"],
+            serde_json::json!({"wall_time_us": 1_003_512, "cpu_time_us": 2_210, "processes_peak": 3})
+        );
+        observation.usage = None;
+        assert!(
+            serde_json::to_value(pending.record(observation))
+                .expect("record")
+                .get("usage")
+                .is_none()
+        );
     }
 
     /// Design 36 D4: of the limits true at a run's end the first of output stall, egress bytes,
@@ -1557,6 +1671,7 @@ mod tests {
             limit_unread: None,
             memory_oom_kills: None,
             process_limit_hits: None,
+            usage: None,
         };
         assert_eq!(
             serde_json::to_value(&bare).expect("serializes"),
@@ -1580,6 +1695,7 @@ mod tests {
             limit_unread: None,
             memory_oom_kills: Some(1),
             process_limit_hits: Some(0),
+            usage: None,
         };
         assert_eq!(
             serde_json::to_value(&full).expect("serializes"),
@@ -1606,6 +1722,7 @@ mod tests {
             limit_unread: Some(LimitUnread::UnattributedKill),
             memory_oom_kills: None,
             process_limit_hits: None,
+            usage: None,
         };
         assert_eq!(
             serde_json::to_value(&unattributed).expect("serializes"),
@@ -1819,6 +1936,7 @@ mod tests {
                 limit_unread: None,
                 memory_oom_kills: None,
                 process_limit_hits: None,
+                usage: None,
             },
             written: None,
         }

@@ -25,7 +25,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Notify, mpsc};
 
-use crate::confinement::AdmittedProfile;
+use crate::confinement::{AdmittedProfile, RunUsage};
 use crate::environment::baseline_value;
 use crate::exec_gate::ExecGate;
 use crate::observation::EndOfRun;
@@ -3654,6 +3654,8 @@ async fn run_child(
         &output_bound,
     )
     .await;
+    // The leader was reaped: its wall time stops here, before the drains (design 36 D32).
+    let leader_exited_at = Instant::now();
     // A drain that did not finish read nothing to its end: its total is unknown.
     let lost = |retention| {
         let mut lost = RetentionBuffer::new(retention, 0);
@@ -3678,6 +3680,9 @@ async fn run_child(
     // the record and is not raised into `exec.metrics-unavailable`: a run that requested no
     // counters was promised none, and the measured path above still reports its own.
     let mut end_of_run = cgroup.end_of_run(terminal_usage.as_ref());
+    // The driver's own clock for every exec, measured or not: a measured exec's wire wall time
+    // runs to its terminal sample and does not move (design 36 D32, D33).
+    end_of_run.usage.wall_time_us = Some(wall_time_us(started_at, leader_exited_at));
     // Read after both drains ended, so no stall is flagged later.
     end_of_run.output_stall_after_exit = execution.backpressure_after_exit.load(Ordering::Acquire);
     // Quiesce the whole run tree after the terminal counter sample. The shared mappings remain
@@ -4627,6 +4632,12 @@ fn exec_cpu_quota(cpu_millis: u64, timeout_ms: u64, cores: u32) -> u64 {
         .clamp(1_000, ceiling)
 }
 
+/// The microseconds from a run's start to its leader's exit (design 36 D32): zero where `exited`
+/// is not after `started`, and `u64::MAX` past it, never a wrapped value.
+pub(crate) fn wall_time_us(started: Instant, exited: Instant) -> u64 {
+    u64::try_from(exited.saturating_duration_since(started).as_micros()).unwrap_or(u64::MAX)
+}
+
 /// The name of an exec's own cgroup beneath the configured cgroup root, which the applied record
 /// states as `applied.cgroup`. It is made of the exec id alone, never of the root, so it is at
 /// most `"substrate-".len() + MAX_RESOURCE_ID_CHARS` characters, within
@@ -4835,19 +4846,39 @@ impl Cgroup {
     }
 
     /// What this cgroup holds once the exec's leader exited, read once before the cgroup is
-    /// removed (design 36 D9). A measured exec's counts are its terminal sample's, `terminal`;
-    /// every other exec, and one whose sample failed, reads each counter on its own. A counter
-    /// that cannot be read is `None`.
+    /// removed (design 36 D9, D38). A measured exec's counts and usage figures are its terminal
+    /// sample's, `terminal` (D33); every other exec, and one whose sample failed, reads each
+    /// counter on its own. A counter that cannot be read is `None`, and the others are kept
+    /// (D30). The wall time is no cgroup read: the caller sets it (D32).
     fn end_of_run(&self, terminal: Option<&Result<ResourceUsage, DriverError>>) -> EndOfRun {
-        let (memory_oom_kills, process_limit_hits) = match terminal {
-            Some(Ok(usage)) => (Some(usage.memory_oom_kills), Some(usage.process_limit_hits)),
-            _ => (self.memory_oom_kills().ok(), self.process_limit_hits().ok()),
+        let (memory_oom_kills, process_limit_hits, usage) = match terminal {
+            Some(Ok(sample)) => (
+                Some(sample.memory_oom_kills),
+                Some(sample.process_limit_hits),
+                RunUsage {
+                    wall_time_us: None,
+                    cpu_time_us: Some(sample.cpu_time_us),
+                    memory_peak_bytes: Some(sample.memory_peak_bytes),
+                    processes_peak: Some(sample.processes_peak),
+                },
+            ),
+            _ => (
+                self.memory_oom_kills().ok(),
+                self.process_limit_hits().ok(),
+                RunUsage {
+                    wall_time_us: None,
+                    cpu_time_us: self.cpu_usage_micros().ok(),
+                    memory_peak_bytes: read_decimal_counter(&self.path.join("memory.peak")).ok(),
+                    processes_peak: read_decimal_counter(&self.path.join("pids.peak")).ok(),
+                },
+            ),
         };
         EndOfRun {
             memory_oom_kills,
             process_limit_hits,
             output_stall_after_exit: false,
             egress_ceiling_reached: false,
+            usage,
         }
     }
 
@@ -5404,6 +5435,85 @@ mod tests {
         assert_eq!(cgroup.end_of_run(Some(&failed)).process_limit_hits, Some(0));
         std::fs::remove_file(directory.path().join("pids.events")).unwrap();
         assert_eq!(cgroup.end_of_run(Some(&failed)).process_limit_hits, None);
+    }
+
+    /// Design 36 D30, D31, D36: the end-of-run read takes the CPU time from `cpu.stat`
+    /// `usage_usec`, the peak memory from `memory.peak` and the peak process count from
+    /// `pids.peak` for an exec that asked for no measurements. A figure that cannot be read is
+    /// absent, never zero, and the others are kept. The wall time is not a cgroup read: the end
+    /// leaves it to `run_child` (D32).
+    #[test]
+    fn the_end_of_run_reads_the_usage_and_leaves_each_unreadable_figure_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu memory pids");
+        let usage = cgroup.end_of_run(None).usage;
+        assert_eq!(usage.cpu_time_us, Some(500));
+        assert_eq!(usage.memory_peak_bytes, Some(2048));
+        assert_eq!(usage.processes_peak, Some(3));
+        assert_eq!(usage.wall_time_us, None);
+        std::fs::remove_file(directory.path().join("memory.peak")).unwrap();
+        let usage = cgroup.end_of_run(None).usage;
+        assert_eq!(usage.memory_peak_bytes, None);
+        assert_eq!(usage.cpu_time_us, Some(500));
+        assert_eq!(usage.processes_peak, Some(3));
+        std::fs::write(directory.path().join("pids.peak"), "many\n").unwrap();
+        assert_eq!(cgroup.end_of_run(None).usage.processes_peak, None);
+        std::fs::write(directory.path().join("cpu.stat"), "user_usec 300\n").unwrap();
+        let usage = cgroup.end_of_run(None).usage;
+        assert_eq!(usage.cpu_time_us, None);
+        assert_eq!(
+            usage,
+            crate::confinement::RunUsage::default(),
+            "every figure unread is every member absent"
+        );
+        // The counts beside the usage are read on their own and are not lost with it.
+        assert_eq!(cgroup.end_of_run(None).memory_oom_kills, Some(0));
+    }
+
+    /// Design 36 D33: a measured exec's end-of-run usage takes the CPU time, the peak memory and
+    /// the peak process count of its terminal sample, not a second read of the cgroup; a sample
+    /// that failed falls back to reading each on its own. Neither sets the wall time.
+    #[test]
+    fn a_measured_end_of_run_takes_the_usage_of_its_terminal_sample() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu memory pids");
+        let mut usage = cgroup
+            .resource_usage(true, Instant::now())
+            .expect("usage is observed");
+        usage.cpu_time_us = 7;
+        usage.memory_peak_bytes = 8;
+        usage.processes_peak = 9;
+        usage.wall_time_us = 10;
+        assert_eq!(
+            cgroup.end_of_run(Some(&Ok(usage))).usage,
+            crate::confinement::RunUsage {
+                wall_time_us: None,
+                cpu_time_us: Some(7),
+                memory_peak_bytes: Some(8),
+                processes_peak: Some(9),
+            }
+        );
+        let failed = Err(crate::DriverError::failed(
+            "exec.metrics-read-failed",
+            "gone",
+        ));
+        let read = cgroup.end_of_run(Some(&failed)).usage;
+        assert_eq!(read.cpu_time_us, Some(500));
+        assert_eq!(read.memory_peak_bytes, Some(2048));
+        assert_eq!(read.processes_peak, Some(3));
+        std::fs::remove_file(directory.path().join("pids.peak")).unwrap();
+        assert_eq!(cgroup.end_of_run(Some(&failed)).usage.processes_peak, None);
+    }
+
+    /// Design 36 D32: the wall time runs from the start to the leader's exit, in microseconds,
+    /// and an exit instant that is not after the start is zero, never a wrapped value.
+    #[test]
+    fn the_wall_time_runs_from_the_start_to_the_leaders_exit() {
+        let started = Instant::now();
+        let exited = started + Duration::from_micros(1_500_250);
+        assert_eq!(super::wall_time_us(started, exited), 1_500_250);
+        assert_eq!(super::wall_time_us(exited, started), 0);
+        assert_eq!(super::wall_time_us(started, started), 0);
     }
 
     /// Design 36 D13: the count of a running exec is read from its cgroup at the moment it is

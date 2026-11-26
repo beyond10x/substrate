@@ -701,6 +701,9 @@ mod imp {
                 memory_oom_kills: observed.end_of_run.and_then(|end| end.memory_oom_kills),
                 // The ended count; `observe` reads a running run's own (design 36 D13).
                 process_limit_hits: observed.end_of_run.and_then(|end| end.process_limit_hits),
+                // What the driver read at the end, whatever state it recorded; none while the
+                // exec runs and none on an end it did not read (design 36 D35, D36, D38).
+                usage: observed.end_of_run.map(|end| end.usage),
             }
         }
     }
@@ -995,6 +998,7 @@ mod imp {
                 process_limit_hits: Some(0),
                 output_stall_after_exit: after_exit,
                 egress_ceiling_reached: egress,
+                usage: crate::confinement::RunUsage::default(),
             }
         }
 
@@ -1553,6 +1557,41 @@ mod imp {
                 LinuxAdapter::observation(&run, &exec_observation(ExecState::Running, None, None));
             assert_eq!(running.state, RunState::Running, "{running:?}");
             assert_eq!(running.process_limit_hits, None, "{running:?}");
+        }
+
+        /// Design 36 D35, D36, D38 on `linux` in the gate's test step: the ended observation
+        /// carries the usage the driver read at the end, unchanged, an unread member absent, also
+        /// beside the limit that ended the run and on an `Unknown` exec; an exec whose end was not
+        /// read and a running one have no usage.
+        #[test]
+        fn the_ended_linux_observation_carries_the_drivers_end_of_run_usage() {
+            let run = RunId::new("ex_count".to_owned());
+            let usage = crate::confinement::RunUsage {
+                wall_time_us: Some(1_000_001),
+                cpu_time_us: Some(1_000_002),
+                memory_peak_bytes: None,
+                processes_peak: Some(9),
+            };
+            let mut read = end(false, 0, false);
+            read.usage = usage;
+            let limited = LinuxAdapter::observation(
+                &run,
+                &exec_observation(ExecState::Cancelled, Some("exec.timeout"), Some(read)),
+            );
+            assert_eq!(limited.limit, Some(RunLimit::WallTime), "{limited:?}");
+            assert_eq!(limited.usage, Some(usage), "{limited:?}");
+            let unknown = LinuxAdapter::observation(
+                &run,
+                &exec_observation(ExecState::Unknown, None, Some(read)),
+            );
+            assert_eq!(unknown.state, RunState::Unknown, "{unknown:?}");
+            assert_eq!(unknown.usage, Some(usage), "{unknown:?}");
+            let rebuilt =
+                LinuxAdapter::observation(&run, &exec_observation(ExecState::Exited, None, None));
+            assert_eq!(rebuilt.usage, None, "{rebuilt:?}");
+            let running =
+                LinuxAdapter::observation(&run, &exec_observation(ExecState::Running, None, None));
+            assert_eq!(running.usage, None, "{running:?}");
         }
     }
 }

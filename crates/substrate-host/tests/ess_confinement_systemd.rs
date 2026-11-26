@@ -816,6 +816,62 @@ async fn a_systemd_local_run_counts_the_creations_its_process_bound_refused() {
     support::under_the_process_bound(NAME, &adapter, profile(16)).await;
 }
 
+/// Design 36 § 8, story 4, around `local`: the story's acceptance run carries a usage of at
+/// least each figure, which the end task read from the run's cgroup and its own clock before it
+/// removed the cgroup; a run its timeout ended carries both the limit and its usage. Each on
+/// the observation and on its `run_ended` (D32, D36, D37).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_local_run_carries_the_usage_behind_its_limits() {
+    const NAME: &str = "ESS confinement systemd local usage";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let profile = ConfinementProfile {
+        inner: Some(InnerAdapter::Local),
+        local_reason: Some(REASON.into()),
+        workspace: Some(workspace.path().to_path_buf()),
+        process_bounds: Some(support::USAGE_BOUNDS),
+        ..ConfinementProfile::default()
+    };
+    let ended = support::usage_of_a_run(NAME, &adapter, profile.clone()).await;
+    assert_eq!(ended.inner, Some(InnerAdapter::Local), "{NAME}: {ended:?}");
+    support::usage_beside_a_limit(NAME, &adapter, profile).await;
+}
+
+/// Design 36 § 8, story 4, around `linux`: the acceptance run carries the usage the inner
+/// `linux` read, on the observation relabelled `systemd` with `inner: linux` and on the outer
+/// adapter's `run_ended`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_linux_run_carries_the_usage_linux_read() {
+    const NAME: &str = "ESS confinement systemd linux usage";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_usage");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let ended = support::usage_of_a_run(
+        NAME,
+        &adapter,
+        ConfinementProfile {
+            inner: Some(InnerAdapter::Linux),
+            workspace: Some(workspace),
+            process_bounds: Some(support::USAGE_BOUNDS),
+            ..ConfinementProfile::default()
+        },
+    )
+    .await;
+    assert_eq!(ended.adapter, AdapterName::Systemd, "{NAME}: {ended:?}");
+    assert_eq!(ended.inner, Some(InnerAdapter::Linux), "{NAME}: {ended:?}");
+}
+
 /// Design 36 § 8, story 1, around `linux`: a run past its timeout names `WallTime`, the limit
 /// the inner `linux` observed, on the observation relabelled `systemd` with `inner: linux`.
 #[tokio::test(flavor = "multi_thread")]

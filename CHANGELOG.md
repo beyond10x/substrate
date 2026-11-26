@@ -20,6 +20,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `a_sigkill_no_source_explains_names_no_limit_and_is_stated` and the monitor's cases in
   `confinement::oci::tests`, the record's JSON case in `confinement::tests`, and the `oci` lane
   case `ESS confinement oci unattributed kill`, a command that sends `SIGKILL` to itself.
+- `substrate_host::confinement::RunUsage` and `RunObservation.usage`, and the member `usage` of
+  the `run_ended` audit record (design 36 § 3a, D29 to D38). An ended run on `linux`, on
+  `systemd` around `linux` and on `systemd` around `local` carries `wall_time_us` (from the
+  start to the leader's exit), `cpu_time_us`, `memory_peak_bytes` and `processes_peak`, named
+  and counted as the wire's `ResourceUsage`, also beside the limit that ended it and on an
+  `Unknown` run. A figure that cannot be read is absent and the others are kept; reading them
+  refuses nothing and changes no state. `oci`, `pod`, `local` and `macos` leave `usage` absent.
+  An exec that asked for `measurements` takes the three counters from its terminal sample, and
+  no wire byte changes: an exec that asked for none still has no `resource.usage`. No Rust
+  consumer breaks at compile time (`RunObservation`, `RunEnded` and `RunUsage` are
+  `#[non_exhaustive]`; build a `RunUsage` from `RunUsage::default()`); a reader of the
+  serialized record that refuses unknown members refuses a record with `usage`. Held by the
+  unit cases of `process.rs`, `confinement::systemd`, `confinement::linux` and
+  `confinement::tests`, and by the lane cases `ESS confinement linux usage`,
+  `ESS confinement systemd local usage` and `ESS confinement systemd linux usage`: a run that
+  sleeps one second in eight processes, allocates 64 MiB and spends one second of CPU carries at
+  least each figure on its observation and on its `run_ended`.
 
 ### Changed
 
