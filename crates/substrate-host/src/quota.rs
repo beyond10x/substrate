@@ -216,13 +216,7 @@ impl ProjectQuotas {
         if state.paths.contains_key(target) {
             return Err(nix::errno::Errno::EEXIST);
         }
-        nix::fcntl::renameat2(
-            nix::fcntl::AT_FDCWD,
-            source,
-            nix::fcntl::AT_FDCWD,
-            target,
-            nix::fcntl::RenameFlags::RENAME_NOREPLACE,
-        )?;
+        crate::rename::rename_noreplace(source, target)?;
         state.paths.remove(source);
         state.paths.insert(target.to_path_buf(), project);
         Ok(())

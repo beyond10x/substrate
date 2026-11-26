@@ -9,6 +9,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Static musl release archives: every release attaches
+  `substrate-daemon-<version>-x86_64-unknown-linux-musl.tar.gz` and
+  `b10x-substrate-<version>-x86_64-unknown-linux-musl.tar.gz` beside the two `gnu` archives, each
+  holding one statically linked executable that runs on any x86_64 Linux, whatever its C
+  library. They are built from the Dockerfile's `release-binaries-musl` stage of the same pinned
+  image, with OpenSSL compiled in from source; `SHA256SUMS` and its keyless signature cover all
+  four archives. Before any image tag moves, `release.yml` refuses a musl binary with a program
+  interpreter or a dynamic section naming a shared library, or one that does not answer
+  `--version` with the release's version in a digest-pinned Alpine 3.24.4 image; a recovery of
+  a tag whose source has no musl stage publishes the `gnu` archives alone and says so. The job
+  `musl-binaries` of `release-lanes.yml` runs the same build and checks on every pull request
+  that changes what they build. The `gnu` archives, their names, their checks and the images are
+  unchanged. The binaries keep musl's own allocator until a recorded measurement shows mimalloc
+  is not slower on their allocation-heavy path. Held by the musl cases of the `xtask` test
+  binary `release_workflow`, which run the release's steps offline against fake `readelf`,
+  `docker` and `gh`.
+- `substrate_host` builds for `x86_64-unknown-linux-musl`: its three `RENAME_NOREPLACE` renames
+  call `renameat2` through nix on glibc and as the system call on musl, with the same
+  arguments and errors (`rename::tests` runs both forms), and its `ioctl` requests and
+  control-message lengths take the type each C library declares.
 - `substrate_host::confinement::LimitUnread` and `RunObservation.limit_unread`, and the member
   `limit_unread` of the `run_ended` audit record (design 36 D27). An ended `oci` run whose main
   process ended by `SIGKILL` that neither the adapter nor the embedder sent, and whose runtime
