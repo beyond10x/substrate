@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:local-gate-holds-what-the-hosted-runner-differs-in
 kind: story
-status: active
+status: implemented
 title: The local gate holds what the hosted runner differs in
 summary: Runner images named by version, the 26.04 tool layout held locally, a wait script that exits non-zero on red
 tags:
@@ -42,10 +42,11 @@ scope:
   path: xtask/src/toolchain.rs
 - confidence: inferred
   path: xtask/tests/wait_checks.rs
-revision: 20
+revision: 21
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-21T22:48:54Z", actor: "human:timo", revision: 2, executor: "agent:host-operator"}
 - {from: "proposed", to: "active", at: "2026-11-21T22:48:54Z", actor: "human:timo", revision: 3, executor: "agent:host-operator"}
+- {from: "active", to: "implemented", at: "2026-11-26T07:55:13Z", actor: "human:operator", revision: 21, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: the local gate holds what the hosted runner differs in
 

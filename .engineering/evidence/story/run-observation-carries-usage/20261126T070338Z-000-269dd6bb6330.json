@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T07:03:38Z",
+  "actor": "human:operator",
+  "artifact": "story:run-observation-carries-usage",
+  "kind": "story",
+  "revision": 16,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Release lanes (release-lanes.yml) on pull request 308 at f60b379096: the confinement lane printed ESS confinement linux usage, linux usage limit, systemd local usage, systemd local usage limit and systemd linux usage: executed; Gate run 45772526538 success",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/45772526446"
+  }
+}

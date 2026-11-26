@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:an-oci-run-killed-at-its-memory-bound-names-the-limit-on-a-hosted-runner
 kind: story
-status: active
+status: implemented
 title: An oci run killed at its memory bound names the memory limit on a hosted runner
 summary: 'Measured on a hosted runner: the runtime''s OOM flag is missing in 128 of 610 memory-bound kills and never late; design 36 D27 states the kill the adapter cannot attribute'
 tags:
@@ -11,10 +11,11 @@ tags:
 relations:
 - decomposes: epic:runs-are-governed-and-limit-hits-are-events
 - informed_by: story:run-observation-names-the-limit-that-ended-it
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-25T16:29:13Z", actor: "agent:substrate", revision: 4}
 - {from: "proposed", to: "active", at: "2026-11-25T16:29:14Z", actor: "agent:substrate", revision: 5}
+- {from: "active", to: "implemented", at: "2026-11-26T07:55:14Z", actor: "human:operator", revision: 8, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: an oci run killed at its memory bound names the memory limit on a hosted runner
 
