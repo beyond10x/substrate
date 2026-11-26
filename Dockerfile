@@ -104,6 +104,43 @@ FROM scratch AS release-binaries
 COPY --from=builder /out/substrate-daemon /substrate-daemon
 COPY --from=builder /out/b10x-substrate /b10x-substrate
 
+# The two release binaries again for x86_64-unknown-linux-musl, statically linked, from the same
+# pinned image; the gnu stages above do not change. musl-gcc compiles every C dependency, OpenSSL
+# from source through the daemon's musl-only `openssl-sys` `vendored` edge, and sees the Linux UAPI
+# headers that OpenSSL and aws-lc include.
+FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS release-musl-builder
+WORKDIR /src
+ARG CARGO_BUILD_JOBS=2
+ARG CARGO_INCREMENTAL=0
+ENV CC_x86_64_unknown_linux_musl=musl-gcc \
+    AR_x86_64_unknown_linux_musl=ar
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends musl-tools && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -s /usr/include/linux /usr/include/asm-generic /usr/include/x86_64-linux-musl/ && \
+    ln -s /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+COPY . .
+RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=b10x-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=b10x-substrate-musl-target,target=/src/target,sharing=locked \
+    find Cargo.toml Cargo.lock crates -path '*/target' -prune -o -type f -exec touch {} + && \
+    rustup target add x86_64-unknown-linux-musl && \
+    cargo build --locked --release --target x86_64-unknown-linux-musl \
+      -p b10x-substrate-daemon --bin substrate-daemon \
+      -p b10x-substrate-cli --bin b10x-substrate && \
+    install -D /src/target/x86_64-unknown-linux-musl/release/substrate-daemon /out/substrate-daemon && \
+    install -D /src/target/x86_64-unknown-linux-musl/release/b10x-substrate /out/b10x-substrate
+RUN set -e; for binary in /out/substrate-daemon /out/b10x-substrate; do \
+      readelf -lW "$binary" > /phdrs; \
+      grep -q '^Program Headers:' /phdrs; \
+      if grep -q INTERP /phdrs; then echo "$binary names a program interpreter" >&2; exit 1; fi; \
+      if readelf -dW "$binary" | grep -q '(NEEDED)'; then echo "$binary needs a shared library" >&2; exit 1; fi; \
+    done
+
+FROM scratch AS release-binaries-musl
+COPY --from=release-musl-builder /out/substrate-daemon /substrate-daemon
+COPY --from=release-musl-builder /out/b10x-substrate /b10x-substrate
+
 FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS executor-builder
 WORKDIR /src
 ARG CARGO_BUILD_JOBS=2

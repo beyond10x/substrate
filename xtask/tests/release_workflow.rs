@@ -247,9 +247,20 @@ fn release_compiles_both_runtime_binaries_once() {
     assert_eq!(runner.matches("cargo build --locked --release").count(), 1);
     assert!(runner.contains("cargo build --locked --release -p b10x-substrate-conformance &&"));
     assert_eq!(occurrences("conformance-runner"), 0);
+    // The fourth is the static musl build of the two release binaries, which no image copies.
+    let (_, musl) = dockerfile_stage("release-musl-builder");
+    assert_eq!(musl.matches("cargo build --locked --release").count(), 1);
+    assert!(!musl.contains("b10x-substrate-mcp"), "{musl}");
+    assert_eq!(
+        DOCKERFILE
+            .matches("COPY --from=release-musl-builder ")
+            .count(),
+        2,
+        "only the release-binaries-musl stage copies from the musl build"
+    );
     assert_eq!(
         DOCKERFILE.matches("cargo build --locked --release").count(),
-        3
+        4
     );
     assert!(DOCKERFILE.contains(" AS daemon\n"));
     assert!(DOCKERFILE.contains(" AS mcp\n"));
@@ -794,8 +805,16 @@ fn a_release_refuses_without_a_recorded_quota_lane_run() {
 
 /// The `run: |` body of the named preflight step, dedented, exactly as the runner would execute it.
 fn step_script(name: &str) -> String {
-    let start = position(&format!("- name: {name}\n"));
-    let mut lines = WORKFLOW[start..].lines().skip(1);
+    step_script_in(WORKFLOW, name)
+}
+
+/// The `run: |` body of the named step of `workflow`, dedented, exactly as the runner would
+/// execute it.
+fn step_script_in(workflow: &str, name: &str) -> String {
+    let start = workflow
+        .find(&format!("- name: {name}\n"))
+        .unwrap_or_else(|| panic!("workflow is missing step {name:?}"));
+    let mut lines = workflow[start..].lines().skip(1);
     for line in lines.by_ref() {
         if line.trim() == "run: |" {
             break;
@@ -818,6 +837,10 @@ fn step_script(name: &str) -> String {
             break;
         }
         body.push(line[indent..].to_owned());
+    }
+    // The blank lines between this step and the next are not part of its script.
+    while body.last().is_some_and(String::is_empty) {
+        body.pop();
     }
     assert!(
         !body.is_empty(),
@@ -1880,6 +1903,499 @@ fn only_a_recovered_tag_that_predates_the_binaries_stage_publishes_without_binar
     assert!(position(&format!("- name: {SOURCE_STEP}\n")) < position(BINARY_STEPS[0]));
 }
 
+const MUSL_ARCHIVES: [&str; 2] = [
+    "substrate-daemon-${VERSION}-${MUSL_TARGET}.tar.gz",
+    "b10x-substrate-${VERSION}-${MUSL_TARGET}.tar.gz",
+];
+const MUSL_SOURCE_STEP: &str = "Find out whether the tagged source builds musl release binaries";
+const MUSL_EXPORT_STEP: &str = "Export the musl release binaries from the pinned builder stage";
+const MUSL_STATIC_STEP: &str = "Refuse musl release binaries that are not statically linked";
+const MUSL_SMOKE_STEP: &str = "Smoke-test the musl release binaries in Alpine";
+const MUSL_STEPS: [&str; 3] = [MUSL_EXPORT_STEP, MUSL_STATIC_STEP, MUSL_SMOKE_STEP];
+
+/// The body of the Dockerfile stage `FROM <base> AS <stage>`, up to the next `FROM`.
+fn dockerfile_stage(stage: &str) -> (&'static str, &'static str) {
+    let (before, rest) = DOCKERFILE
+        .split_once(&format!(" AS {stage}\n"))
+        .unwrap_or_else(|| panic!("the Dockerfile has no stage {stage:?}"));
+    let base = before
+        .rsplit_once("FROM ")
+        .expect("the stage's FROM line")
+        .1;
+    (base, rest.split("\nFROM ").next().expect("stage body"))
+}
+
+/// The value of the first `<key>: ` line of `workflow`, trimmed.
+fn env_value<'a>(workflow: &'a str, key: &str) -> &'a str {
+    workflow
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&format!("{key}: ")))
+        .unwrap_or_else(|| panic!("the workflow names no {key}"))
+}
+
+#[test]
+fn musl_release_binaries_come_from_their_own_stage_of_the_pinned_builder_image() {
+    // The gnu builder's image, by digest, builds the musl binaries in a stage of their own, so
+    // the gnu stage, its binaries and the daemon image are what they were.
+    let (gnu_base, _) = dockerfile_stage("builder");
+    let (musl_base, builder) = dockerfile_stage("release-musl-builder");
+    assert_eq!(
+        musl_base, gnu_base,
+        "the musl builder's image is the gnu builder's"
+    );
+    assert!(gnu_base.contains("@sha256:"), "{gnu_base}");
+    let build = builder
+        .split_once("cargo build --locked --release --target x86_64-unknown-linux-musl")
+        .expect("the musl builder's one release build")
+        .1
+        .split_once("install -D")
+        .expect("the build's package list ends before the first install")
+        .0;
+    assert!(
+        build.contains("-p b10x-substrate-daemon --bin substrate-daemon"),
+        "{build}"
+    );
+    assert!(
+        build.contains("-p b10x-substrate-cli --bin b10x-substrate"),
+        "{build}"
+    );
+    assert!(builder.contains("musl-tools"), "{builder}");
+    // The stage itself refuses an executable with an interpreter or a needed library.
+    assert!(builder.contains("grep -q INTERP"), "{builder}");
+    assert!(builder.contains("grep -q '(NEEDED)'"), "{builder}");
+    let (base, stage) = dockerfile_stage("release-binaries-musl");
+    assert_eq!(base, "scratch");
+    assert_eq!(
+        stage.trim(),
+        "COPY --from=release-musl-builder /out/substrate-daemon /substrate-daemon\n\
+         COPY --from=release-musl-builder /out/b10x-substrate /b10x-substrate"
+    );
+    // The gnu stage exports the gnu binaries only.
+    let (_, gnu) = dockerfile_stage("release-binaries");
+    assert!(
+        gnu.lines()
+            .filter(|line| !line.starts_with('#'))
+            .all(|line| !line.contains("musl")),
+        "{gnu}"
+    );
+
+    position("MUSL_TARGET: x86_64-unknown-linux-musl\n");
+    let image = env_value(WORKFLOW, "MUSL_FLOOR_IMAGE");
+    let (name, digest) = image
+        .split_once("@sha256:")
+        .expect("an image pinned by digest");
+    assert!(name.starts_with("alpine:"), "{image}");
+    assert_eq!(digest.len(), 64, "{image}");
+    assert!(
+        digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "{image}"
+    );
+
+    let export = step_script(MUSL_EXPORT_STEP);
+    assert!(
+        export.contains("--target release-binaries-musl \\\n"),
+        "{export}"
+    );
+    assert!(
+        export.contains("--output \"type=local,dest=${BINARY_DIST}/musl\""),
+        "{export}"
+    );
+    // Every musl refusal runs after the gnu ones and before anything is packaged or pushed.
+    let gnu_smoke =
+        position("- name: Smoke-test the release binaries on the oldest supported glibc\n");
+    let musl_export = position(&format!("- name: {MUSL_EXPORT_STEP}\n"));
+    let musl_static = position(&format!("- name: {MUSL_STATIC_STEP}\n"));
+    let musl_smoke = position(&format!("- name: {MUSL_SMOKE_STEP}\n"));
+    let package = position("- name: Package the release binaries\n");
+    let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
+    let mcp_push = position("docker push \"${MCP_IMAGE}:${VERSION}\"");
+    assert!(gnu_smoke < musl_export && musl_export < musl_static && musl_static < musl_smoke);
+    assert!(musl_smoke < package && package < daemon_push && package < mcp_push);
+}
+
+fn musl_source(dockerfile: Option<&str>, event: &str) -> (bool, String, String) {
+    let directory = tempfile::tempdir().expect("temporary checkout");
+    if let Some(dockerfile) = dockerfile {
+        fs::write(directory.path().join("Dockerfile"), dockerfile).expect("Dockerfile");
+    }
+    run_release_step(
+        MUSL_SOURCE_STEP,
+        directory.path(),
+        &[("EVENT_NAME", event)],
+        None,
+    )
+}
+
+#[test]
+fn only_a_recovered_tag_that_predates_the_musl_stage_publishes_without_musl_archives() {
+    let old = "FROM rust:1 AS builder\nFROM scratch AS release-binaries\nFROM builder AS daemon\n";
+    let (success, output, outputs) = musl_source(Some(old), "workflow_dispatch");
+    assert!(success, "{output}");
+    assert_eq!(outputs.trim(), "present=false");
+    assert!(output.contains("no musl archives"), "{output}");
+    let (success, output, outputs) = musl_source(Some(old), "push");
+    assert!(!success, "{output}");
+    assert!(output.contains("refused:"), "{output}");
+    assert!(!outputs.contains("present="), "{outputs}");
+    let (success, output, _) = musl_source(None, "workflow_dispatch");
+    assert!(
+        !success,
+        "a missing Dockerfile must not read as an older one: {output}"
+    );
+    for event in ["push", "workflow_dispatch"] {
+        let (success, output, outputs) = musl_source(Some(DOCKERFILE), event);
+        assert!(success, "{output}");
+        assert_eq!(outputs.trim(), "present=true");
+    }
+
+    position(&format!(
+        "- name: {MUSL_SOURCE_STEP}\n        id: musl-source\n"
+    ));
+    for step in MUSL_STEPS {
+        assert!(
+            step_block(step).contains("if: steps.musl-source.outputs.present == 'true'\n"),
+            "step {step:?} is not conditional on the tagged source building musl binaries"
+        );
+    }
+    assert!(position(&format!("- name: {MUSL_SOURCE_STEP}\n")) < position(MUSL_STEPS[0]));
+}
+
+/// Writes an executable `name` holding `script` into `tools`.
+fn tool(tools: &Path, name: &str, script: &str) {
+    let path = tools.join(name);
+    fs::write(&path, script).expect("fake tool");
+    let mut permissions = fs::metadata(&path).expect("metadata").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    fs::set_permissions(&path, permissions).expect("executable fake tool");
+}
+
+/// The program headers `readelf -lW` prints for a static-pie executable: no `INTERP`.
+const STATIC_PROGRAM_HEADERS: &str = "\nElf file type is DYN (Position-Independent Executable file)\n\
+Entry point 0x1234\nThere are 9 program headers, starting at offset 64\n\nProgram Headers:\n  \
+Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align\n  \
+LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x0f1234 0x0f1234 R   0x1000\n  \
+DYNAMIC        0x2f1000 0x00000000002f2000 0x00000000002f2000 0x0001c0 0x0001c0 RW  0x8\n  \
+GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10\n";
+
+/// The dynamic section of a static-pie executable: no `NEEDED`.
+const STATIC_DYNAMIC: &str = "\nDynamic section at offset 0x2f1000 contains 3 entries:\n  \
+Tag        Type                         Name/Value\n 0x000000000000001e (FLAGS) BIND_NOW\n \
+0x000000006ffffffb (FLAGS_1) Flags: NOW PIE\n 0x0000000000000000 (NULL) 0x0\n";
+
+/// Runs the musl static-link step offline with `readelf` replaced by a fake that prints
+/// `headers` for `-lW` (exiting `headers_status`) and `dynamic` for `-dW`, for `fake_for` only;
+/// every other binary gets the static answers.
+fn run_musl_static_step(
+    fake_for: &str,
+    headers: &str,
+    headers_status: i32,
+    dynamic: &str,
+) -> (bool, String) {
+    let directory = tempfile::tempdir().expect("temporary dist");
+    let root = directory.path();
+    fs::create_dir_all(root.join("dist/musl")).expect("musl");
+    for binary in ["substrate-daemon", "b10x-substrate"] {
+        fs::write(
+            root.join("dist/musl").join(binary),
+            "not an ELF; the fake answers",
+        )
+        .expect("binary");
+    }
+    fs::write(root.join("headers"), headers).expect("headers");
+    fs::write(root.join("dynamic"), dynamic).expect("dynamic");
+    fs::write(root.join("static-headers"), STATIC_PROGRAM_HEADERS).expect("static headers");
+    fs::write(root.join("static-dynamic"), STATIC_DYNAMIC).expect("static dynamic");
+    let tools = root.join("tools");
+    fs::create_dir_all(&tools).expect("tools");
+    tool(
+        &tools,
+        "readelf",
+        &format!(
+            "#!/bin/sh\ncase \"$2\" in\n  */{fake_for}) prefix= ;;\n  *) prefix=static- ;;\nesac\n\
+             case \"$1\" in\n  -lW) cat \"${{prefix}}headers\"; [ -n \"$prefix\" ] || exit {headers_status} ;;\n  \
+             -dW) cat \"${{prefix}}dynamic\" ;;\n  *) echo \"unexpected readelf $*\" >&2; exit 2 ;;\nesac\n"
+        ),
+    );
+    let (success, output, _) = run_release_step(
+        MUSL_STATIC_STEP,
+        root,
+        &[
+            ("BINARY_DIST", "dist"),
+            ("MUSL_TARGET", "x86_64-unknown-linux-musl"),
+        ],
+        Some(&tools),
+    );
+    (success, output)
+}
+
+#[test]
+fn static_musl_binaries_are_accepted() {
+    for binary in ["substrate-daemon", "b10x-substrate"] {
+        let (success, output) =
+            run_musl_static_step(binary, STATIC_PROGRAM_HEADERS, 0, STATIC_DYNAMIC);
+        assert!(success, "{output}");
+        assert!(
+            output.contains("substrate-daemon (x86_64-unknown-linux-musl) has no program interpreter and needs no shared library"),
+            "{output}"
+        );
+        // A non-PIE static executable has no dynamic section at all.
+        let (success, output) = run_musl_static_step(
+            binary,
+            STATIC_PROGRAM_HEADERS,
+            0,
+            "\nThere is no dynamic section in this file.\n",
+        );
+        assert!(success, "{output}");
+    }
+}
+
+#[test]
+fn a_musl_binary_with_a_program_interpreter_is_refused() {
+    let interpreted = STATIC_PROGRAM_HEADERS.replace(
+        "  DYNAMIC",
+        "  INTERP         0x000238 0x0000000000000238 0x0000000000000238 0x00001c 0x00001c R   0x1\n      \
+         [Requesting program interpreter: /lib/ld-musl-x86_64.so.1]\n  DYNAMIC",
+    );
+    for binary in ["substrate-daemon", "b10x-substrate"] {
+        let (success, output) = run_musl_static_step(binary, &interpreted, 0, STATIC_DYNAMIC);
+        assert!(!success, "accepted an interpreter in {binary}: {output}");
+        assert!(
+            output.contains(&format!(
+                "refused: {binary} (x86_64-unknown-linux-musl) names a program interpreter"
+            )),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn a_musl_binary_that_needs_a_shared_library_is_refused() {
+    let needing = STATIC_DYNAMIC.replace(
+        " 0x0000000000000000 (NULL)",
+        " 0x0000000000000001 (NEEDED)             Shared library: [libc.musl-x86_64.so.1]\n 0x0000000000000000 (NULL)",
+    );
+    for binary in ["substrate-daemon", "b10x-substrate"] {
+        let (success, output) = run_musl_static_step(binary, STATIC_PROGRAM_HEADERS, 0, &needing);
+        assert!(!success, "accepted a needed library in {binary}: {output}");
+        assert!(
+            output.contains(&format!(
+                "refused: {binary} (x86_64-unknown-linux-musl) needs a shared library"
+            )),
+            "{output}"
+        );
+        assert!(output.contains("libc.musl-x86_64.so.1"), "{output}");
+    }
+}
+
+#[test]
+fn a_musl_binary_whose_program_headers_cannot_be_read_is_refused() {
+    for (headers, status) in [
+        ("readelf: Error: Not an ELF file\n", 1),
+        ("\nThere are no program headers in this file.\n", 0),
+    ] {
+        let (success, output) =
+            run_musl_static_step("substrate-daemon", headers, status, STATIC_DYNAMIC);
+        assert!(!success, "accepted unreadable headers: {output}");
+        assert!(
+            output.contains(
+                "refused: substrate-daemon (x86_64-unknown-linux-musl) has no program headers"
+            ),
+            "{output}"
+        );
+    }
+}
+
+const ALPINE: &str =
+    "alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf";
+
+/// Runs the Alpine smoke step offline with `docker` replaced by a fake that logs its arguments
+/// and answers `--version` for each binary with `answer(binary)`, exiting `status(binary)`.
+fn run_musl_smoke_step(image: &str, answers: &[(&str, &str, i32)]) -> (bool, String, String) {
+    let directory = tempfile::tempdir().expect("temporary dist");
+    let root = directory.path();
+    fs::create_dir_all(root.join("dist/musl")).expect("musl");
+    let tools = root.join("tools");
+    fs::create_dir_all(&tools).expect("tools");
+    let mut docker = String::from(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"\nfor last; do :; done\n\
+         eval \"binary=\\${$(($# - 1))}\"\ncase \"$binary\" in\n",
+    );
+    for (binary, answer, status) in answers {
+        writeln!(
+            docker,
+            "  /release-binaries/{binary}) printf '%s\\n' '{answer}'; exit {status} ;;"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    docker.push_str("  *) echo \"unexpected docker $*\" >&2; exit 2 ;;\nesac\n");
+    tool(&tools, "docker", &docker);
+    let log = root.join("docker.log");
+    let log_text = log.display().to_string();
+    let (success, output, _) = run_release_step(
+        MUSL_SMOKE_STEP,
+        root,
+        &[
+            ("BINARY_DIST", "dist"),
+            ("MUSL_TARGET", "x86_64-unknown-linux-musl"),
+            ("MUSL_FLOOR_IMAGE", image),
+            ("VERSION", TAG),
+            ("DOCKER_LOG", &log_text),
+        ],
+        Some(&tools),
+    );
+    (
+        success,
+        output,
+        fs::read_to_string(&log).unwrap_or_default(),
+    )
+}
+
+#[test]
+fn musl_binaries_that_answer_their_version_in_alpine_are_accepted() {
+    let (success, output, calls) = run_musl_smoke_step(
+        ALPINE,
+        &[
+            ("substrate-daemon", "substrate-daemon 9.9.9", 0),
+            ("b10x-substrate", "b10x-substrate 9.9.9", 0),
+        ],
+    );
+    assert!(success, "{output}");
+    let calls: Vec<&str> = calls.lines().collect();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    for (call, binary) in calls.iter().zip(["substrate-daemon", "b10x-substrate"]) {
+        assert!(
+            call.starts_with("run --rm --network none --read-only "),
+            "{call}"
+        );
+        assert!(call.contains("/dist/musl:/release-binaries:ro "), "{call}");
+        assert!(call.contains(&format!(" {ALPINE} sh -c ")), "{call}");
+        // The container is musl's and holds no glibc loader.
+        assert!(call.contains("test -e /lib/ld-musl-x86_64.so.1"), "{call}");
+        assert!(
+            call.contains("test ! -e /lib64/ld-linux-x86-64.so.2"),
+            "{call}"
+        );
+        assert!(
+            call.ends_with(&format!(" /release-binaries/{binary} --version")),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn a_musl_binary_that_does_not_answer_its_version_in_alpine_is_refused() {
+    for binary in ["substrate-daemon", "b10x-substrate"] {
+        let answers = |answer: &'static str, status| {
+            ["substrate-daemon", "b10x-substrate"].map(|name| {
+                if name == binary {
+                    (name, answer, status)
+                } else if name == "substrate-daemon" {
+                    (name, "substrate-daemon 9.9.9", 0)
+                } else {
+                    (name, "b10x-substrate 9.9.9", 0)
+                }
+            })
+        };
+        // It does not start: exec format error, a missing loader, a crash.
+        let (success, output, _) = run_musl_smoke_step(ALPINE, &answers("sh: not found", 127));
+        assert!(!success, "accepted {binary} that did not start: {output}");
+        assert!(
+            output.contains(&format!(
+                "refused: {binary} (x86_64-unknown-linux-musl) does not answer --version in {ALPINE}"
+            )),
+            "{output}"
+        );
+        // It starts, but is not this release's binary.
+        let (success, output, _) = run_musl_smoke_step(ALPINE, &answers("other 1.2.3", 0));
+        assert!(!success, "accepted {binary} of another version: {output}");
+        assert!(
+            output.contains(&format!(
+                "refused: {binary} (x86_64-unknown-linux-musl) answers --version with 'other 1.2.3'"
+            )),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn the_alpine_smoke_test_refuses_an_image_not_pinned_by_digest() {
+    for image in ["alpine:3.24.4", "alpine:latest", "alpine@sha256:f59abe", ""] {
+        let (success, output, calls) = run_musl_smoke_step(
+            image,
+            &[
+                ("substrate-daemon", "substrate-daemon 9.9.9", 0),
+                ("b10x-substrate", "b10x-substrate 9.9.9", 0),
+            ],
+        );
+        assert!(!success, "accepted {image:?}: {output}");
+        assert!(output.contains("is not pinned by digest"), "{output}");
+        assert!(calls.is_empty(), "docker ran: {calls}");
+    }
+}
+
+/// The text of job `id` of `workflow`, from its key line to the next job's.
+fn workflow_job<'a>(workflow: &'a str, id: &str) -> &'a str {
+    let start = workflow
+        .find(&format!("\n  {id}:\n"))
+        .unwrap_or_else(|| panic!("the workflow has no job {id:?}"))
+        + 1;
+    let rest = &workflow[start..];
+    let mut end = 0;
+    for (index, line) in rest.split_inclusive('\n').enumerate() {
+        let job_key =
+            line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':');
+        if index > 0 && job_key {
+            return &rest[..end];
+        }
+        end += line.len();
+    }
+    rest
+}
+
+/// The pull-request check of the musl binaries runs the release's own three musl steps, byte for
+/// byte, with the same target, image and directory, on every pull request that changes what they
+/// build.
+#[test]
+fn the_pull_request_check_runs_the_releases_musl_steps_byte_for_byte() {
+    let job = workflow_job(LANES_WORKFLOW, "musl-binaries");
+    assert!(job.contains("    runs-on: ubuntu-26.04\n"), "{job}");
+    assert!(!job.contains("secrets."), "{job}");
+    for step in MUSL_STEPS {
+        assert_eq!(
+            step_script_in(job, step),
+            step_script(step),
+            "the pull-request check's {step:?} is not the release's"
+        );
+    }
+    for key in ["BINARY_DIST", "MUSL_TARGET", "MUSL_FLOOR_IMAGE"] {
+        assert_eq!(env_value(job, key), env_value(WORKFLOW, key), "{key}");
+    }
+    // The version the binaries must answer is the workspace's, as a release's must be its tag's.
+    let version = step_script_in(job, "Read the workspace version");
+    assert!(version.contains("[workspace.package]"), "{version}");
+    assert!(version.contains(">> \"$GITHUB_ENV\""), "{version}");
+    let pull_request = &LANES_WORKFLOW[LANES_WORKFLOW
+        .find("  pull_request:\n    paths:\n")
+        .expect("pull-request paths")..];
+    let paths = &pull_request[..pull_request.find("\n  workflow_dispatch:").expect("end")];
+    for path in [
+        "- crates/**",
+        "- vendor/**",
+        "- Dockerfile",
+        "- Cargo.lock",
+        "- Cargo.toml",
+        "- rust-toolchain.toml",
+        "- .github/workflows/release.yml",
+    ] {
+        assert!(
+            paths.contains(path),
+            "the check does not run for {path}: {paths}"
+        );
+    }
+}
+
 const EXECUTOR_SOURCE_STEP: &str = "Find out whether the tagged source builds the executor image";
 const EXECUTOR_BUILD_STEP: &str = "Build, smoke-test and push the executor image once";
 const EXECUTOR_STEPS: [&str; 4] = [
@@ -2134,26 +2650,34 @@ fn a_recovery_reuses_an_executor_image_only_from_the_same_source_and_release() {
 
 /// Runs the publication step with a fake `gh` and returns its success, output and the argument
 /// lines `gh` received.
-fn publish(binaries: &str, assets_present: bool) -> (bool, String, String) {
+/// The six binary assets of a release, by file name: two gnu archives, two musl archives, the
+/// sums and their signature.
+fn binary_assets() -> [String; 6] {
+    [
+        format!("substrate-daemon-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
+        format!("b10x-substrate-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
+        format!("substrate-daemon-{TAG}-x86_64-unknown-linux-musl.tar.gz"),
+        format!("b10x-substrate-{TAG}-x86_64-unknown-linux-musl.tar.gz"),
+        "SHA256SUMS".to_owned(),
+        "SHA256SUMS.sigstore.json".to_owned(),
+    ]
+}
+
+/// Runs the publication step with a fake `gh`, with `present` written to the assets directory,
+/// and returns its success, output and the argument lines `gh` received.
+fn publish(binaries: &str, musl: &str, present: &[String]) -> (bool, String, String) {
     let directory = tempfile::tempdir().expect("temporary checkout");
     let root = directory.path();
     let tools = root.join("tools");
     fs::create_dir_all(&tools).expect("tools");
-    let gh = tools.join("gh");
-    fs::write(&gh, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GH_LOG\"\n").expect("fake gh");
-    let mut permissions = fs::metadata(&gh).expect("metadata").permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-    fs::set_permissions(&gh, permissions).expect("executable fake gh");
+    tool(
+        &tools,
+        "gh",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GH_LOG\"\n",
+    );
     fs::create_dir_all(root.join("dist/assets")).expect("assets");
-    if assets_present {
-        for asset in [
-            format!("substrate-daemon-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
-            format!("b10x-substrate-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
-            "SHA256SUMS".to_owned(),
-            "SHA256SUMS.sigstore.json".to_owned(),
-        ] {
-            fs::write(root.join("dist/assets").join(asset), "asset").expect("asset");
-        }
+    for asset in present {
+        fs::write(root.join("dist/assets").join(asset), "asset").expect("asset");
     }
     let log = root.join("gh.log");
     let log_text = log.display().to_string();
@@ -2162,10 +2686,12 @@ fn publish(binaries: &str, assets_present: bool) -> (bool, String, String) {
         root,
         &[
             ("BINARIES", binaries),
+            ("MUSL", musl),
             ("VERSION", TAG),
             ("GITHUB_REPOSITORY", "example/substrate"),
             ("BINARY_DIST", "dist"),
             ("BINARY_TARGET", "x86_64-unknown-linux-gnu"),
+            ("MUSL_TARGET", "x86_64-unknown-linux-musl"),
             ("GH_LOG", &log_text),
         ],
         Some(&tools),
@@ -2177,53 +2703,85 @@ fn publish(binaries: &str, assets_present: bool) -> (bool, String, String) {
     )
 }
 
+/// The asset paths `gh release create` received, in order.
+fn created_assets(calls: &str) -> Vec<String> {
+    calls
+        .lines()
+        .find(|line| line.starts_with("release create "))
+        .expect("gh release create ran")
+        .split(' ')
+        .filter(|word| word.starts_with("dist/assets/"))
+        .map(|word| word.trim_start_matches("dist/assets/").to_owned())
+        .collect()
+}
+
 #[test]
-fn the_release_attaches_all_four_binary_assets_or_none() {
-    let (success, output, calls) = publish("true", true);
+fn the_release_attaches_all_six_binary_assets_or_none() {
+    let all = binary_assets();
+    let (success, output, calls) = publish("true", "true", &all);
     assert!(success, "{output}");
-    let create = calls
-        .lines()
-        .find(|line| line.starts_with("release create "))
-        .expect("gh release create ran");
-    for asset in [
-        format!("dist/assets/substrate-daemon-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
-        format!("dist/assets/b10x-substrate-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
-        "dist/assets/SHA256SUMS ".to_owned(),
-        "dist/assets/SHA256SUMS.sigstore.json".to_owned(),
-    ] {
-        assert!(
-            format!("{create} ").contains(&asset),
-            "missing {asset}: {create}"
-        );
-    }
-    assert!(create.contains("--draft"), "{create}");
+    assert_eq!(created_assets(&calls), all);
+    assert!(calls.contains("--draft"), "{calls}");
 
-    // A missing asset is refused before anything is created.
-    let (success, output, calls) = publish("true", false);
-    assert!(!success, "{output}");
-    assert!(output.contains("refused:"), "{output}");
-    assert!(calls.is_empty(), "gh ran: {calls}");
-
-    // The one source without the stage publishes the release with no asset at all.
-    let (success, output, calls) = publish("false", false);
-    assert!(success, "{output}");
-    let create = calls
-        .lines()
-        .find(|line| line.starts_with("release create "))
-        .expect("gh release create ran");
-    assert!(!create.contains("dist/assets"), "{create}");
-
-    // An unset or unexpected answer is refused rather than read as either.
-    for binaries in ["", "maybe"] {
-        let (success, output, calls) = publish(binaries, true);
-        assert!(!success, "accepted BINARIES={binaries:?}: {output}");
+    // A missing asset is refused before anything is created, each of the six.
+    for missing in &all {
+        let present: Vec<String> = all.iter().filter(|a| *a != missing).cloned().collect();
+        let (success, output, calls) = publish("true", "true", &present);
+        assert!(!success, "published without {missing}: {output}");
+        assert!(output.contains("refused:"), "{output}");
         assert!(calls.is_empty(), "gh ran: {calls}");
     }
 
-    // Notes and summaries say when a release carries no binaries.
+    // A recovered source without the musl stage publishes the gnu archives and the sums only.
+    let gnu: Vec<String> = all
+        .iter()
+        .filter(|asset| !asset.contains("musl"))
+        .cloned()
+        .collect();
+    let (success, output, calls) = publish("true", "false", &all);
+    assert!(success, "{output}");
+    assert_eq!(created_assets(&calls), gnu);
+
+    // The one source without the stage publishes the release with no asset at all.
+    let (success, output, calls) = publish("false", "false", &[]);
+    assert!(success, "{output}");
+    assert!(created_assets(&calls).is_empty(), "{calls}");
+
+    // An unset or unexpected answer is refused rather than read as either.
+    for binaries in ["", "maybe"] {
+        let (success, output, calls) = publish(binaries, "true", &all);
+        assert!(!success, "accepted BINARIES={binaries:?}: {output}");
+        assert!(calls.is_empty(), "gh ran: {calls}");
+    }
+    for musl in ["", "maybe"] {
+        let (success, output, calls) = publish("true", musl, &all);
+        assert!(!success, "accepted MUSL={musl:?}: {output}");
+        assert!(calls.is_empty(), "gh ran: {calls}");
+    }
+
+    // Notes and summaries say when a release carries no binaries, or no musl archives.
     position("BINARIES: ${{ steps.binary-source.outputs.present }}");
+    position("MUSL: ${{ steps.musl-source.outputs.present }}");
     position("This release carries no binaries:");
     position("not published: the tagged source has no release-binaries stage");
+    position("This release carries no musl archives:");
+}
+
+#[test]
+fn the_release_notes_and_summaries_name_the_musl_archives() {
+    let notes = &WORKFLOW[position("## Release binaries")..position("## Confinement lane")];
+    for archive in MUSL_ARCHIVES {
+        assert!(notes.contains(archive), "the notes do not name {archive}");
+    }
+    assert!(notes.contains("any x86_64 Linux"), "{notes}");
+    assert!(notes.contains("${MUSL_FLOOR_IMAGE}"), "{notes}");
+    for archive in MUSL_ARCHIVES {
+        assert!(
+            step_block("Describe the required changelog pull request").contains(archive),
+            "the changelog stanza does not name {archive}"
+        );
+    }
+    assert!(step_block("Release summary").contains("${MUSL_TARGET}"));
 }
 
 #[test]
@@ -2244,7 +2802,7 @@ fn readme_names_both_release_signing_identities() {
 
 #[test]
 fn release_binaries_are_archived_summed_signed_and_verified_before_announcement() {
-    for archive in BINARY_ARCHIVES {
+    for archive in BINARY_ARCHIVES.iter().chain(&MUSL_ARCHIVES) {
         assert!(
             occurrences(archive) >= 2,
             "{archive} must be both packaged and attached"
@@ -2271,6 +2829,7 @@ fn release_binaries_are_archived_summed_signed_and_verified_before_announcement(
     for asset in BINARY_ARCHIVES
         .iter()
         .copied()
+        .chain(MUSL_ARCHIVES)
         .chain(["SHA256SUMS\"", "SHA256SUMS.sigstore.json\""])
     {
         assert!(
@@ -2400,6 +2959,9 @@ fn readme_records_what_the_release_binaries_need_at_run_time() {
         "libssl3",
         "zlib1g",
         "glibc 2.35",
+        "substrate-daemon-<version>-x86_64-unknown-linux-musl.tar.gz",
+        "b10x-substrate-<version>-x86_64-unknown-linux-musl.tar.gz",
+        "any x86_64 Linux",
     ] {
         assert!(
             readme.contains(needle),
@@ -2515,6 +3077,10 @@ fn release_binary_steps_receive_no_token_or_secret() {
         "Package the release binaries",
         "Prove the archived daemon is the image's daemon",
         "Sign the release-binary checksums keylessly",
+        MUSL_SOURCE_STEP,
+        MUSL_EXPORT_STEP,
+        MUSL_STATIC_STEP,
+        MUSL_SMOKE_STEP,
         "Verify the release-binary checksum signature with the workflow identity",
     ] {
         let block = step_block(step);
@@ -2554,13 +3120,25 @@ fn only_the_release_job_holds_packages_and_id_token_write() {
 
 /// Runs the packaging step offline in a tagged throwaway repository and returns the bytes of
 /// every file it wrote to the assets directory, by name.
-fn package_release_binaries(source: &TaggedSource) -> Vec<(String, Vec<u8>)> {
+fn package_release_binaries(source: &TaggedSource, musl: &str) -> Vec<(String, Vec<u8>)> {
+    let (success, stderr, assets) = try_package_release_binaries(source, musl);
+    assert!(success, "{stderr}");
+    assets
+}
+
+/// As [`package_release_binaries`], returning the step's success and standard error too.
+fn try_package_release_binaries(
+    source: &TaggedSource,
+    musl: &str,
+) -> (bool, String, Vec<(String, Vec<u8>)>) {
     let root = source.directory.path();
     let _ = fs::remove_dir_all(root.join("dist"));
-    let bin = root.join("dist/bin");
-    fs::create_dir_all(&bin).expect("bin");
-    for binary in ["substrate-daemon", "b10x-substrate"] {
-        fs::write(bin.join(binary), format!("{binary} bytes")).expect("binary");
+    for (directory, target) in [("bin", "gnu"), ("musl", "musl")] {
+        let bin = root.join("dist").join(directory);
+        fs::create_dir_all(&bin).expect("bin");
+        for binary in ["substrate-daemon", "b10x-substrate"] {
+            fs::write(bin.join(binary), format!("{binary} {target} bytes")).expect("binary");
+        }
     }
     let output_file = root.join("github-output");
     fs::write(&output_file, "").expect("GITHUB_OUTPUT");
@@ -2571,6 +3149,8 @@ fn package_release_binaries(source: &TaggedSource) -> Vec<(String, Vec<u8>)> {
         .env("SOURCE_SHA", &source.sha)
         .env("VERSION", TAG)
         .env("BINARY_TARGET", "x86_64-unknown-linux-gnu")
+        .env("MUSL_TARGET", "x86_64-unknown-linux-musl")
+        .env("MUSL", musl)
         .env("BINARY_DIST", "dist")
         .env("GITHUB_OUTPUT", &output_file)
         .args([
@@ -2582,13 +3162,10 @@ fn package_release_binaries(source: &TaggedSource) -> Vec<(String, Vec<u8>)> {
         ])
         .output()
         .expect("bash runs");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let mut assets: Vec<(String, Vec<u8>)> = fs::read_dir(root.join("dist/assets"))
-        .expect("assets")
+        .into_iter()
+        .flatten()
         .map(|entry| {
             let entry = entry.expect("asset entry");
             (
@@ -2598,42 +3175,25 @@ fn package_release_binaries(source: &TaggedSource) -> Vec<(String, Vec<u8>)> {
         })
         .collect();
     assets.sort();
-    assets
+    (output.status.success(), stderr, assets)
 }
 
-#[test]
-fn release_archives_are_deterministic_named_as_documented_and_summed_exactly() {
-    let source = TaggedSource::with_files(
+/// A tagged source holding the three files every archive carries beside its binary.
+fn release_source() -> TaggedSource {
+    TaggedSource::with_files(
         &[
             ("LICENSE", "licence text\n"),
             ("THIRD_PARTY_LICENSES.html", "<p>notices</p>\n"),
             ("README.md", "# readme\n"),
         ],
         "release",
-    );
-    let first = package_release_binaries(&source);
-    // Input modification times and the wall clock must not reach the archive bytes.
-    for file in ["LICENSE", "THIRD_PARTY_LICENSES.html", "README.md"] {
-        let status = std::process::Command::new("touch")
-            .args(["-d", "2001-02-03T04:05:06Z"])
-            .arg(source.directory.path().join(file))
-            .status()
-            .expect("touch runs");
-        assert!(status.success());
-    }
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    let second = package_release_binaries(&source);
-    assert_eq!(first, second, "packaging the same inputs twice differs");
+    )
+}
 
-    let daemon = format!("substrate-daemon-{TAG}-x86_64-unknown-linux-gnu.tar.gz");
-    let cli = format!("b10x-substrate-{TAG}-x86_64-unknown-linux-gnu.tar.gz");
-    let names: Vec<&str> = first.iter().map(|(name, _)| name.as_str()).collect();
-    let mut expected = vec!["SHA256SUMS", cli.as_str(), daemon.as_str()];
-    expected.sort_unstable();
-    assert_eq!(names, expected);
-
+/// The archive names `SHA256SUMS` among `assets` lists, sorted.
+fn summed_archives(assets: &[(String, Vec<u8>)]) -> Vec<String> {
     let sums = String::from_utf8(
-        first
+        assets
             .iter()
             .find(|(name, _)| name == "SHA256SUMS")
             .expect("SHA256SUMS")
@@ -2641,20 +3201,45 @@ fn release_archives_are_deterministic_named_as_documented_and_summed_exactly() {
             .clone(),
     )
     .expect("utf-8 sums");
-    let mut summed: Vec<&str> = sums
+    let mut summed: Vec<String> = sums
         .lines()
-        .map(|line| line.split_once("  ").expect("sha256sum line").1)
+        .map(|line| line.split_once("  ").expect("sha256sum line").1.to_owned())
         .collect();
     summed.sort_unstable();
-    let mut archives = vec![daemon.as_str(), cli.as_str()];
-    archives.sort_unstable();
-    assert_eq!(
-        summed, archives,
-        "SHA256SUMS covers exactly the two archives"
-    );
+    summed
+}
 
-    let assets = source.directory.path().join("dist/assets");
-    for (archive, binary) in [(&daemon, "substrate-daemon"), (&cli, "b10x-substrate")] {
+/// Each archive of a release with musl archives, the binary it holds and the build that binary
+/// came from.
+fn release_archives() -> [(String, &'static str, &'static str); 4] {
+    [
+        (
+            format!("substrate-daemon-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
+            "substrate-daemon",
+            "gnu",
+        ),
+        (
+            format!("b10x-substrate-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
+            "b10x-substrate",
+            "gnu",
+        ),
+        (
+            format!("substrate-daemon-{TAG}-x86_64-unknown-linux-musl.tar.gz"),
+            "substrate-daemon",
+            "musl",
+        ),
+        (
+            format!("b10x-substrate-{TAG}-x86_64-unknown-linux-musl.tar.gz"),
+            "b10x-substrate",
+            "musl",
+        ),
+    ]
+}
+
+/// Asserts that each archive in `assets` holds exactly its binary of its build and the three
+/// documented files, owned by 0/0.
+fn assert_archive_contents(assets: &Path, archives: &[(String, &str, &str)]) {
+    for (archive, binary, build) in archives {
         let stem = archive.trim_end_matches(".tar.gz");
         let listing = std::process::Command::new("tar")
             .args(["--numeric-owner", "-tvzf"])
@@ -2682,6 +3267,101 @@ fn release_archives_are_deterministic_named_as_documented_and_summed_exactly() {
         assert_eq!(
             entries, want,
             "{archive} holds exactly the documented files"
+        );
+        // The gnu archive holds the gnu build and the musl archive the musl build.
+        let content = std::process::Command::new("tar")
+            .args(["-xzOf"])
+            .arg(assets.join(archive))
+            .arg(format!("{stem}/{binary}"))
+            .output()
+            .expect("tar runs");
+        assert!(content.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&content.stdout),
+            format!("{binary} {build} bytes"),
+            "{archive}"
+        );
+    }
+}
+
+#[test]
+fn release_archives_are_deterministic_named_as_documented_and_summed_exactly() {
+    let source = release_source();
+    let first = package_release_binaries(&source, "true");
+    // Input modification times and the wall clock must not reach the archive bytes.
+    for file in ["LICENSE", "THIRD_PARTY_LICENSES.html", "README.md"] {
+        let status = std::process::Command::new("touch")
+            .args(["-d", "2001-02-03T04:05:06Z"])
+            .arg(source.directory.path().join(file))
+            .status()
+            .expect("touch runs");
+        assert!(status.success());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = package_release_binaries(&source, "true");
+    assert_eq!(first, second, "packaging the same inputs twice differs");
+
+    let archives = release_archives();
+    let names: Vec<&str> = first.iter().map(|(name, _)| name.as_str()).collect();
+    let mut expected: Vec<&str> = archives
+        .iter()
+        .map(|(archive, _, _)| archive.as_str())
+        .chain(["SHA256SUMS"])
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(names, expected);
+    let mut all: Vec<String> = archives
+        .iter()
+        .map(|(archive, _, _)| archive.clone())
+        .collect();
+    all.sort_unstable();
+    assert_eq!(
+        summed_archives(&first),
+        all,
+        "SHA256SUMS covers exactly the four archives"
+    );
+    assert_archive_contents(&source.directory.path().join("dist/assets"), &archives);
+}
+
+#[test]
+fn a_source_without_the_musl_stage_packages_and_sums_the_gnu_archives_alone() {
+    let source = release_source();
+    let with_musl = package_release_binaries(&source, "true");
+    let gnu = package_release_binaries(&source, "false");
+    let archives: Vec<(String, &str, &str)> = release_archives()
+        .into_iter()
+        .filter(|(_, _, build)| *build == "gnu")
+        .collect();
+    let mut gnu_archives: Vec<String> = archives
+        .iter()
+        .map(|(archive, _, _)| archive.clone())
+        .collect();
+    gnu_archives.sort_unstable();
+    assert_eq!(summed_archives(&gnu), gnu_archives);
+    assert_eq!(gnu.len(), 3, "two archives and SHA256SUMS");
+    assert_archive_contents(&source.directory.path().join("dist/assets"), &archives);
+    // The gnu archives are the same bytes with and without the musl ones beside them.
+    for (name, bytes) in &gnu {
+        if name != "SHA256SUMS" {
+            let same = with_musl
+                .iter()
+                .find(|(other, _)| other == name)
+                .expect("the gnu archive");
+            assert_eq!(&same.1, bytes, "{name} differs with and without musl");
+        }
+    }
+
+    // Anything but an explicit answer is refused, and nothing is summed.
+    for musl in ["", "yes"] {
+        let (success, stderr, assets) = try_package_release_binaries(&source, musl);
+        assert!(!success, "accepted MUSL={musl:?}");
+        assert!(
+            stderr.contains("refused: no answer on whether this release carries musl archives"),
+            "{stderr}"
+        );
+        assert!(
+            !assets.iter().any(|(name, _)| name == "SHA256SUMS"),
+            "{musl:?}"
         );
     }
 }
@@ -4393,7 +5073,16 @@ const RUNNER_IMAGES: [(&str, Runners); 10] = [
     ("macos.yml", Runners::Images(&["macos-15"])),
     ("namespace-lane.yml", Runners::Images(&["ubuntu-26.04"])),
     ("pages.yml", Runners::Images(&["ubuntu-26.04"])),
-    ("release-lanes.yml", Runners::Images(&["ubuntu-24.04"; 4])),
+    (
+        "release-lanes.yml",
+        Runners::Images(&[
+            "ubuntu-24.04",
+            "ubuntu-24.04",
+            "ubuntu-24.04",
+            "ubuntu-24.04",
+            "ubuntu-26.04",
+        ]),
+    ),
     ("release.yml", Runners::Images(&["ubuntu-26.04"; 2])),
     (
         "shared-gates.yml",

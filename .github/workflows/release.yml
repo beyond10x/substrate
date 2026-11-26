@@ -6,7 +6,9 @@
 # through the protected-main pull-request path. `b10x-substrate-*` is the source-package prefix
 # fixed by README.md. The GitHub release also carries the daemon and CLI binaries as
 # `<binary>-<version>-x86_64-unknown-linux-gnu.tar.gz`, exported from the same pinned builder stage
-# as the images, with `SHA256SUMS` over both archives and its keyless `cosign sign-blob` bundle.
+# as the images, and as statically linked `<binary>-<version>-x86_64-unknown-linux-musl.tar.gz`
+# from a musl stage of the same pinned image, with `SHA256SUMS` over the archives and its keyless
+# `cosign sign-blob` bundle.
 #
 # Permissions. `contents: read` at workflow level. `preflight` adds `actions: read`, the only
 # scope that can read another workflow's conclusion for a SHA, and `checks: read`, which reads the
@@ -111,6 +113,8 @@ env:
   BINARY_DIST: target/release-binaries
   GLIBC_CEILING: "2.35"
   GLIBC_FLOOR_IMAGE: ubuntu:22.04@sha256:e0f80c829509ef4df9e76bd8944eb7b8ec25cbb379b112a7f9448b2c77a77c9b
+  MUSL_TARGET: x86_64-unknown-linux-musl
+  MUSL_FLOOR_IMAGE: alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
   GATE_WORKFLOW: gate.yml
   CHART_WORKFLOW: chart-lane.yml
   NAMESPACE_WORKFLOW: namespace-lane.yml
@@ -1064,7 +1068,8 @@ jobs:
     # A release build is cold with respect to earlier runs. Within this job, one pinned builder
     # stage compiles both binaries once and the two minimal runtime targets reuse that exact stage;
     # no cache from an earlier release is an input to an artifact an operator is asked to verify.
-    timeout-minutes: 120
+    # The musl stage compiles the daemon and the CLI a second time, for their static archives.
+    timeout-minutes: 180
     permissions:
       # `write`, not `read`: this job creates the GitHub release with `GITHUB_TOKEN`. It does not
       # write git refs. Restated in full because a job-level block replaces the workflow-level one
@@ -1377,6 +1382,28 @@ jobs:
             exit 1
           fi
 
+      # The same answer for the static musl archives: a recovery of a tag cut before the
+      # `release-binaries-musl` stage existed publishes the gnu archives alone, and says so.
+      - name: Find out whether the tagged source builds musl release binaries
+        id: musl-source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ ! -f Dockerfile ]; then
+            echo "refused: the tagged source has no Dockerfile." >&2
+            exit 1
+          fi
+          if grep -qx 'FROM scratch AS release-binaries-musl' Dockerfile; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = workflow_dispatch ]; then
+            echo "the tagged source predates the release-binaries-musl stage: this recovery publishes no musl archives."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "refused: the tagged source's Dockerfile has no release-binaries-musl stage." >&2
+            exit 1
+          fi
+
       - name: Find out whether the tagged source builds the executor image
         id: executor-source
         env:
@@ -1545,9 +1572,82 @@ jobs:
               /release-binaries/substrate-daemon --help >/dev/null &&
               /release-binaries/b10x-substrate --help >/dev/null'
 
+      # The musl binaries come from their own stage of the same pinned `rust` image, so the gnu
+      # stage, its binaries and the daemon image are what they were. Every musl refusal runs before
+      # any image tag is mutated. `release-lanes.yml` runs these three steps on pull requests.
+      - name: Export the musl release binaries from the pinned builder stage
+        if: steps.musl-source.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --target release-binaries-musl \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --output "type=local,dest=${BINARY_DIST}/musl" \
+            .
+          ls -l "${BINARY_DIST}/musl"
+
+      # A static executable has no program interpreter, and its dynamic section, where it has one
+      # (static-pie), names no shared library.
+      - name: Refuse musl release binaries that are not statically linked
+        if: steps.musl-source.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          for binary in substrate-daemon b10x-substrate; do
+            file="${BINARY_DIST}/musl/${binary}"
+            if ! headers=$(readelf -lW "$file" 2>&1) || ! grep -q '^Program Headers:' <<<"$headers"; then
+              echo "refused: ${binary} (${MUSL_TARGET}) has no program headers readelf can read." >&2
+              exit 1
+            fi
+            if grep -q 'INTERP' <<<"$headers"; then
+              echo "refused: ${binary} (${MUSL_TARGET}) names a program interpreter; it is not statically linked." >&2
+              exit 1
+            fi
+            if ! dynamic=$(readelf -dW "$file" 2>&1); then
+              echo "refused: readelf cannot read the dynamic section of ${binary} (${MUSL_TARGET})." >&2
+              exit 1
+            fi
+            if needed=$(grep '(NEEDED)' <<<"$dynamic"); then
+              echo "refused: ${binary} (${MUSL_TARGET}) needs a shared library: ${needed//$'\n'/; }" >&2
+              exit 1
+            fi
+            echo "${binary} (${MUSL_TARGET}) has no program interpreter and needs no shared library"
+          done
+
+      # Alpine has musl and no glibc loader, which the container proves before it starts a
+      # binary. The answer must be this release's version.
+      - name: Smoke-test the musl release binaries in Alpine
+        if: steps.musl-source.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          if ! grep -Eqx '[^@]+@sha256:[0-9a-f]{64}' <<<"$MUSL_FLOOR_IMAGE"; then
+            echo "refused: MUSL_FLOOR_IMAGE '${MUSL_FLOOR_IMAGE}' is not pinned by digest." >&2
+            exit 1
+          fi
+          for binary in substrate-daemon b10x-substrate; do
+            if ! answer=$(docker run --rm --network none --read-only \
+                --volume "${PWD}/${BINARY_DIST}/musl:/release-binaries:ro" \
+                "${MUSL_FLOOR_IMAGE}" \
+                sh -c 'test -e /lib/ld-musl-x86_64.so.1 && test ! -e /lib64/ld-linux-x86-64.so.2 && exec "$@"' \
+                sh "/release-binaries/${binary}" --version); then
+              echo "refused: ${binary} (${MUSL_TARGET}) does not answer --version in ${MUSL_FLOOR_IMAGE}." >&2
+              exit 1
+            fi
+            first=$(head -n 1 <<<"$answer")
+            if [ "$first" != "${binary} ${VERSION}" ]; then
+              echo "refused: ${binary} (${MUSL_TARGET}) answers --version with '${first}', not '${binary} ${VERSION}'." >&2
+              exit 1
+            fi
+            echo "${binary} (${MUSL_TARGET}) answers '${first}' in ${MUSL_FLOOR_IMAGE}"
+          done
+
       - name: Package the release binaries
         id: binaries
         if: steps.binary-source.outputs.present == 'true'
+        env:
+          MUSL: ${{ steps.musl-source.outputs.present }}
         run: |
           set -euo pipefail
           epoch=$(git log -1 --format=%ct "${SOURCE_SHA}")
@@ -1556,11 +1656,33 @@ jobs:
             "substrate-daemon-${VERSION}-${BINARY_TARGET}.tar.gz"
             "b10x-substrate-${VERSION}-${BINARY_TARGET}.tar.gz"
           )
+          case "$MUSL" in
+            true)
+              archives+=(
+                "substrate-daemon-${VERSION}-${MUSL_TARGET}.tar.gz"
+                "b10x-substrate-${VERSION}-${MUSL_TARGET}.tar.gz"
+              )
+              ;;
+            false) ;;
+            *)
+              echo "refused: no answer on whether this release carries musl archives ('${MUSL}')." >&2
+              exit 1
+              ;;
+          esac
           for archive in "${archives[@]}"; do
             stem=${archive%.tar.gz}
-            binary=${stem%"-${VERSION}-${BINARY_TARGET}"}
+            case "$stem" in
+              *"-${VERSION}-${MUSL_TARGET}")
+                binary=${stem%"-${VERSION}-${MUSL_TARGET}"}
+                built="${BINARY_DIST}/musl/${binary}"
+                ;;
+              *)
+                binary=${stem%"-${VERSION}-${BINARY_TARGET}"}
+                built="${BINARY_DIST}/bin/${binary}"
+                ;;
+            esac
             mkdir -p "${BINARY_DIST}/stage/${stem}"
-            install -m 0755 "${BINARY_DIST}/bin/${binary}" "${BINARY_DIST}/stage/${stem}/${binary}"
+            install -m 0755 "$built" "${BINARY_DIST}/stage/${stem}/${binary}"
             install -m 0644 LICENSE THIRD_PARTY_LICENSES.html README.md "${BINARY_DIST}/stage/${stem}/"
             tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${epoch}" \
               -C "${BINARY_DIST}/stage" -cf - "${stem}" \
@@ -2080,6 +2202,7 @@ jobs:
           SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
           BINARIES_IDENTITY: ${{ steps.binaries-verify.outputs.identity }}
           BINARIES: ${{ steps.binary-source.outputs.present }}
+          MUSL: ${{ steps.musl-source.outputs.present }}
           CHART_DIGEST: ${{ steps.chart.outputs.digest }}
           CHART_IDENTITY: ${{ steps.chart-verify.outputs.identity }}
           EXECUTOR: ${{ steps.executor-source.outputs.present }}
@@ -2208,6 +2331,37 @@ jobs:
           \`\`\`
 
           NOTES
+          case "$MUSL" in
+          true)
+          cat >> release-notes.md <<NOTES
+          ### Static musl archives
+
+          | | |
+          | --- | --- |
+          | daemon | \`substrate-daemon-${VERSION}-${MUSL_TARGET}.tar.gz\` |
+          | command-line client | \`b10x-substrate-${VERSION}-${MUSL_TARGET}.tar.gz\` |
+          | runs on | any x86_64 Linux, whatever its C library |
+
+          Both are built for \`${MUSL_TARGET}\` from a stage of the same pinned image and linked
+          statically; each archive holds the binary and the same three files. Before release this
+          workflow refused either one with a program interpreter or a needed shared library, and
+          started both with \`--version\` in \`${MUSL_FLOOR_IMAGE}\`. \`SHA256SUMS\` and its
+          signature above cover them. They keep musl's own allocator.
+
+          NOTES
+          ;;
+          false)
+          cat >> release-notes.md <<NOTES
+          This release carries no musl archives: it was published by a recovery run of a tag whose
+          source predates the Dockerfile's \`release-binaries-musl\` stage.
+
+          NOTES
+          ;;
+          *)
+          echo "refused: no answer on whether this release carries musl archives ('${MUSL}')." >&2
+          exit 1
+          ;;
+          esac
           ;;
           false)
           cat >> release-notes.md <<NOTES
@@ -2432,6 +2586,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BINARIES: ${{ steps.binary-source.outputs.present }}
+          MUSL: ${{ steps.musl-source.outputs.present }}
         run: |
           set -euo pipefail
           case "$BINARIES" in
@@ -2439,6 +2594,21 @@ jobs:
               assets=(
                 "${BINARY_DIST}/assets/substrate-daemon-${VERSION}-${BINARY_TARGET}.tar.gz"
                 "${BINARY_DIST}/assets/b10x-substrate-${VERSION}-${BINARY_TARGET}.tar.gz"
+              )
+              case "$MUSL" in
+                true)
+                  assets+=(
+                    "${BINARY_DIST}/assets/substrate-daemon-${VERSION}-${MUSL_TARGET}.tar.gz"
+                    "${BINARY_DIST}/assets/b10x-substrate-${VERSION}-${MUSL_TARGET}.tar.gz"
+                  )
+                  ;;
+                false) ;;
+                *)
+                  echo "refused: no answer on whether this release carries musl archives ('${MUSL}')." >&2
+                  exit 1
+                  ;;
+              esac
+              assets+=(
                 "${BINARY_DIST}/assets/SHA256SUMS"
                 "${BINARY_DIST}/assets/SHA256SUMS.sigstore.json"
               )
@@ -2475,6 +2645,7 @@ jobs:
           MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
           SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
           BINARIES: ${{ steps.binary-source.outputs.present }}
+          MUSL: ${{ steps.musl-source.outputs.present }}
           CHART_DIGEST: ${{ steps.chart.outputs.digest }}
           EXECUTOR: ${{ steps.executor-source.outputs.present }}
           EXECUTOR_DIGEST: ${{ steps.executor-build.outputs.digest }}
@@ -2493,6 +2664,11 @@ jobs:
             fi
             if [ "$BINARIES" = true ]; then
               echo "Release binaries: \`substrate-daemon-${VERSION}-${BINARY_TARGET}.tar.gz\` and \`b10x-substrate-${VERSION}-${BINARY_TARGET}.tar.gz\` on the GitHub release, \`SHA256SUMS\` at \`${SUMS_DIGEST}\`, keyless-signed; verify with \`cosign verify-blob\`."
+              if [ "$MUSL" = true ]; then
+                echo "Static musl archives: \`substrate-daemon-${VERSION}-${MUSL_TARGET}.tar.gz\` and \`b10x-substrate-${VERSION}-${MUSL_TARGET}.tar.gz\` on the GitHub release, covered by the same \`SHA256SUMS\`; they run on any x86_64 Linux."
+              else
+                echo "Static musl archives: not published: the tagged source has no release-binaries-musl stage."
+              fi
             else
               echo "Release binaries: not published: the tagged source has no release-binaries stage."
             fi
@@ -2511,12 +2687,13 @@ jobs:
           MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
           SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
           BINARIES: ${{ steps.binary-source.outputs.present }}
+          MUSL: ${{ steps.musl-source.outputs.present }}
           CHART_DIGEST: ${{ steps.chart.outputs.digest }}
           EXECUTOR: ${{ steps.executor-source.outputs.present }}
           EXECUTOR_DIGEST: ${{ steps.executor-build.outputs.digest }}
         run: |
           case "$BINARIES" in
-            true) binaries_row="\`${BINARY_TARGET}\`, SHA256SUMS \`${SUMS_DIGEST:-<not built>}\`" ;;
+            true) binaries_row="\`${BINARY_TARGET}\` and \`${MUSL_TARGET}\` (${MUSL:-<undecided>}), SHA256SUMS \`${SUMS_DIGEST:-<not built>}\`" ;;
             false) binaries_row="not published: the tagged source has no release-binaries stage" ;;
             *) binaries_row="<undecided>" ;;
           esac
