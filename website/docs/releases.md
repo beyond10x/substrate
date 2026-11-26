@@ -10,7 +10,7 @@ fails when the two differ. Earlier releases are in the
 [full changelog](https://github.com/beyond10x/substrate/blob/main/CHANGELOG.md). The
 [confinement adapters](./concepts/adapters.md) page explains each adapter the notes name.
 
-The newest release is 0.28.0, published on 25 November 2026. The
+The newest release is 0.29.0, published on 26 November 2026. The
 [status page](./status.md#newest-release) summarizes it.
 
 A release that moves the contract bundle needs its SDK clients upgraded with the daemon. See the
@@ -18,85 +18,91 @@ A release that moves the contract bundle needs its SDK clients upgraded with the
 
 <!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->
 
-## 0.28.0 (2026-11-25)
+## 0.29.0 (2026-11-26)
 
-### Added in 0.28.0
+### Added in 0.29.0
 
-- An exec start and a session start carry an executable allow-list and deny-list (design 37):
-  `sandbox.exec_subpaths` and `sandbox.exec_denied_paths`, at most `MAX_EXEC_SUBPATHS` and
-  `MAX_EXEC_DENIED_PATHS` (64 each) unique entries of 1 to `MAX_EXEC_LIST_ENTRY_BYTES` (4,095)
-  bytes. An absent allow-list is no list; a present one holds the run to its program and what
-  the entries admit; a deny entry is never executed, also beneath an allow entry. The requested
-  and the applied sandbox of the exec record echo both lists as sent. The three wire starts of
-  the host driver apply them through the helper of design 35, as an adapter start does. A start
-  without the members serializes, hashes and runs as before.
-- `substrate-daemon --exec-gate <path>` names the statically linked `substrate-exec-gate`
-  helper. It has no default and no environment variable and is refused beside
-  `--driver kubernetes`. A helper the host driver's open refuses stops the daemon before it
-  binds its socket. Without the flag neither list's fact is published.
-- The capability snapshot publishes `confinement.exec-denied-paths` beside
-  `confinement.exec-subpaths`, each where the host driver proved it, and `sandbox.requires.facts`
-  admits `exec-denied-paths`. The published set of confinement properties is the `linux`
-  adapter's proof with no exception.
-- The capability snapshot's optional `withheld` says why a fact the deployment was configured
-  to prove is absent: at most `MAX_WITHHELD_FACTS` (12) entries of a fact, a cause
-  (`file-system-unlisted`, `mount-id-unreported`) and a configuration address
-  (`config.exec_gate`, `config.workspace_root`, `config.writable_roots`), each once. An entry
-  carries no host path and no file-system type. A daemon whose open withholds the facts starts
-  and serves without them.
-- A start that names a list is refused before the program starts by one of eight codes, the rows of `substrate_wire::EXEC_LIST_REFUSALS`:
-  `exec.sandbox-exec-subpaths-empty` (422), `confinement.exec-denied-paths-without-subpaths`
-  (422), `confinement.fact-unserved` (501) at `sandbox.exec_subpaths` or
-  `sandbox.exec_denied_paths`, `session.pty-unserved` (501) at `mode`,
-  `exec.sandbox-path-unrepresentable` (422), `exec.sandbox-exec-subpath-undeclared` (422),
-  `exec.sandbox-program-unlisted` (422) and `exec.sandbox-place-unserved` (501). A list over its
-  bound, an empty or over-long entry, an entry written twice and `null` are
-  `request.schema-invalid` (422) at the member. The daemon checks the lexical rules and the
-  first three codes in that order after `exec.capability-stale`, for every driver, and the
-  operation is recorded as refused; the host driver answers the other five for an accepted
-  operation, whose recorded state is `terminal` with the refusal as its error. A message names a path of the run's view and a cause by name,
-  never a host path and never a file-system type. A start with an execution capsule and a list
-  is `exec.sandbox-path-unrepresentable` at `argv`: its program lies beneath `/runtime`, which
-  no list can name.
-- Contract bundle `substrate-wire/0.29.0` (predecessor `0.28.0`, adds no route, preserves its
-  45) publishes the two members on both starts and on the exec record, the fact
-  `confinement.exec-denied-paths`, `withheld`, and the eight codes, each with a vector and the
-  fact refusal with one per list. One vector replays a start without the members under its
-  `0.28.0` request hash. The vector of `exec.sandbox-place-unserved` is published and not
-  executed, because no lane has a volume whose place it refuses. `cargo xtask check-bundle
-  0.29.0` holds each value to its wire constant and each refusal to its row
-  (`xtask/src/bundle/exec_lists.rs`). The daemon, the SDK and the conformance runner advertise
-  `substrate-wire/0.29.0` (inner `bundle.json` sha256
-  `65bde1870351dfb72d4431d2dd88f0f641e91cc814007d01e0a5250517539bfd`). A client that validates
-  a capability snapshot or an exec record against a bundle's schema needs the schema of
-  `0.29.0`.
-- The executable lists are served on `xfs` beside `ext4`, `overlay` and `tmpfs`
-  (`LISTED_FILE_SYSTEMS`; the probe is design 35 § 3.14). `btrfs` stays refused by name.
+- Static musl release archives: every release attaches
+  `substrate-daemon-<version>-x86_64-unknown-linux-musl.tar.gz` and
+  `b10x-substrate-<version>-x86_64-unknown-linux-musl.tar.gz` beside the two `gnu` archives, each
+  holding one statically linked executable that runs on any x86_64 Linux, whatever its C
+  library. They are built from the Dockerfile's `release-binaries-musl` stage of the same pinned
+  image, with OpenSSL compiled in from source; `SHA256SUMS` and its keyless signature cover all
+  four archives. Each musl archive also carries `musl-COPYRIGHT`, the licence and copyright
+  notice of the musl C library linked into its binary, committed unchanged as
+  `licenses/musl-COPYRIGHT`. The musl build selects the packages and targets the `gnu` build
+  selects, so both resolve the same dependency features. Before any image tag moves, `release.yml` refuses a musl binary with a program
+  interpreter or a dynamic section naming a shared library, or one that does not answer
+  `--version` with the release's version in a digest-pinned Alpine 3.24.4 image; a recovery of
+  a tag whose source has no musl stage publishes the `gnu` archives alone and says so. The job
+  `musl-binaries` of `release-lanes.yml` runs the same build and checks on every pull request
+  that changes what they build. The `gnu` archives, their names, their checks and the images are
+  unchanged. The binaries keep musl's own allocator until a recorded measurement shows mimalloc
+  is not slower on their allocation-heavy path. Held by the musl cases of the `xtask` test
+  binary `release_workflow`, which run the release's steps offline against fake `readelf`,
+  `docker` and `gh`.
+- `substrate_host` builds for `x86_64-unknown-linux-musl`: its three `RENAME_NOREPLACE` renames
+  make `renameat2` as the system call (on glibc `rename::tests` compares it with nix's wrapper),
+  and its `ioctl` requests and control-message lengths take the type each C library declares.
+- `substrate_host::confinement::LimitUnread` and `RunObservation.limit_unread`, and the member
+  `limit_unread` of the `run_ended` audit record (design 36 D27). An ended `oci` run whose main
+  process ended by `SIGKILL` that neither the adapter nor the embedder sent, and whose runtime
+  state holds no `OOMKilled`, names no limit and states `unattributed_kill`. Every other run on
+  every adapter states nothing, and a run never has both a limit and the statement. The member
+  is no limit: a consumer that counts limit hits counts `limit`. No Rust consumer breaks at
+  compile time (`RunObservation` and `RunEnded` are `#[non_exhaustive]`); a reader of the
+  serialized record that refuses unknown members refuses a record with the new member. Held by
+  `a_sigkill_no_source_explains_names_no_limit_and_is_stated` and the monitor's cases in
+  `confinement::oci::tests`, the record's JSON case in `confinement::tests`, and the `oci` lane
+  case `ESS confinement oci unattributed kill`, a command that sends `SIGKILL` to itself.
+- `scripts/wait-checks.sh` waits for a pull request's checks or a commit's check runs and exits
+  by what they came to: 0 when every check succeeded or was skipped or neutral, 1 when one
+  ended any other way (a startup failure and a stale check included), 3 when one is still
+  pending at its timeout, which is wall time, or none is reported, and 2 when `gh` fails on
+  three asks in a row. It is POSIX sh over `gh` and `jq` and only reads. `--from` decides once
+  on a list `gh` printed, and the module `wait_checks` of the `xtask` test binary `bot_scripts`
+  holds each status on lists recorded from this repository.
+- `substrate_host::confinement::RunUsage` and `RunObservation.usage`, and the member `usage` of
+  the `run_ended` audit record (design 36 § 3a, D29 to D38). An ended run on `linux`, on
+  `systemd` around `linux` and on `systemd` around `local` carries `wall_time_us` (from the
+  start to the leader's exit), `cpu_time_us`, `memory_peak_bytes` and `processes_peak`, named
+  and counted as the wire's `ResourceUsage`, also beside the limit that ended it and on an
+  `Unknown` run. A figure that cannot be read is absent and the others are kept; reading them
+  refuses nothing and changes no state. `oci`, `pod`, `local` and `macos` leave `usage` absent.
+  An exec that asked for `measurements` takes the three counters from its terminal sample, and
+  no wire byte changes: an exec that asked for none still has no `resource.usage`. No Rust
+  consumer breaks at compile time (`RunObservation`, `RunEnded` and `RunUsage` are
+  `#[non_exhaustive]`; build a `RunUsage` from `RunUsage::default()`); a reader of the
+  serialized record that refuses unknown members refuses a record with `usage`. Held by the
+  unit cases of `process.rs`, `confinement::systemd`, `confinement::linux` and
+  `confinement::tests`, and by the lane cases `ESS confinement linux usage`,
+  `ESS confinement systemd local usage` and `ESS confinement systemd linux usage`: a run that
+  sleeps one second in eight processes, allocates 64 MiB and spends one second of CPU carries at
+  least each figure, and at most what its bounds let it reach, on its observation and on its
+  `run_ended`.
 
-### Changed in 0.28.0
+### Changed in 0.29.0
 
-- **Breaking (`b10x-substrate-host` adapter API, design 37):** a confinement profile with more
-  than 64 `exec_subpaths` entries is refused `confinement.exec-subpaths-exceeded` (422), on
-  every adapter, before any fact is read. Such a profile was admitted before.
-- **Breaking (`b10x-substrate-wire` and `b10x-substrate-host` public API, design 37):** six
-  public Rust types gain a member, and none is `#[non_exhaustive]`: a consumer that writes
-  one as a struct literal, or matches an enum without a wildcard, adds a line. In
-  `b10x-substrate-wire`: `ConfinementRequest` and `AppliedConfinement` gain `exec_subpaths`
-  (`Option<Vec<String>>`) and `exec_denied_paths` (`Vec<String>`), `CapabilitySnapshot` and
-  `CapabilityFacts` one member each for `withheld` and the deny-list's fact, and
-  `ConfinementProperty` the variant `ExecDeniedPaths`. In `b10x-substrate-host`:
-  `ConfinementError` gains `ExecSubpathsExceeded`.
-- A metrics scrape carries at most 593 samples, 587 before: the refusal series gain the six
-  codes above that are new to the wire crate.
-- The request for the pack budget in the published `gix-pack`, which this repository carries
-  as `vendor/gix-pack-0.74.2`, is <https://github.com/GitoxideLabs/gitoxide/issues/3244>.
-
-### Fixed in 0.28.0
-
-- A startup probe of the host driver ends when its sandbox has ended. The terminal probe behind
-  `sessions.pty` and the egress aperture probe answer that the mechanism is not proved once the
-  backend they started is gone. Their deadlines, 10 s and 5 s, are unchanged and bound a sandbox
-  that stays and says nothing. No fact changes: a backend that proved a mechanism before proves
-  it now. Held by `a_sandbox_that_ends_at_once_ends_the_probe_before_its_deadline` in
-  `pty::tests` and in `egress::tests`, each through a backend that exits at once and with half
-  the deadline as its bound.
+- `b10x-substrate-host` makes `memfd_create` and `renameat2` as system calls on every Linux C
+  library, so a binary that embeds it links against glibc older than 2.27 and against musl. A
+  unit test of the crate refuses a source file that calls either C library wrapper outside
+  `memfd.rs` and `rename.rs`; on glibc the tests compare the `renameat2` system call with nix's
+  wrapper over twelve cases.
+- The `oci` adapter reads a container's state once after the runtime client returns, and
+  publishes the run's end once that read and the removal are done (design 36 D28). Measured on
+  a standard hosted runner on 2026-11-25, 610 memory-bound kills: the flag was at the first read
+  in 482 and at no later read within 5 s in the other 128. The `oci` lane's memory case passes
+  with either of the two ends design 36 allows, `memory`, or no limit and `unattributed_kill`,
+  and prints which it read; any other end fails it.
+- Every Linux workflow job runs on a runner image named by its version: `ubuntu-26.04` for the
+  gate, the change classification, the chart and namespace lanes, the pages build and the
+  release, and `ubuntu-24.04` for the release lanes, as before. The Ubuntu release a job runs on
+  moves only with a commit; the image's weekly updates still arrive. `every_job_runs_on_a_runner_image_named_by_its_version` in
+  `xtask/tests/release_workflow.rs` holds the table. The documentation site's job runs in the
+  website repository's reusable workflow, pinned by commit, which names its own runner. The
+  host crate's executable-list lane cases list the directory that holds each tool's file, with
+  every symbolic link followed, so a tool kept as a link out of `/usr/bin` (Ubuntu 26.04's
+  `ln`, `env`, `cat`, `ls` and `mkdir`) is admitted by the directory it lies in. A case in
+  `ess_confinement_linux` holds that rule on a staged directory of links, on any host, without
+  privilege or a mount. The staged-mount cases still run on a workstation only: a hosted runner
+  grants a user namespace no mount.

@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.29.0] — 2026-11-26
+
 ### Added
 
 - Static musl release archives: every release attaches
@@ -29,9 +31,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   binary `release_workflow`, which run the release's steps offline against fake `readelf`,
   `docker` and `gh`.
 - `substrate_host` builds for `x86_64-unknown-linux-musl`: its three `RENAME_NOREPLACE` renames
-  call `renameat2` through nix on glibc and as the system call on musl, with the same
-  arguments and errors (`rename::tests` runs both forms), and its `ioctl` requests and
-  control-message lengths take the type each C library declares.
+  make `renameat2` as the system call (on glibc `rename::tests` compares it with nix's wrapper),
+  and its `ioctl` requests and control-message lengths take the type each C library declares.
 - `substrate_host::confinement::LimitUnread` and `RunObservation.limit_unread`, and the member
   `limit_unread` of the `run_ended` audit record (design 36 D27). An ended `oci` run whose main
   process ended by `SIGKILL` that neither the adapter nor the embedder sent, and whose runtime
