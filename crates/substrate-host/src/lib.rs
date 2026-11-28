@@ -32,7 +32,10 @@ mod git;
 // Where the baseline of a Git workspace is kept and how it goes, with and without `git`.
 #[cfg(target_os = "linux")]
 mod git_baselines;
+// Root file systems from a digest-named archive (design 38 § 3).
 pub mod host_process;
+#[cfg(target_os = "linux")]
+pub mod image;
 // The operator's local endpoint declaration (ADR 0054), which configuration names on every
 // platform.
 pub mod local_endpoint;

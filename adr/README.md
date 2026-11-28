@@ -59,3 +59,7 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0052](0052-the-workspace-root-is-the-directory-dot-on-the-v1-directory-page.md) | The workspace root is the directory `.` on the v1 directory page | accepted |
 | [0053](0053-a-mutation-is-refused-before-dispatch-when-its-success-result-cannot-be-recorded.md) | A mutation is refused before dispatch when its success result cannot be recorded | accepted |
 | [0054](0054-a-local-endpoint-is-an-aperture-relayed-to-a-per-run-socket.md) | A local endpoint is an aperture relayed to a per-run socket | accepted |
+| [0055](0055-the-daemon-unpacks-a-root-filesystem-from-a-sha256-named-archive.md) | The daemon unpacks a root filesystem from a sha256-named archive | accepted |
+| [0056](0056-a-workload-is-a-confined-run-the-daemon-supervises-on-the-host-driver.md) | A workload is a confined run the daemon supervises on the host driver | accepted |
+| [0057](0057-an-inbound-endpoint-is-a-daemon-relay-into-a-no-egress-run.md) | An inbound endpoint is a daemon relay into a no-egress run | accepted |
+| [0058](0058-a-start-carries-a-per-run-secret-value-held-in-memory.md) | A start carries a per-run secret value held in memory | accepted |
