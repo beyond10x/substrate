@@ -26,6 +26,7 @@ async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+flate2.workspace = true
 # Pin and statically include gix's curl backend; runtime images need no system libcurl.
 curl = { workspace = true, optional = true }
 hex.workspace = true

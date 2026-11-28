@@ -38,6 +38,7 @@ ed25519-dalek = "3.0"
 fancy-regex = "0.19"
 hex = "0.4"
 futures-util = { version = "0.3", features = ["sink"] }
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 getrandom = "0.4"
 git2 = { version = "0.20", default-features = false, features = ["https"] }
 gix = { version = "=0.87.1", default-features = false, features = ["blocking-http-transport-curl-openssl", "parallel", "pack-cache-lru-dynamic", "sha1"] }

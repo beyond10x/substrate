@@ -32,7 +32,10 @@ mod git;
 // Where the baseline of a Git workspace is kept and how it goes, with and without `git`.
 #[cfg(target_os = "linux")]
 mod git_baselines;
+// Root file systems from a digest-named archive (design 38 § 3).
 pub mod host_process;
+#[cfg(target_os = "linux")]
+pub mod image;
 mod observation;
 // Which bytes of a bounded output stream a run keeps (design 29). Published through `confinement`,
 // which re-exports its public types.
