@@ -48,7 +48,14 @@ before the start, so a name the caller chooses lets its agent create the socket 
    with no group or other write permission. The daemon creates, replaces and removes nothing in
    it: the agent, which the operator declared beside it, owns the sockets. The directory is one of
    the daemon's private host paths, so a read-only root, a read-only file or a writable root that
-   meets it is refused as one that meets the state directory is.
+   meets it is refused as one that meets the state directory is. Startup also refuses, with the
+   same code, a directory that meets a path the daemon owns, compared as written and as resolved
+   in both directions: the workspace root, because every directory at or beneath it is one a run
+   may hold read-write (a workspace, or a directory `workspace.adopt` serves); the state
+   directory; and every other path the daemon trusts, the API socket among them, so no key names
+   a socket of the daemon's own. Two endpoints over one directory, told apart by the device and
+   inode their opened descriptors report, are refused, because decision 6 holds a key per
+   endpoint and one directory would give two runs one socket.
 
 3. **The socket's name is the start's `sandbox.local_endpoint_key`, else the run id.** The key is
    optional on the sandbox of an exec start and of a session start's exec, beside `aperture` and
@@ -63,15 +70,20 @@ before the start, so a name the caller chooses lets its agent create the socket 
    start member; a start without it serializes and hashes as on `0.29.0`.
 
 4. **The relay connects through the held descriptor, from the host side only.** For each
-   connection the forwarder accepts, a relay process forked from it connects to
-   `/proc/self/fd/<n>/<name>`, where `<n>` is the directory's descriptor, which the fork
-   inherited. The path is built before the fork from the descriptor number and the name. The relay
-   runs in the daemon's mount, network and user namespaces, so nothing a run controls takes part
-   in the lookup, and no path given to bubblewrap names the directory. The design's open question
-   I10 (whether a `connect` through `/proc/self/fd/<n>/<name>` reaches the socket, and whether
-   such a `sun_path` fits) is answered: the startup probe below connects that way on every host
-   that publishes the fact, and a unit case of the host driver holds it. `sun_path` holds 108
-   bytes; `/proc/self/fd/` with a descriptor number and a 64-byte key takes at most 90.
+   connection the forwarder accepts, a relay process forked from it opens the entry `<name>`
+   beneath the directory's descriptor `<n>`, which the fork inherited, with
+   `openat(<n>, <name>, O_PATH | O_NOFOLLOW | O_CLOEXEC)`; requires with `fstat` that the opened
+   file is a socket; and connects through `/proc/self/fd/<m>`, where `<m>` is that descriptor, so
+   the connect reaches the opened socket and looks up no name again. A symbolic link is opened as
+   the link and is not a socket, so an entry that is a link reaches nothing, wherever it points;
+   so does a regular file, a directory or an absent entry. The name is fixed before the fork, and
+   the relay allocates nothing. The relay runs in the daemon's mount, network and user
+   namespaces, so nothing a run controls takes part in the lookup, and no path given to
+   bubblewrap names the directory. The design's open question I10 (whether a `connect` from the
+   daemon reaches the agent's socket through the held descriptor, and whether such a `sun_path`
+   fits) is answered: the startup probe below connects that way on every host that publishes the
+   fact, and unit cases of the host driver hold it. `/proc/self/fd/` with a descriptor number
+   takes at most 24 of the 108 bytes of `sun_path`, whatever the name.
 
 5. **An absent socket closes the connection.** When the connect fails, for an absent socket or any
    other reason, the relay closes the accepted connection and tries nothing else: no other socket,
@@ -85,7 +97,11 @@ before the start, so a name the caller chooses lets its agent create the socket 
    it alone holds the live set: from the admission of the start, before anything is spawned, to the
    end of the run, when its apertures are torn down and the key is free again. A refusal of the
    driver is recorded as every driver refusal is: the accepted operation's row is `terminal` with
-   the refusal as its error (design 37 D23).
+   the refusal as its error (design 37 D23). The keys of an endpoint are one name space across
+   subjects, because the socket is one host object: a key any live run holds is refused whatever
+   the subject of the start, so a deployment with several `--allow-uid` subjects shares the key
+   space of each endpoint. The refusal's fixed message names neither the other subject nor its
+   run.
 
 7. **The fact needs the mechanism.** A local endpoint is listed in `exec.egress-apertures` with
    `destination: "local:<port>"`, and only after the mechanism ran at startup in a throwaway
@@ -127,8 +143,9 @@ may say, configuration owns reach, the mechanism is probed, and what was applied
 
 The agent attributes a connection by the socket it arrived on and trusts nothing the run says.
 That holds while the directory is the agent's alone: a second writer of the directory could
-create a socket under another run's name. The daemon refuses a directory others can write, and
-the operator owns the agent.
+create a socket under another run's name. The daemon refuses a directory others can write and
+one a run may hold, the relay reaches a socket entry and never what a link names, and the
+operator owns the agent.
 
 A key held by a live run is refused rather than shared, so two runs of one caller with one key
 cannot be told apart by mistake; it costs the caller a retry when it restarts an instance before

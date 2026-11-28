@@ -980,6 +980,7 @@ fn check_host_declarations(config: &DaemonConfig) -> anyhow::Result<HostDeclarat
     )?;
     check_writable_roots_clear_of(&config.writable_roots, &protected_host_paths(config))?;
     check_writable_roots_outside_local_endpoints(&config.writable_roots, &config.local_endpoints)?;
+    check_local_endpoints_apart(config)?;
     check_ca_bundle(config.ca_bundle.as_deref())?;
     Ok(HostDeclarations {
         git_sources,
@@ -1031,12 +1032,82 @@ fn open_local_endpoints(
                 endpoint.name
             );
         }
-        opened.push(
+        let endpoint =
             substrate_host::LocalEndpoint::open(&endpoint.name, endpoint.port, &endpoint.directory)
-                .map_err(|error| anyhow!("{}: {}", error.code, error.message))?,
-        );
+                .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+        if let Some(earlier) = opened
+            .iter()
+            .find(|earlier: &&substrate_host::LocalEndpoint| earlier.same_directory(&endpoint))
+        {
+            bail!(
+                "{CODE}: local endpoints {} and {} are declared over one directory",
+                earlier.name,
+                endpoint.name
+            );
+        }
+        opened.push(endpoint);
     }
     Ok(opened)
+}
+
+/// Refuses a local endpoint directory that meets a path the daemon owns (ADR 0054 decision 2):
+/// the workspace root, the state directory, or any of [`protected_host_paths`]. A directory at or
+/// beneath the workspace root is one a run may hold read-write (a workspace, or a directory
+/// `workspace.adopt` serves), so a run could create the entries a relay reaches; a directory
+/// holding the API socket, or another path of the daemon's, lets a key name it. Each path is
+/// compared as written and as resolved, in both directions.
+///
+/// # Errors
+///
+/// `config.local-endpoint-invalid`, naming the endpoint and what its directory meets, never a
+/// path.
+fn check_local_endpoints_apart(config: &DaemonConfig) -> anyhow::Result<()> {
+    const CODE: &str = substrate_host::local_endpoint::LOCAL_ENDPOINT_INVALID;
+    if config.local_endpoints.is_empty() {
+        return Ok(());
+    }
+    let mut owned = vec![
+        (config.workspaces.clone(), "the workspace root".to_owned()),
+        (
+            state_directory(&config.state)?.to_path_buf(),
+            "the state directory".to_owned(),
+        ),
+    ];
+    owned.extend(
+        protected_host_paths(config)
+            .into_iter()
+            .filter(|(path, _)| {
+                !config
+                    .local_endpoints
+                    .iter()
+                    .any(|endpoint| &endpoint.directory == path)
+            }),
+    );
+    let mut forms = Vec::new();
+    for (path, what) in &owned {
+        if let Ok(absolute) = std::path::absolute(path) {
+            forms.push((absolute, what));
+        }
+        forms.push((resolved_prefix(path)?, what));
+    }
+    for endpoint in &config.local_endpoints {
+        let mut directories = vec![resolved_prefix(&endpoint.directory)?];
+        if let Ok(absolute) = std::path::absolute(&endpoint.directory) {
+            directories.push(absolute);
+        }
+        for directory in &directories {
+            if let Some((_, what)) = forms
+                .iter()
+                .find(|(path, _)| directory.starts_with(path) || path.starts_with(directory))
+            {
+                bail!(
+                    "{CODE}: the directory of local endpoint {} meets {what}",
+                    endpoint.name
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Design 34 § 3: beside `--driver kubernetes` a host-only declaration is refused by name, never

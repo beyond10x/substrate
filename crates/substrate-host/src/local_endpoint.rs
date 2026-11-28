@@ -2,9 +2,10 @@
 //! directory of Unix sockets on the host.
 //!
 //! The directory is opened once, when the declaration is made, and held by its descriptor for the
-//! life of the process. Every relay reaches a socket in it through that descriptor
-//! (`/proc/self/fd/<n>/<socket>`), so a path swapped after startup changes nothing a run can
-//! reach, and the published record never names a host path.
+//! life of the process. Every relay opens the socket's entry beneath that descriptor without
+//! following a link and connects to the opened socket, so a path swapped after startup changes
+//! nothing a run can reach, an entry that is a link reaches nothing, and the published record
+//! never names a host path.
 
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
@@ -31,6 +32,8 @@ pub struct LocalEndpoint {
     pub name: String,
     pub port: u16,
     directory: Arc<OwnedFd>,
+    /// The device and inode the opened descriptor reported.
+    identity: (u64, u64),
 }
 
 impl LocalEndpoint {
@@ -76,6 +79,7 @@ impl LocalEndpoint {
             name: name.to_owned(),
             port,
             directory: Arc::new(OwnedFd::from(opened)),
+            identity: (metadata.dev(), metadata.ino()),
         })
     }
 
@@ -99,6 +103,14 @@ impl LocalEndpoint {
             )));
         }
         Ok(())
+    }
+
+    /// Whether `other` holds the same directory, by the device and inode each opened descriptor
+    /// reported, whatever paths named them. Two endpoints over one directory would let two live
+    /// runs hold one socket (ADR 0054 decision 6), so the daemon refuses such a declaration.
+    #[must_use]
+    pub fn same_directory(&self, other: &Self) -> bool {
+        self.identity == other.identity
     }
 
     /// The directory, for a relay that reaches a socket in it.
@@ -201,6 +213,27 @@ mod tests {
             .count();
         assert_eq!(seen, 1);
         std::fs::remove_dir_all(&moved).expect("cleanup");
+    }
+
+    /// One directory is one directory under any path that names it; two directories are two.
+    #[test]
+    fn one_directory_is_told_apart_from_another_by_what_its_descriptor_reports() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let first = scratch.path().join("first");
+        let second = scratch.path().join("second");
+        for directory in [&first, &second] {
+            std::fs::create_dir(directory).expect("directory");
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                .expect("mode");
+        }
+        let alias = scratch.path().join("alias");
+        std::os::unix::fs::symlink(scratch.path(), &alias).expect("alias");
+        let agent = LocalEndpoint::open("agent", 7000, &first).expect("agent");
+        let audit = LocalEndpoint::open("audit", 7001, &alias.join("first")).expect("audit");
+        let other = LocalEndpoint::open("other", 7002, &second).expect("other");
+        assert!(agent.same_directory(&audit));
+        assert!(audit.same_directory(&agent));
+        assert!(!agent.same_directory(&other));
     }
 
     #[test]

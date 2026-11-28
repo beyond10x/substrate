@@ -9454,7 +9454,10 @@ async fn runtime_clean_room_relays_local_endpoints_to_their_runs() {
     const PART: &str = "local endpoints";
     let delegated = DelegatedCgroup::acquire();
     let temporary = clean_room("substrate-local-endpoint-");
-    let directory = temporary.path().join("agent");
+    // Apart from the daemon's root, which is its state directory: startup refuses a local
+    // endpoint directory that meets a path the daemon owns (ADR 0054 decision 2).
+    let agent = clean_room("substrate-local-endpoint-agent-");
+    let directory = agent.path().join("agent");
     std::fs::create_dir(&directory).expect("the endpoint's directory");
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
         .expect("a private directory");

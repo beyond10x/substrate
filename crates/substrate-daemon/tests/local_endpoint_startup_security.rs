@@ -89,7 +89,10 @@ async fn control_a_group_writable_directory_stops_startup() {
         observed.starts_with("config.local-endpoint-invalid: "),
         "{observed}"
     );
-    assert!(!observed.contains(&base.display().to_string()), "{observed}");
+    assert!(
+        !observed.contains(&base.display().to_string()),
+        "{observed}"
+    );
 }
 
 /// Rule: a run never writes the directory of a local endpoint (ADR 0054 decision 2, and its
@@ -102,7 +105,6 @@ async fn control_a_group_writable_directory_stops_startup() {
 /// relay as the daemon's uid. Startup refuses a writable root around or under the directory; the
 /// workspace root is the root of every workspace and is held to the same rule here.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "finding 1: a local endpoint directory beneath the workspace root is admitted at startup"]
 async fn a_local_endpoint_directory_beneath_the_workspace_root_stops_startup() {
     let (_directory, base) = tree();
     let agent = private_directory(&base.join("workspaces/agent"));
@@ -121,8 +123,6 @@ async fn a_local_endpoint_directory_beneath_the_workspace_root_stops_startup() {
 /// API admits as `local:<uid>` when that uid is allowed. A socket name that is a valid key
 /// (`[a-z0-9][a-z0-9-]*`) inside the declared directory is one a start can name.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "finding 2: the daemon's API socket inside a local endpoint directory is admitted at \
-            startup"]
 async fn the_api_socket_inside_a_local_endpoint_directory_stops_startup() {
     let (_directory, base) = tree();
     let agent = private_directory(&base.join("agent"));
@@ -145,8 +145,6 @@ async fn the_api_socket_inside_a_local_endpoint_directory_stops_startup() {
 /// `<directory>/k`, and neither start is refused. Either startup refuses two declarations of one
 /// directory, or the live set is keyed by the directory; this case holds the first form.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "finding 3: two local endpoints over one directory are admitted at startup, so one \
-            socket can be held by two live runs"]
 async fn two_local_endpoints_over_one_directory_stop_startup() {
     let (_directory, base) = tree();
     let agent = private_directory(&base.join("agent"));

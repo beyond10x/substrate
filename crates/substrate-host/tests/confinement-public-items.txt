@@ -449,6 +449,7 @@ local_endpoint.rs: struct LocalEndpoint > pub name: String,
 local_endpoint.rs: struct LocalEndpoint > pub port: u16,
 local_endpoint.rs: struct LocalEndpoint > (private fields)
 local_endpoint.rs: impl LocalEndpoint > pub fn open(name: &str, port: u16, directory: &Path) -> Result<Self, DriverError>
+local_endpoint.rs: impl LocalEndpoint > pub fn same_directory(&self, other: &Self) -> bool
 observation.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum PipeStream
 observation.rs: enum PipeStream > Stdout,
 observation.rs: enum PipeStream > Stderr,

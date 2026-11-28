@@ -753,17 +753,25 @@ enum Destination<'a> {
     },
 }
 
+/// The bytes a relay target holds for a socket's entry name, its terminating NUL included.
+const RELAY_ENTRY_BYTES: usize = 256;
+
+/// The path a relay connects through, followed by the number of the descriptor it opened on the
+/// socket's entry.
+const PROC_SELF_FD: &[u8] = b"/proc/self/fd/";
+
 /// What a relay connects to, built before the fork so the relay allocates nothing.
 #[derive(Clone, Copy)]
+#[allow(clippy::large_enum_variant)] // One per forwarder, read in place after the fork.
 enum RelayTarget {
     Tcp(libc::sockaddr_in),
-    /// `/proc/self/fd/<directory_fd>/<socket>`: the relay inherits `directory_fd` from the
-    /// forwarder, so `/proc/self` names the relay's own table and the lookup starts at the
-    /// directory the daemon opened.
+    /// One entry of the directory `directory_fd` holds, as a NUL-terminated name. The relay
+    /// inherits `directory_fd` from the forwarder, opens the entry beneath it with
+    /// `O_PATH | O_NOFOLLOW`, requires a socket there, and connects through
+    /// `/proc/self/fd/<entry descriptor>` ([`connect_entry`]).
     Unix {
         directory_fd: RawFd,
-        address: libc::sockaddr_un,
-        length: libc::socklen_t,
+        entry: [libc::c_char; RELAY_ENTRY_BYTES],
     },
 }
 
@@ -782,8 +790,9 @@ impl RelayTarget {
 /// # Errors
 ///
 /// `exec.aperture-install-failed` for an IPv6 destination, and for a socket name that is not one
-/// entry of the directory (empty, `.`, `..`, or holding `/` or NUL) or whose path does not fit
-/// `sun_path`. Admission lets neither through; it is held again where the path is built.
+/// entry of the directory (empty, `.`, `..`, or holding `/` or NUL) or that is longer than
+/// `RELAY_ENTRY_BYTES` less its NUL. Admission lets neither through; it is held again where the
+/// target is built.
 fn relay_target(destination: &Destination<'_>) -> Result<RelayTarget, DriverError> {
     match destination {
         Destination::Tcp(SocketAddr::V4(address)) => {
@@ -798,25 +807,19 @@ fn relay_target(destination: &Destination<'_>) -> Result<RelayTarget, DriverErro
                 && *socket != "."
                 && *socket != ".."
                 && !socket.bytes().any(|byte| byte == b'/' || byte == 0);
-            let directory_fd = directory.as_raw_fd();
-            let path = format!("/proc/self/fd/{directory_fd}/{socket}");
-            // SAFETY: `sockaddr_un` is plain data for which all zero bytes are valid.
-            let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-            if !entry || path.len() >= address.sun_path.len() {
+            if !entry || socket.len() >= RELAY_ENTRY_BYTES {
                 return Err(DriverError::failed(
                     "exec.aperture-install-failed",
                     "The local endpoint could not be installed exactly as declared: its socket name is not one entry of the directory.",
                 ));
             }
-            address.sun_family = libc::sa_family_t::try_from(libc::AF_UNIX).unwrap_or(1);
-            for (slot, byte) in address.sun_path.iter_mut().zip(path.bytes()) {
+            let mut name = [0 as libc::c_char; RELAY_ENTRY_BYTES];
+            for (slot, byte) in name.iter_mut().zip(socket.bytes()) {
                 *slot = libc::c_char::from_ne_bytes([byte]);
             }
-            let length = std::mem::size_of::<libc::sa_family_t>() + path.len() + 1;
             Ok(RelayTarget::Unix {
-                directory_fd,
-                address,
-                length: libc::socklen_t::try_from(length).unwrap_or(110),
+                directory_fd: directory.as_raw_fd(),
+                entry: name,
             })
         }
     }
@@ -1470,6 +1473,76 @@ unsafe fn listen_through_helper(plan: &ForwarderPlan) -> Result<RawFd, (i32, i32
     }
 }
 
+/// Connects `upstream` to the socket that is the entry `entry` names in `directory_fd`, and
+/// nothing else (ADR 0054 decisions 4 and 5).
+///
+/// The entry is opened beneath the held directory with `O_PATH | O_NOFOLLOW`, so a symbolic link
+/// is opened as the link and never followed; the opened file must be a socket; and the connect
+/// goes through `/proc/self/fd/<that descriptor>`, which names the opened socket itself, so no
+/// name is looked up a second time. An entry that is absent, a link, or anything but a socket
+/// answers `false`, and the caller closes the accepted connection.
+///
+/// # Safety
+///
+/// `entry` holds a NUL. It allocates nothing and calls only async-signal-safe functions, so a
+/// post-fork child may call it.
+unsafe fn connect_entry(
+    upstream: RawFd,
+    directory_fd: RawFd,
+    entry: &[libc::c_char; RELAY_ENTRY_BYTES],
+) -> bool {
+    unsafe {
+        let opened = libc::openat(
+            directory_fd,
+            entry.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        );
+        if opened < 0 {
+            return false;
+        }
+        let mut status: libc::stat = std::mem::zeroed();
+        if libc::fstat(opened, &raw mut status) != 0
+            || status.st_mode & libc::S_IFMT != libc::S_IFSOCK
+        {
+            libc::close(opened);
+            return false;
+        }
+        let (address, length) = proc_self_fd_address(opened);
+        let connected = libc::connect(upstream, std::ptr::from_ref(&address).cast(), length) == 0;
+        libc::close(opened);
+        connected
+    }
+}
+
+/// `/proc/self/fd/<descriptor>` as a Unix socket address, written without allocating.
+fn proc_self_fd_address(descriptor: RawFd) -> (libc::sockaddr_un, libc::socklen_t) {
+    // SAFETY: `sockaddr_un` is plain data for which all zero bytes are valid.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::sa_family_t::try_from(libc::AF_UNIX).unwrap_or(1);
+    let mut digits = [0_u8; 10];
+    let mut count = 0;
+    let mut rest = u32::try_from(descriptor).unwrap_or(0);
+    loop {
+        digits[count] = b'0' + u8::try_from(rest % 10).unwrap_or(0);
+        count += 1;
+        rest /= 10;
+        if rest == 0 || count == digits.len() {
+            break;
+        }
+    }
+    let path = PROC_SELF_FD
+        .iter()
+        .copied()
+        .chain(digits[..count].iter().rev().copied());
+    let mut written = 0;
+    for (slot, byte) in address.sun_path.iter_mut().zip(path) {
+        *slot = libc::c_char::from_ne_bytes([byte]);
+        written += 1;
+    }
+    let length = std::mem::size_of::<libc::sa_family_t>() + written + 1;
+    (address, libc::socklen_t::try_from(length).unwrap_or(0))
+}
+
 /// One connection: dial the pinned tuple from the host namespace and move bytes both ways.
 ///
 /// The destination is the pinned `address:port` and nothing the child sent can change it. A child
@@ -1491,23 +1564,29 @@ unsafe fn relay_body(
     ceiling: u64,
 ) -> i32 {
     unsafe {
-        let (family, address, length): (libc::c_int, *const libc::sockaddr, libc::socklen_t) =
-            match target {
-                RelayTarget::Tcp(address) => (
-                    libc::AF_INET,
-                    std::ptr::from_ref(address).cast(),
-                    u32::try_from(std::mem::size_of::<libc::sockaddr_in>()).unwrap_or(16),
-                ),
-                RelayTarget::Unix {
-                    address, length, ..
-                } => (libc::AF_UNIX, std::ptr::from_ref(address).cast(), *length),
-            };
+        let family = match target {
+            RelayTarget::Tcp(_) => libc::AF_INET,
+            RelayTarget::Unix { .. } => libc::AF_UNIX,
+        };
         let upstream = libc::socket(family, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
         if upstream < 0 {
             libc::close(client);
             return 1;
         }
-        if libc::connect(upstream, address, length) != 0 {
+        let connected = match target {
+            RelayTarget::Tcp(address) => {
+                libc::connect(
+                    upstream,
+                    std::ptr::from_ref(address).cast(),
+                    u32::try_from(std::mem::size_of::<libc::sockaddr_in>()).unwrap_or(16),
+                ) == 0
+            }
+            RelayTarget::Unix {
+                directory_fd,
+                entry,
+            } => connect_entry(upstream, *directory_fd, entry),
+        };
+        if !connected {
             libc::close(upstream);
             libc::close(client);
             return 2;
@@ -2444,13 +2523,13 @@ mod tests {
         (directory, endpoint)
     }
 
-    /// ADR 0054 decision 4: the relay's path is one entry of the held directory, built before the
-    /// fork. A name that is not one entry, or whose path would not fit `sun_path`, is refused
-    /// where the path is built, though admission lets none through.
+    /// ADR 0054 decision 4: the relay's target is one entry of the held directory, built before
+    /// the fork. A name that is not one entry, or that does not fit the target with its NUL, is
+    /// refused where the target is built, though admission lets none through.
     #[test]
     fn a_local_endpoint_socket_name_is_one_entry_of_the_held_directory() {
         let (_directory, endpoint) = local_endpoint(7000);
-        let long = "k".repeat(120);
+        let long = "k".repeat(super::RELAY_ENTRY_BYTES);
         for socket in ["", ".", "..", "a/b", "a\0b", long.as_str()] {
             let destination = super::Destination::Unix {
                 directory: endpoint.directory(),
@@ -2462,33 +2541,119 @@ mod tests {
             assert_eq!(refusal.code, "exec.aperture-install-failed");
         }
         let key = "k".repeat(substrate_wire::MAX_LOCAL_ENDPOINT_KEY_BYTES);
-        for socket in ["worker-1", "ex_01JZ0000000000000000000000", key.as_str()] {
+        let longest = "k".repeat(super::RELAY_ENTRY_BYTES - 1);
+        for socket in [
+            "worker-1",
+            "ex_01JZ0000000000000000000000",
+            key.as_str(),
+            longest.as_str(),
+        ] {
             let destination = super::Destination::Unix {
                 directory: endpoint.directory(),
                 socket,
             };
             let Ok(super::RelayTarget::Unix {
                 directory_fd,
-                address,
-                length,
+                entry,
             }) = super::relay_target(&destination)
             else {
                 panic!("{socket:?} was refused");
             };
             assert_eq!(directory_fd, endpoint.directory_number());
+            let name: Vec<u8> = entry
+                .iter()
+                .take_while(|byte| **byte != 0)
+                .map(|byte| byte.to_ne_bytes()[0])
+                .collect();
+            assert_eq!(name, socket.as_bytes());
+        }
+    }
+
+    /// The address the relay connects through names the descriptor it opened, and nothing else.
+    #[test]
+    fn the_relay_address_is_the_proc_link_of_one_descriptor() {
+        for descriptor in [0, 7, 10, 999, i32::MAX] {
+            let (address, length) = super::proc_self_fd_address(descriptor);
             let path: Vec<u8> = address
                 .sun_path
                 .iter()
                 .take_while(|byte| **byte != 0)
                 .map(|byte| byte.to_ne_bytes()[0])
                 .collect();
-            let expected = format!("/proc/self/fd/{directory_fd}/{socket}");
+            let expected = format!("/proc/self/fd/{descriptor}");
             assert_eq!(path, expected.as_bytes());
             assert_eq!(
                 usize::try_from(length).unwrap(),
                 std::mem::size_of::<libc::sa_family_t>() + expected.len() + 1
             );
         }
+    }
+
+    /// Connects through the relay's own step to `socket` in `endpoint`'s directory, and says
+    /// whether the connect was made.
+    fn relay_connects(endpoint: &crate::LocalEndpoint, socket: &str) -> bool {
+        let destination = super::Destination::Unix {
+            directory: endpoint.directory(),
+            socket,
+        };
+        let Ok(super::RelayTarget::Unix {
+            directory_fd,
+            entry,
+        }) = super::relay_target(&destination)
+        else {
+            panic!("{socket:?} was refused");
+        };
+        // SAFETY: a fresh socket this case owns and closes.
+        unsafe {
+            let upstream = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            assert!(upstream >= 0, "socket");
+            let connected = super::connect_entry(upstream, directory_fd, &entry);
+            libc::close(upstream);
+            connected
+        }
+    }
+
+    /// ADR 0054 decision 4: the relay reaches a socket that is an entry of the held directory
+    /// and nothing an entry leads to. A symbolic link entry, to a socket outside the directory or
+    /// to one inside it, is opened as the link and refused; so are a regular file, a directory
+    /// and an absent entry. Each refusal leaves the socket outside unreached.
+    #[test]
+    fn a_link_in_the_declared_directory_reaches_nothing_through_the_relay() {
+        let (directory, endpoint) = local_endpoint(7000);
+        let outside = tempfile::tempdir().expect("outside");
+        let listener =
+            std::os::unix::net::UnixListener::bind(outside.path().join("socket")).expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let inside = std::os::unix::net::UnixListener::bind(directory.path().join("worker-1"))
+            .expect("bind inside");
+        inside.set_nonblocking(true).expect("nonblocking");
+        std::os::unix::fs::symlink(outside.path().join("socket"), directory.path().join("away"))
+            .expect("link outside");
+        std::os::unix::fs::symlink("worker-1", directory.path().join("alias"))
+            .expect("link inside");
+        std::fs::write(directory.path().join("file"), b"").expect("file");
+        std::fs::create_dir(directory.path().join("nested")).expect("nested");
+
+        for socket in ["away", "alias", "file", "nested", "absent"] {
+            assert!(
+                !relay_connects(&endpoint, socket),
+                "the relay connected through {socket:?}"
+            );
+        }
+        assert_eq!(
+            listener.accept().map(|_| ()).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::WouldBlock),
+            "the socket outside the directory was reached"
+        );
+        assert_eq!(
+            inside.accept().map(|_| ()).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::WouldBlock),
+            "the socket a link inside names was reached"
+        );
+
+        // The socket itself is reached, through the descriptor opened on it.
+        assert!(relay_connects(&endpoint, "worker-1"));
+        assert!(inside.accept().is_ok(), "the socket entry was not reached");
     }
 
     /// ADR 0054 decision 7: each kind's elements only where its own mechanism was proved, a
@@ -2569,6 +2734,7 @@ mod tests {
     #[test]
     fn a_local_endpoint_relays_to_the_socket_its_key_names_through_the_held_directory() {
         let Some(sandbox) = Sandbox::open() else {
+            eprintln!("local endpoint relay through a sandbox: ABSENT (no bubblewrap)");
             return;
         };
         let (directory, endpoint) = local_endpoint(7000);
@@ -2610,7 +2776,7 @@ mod tests {
 
         // Without a key the socket is the run id's, which nobody serves here: the relay closes
         // the connection and tries nothing else, so the keyed socket is not reached.
-        let keyless = [super::RunAperture::local(endpoint, None)];
+        let keyless = [super::RunAperture::local(endpoint.clone(), None)];
         let installed = super::install_all(&keyless, "ex_absent", sandbox.pid, None)
             .expect("install the local endpoint");
         assert_eq!(
@@ -2622,6 +2788,21 @@ mod tests {
             "a connection to an absent socket was answered"
         );
         drop(installed);
+
+        // A key naming a symbolic link to the served socket reaches nothing: the relay opens the
+        // link as a link and closes the connection.
+        std::os::unix::fs::symlink("worker-1", moved.join("alias")).expect("link");
+        let linked = [super::RunAperture::local(
+            endpoint,
+            Some("alias".to_owned()),
+        )];
+        let installed = super::install_all(&linked, "ex_link", sandbox.pid, None)
+            .expect("install the local endpoint");
+        assert!(
+            !super::reaches_from_inside(sandbox.pid, 7000, super::PROBE_SENTINEL),
+            "a connection through a link entry was answered"
+        );
+        drop(installed);
         stop.store(true, AtomicOrdering::Relaxed);
         assert_eq!(
             server.join().expect("server"),
@@ -2629,6 +2810,7 @@ mod tests {
             "the keyed socket served one connection"
         );
         std::fs::remove_dir_all(&moved).expect("cleanup");
+        eprintln!("local endpoint relay through a sandbox: executed");
     }
 
     /// The local endpoint's startup probe proves the mechanism wherever a throwaway sandbox opens
@@ -2639,9 +2821,11 @@ mod tests {
             "/does/not/exist/bwrap"
         )));
         if Sandbox::open().is_none() {
+            eprintln!("local endpoint startup probe: ABSENT (no bubblewrap)");
             return;
         }
         assert!(super::local_mechanism_is_provable(Path::new(BUBBLEWRAP)));
+        eprintln!("local endpoint startup probe: executed");
     }
 
     #[test]
