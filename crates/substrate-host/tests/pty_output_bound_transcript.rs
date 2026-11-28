@@ -82,6 +82,7 @@ fn pty_start(snapshot: &str, argv: &[&str], output_bytes: u64) -> PipeSessionSta
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: ExecLimits {
                 timeout_ms: 60_000,

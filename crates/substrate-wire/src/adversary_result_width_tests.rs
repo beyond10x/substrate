@@ -39,6 +39,7 @@ fn start(apertures: usize, roots: usize) -> ExecStartInput {
             requires: None,
             exec_subpaths: None,
             exec_denied_paths: Vec::new(),
+            local_endpoint_key: None,
         },
         limits: ExecLimits {
             timeout_ms: 1_000,
@@ -131,9 +132,16 @@ macro_rules! the_one_name {
 #[test]
 fn a_vocabulary_a_width_names_by_one_variant_has_no_other() {
     assert_eq!(the_one_name!(ApertureMode::Aperture), "\"aperture\"".len());
-    assert_eq!(
-        the_one_name!(ApertureMechanism::LoopbackForwarder),
-        "\"loopback-forwarder\"".len()
+    // Two names since ADR 0054; the widest aperture names the longer one. The `match` does not
+    // compile when a third is added until this case counts it.
+    let mechanism = |mechanism: ApertureMechanism| match mechanism {
+        ApertureMechanism::LoopbackForwarder | ApertureMechanism::LocalEndpointForwarder => {
+            json_bytes(&mechanism)
+        }
+    };
+    assert!(
+        mechanism(ApertureMechanism::LocalEndpointForwarder)
+            > mechanism(ApertureMechanism::LoopbackForwarder)
     );
     assert_eq!(the_one_name!(ExecKind::Exec), "\"exec\"".len());
     assert_eq!(the_one_name!(SessionKind::Session), "\"session\"".len());
@@ -173,6 +181,7 @@ fn the_list_is_the_widest_form_of_an_applied_network() {
         },
         max_bytes: Some(u64::MAX),
         listen: listen.map(str::to_owned),
+        key: None,
     };
     let forms = [
         AppliedNetwork::None,

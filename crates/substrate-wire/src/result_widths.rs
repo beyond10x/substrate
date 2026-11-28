@@ -32,14 +32,14 @@ use super::{
     AppliedExecutionCapsule, AppliedFilesystem, AppliedNetwork, AppliedWritableRoot, CaptureMode,
     EXECUTION_CAPSULE_MOUNT, ErrorClass, Exec, ExecAbsence, ExecExit, ExecKind, ExecRefusal,
     ExecStartInput, ExecState, ExecUsage, FileAbsence, FileKind, FileObservation, LeaseObservation,
-    LeaseState, MAX_EGRESS_APERTURES, MAX_PROCESS_REASON_BYTES, MAX_READ_ONLY_FILE_PATH_BYTES,
-    MAX_ROOT_NAME_BYTES, MAX_WRITABLE_ROOTS, PipeSession, PipeSessionLimits, ProcessConfinement,
-    ProcessDeadline, ProcessDeadlineSource, ProcessEndedBy, ProcessEnvDigest, ProcessExit,
-    ProcessKind, ProcessLease, ProcessLeaseState, ProcessOwner, ProcessPresence, ProcessProfile,
-    ProcessRecord, ProcessState, ProcessTimestamp, ResourceUsage, RootName, SessionAbsence,
-    SessionAttachmentState, SessionKind, SessionMode, SessionState, Signal, StorageLimit,
-    StorageUsage, UnrecordedOutput, Workspace, WorkspaceAbsence, WorkspaceKind, WorkspaceOrigin,
-    WorkspaceState, WritableRoot,
+    LeaseState, MAX_EGRESS_APERTURES, MAX_LOCAL_ENDPOINT_KEY_BYTES, MAX_PROCESS_REASON_BYTES,
+    MAX_READ_ONLY_FILE_PATH_BYTES, MAX_ROOT_NAME_BYTES, MAX_WRITABLE_ROOTS, PipeSession,
+    PipeSessionLimits, ProcessConfinement, ProcessDeadline, ProcessDeadlineSource, ProcessEndedBy,
+    ProcessEnvDigest, ProcessExit, ProcessKind, ProcessLease, ProcessLeaseState, ProcessOwner,
+    ProcessPresence, ProcessProfile, ProcessRecord, ProcessState, ProcessTimestamp, ResourceUsage,
+    RootName, SessionAbsence, SessionAttachmentState, SessionKind, SessionMode, SessionState,
+    Signal, StorageLimit, StorageUsage, UnrecordedOutput, Workspace, WorkspaceAbsence,
+    WorkspaceKind, WorkspaceOrigin, WorkspaceState, WritableRoot,
 };
 
 /// Most characters of a timestamp: the length bundle `0.27.0` publishes for one, which is an
@@ -273,13 +273,17 @@ fn widest_aperture() -> AppliedAperture {
         mode: ApertureMode::Aperture,
         name: costliest(MAX_APERTURE_NAME_CHARS),
         destination: costliest(MAX_APERTURE_DESTINATION_CHARS),
-        mechanism: ApertureMechanism::LoopbackForwarder,
+        // The longer of the two names (ADR 0054).
+        mechanism: ApertureMechanism::LocalEndpointForwarder,
         bytes: ApertureBytes {
             to_destination: u64::MAX,
             from_destination: u64::MAX,
         },
         max_bytes: Some(u64::MAX),
         listen: Some(costliest(MAX_APERTURE_LISTEN_CHARS)),
+        // A name could be a local endpoint's, whose record states the socket's name: the key at
+        // its bound, which is longer than every run id (ADR 0054 decision 8).
+        key: Some(costliest(MAX_LOCAL_ENDPOINT_KEY_BYTES)),
     }
 }
 

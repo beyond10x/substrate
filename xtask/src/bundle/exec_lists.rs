@@ -113,17 +113,28 @@ fn class_of(refusal: &wire::ExecListRefusal) -> &'static str {
     }
 }
 
-/// Whether the module binds `version`: `0.29.0` only.
+/// Whether `version` is the bundle that introduced the lists: `0.29.0` only.
 pub(super) fn binds(version: &str) -> bool {
     version == VERSION
 }
 
-/// Every check of the additions, for `0.29.0`.
-pub(super) fn check(released: &Tree, failures: &mut Vec<String>) {
+/// Whether the lists bind `version`: `0.29.0` and every later bundle, which carries them on.
+pub(super) fn applies_to(version: &str) -> bool {
+    let mut parts = version.split('.').map(str::parse::<u64>);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => {
+            (major, minor, patch) >= (0, 29, 0)
+        }
+        _ => false,
+    }
+}
+
+/// Every check of the additions, for `0.29.0` and every later bundle.
+pub(super) fn check(version: &str, released: &Tree, failures: &mut Vec<String>) {
     check_definitions(released, failures);
     check_starts(released, failures);
-    check_record(released, failures);
-    check_snapshot(released, failures);
+    check_record(version, released, failures);
+    check_snapshot(version, released, failures);
     check_requires(released, failures);
     check_refusal_vectors(released, failures);
     check_file_system_types(released, failures);
@@ -394,7 +405,7 @@ fn shapes_with<'a>(
 /// Every requested sandbox (it alone states `require`) and every applied one (it alone states
 /// `cgroup`) of the exec record carries both members, and a record the wire crate emits with both
 /// lists on both validates against the exec result schema.
-fn check_record(released: &Tree, failures: &mut Vec<String>) {
+fn check_record(version: &str, released: &Tree, failures: &mut Vec<String>) {
     let Some(resource) = json_at(released, RESOURCE, failures) else {
         return;
     };
@@ -444,7 +455,7 @@ fn check_record(released: &Tree, failures: &mut Vec<String>) {
         }
     };
     let Some(validator) =
-        super::workdir_apertures::exec_result_validator(VERSION, released, failures)
+        super::workdir_apertures::exec_result_validator(version, released, failures)
     else {
         return;
     };
@@ -559,7 +570,7 @@ fn every_withheld_entry() -> Vec<wire::WithheldFact> {
 /// The deny-list's fact and the member `withheld` (design 37 § 5 and § 8), held to the wire
 /// crate: the snapshot the probe publishes validates with every entry `withheld` can hold, and
 /// is refused with a duplicate entry or an entry that names a path.
-fn check_snapshot(released: &Tree, failures: &mut Vec<String>) {
+fn check_snapshot(version: &str, released: &Tree, failures: &mut Vec<String>) {
     let Some(capability) = json_at(released, CAPABILITY, failures) else {
         return;
     };
@@ -619,7 +630,7 @@ fn check_snapshot(released: &Tree, failures: &mut Vec<String>) {
             "the wire crate refuses the snapshot with every withheld entry: {error}"
         )),
     }
-    let Some(schema) = super::read_only_roots::validator(VERSION, released, CAPABILITY, failures)
+    let Some(schema) = super::read_only_roots::validator(version, released, CAPABILITY, failures)
     else {
         return;
     };
@@ -1377,7 +1388,7 @@ mod tests {
 
     fn failures_of(tree: &super::Tree) -> Vec<String> {
         let mut failures = Vec::new();
-        super::check(tree, &mut failures);
+        super::check(VERSION, tree, &mut failures);
         super::check_introduction(tree, &mut failures);
         failures
     }
@@ -1463,7 +1474,11 @@ mod tests {
     #[test]
     fn the_predecessor_declares_none_of_it() {
         let mut failures = Vec::new();
-        super::check(&released(super::PREDECESSOR), &mut failures);
+        super::check(
+            super::PREDECESSOR,
+            &released(super::PREDECESSOR),
+            &mut failures,
+        );
         for named in [
             "no exec-subpaths definition for exec_subpaths",
             "no exec-denied-paths definition for exec_denied_paths",

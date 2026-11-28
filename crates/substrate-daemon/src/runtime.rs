@@ -500,6 +500,13 @@ pub struct DaemonConfig {
     /// a start naming an aperture is `unserved`; the sandbox keeps `--unshare-net` and there is no
     /// weaker reach to fall back to.
     pub egress_apertures: Vec<EgressAperture>,
+    /// Operator-declared local endpoints (ADR 0054), each an aperture name, the port its
+    /// listener takes inside a run, and a directory of Unix sockets.
+    ///
+    /// Never request data. They share the apertures' name space and deployment bound; `serve`
+    /// opens each directory once and refuses one not owned by this daemon's user or writable by
+    /// its group or by others.
+    pub local_endpoints: Vec<LocalEndpointConfig>,
     /// Operator-declared writable host roots (ADR 0038 kind 1), each a name and a host directory.
     ///
     /// Never request data: a start names a root and a mount, never a path. `serve` refuses, naming
@@ -591,6 +598,17 @@ pub struct EgressAperture {
     pub max_bytes: Option<u64>,
 }
 
+/// One operator-declared local endpoint: an aperture name, the port its listener takes inside a
+/// run, and the host directory of Unix sockets its relays connect into (ADR 0054 decision 1).
+///
+/// The daemon's own configuration vocabulary, converted at the composition root (invariant 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalEndpointConfig {
+    pub name: String,
+    pub port: u16,
+    pub directory: PathBuf,
+}
+
 /// One operator-declared writable host root: a name in the root-name set and the absolute host
 /// directory behind it (ADR 0038 decision 2).
 ///
@@ -659,6 +677,7 @@ impl DaemonConfig {
             event_retention: 10_000,
             secret_slots: Vec::new(),
             egress_apertures: Vec::new(),
+            local_endpoints: Vec::new(),
             writable_roots: Vec::new(),
             ca_bundle: None,
             exec_gate: None,
@@ -768,9 +787,14 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         delegated_context,
         private_host_paths,
     )?;
-    Arc::get_mut(&mut app)
-        .context("configure capture policy before sharing the application")?
-        .allow_unrecorded_sessions = config.allow_unrecorded_sessions;
+    let configured = Arc::get_mut(&mut app)
+        .context("configure capture policy before sharing the application")?;
+    configured.allow_unrecorded_sessions = config.allow_unrecorded_sessions;
+    configured.local_endpoints = config
+        .local_endpoints
+        .iter()
+        .map(|endpoint| endpoint.name.clone())
+        .collect();
     // S7: without a driver, the logs an earlier run left are still read from the state
     // directory; nothing is created there and nothing runs.
     let host_process_logs = if host_processes.is_none() {
@@ -918,6 +942,7 @@ impl Drop for DriverTask {
 struct HostDeclarations {
     git_sources: Vec<substrate_host::GitSourceBinding>,
     egress_apertures: Vec<substrate_host::EgressAperture>,
+    local_endpoints: Vec<substrate_host::LocalEndpoint>,
 }
 
 /// The host driver and, on a Unix-socket-only daemon that proved it, the host-process supervisor.
@@ -945,6 +970,7 @@ fn check_host_declarations(config: &DaemonConfig) -> anyhow::Result<HostDeclarat
     // Resolved once, here, and pinned for the process's lifetime: the sandbox gets no resolver, so
     // a name that only resolves later resolves nowhere at all (ADR 0013).
     let egress_apertures = resolve_egress_apertures(&config.egress_apertures)?;
+    let local_endpoints = open_local_endpoints(&config.local_endpoints, &config.egress_apertures)?;
     check_git_root_host_paths(&config.workspaces)?;
     check_writable_roots(
         &config.writable_roots,
@@ -953,11 +979,135 @@ fn check_host_declarations(config: &DaemonConfig) -> anyhow::Result<HostDeclarat
         nix::unistd::Uid::effective().as_raw(),
     )?;
     check_writable_roots_clear_of(&config.writable_roots, &protected_host_paths(config))?;
+    check_writable_roots_outside_local_endpoints(&config.writable_roots, &config.local_endpoints)?;
+    check_local_endpoints_apart(config)?;
     check_ca_bundle(config.ca_bundle.as_deref())?;
     Ok(HostDeclarations {
         git_sources,
         egress_apertures,
+        local_endpoints,
     })
+}
+
+/// Opens every declared local endpoint's directory once and holds it (ADR 0054 decisions 1 and
+/// 2).
+///
+/// # Errors
+///
+/// `config.local-endpoint-invalid`, naming the endpoint and never its path, for a name declared
+/// twice or also declared as an egress aperture, more apertures of both kinds than
+/// `MAX_DEPLOYMENT_EGRESS_APERTURES`, and a declaration the host driver cannot open: a bad name,
+/// a port of zero, a path that is not absolute, an entry that is not a directory or is a
+/// symbolic link, or a directory not owned by this daemon's effective uid or writable by its
+/// group or by others.
+fn open_local_endpoints(
+    declared: &[LocalEndpointConfig],
+    apertures: &[EgressAperture],
+) -> anyhow::Result<Vec<substrate_host::LocalEndpoint>> {
+    const CODE: &str = substrate_host::local_endpoint::LOCAL_ENDPOINT_INVALID;
+    if declared.len() + apertures.len() > MAX_DEPLOYMENT_EGRESS_APERTURES {
+        bail!(
+            "{CODE}: at most {MAX_DEPLOYMENT_EGRESS_APERTURES} egress apertures and local \
+             endpoints may be declared together"
+        );
+    }
+    let mut names: BTreeSet<&str> = apertures
+        .iter()
+        .map(|aperture| aperture.name.as_str())
+        .collect();
+    let mut opened = Vec::with_capacity(declared.len());
+    for endpoint in declared {
+        if apertures
+            .iter()
+            .any(|aperture| aperture.name == endpoint.name)
+        {
+            bail!(
+                "{CODE}: {} is declared both as an egress aperture and as a local endpoint",
+                endpoint.name
+            );
+        }
+        if !names.insert(endpoint.name.as_str()) {
+            bail!(
+                "{CODE}: local endpoint {} is declared more than once",
+                endpoint.name
+            );
+        }
+        let endpoint =
+            substrate_host::LocalEndpoint::open(&endpoint.name, endpoint.port, &endpoint.directory)
+                .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+        if let Some(earlier) = opened
+            .iter()
+            .find(|earlier: &&substrate_host::LocalEndpoint| earlier.same_directory(&endpoint))
+        {
+            bail!(
+                "{CODE}: local endpoints {} and {} are declared over one directory",
+                earlier.name,
+                endpoint.name
+            );
+        }
+        opened.push(endpoint);
+    }
+    Ok(opened)
+}
+
+/// Refuses a local endpoint directory that meets a path the daemon owns (ADR 0054 decision 2):
+/// the workspace root, the state directory, or any of [`protected_host_paths`]. A directory at or
+/// beneath the workspace root is one a run may hold read-write (a workspace, or a directory
+/// `workspace.adopt` serves), so a run could create the entries a relay reaches; a directory
+/// holding the API socket, or another path of the daemon's, lets a key name it. Each path is
+/// compared as written and as resolved, in both directions.
+///
+/// # Errors
+///
+/// `config.local-endpoint-invalid`, naming the endpoint and what its directory meets, never a
+/// path.
+fn check_local_endpoints_apart(config: &DaemonConfig) -> anyhow::Result<()> {
+    const CODE: &str = substrate_host::local_endpoint::LOCAL_ENDPOINT_INVALID;
+    if config.local_endpoints.is_empty() {
+        return Ok(());
+    }
+    let mut owned = vec![
+        (config.workspaces.clone(), "the workspace root".to_owned()),
+        (
+            state_directory(&config.state)?.to_path_buf(),
+            "the state directory".to_owned(),
+        ),
+    ];
+    owned.extend(
+        protected_host_paths(config)
+            .into_iter()
+            .filter(|(path, _)| {
+                !config
+                    .local_endpoints
+                    .iter()
+                    .any(|endpoint| &endpoint.directory == path)
+            }),
+    );
+    let mut forms = Vec::new();
+    for (path, what) in &owned {
+        if let Ok(absolute) = std::path::absolute(path) {
+            forms.push((absolute, what));
+        }
+        forms.push((resolved_prefix(path)?, what));
+    }
+    for endpoint in &config.local_endpoints {
+        let mut directories = vec![resolved_prefix(&endpoint.directory)?];
+        if let Ok(absolute) = std::path::absolute(&endpoint.directory) {
+            directories.push(absolute);
+        }
+        for directory in &directories {
+            if let Some((_, what)) = forms
+                .iter()
+                .find(|(path, _)| directory.starts_with(path) || path.starts_with(directory))
+            {
+                bail!(
+                    "{CODE}: the directory of local endpoint {} meets {what}",
+                    endpoint.name
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Design 34 § 3: beside `--driver kubernetes` a host-only declaration is refused by name, never
@@ -972,6 +1122,7 @@ fn check_kubernetes_selection(config: &DaemonConfig) -> anyhow::Result<()> {
         ("git_sources", !config.git_sources.is_empty()),
         ("secret_slots", !config.secret_slots.is_empty()),
         ("egress_apertures", !config.egress_apertures.is_empty()),
+        ("local_endpoints", !config.local_endpoints.is_empty()),
         ("writable_roots", !config.writable_roots.is_empty()),
         ("ca_bundle", config.ca_bundle.is_some()),
         ("exec_gate", config.exec_gate.is_some()),
@@ -1009,6 +1160,7 @@ fn open_host_driver(
         })
         .collect();
     host_config.egress_apertures = declared.egress_apertures;
+    host_config.local_endpoints = declared.local_endpoints;
     host_config.writable_roots = config
         .writable_roots
         .iter()
@@ -1375,7 +1527,41 @@ fn protected_host_paths(config: &DaemonConfig) -> Vec<(PathBuf, String)> {
     if let Some(cgroup_root) = &config.cgroup_root {
         protected.push((cgroup_root.clone(), "the delegated cgroup root".to_owned()));
     }
+    protected.extend(config.local_endpoints.iter().map(|endpoint| {
+        (
+            endpoint.directory.clone(),
+            format!("the directory of local endpoint {:?}", endpoint.name),
+        )
+    }));
     protected
+}
+
+/// Refuses, naming the root, a writable root that lies under a local endpoint's directory
+/// (ADR 0054 decision 2): a run that could write there could create a socket under another
+/// run's name. [`check_writable_roots_clear_of`] refuses one that equals or contains it.
+///
+/// # Errors
+///
+/// Returns the first such root, prefixed `config.writable-root-invalid`.
+fn check_writable_roots_outside_local_endpoints(
+    declared: &[WritableRootConfig],
+    local_endpoints: &[LocalEndpointConfig],
+) -> anyhow::Result<()> {
+    for endpoint in local_endpoints {
+        let directory = resolved_prefix(&endpoint.directory)?;
+        if let Some(root) = declared
+            .iter()
+            .find(|root| resolved_prefix(&root.path).is_ok_and(|path| path.starts_with(&directory)))
+        {
+            bail!(
+                "config.writable-root-invalid: writable root {:?} lies under the directory of \
+                 local endpoint {:?}",
+                root.name,
+                endpoint.name
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Refuses, naming the root, a writable root that equals or contains any of `protected`
@@ -1536,6 +1722,23 @@ fn configuration_generation(config: &DaemonConfig) -> u64 {
     for source in git_sources {
         material.extend_from_slice(&(source.len() as u64).to_be_bytes());
         material.extend_from_slice(source.as_bytes());
+    }
+    // Local endpoints whole: the fact publishes the name and the port, and the directory is what
+    // a relay connects into (ADR 0054). Nothing is added when none is declared, so a daemon
+    // without one keeps the generation it had.
+    let mut local_endpoints = config
+        .local_endpoints
+        .iter()
+        .map(|endpoint| {
+            let mut material = format!("local:{}={}:", endpoint.name, endpoint.port).into_bytes();
+            material.extend_from_slice(endpoint.directory.as_os_str().as_encoded_bytes());
+            material
+        })
+        .collect::<Vec<_>>();
+    local_endpoints.sort_unstable();
+    for endpoint in local_endpoints {
+        material.extend_from_slice(&(endpoint.len() as u64).to_be_bytes());
+        material.extend_from_slice(&endpoint);
     }
     let digest = Sha256::digest(material);
     u64::from_be_bytes(
@@ -2348,6 +2551,130 @@ mod tests {
                 .to_string()
                 .contains("at most 12 egress apertures may be declared"),
             "{refused}"
+        );
+    }
+
+    /// A private directory this user owns, as a local endpoint's declaration names it.
+    fn local_endpoint(
+        name: &str,
+        directory: &std::path::Path,
+        mode: u32,
+    ) -> super::LocalEndpointConfig {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::create_dir_all(directory).expect("directory");
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).expect("mode");
+        super::LocalEndpointConfig {
+            name: name.to_owned(),
+            port: 7000,
+            directory: directory.to_path_buf(),
+        }
+    }
+
+    /// ADR 0054 decisions 1 and 2 at startup: a local endpoint shares the apertures' name space
+    /// and their deployment bound of twelve, and its directory is opened only when this user owns
+    /// it and neither its group nor others may write it. Every refusal is
+    /// `config.local-endpoint-invalid`, names the endpoint and never the path.
+    #[test]
+    fn local_endpoints_share_the_aperture_names_and_bound_and_open_only_a_private_directory() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let private = local_endpoint("agent", &scratch.path().join("private"), 0o700);
+        let opened =
+            super::open_local_endpoints(std::slice::from_ref(&private), &[aperture("model", 9)])
+                .expect("a private directory is declared");
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].name, "agent");
+
+        let shared = local_endpoint("audit", &scratch.path().join("shared"), 0o770);
+        let mut refusals = vec![
+            super::open_local_endpoints(std::slice::from_ref(&private), &[aperture("agent", 9)])
+                .expect_err("a name declared by both kinds"),
+            super::open_local_endpoints(&[private.clone(), private.clone()], &[])
+                .expect_err("a name declared twice"),
+            super::open_local_endpoints(std::slice::from_ref(&shared), &[])
+                .expect_err("a shared directory"),
+        ];
+        let twelve: Vec<super::EgressAperture> = (0..12u16)
+            .map(|n| aperture(&format!("a{n}"), 9000 + n))
+            .collect();
+        refusals.push(
+            super::open_local_endpoints(std::slice::from_ref(&private), &twelve)
+                .expect_err("thirteen of both kinds"),
+        );
+        for refusal in refusals {
+            let reported = refusal.to_string();
+            assert!(
+                reported.starts_with("config.local-endpoint-invalid: "),
+                "{reported}"
+            );
+            assert!(
+                !reported.contains(&scratch.path().display().to_string()),
+                "{reported}"
+            );
+        }
+        let eleven = &twelve[..11];
+        assert!(super::open_local_endpoints(std::slice::from_ref(&private), eleven).is_ok());
+    }
+
+    /// ADR 0054 decision 2: the directory is a private host path, so a writable root that
+    /// contains it or lies under it is refused, and the configuration generation moves with a
+    /// local endpoint's declaration and not without one.
+    #[test]
+    fn a_local_endpoint_directory_is_kept_from_writable_roots_and_moves_the_generation() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let directory = scratch.path().join("endpoints").join("agent");
+        let endpoint = local_endpoint("agent", &directory, 0o700);
+        let beneath = directory.join("inner");
+        std::fs::create_dir(&beneath).expect("beneath");
+        let root = |name: &str, path: &std::path::Path| super::WritableRootConfig {
+            name: name.to_owned(),
+            path: path.to_path_buf(),
+        };
+        let mut config = super::DaemonConfig::minimum(
+            scratch.path().join("api.sock"),
+            scratch.path().join("state/state.db"),
+            scratch.path().join("workspaces"),
+            "dep_local",
+            vec![0],
+        );
+        let without = super::configuration_generation(&config);
+        config.local_endpoints = vec![endpoint.clone()];
+        assert_ne!(super::configuration_generation(&config), without);
+        let mut moved = endpoint.clone();
+        moved.port = 7001;
+        let with = super::configuration_generation(&config);
+        config.local_endpoints = vec![moved];
+        assert_ne!(super::configuration_generation(&config), with);
+        config.local_endpoints = vec![endpoint.clone()];
+
+        let refused = super::check_writable_roots_outside_local_endpoints(
+            &[root("inner", &beneath)],
+            std::slice::from_ref(&endpoint),
+        )
+        .expect_err("a writable root under the directory");
+        assert!(
+            refused
+                .to_string()
+                .starts_with("config.writable-root-invalid: "),
+            "{refused}"
+        );
+        let refused = super::check_writable_roots_clear_of(
+            &[root("outer", &scratch.path().join("endpoints"))],
+            &super::protected_host_paths(&config),
+        )
+        .expect_err("a writable root containing the directory");
+        assert!(refused.to_string().contains("local endpoint"), "{refused}");
+        assert!(
+            super::check_writable_roots_outside_local_endpoints(
+                &[root("apart", &scratch.path().join("workspaces"))],
+                std::slice::from_ref(&endpoint),
+            )
+            .is_ok()
+        );
+        assert!(
+            super::PrivateHostPaths::of(&config)
+                .expect("private paths")
+                .resolve()
+                .meets_a_root([beneath.to_str().expect("utf-8")])
         );
     }
 

@@ -75,11 +75,13 @@ because D4 comes after the others.
 | 1 | `0.30.0` | 5 | images: create, chunked upload, complete, get, list, delete; `image` on exec and session start | D2 |
 | 2 | `0.31.0` | 1 | workloads: deploy, get, list, stop, start, restart, delete, logs | D1, slice 1 |
 | 3 | `0.32.0` | 2 | endpoints; `endpoints` on the workload spec | D3, slice 2 |
-| 4 | `0.33.0` | 3 | a local endpoint, selected by name in `aperture`/`apertures` | slice 2 |
+| 4 | `0.30.0` (landed first, ADR 0054) | 3 | a local endpoint, selected by name in `aperture`/`apertures` | execs: nothing; workloads: slice 2 |
 | 5 | `0.34.0` | 6 | volumes; `mounts` on exec, session and workload | slice 2 |
 | 6 | `0.35.0` | 4 | `secret_values` on exec, session and workload | D4, slice 2 |
 
-Slices 3 and 4 touch execs first and workloads when slice 2 is in. A slice never rewrites a released
+Slices 3 and 4 touch execs first and workloads when slice 2 is in. A slice takes the next bundle number
+when it lands, so the numbers of this table move: slice 4 landed first and published `0.30.0`, and the
+others take the numbers after it. A slice never rewrites a released
 bundle (invariant 6), states its predecessor and route counts, and is held by
 `cargo xtask check-bundle <version>` and a line of `scripts/gate.sh`.
 
@@ -542,30 +544,43 @@ The existing shapes (§ 1) take it with these changes in the successor bundle, e
 | shape | local endpoint |
 |---|---|
 | fact `exec.egress-apertures` element `{name, destination, max_bytes?}` | listed with `destination: "local:<port>"`; the client reads the port there as it reads a TCP aperture's. Listed only after the local mechanism was verified |
-| applied aperture `{mode, name, destination, mechanism, bytes, listen?}` | `mode: "aperture"`; `destination: "local:<port>"` (3 to 64 characters: it fits); `mechanism`: the schema's one-value `const` becomes an enum of `loopback-forwarder` and `local-endpoint-forwarder`; `bytes` counted in the forwarder as today; `listen` always present, also on the single (non-array) form, where the schema gains it as an optional member that only this mechanism fills. **No host path appears**: neither the directory nor the socket name |
+| applied aperture `{mode, name, destination, mechanism, bytes, listen?}` | `mode: "aperture"`; `destination: "local:<port>"` (3 to 64 characters: it fits); `mechanism`: the schema's one-value `const` becomes an enum of `loopback-forwarder` and `local-endpoint-forwarder`; `bytes` counted in the forwarder as today; `listen` always present, also on the single (non-array) form, where the schema gains it as an optional member that only this mechanism fills; `key`, the socket's name in the directory (§ 6.2), a string the caller chose or the run id. **No host path appears**: not the directory and not the socket's path |
 | `max_bytes` | not declarable in the first slice |
+| start sandbox | the optional `local_endpoint_key` beside `aperture` and `apertures` (§ 6.2) |
 
 A client pinned to an earlier bundle cannot select a local endpoint and so never reads the new values.
-The directory is opened at startup and held by descriptor; it must be owned by the daemon's uid or the
-declared uid and carry no group or other write permission, or the declaration is refused at startup.
+The directory is opened at startup and held by descriptor; it must be owned by the daemon's uid and
+carry no group or other write permission, or the declaration is refused at startup. ADR 0054 decision 2
+accepts no other uid, and makes the directory one of the daemon's private host paths.
 
 ### 6.2 The relay
 
 The listener is installed as an aperture's: the helper joins the namespace, binds `127.0.0.n:<port>`,
-hands the listener out. The forwarder connects to **`<directory>/<run id>`**, the run id being the id of
-the exec, session or workload that owns the namespace (at most 32 characters); a workload's is stable
-across restarts. The name is the run id and no other string. The connect is made from the daemon through
-the held directory descriptor, as `/proc/self/fd/<n>/<run id>` in the daemon's own context, which no
-child can reach (the warning of `bind_args` in `process.rs` is about a path given to bubblewrap). The
-entry is created and replaced by the agent, which the operator declared and which owns the directory;
-the daemon creates and removes nothing there. **If the socket is absent the connection is closed**; no
-other socket is tried. Whether the proc-descriptor path form connects as intended on the target kernels
-is § 16, I10.
+hands the listener out. The forwarder connects to **`<directory>/<key>`** when the start names
+`sandbox.local_endpoint_key`, and to **`<directory>/<run id>`** when it does not, the run id being the id
+of the exec (for a session, of the exec it runs) or workload that owns the namespace (at most 32 characters); a workload's is stable
+across restarts. The key is 1 to 64 bytes matching `^[a-z0-9][a-z0-9-]*$`; every run id holds `_`, so a key
+never names another run's id. The stakeholder decided the key on 2026-11-28: an instance's first call
+often comes at startup, the socket named by a minted id may not exist yet, and the caller knows its
+instance's id before the start, so its agent creates the socket first. A key held by a live run on the
+same local endpoint is refused `exec.local-endpoint-key-in-use` (409); it is free again when that run
+ends. The connect is made from the daemon's side through the held directory descriptor, as
+`/proc/self/fd/<n>/<name>` in a relay forked from the forwarder, which never leaves the host namespaces
+and which no child can reach (the warning of `bind_args` in `process.rs` is about a path given to
+bubblewrap). The entry is created and replaced by the agent, which the operator declared and which owns
+the directory; the daemon creates and removes nothing there. **If the socket is absent the connection is
+closed**; no other socket is tried. § 16, I10 is answered by ADR 0054 decision 4: the startup probe
+connects that way before the fact is published.
 
-### 6.3 The wire of slice 4 (`0.33.0`)
+### 6.3 The wire of slice 4 (`0.30.0`)
 
-- Facts: none new; § 6.1. Fields: none new. Refusals: `exec.local-endpoints-unserved` (501, a name of a
-  local endpoint selected while the mechanism is not verified); the existing aperture refusals.
+Slice 4 landed first, so it publishes `0.30.0` (ADR 0054 decision 10), not the `0.33.0` § 2 proposed.
+
+- Facts: none new; § 6.1. Fields: the optional `sandbox.local_endpoint_key` on both starts; the applied
+  `key`. Refusals: `exec.local-endpoints-unserved` (501, a name of a local endpoint selected while the
+  mechanism is not verified), `exec.local-endpoint-key-without-endpoint` (422, a key while no local
+  endpoint is selected), `exec.local-endpoint-key-in-use` (409, a key a live run holds on the same local
+  endpoint); the existing aperture refusals.
 - Acceptance, from `story:local-endpoint-attributed-to-its-run` (weft test `ports-node-endpoints-local`):
   - two runs naming the same local endpoint each connect to their listener; the agent's socket for run A
     receives only A's connection and the socket for run B only B's;

@@ -1,0 +1,65 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "argv": [
+        "/fixture/fill-both-pipes"
+      ],
+      "operation": "exec.start",
+      "output_limit_bytes": 65536
+    },
+    "kind": "driver",
+    "port": "exec"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "security.output-draining"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "state": "exited",
+      "stderr_truncated": true,
+      "stdout_truncated": true
+    }
+  },
+  "id": "output-cap-drains-past-truncation",
+  "layer": "driver",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/pipe_deadlock",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/stdout_drained_bytes",
+      "expected": 131072,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/stderr_drained_bytes",
+      "expected": 131072,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "output",
+      "name": "twice-cap-concurrent",
+      "state": {
+        "bytes_per_stream": 131072
+      }
+    }
+  ]
+}

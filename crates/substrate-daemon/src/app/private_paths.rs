@@ -21,7 +21,8 @@ const MAX_LINK_HOPS: usize = 8;
 /// - the workspace root: every subject's workspaces and the directories the host driver keeps
 ///   under it;
 /// - the production TLS private key, the static-bearer file, every secret-slot source, the
-///   namespace driver's kubeconfig, the API socket (a read-only bind does not stop a connect)
+///   namespace driver's kubeconfig, the API socket (a read-only bind does not stop a connect),
+///   every local endpoint's directory of sockets (ADR 0054 decision 2), for the same reason,
 ///   and the delegated cgroup root.
 ///
 /// Narrower than what a writable root is kept clear of (`protected_host_paths`): the daemon
@@ -53,6 +54,12 @@ impl PrivateHostPaths {
         written.extend(config.tls.iter().map(|tls| tls.private_key.clone()));
         written.extend(config.tcp.iter().map(|tcp| tcp.bearer_file.clone()));
         written.extend(config.secret_slots.iter().map(|slot| slot.path.clone()));
+        written.extend(
+            config
+                .local_endpoints
+                .iter()
+                .map(|endpoint| endpoint.directory.clone()),
+        );
         if let DriverSelection::Kubernetes { config: kubeconfig } = &config.driver {
             written.push(kubeconfig.clone());
         }

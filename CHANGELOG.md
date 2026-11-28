@@ -7,6 +7,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Contract bundle `substrate-wire/0.30.0` (ADR 0054), which the daemon and the Rust SDK
+  advertise. It adds no route and keeps the 45 routes of `0.29.0`. It publishes the local
+  endpoint: an aperture the operator declares whose destination is a directory of Unix sockets.
+  A start selects one by name through `sandbox.aperture` or `sandbox.apertures`. The
+  `exec.egress-apertures` fact lists it with destination `local:<port>`, and only after its
+  mechanism was proved. Its applied aperture has mechanism `local-endpoint-forwarder`, `listen`
+  and `key`, and names no host path. The optional `sandbox.local_endpoint_key` on the exec start
+  and on a session start's exec (1 to `MAX_LOCAL_ENDPOINT_KEY_BYTES`, 64, bytes of
+  `^[a-z0-9][a-z0-9-]*$`) names the socket; without it the socket is named by the run's id. The
+  three refusals `exec.local-endpoints-unserved` (501),
+  `exec.local-endpoint-key-without-endpoint` (422) and `exec.local-endpoint-key-in-use` (409)
+  are published with a vector each. A start without the new member serializes and hashes as on
+  `0.29.0`. `cargo xtask check-bundle 0.30.0` holds each value to its wire constant
+  (`xtask/src/bundle/local_endpoints.rs`). The checks of design 37's executable lists now bind
+  `0.29.0` and every later bundle.
+
 ## [0.29.0] — 2026-11-26
 
 ### Added

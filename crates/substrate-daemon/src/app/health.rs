@@ -239,7 +239,7 @@ impl Check {
 /// Every code `substrate_refusals_total` names: the codes the wire crate names as constants.
 /// Any other code is counted as `other`. `tests::the_refusal_codes_are_the_wire_constants` holds
 /// this list to the wire crate's source, so a constant added there fails until it is added here.
-const REFUSAL_CODES: [&str; 120] = [
+const REFUSAL_CODES: [&str; 123] = [
     substrate_wire::EXEC_METRICS_UNSERVED,
     substrate_wire::EXEC_SCRATCH_QUOTA_UNSERVED,
     substrate_wire::EXEC_SCRATCH_QUOTA_LIMIT,
@@ -259,6 +259,9 @@ const REFUSAL_CODES: [&str; 120] = [
     substrate_wire::EXEC_APERTURES_TOO_MANY,
     substrate_wire::EXEC_APERTURE_LISTED_TWICE,
     substrate_wire::EXEC_APERTURE_HOST_LISTED_TWICE,
+    substrate_wire::EXEC_LOCAL_ENDPOINTS_UNSERVED,
+    substrate_wire::EXEC_LOCAL_ENDPOINT_KEY_WITHOUT_ENDPOINT,
+    substrate_wire::EXEC_LOCAL_ENDPOINT_KEY_IN_USE,
     substrate_wire::READ_ONLY_ROOT_INVALID,
     substrate_wire::READ_ONLY_ROOT_ABSENT,
     substrate_wire::READ_ONLY_ROOT_NOT_A_DIRECTORY,
@@ -1299,8 +1302,8 @@ mod tests {
             None,
             Some("linux"),
         );
-        assert_eq!(SERIES_MAXIMUM, 592);
-        assert_eq!(HOST_SERIES_MAXIMUM, 593);
+        assert_eq!(SERIES_MAXIMUM, 595);
+        assert_eq!(HOST_SERIES_MAXIMUM, 596);
         assert_eq!(samples(&exposition).len(), HOST_SERIES_MAXIMUM);
         let refusals = samples(&exposition)
             .iter()
@@ -1526,7 +1529,7 @@ mod tests {
             )
         );
         assert_eq!(samples(&namespace).len(), KUBERNETES_SERIES_MAXIMUM);
-        assert_eq!(KUBERNETES_SERIES_MAXIMUM, 593);
+        assert_eq!(KUBERNETES_SERIES_MAXIMUM, 596);
     }
 
     /// The scrape states the driver's count as it is, so one more collision is one more on the

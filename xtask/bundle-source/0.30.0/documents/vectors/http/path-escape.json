@@ -1,0 +1,78 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "workspace.file.read",
+    "request": {
+      "headers": {
+        "x-request-id": "req_path_escape01"
+      },
+      "method": "GET",
+      "path": "/v1/workspaces/ws_vector/files/%2e%2e%2fetc%2fpasswd",
+      "query": {
+        "limit_bytes": 16,
+        "mode": "file",
+        "offset": 0
+      }
+    },
+    "valid_address": false,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "security.path.lexical",
+    "error.refused"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "path",
+          "class": "refused",
+          "code": "workspace.path-escape",
+          "message": "Workspace path is outside the confined root.",
+          "retriable": false
+        },
+        "request_id": "req_path_escape01"
+      },
+      "status": 422
+    }
+  },
+  "id": "lexical-path-escape-is-refused",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/outside_access_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "workspace",
+      "name": "owned",
+      "state": {
+        "owner": "local:1000"
+      }
+    }
+  ]
+}

@@ -31,18 +31,19 @@ use super::{
     MAX_EXEC_LIST_ENTRY_BYTES, MAX_EXEC_REFUSAL_CODE_CHARS, MAX_EXEC_REFUSAL_MESSAGE_CHARS,
     MAX_EXEC_SUBPATHS, MAX_EXEC_USAGE_CODE_CHARS, MAX_EXEC_USAGE_MESSAGE_CHARS,
     MAX_LABEL_KEY_CHARS, MAX_LABEL_VALUE_CHARS, MAX_LABELS, MAX_LEASE_ACTOR_CHARS,
-    MAX_LEASE_PRINCIPAL_CHARS, MAX_OPERATION_ID_CHARS, MAX_PROCESS_EXIT_SIGNAL_CHARS,
-    MAX_PROCESS_REASON_BYTES, MAX_READ_ONLY_FILE_PATH_BYTES, MAX_RESOURCE_ID_CHARS,
-    MAX_ROOT_NAME_BYTES, MAX_TIMESTAMP_CHARS, MAX_WRITABLE_ROOTS, NetworkMode,
-    OPERATION_RESULT_MAX_JSON_BYTES, PipeSession, PipeSessionLimits, ProcessConfinement,
-    ProcessDeadline, ProcessDeadlineSource, ProcessEndedBy, ProcessEnvDigest, ProcessExit,
-    ProcessKind, ProcessLease, ProcessLeaseState, ProcessOwner, ProcessPresence, ProcessProfile,
-    ProcessRecord, ProcessState, ProcessTimestamp, ReadOnlyFile, ReadOnlyRoot, ResourceUsage,
-    RootName, SESSION_OUTPUT_BACKPRESSURE, SESSION_OUTPUT_LIMIT, SandboxProfile, SecretSlotRequest,
-    SessionAbsence, SessionAttachmentState, SessionKind, SessionMode, SessionState, Signal,
-    StorageLimit, StorageUsage, UnrecordedOutput, Workspace, WorkspaceAbsence, WorkspaceAccess,
-    WorkspaceKind, WorkspaceOrigin, WorkspaceState, WritableGitRoot, WritableHostRoot,
-    WritableRoot, json_char_bytes, valid_aperture_name, validate_operation_id,
+    MAX_LEASE_PRINCIPAL_CHARS, MAX_LOCAL_ENDPOINT_KEY_BYTES, MAX_OPERATION_ID_CHARS,
+    MAX_PROCESS_EXIT_SIGNAL_CHARS, MAX_PROCESS_REASON_BYTES, MAX_READ_ONLY_FILE_PATH_BYTES,
+    MAX_RESOURCE_ID_CHARS, MAX_ROOT_NAME_BYTES, MAX_TIMESTAMP_CHARS, MAX_WRITABLE_ROOTS,
+    NetworkMode, OPERATION_RESULT_MAX_JSON_BYTES, PipeSession, PipeSessionLimits,
+    ProcessConfinement, ProcessDeadline, ProcessDeadlineSource, ProcessEndedBy, ProcessEnvDigest,
+    ProcessExit, ProcessKind, ProcessLease, ProcessLeaseState, ProcessOwner, ProcessPresence,
+    ProcessProfile, ProcessRecord, ProcessState, ProcessTimestamp, ReadOnlyFile, ReadOnlyRoot,
+    ResourceUsage, RootName, SESSION_OUTPUT_BACKPRESSURE, SESSION_OUTPUT_LIMIT, SandboxProfile,
+    SecretSlotRequest, SessionAbsence, SessionAttachmentState, SessionKind, SessionMode,
+    SessionState, Signal, StorageLimit, StorageUsage, UnrecordedOutput, Workspace,
+    WorkspaceAbsence, WorkspaceAccess, WorkspaceKind, WorkspaceOrigin, WorkspaceState,
+    WritableGitRoot, WritableHostRoot, WritableRoot, json_char_bytes, valid_aperture_name,
+    validate_operation_id,
 };
 
 /// The characters the serializer writes for an instant held as `DateTime<Utc>` with
@@ -389,6 +390,7 @@ fn minimal_start() -> ExecStartInput {
             requires: None,
             exec_subpaths: None,
             exec_denied_paths: Vec::new(),
+            local_endpoint_key: None,
         },
         limits: ExecLimits {
             timeout_ms: 1_000,
@@ -523,18 +525,25 @@ fn stored_storage() -> StorageUsage {
     }
 }
 
+/// A stored aperture; with `listen`, also the longer mechanism and the key a local endpoint
+/// states (ADR 0054 decision 8), so the list form reaches the figure.
 fn stored_aperture(listen: bool) -> AppliedAperture {
     AppliedAperture {
         mode: ApertureMode::Aperture,
         name: costliest(MAX_APERTURE_NAME_CHARS),
         destination: costliest(MAX_APERTURE_DESTINATION_CHARS),
-        mechanism: ApertureMechanism::LoopbackForwarder,
+        mechanism: if listen {
+            ApertureMechanism::LocalEndpointForwarder
+        } else {
+            ApertureMechanism::LoopbackForwarder
+        },
         bytes: ApertureBytes {
             to_destination: u64::MAX,
             from_destination: u64::MAX,
         },
         max_bytes: Some(u64::MAX),
         listen: listen.then(|| costliest(MAX_APERTURE_LISTEN_CHARS)),
+        key: listen.then(|| costliest(MAX_LOCAL_ENDPOINT_KEY_BYTES)),
     }
 }
 
@@ -855,7 +864,7 @@ fn the_widest_exec_result_bounds_every_stored_form_of_its_exec() {
     // its snapshot, and one with as many apertures and writable roots as a start may have.
     assert_eq!(Exec::widest_json_bytes(&minimal_start()), 24_325);
     let at_the_list_bounds = Exec::widest_json_bytes(&start_at_the_list_bounds());
-    assert_eq!(at_the_list_bounds, 225_869);
+    assert_eq!(at_the_list_bounds, 229_061);
     assert!(at_the_list_bounds < published_bound());
 }
 

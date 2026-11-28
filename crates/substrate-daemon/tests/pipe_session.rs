@@ -1782,6 +1782,7 @@ async fn the_two_entry_points_name_one_refusal_for_a_pty_start_that_earns_two() 
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: substrate_wire::ExecLimits {
                 timeout_ms: 10_000,

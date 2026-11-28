@@ -66,6 +66,7 @@ fn applied(name: &str, listen: Option<&str>) -> AppliedAperture {
         },
         max_bytes: None,
         listen: listen.map(str::to_owned),
+        key: None,
     }
 }
 

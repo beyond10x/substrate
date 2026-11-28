@@ -748,6 +748,8 @@ pub struct ProcessRuntime {
     exec_subpaths_proved: bool,
     /// Whether the probe proved the deny-list with the helper (design 35 § 9).
     exec_denied_paths_proved: bool,
+    /// The local endpoint sockets live runs hold (ADR 0054 decision 6).
+    local_endpoint_claims: crate::local_endpoint::Claims,
 }
 
 impl ProcessRuntime {
@@ -777,6 +779,7 @@ impl ProcessRuntime {
             exec_gate,
             exec_subpaths_proved,
             exec_denied_paths_proved: false,
+            local_endpoint_claims: crate::local_endpoint::Claims::default(),
             executions: Arc::new(Mutex::new(HashMap::new())),
             reservations: Arc::new(Mutex::new(HashSet::new())),
             unproven: Arc::new(Mutex::new(HashMap::new())),
@@ -1522,6 +1525,12 @@ impl ProcessRuntime {
             Ok(value) => value,
             Err(error) => return contain_cgroup(&cgroup, error),
         };
+        // ADR 0054 decision 6: every local endpoint socket this run relays to is held from here,
+        // before anything is spawned, until its apertures are torn down.
+        let local_claims = match self.claim_local_endpoints(id, &apertures) {
+            Ok(value) => value,
+            Err(error) => return contain_cgroup(&cgroup, error),
+        };
         // Generated before the spawn because bubblewrap binds it, and installed after, because the
         // namespace it points into does not exist yet.
         let resolution = if apertures.is_empty() {
@@ -1777,8 +1786,12 @@ impl ProcessRuntime {
                     )
                     .await;
                 };
-                match crate::egress::install_all(&apertures, sandbox_pid, Some(&cgroup.procs())) {
-                    Ok(installed) => Some(installed),
+                match crate::egress::install_all(&apertures, id, sandbox_pid, Some(&cgroup.procs()))
+                {
+                    Ok(mut installed) => {
+                        installed.hold(local_claims);
+                        Some(installed)
+                    }
                     // Nothing partial: every aperture exists exactly as declared, or the dispatch
                     // is refused with the forwarders already started reaped and the sandbox torn
                     // down around them.
@@ -2722,11 +2735,48 @@ impl ProcessRuntime {
     /// every member can be reached by its own name. Nothing here reads a destination out of the
     /// request, because there is no destination in a request: a name is the only thing a caller
     /// may say, and configuration owns everything the name stands for.
-    pub(crate) fn admit_egress_aperture<'a>(
-        config: &'a HostConfig,
+    ///
+    /// A name may select a local endpoint (ADR 0054), held to the same rules; a declared local
+    /// endpoint whose mechanism was not proved is `exec.local-endpoints-unserved` before the
+    /// apertures fact is read. The key is held to its shape first, and a key beside no selected
+    /// local endpoint is refused once the names are known.
+    #[allow(clippy::too_many_lines)] // Refusal precedence is clearer in one admission sequence.
+    pub(crate) fn admit_egress_aperture(
+        config: &HostConfig,
         published: Option<&Vec<substrate_wire::EgressApertureFact>>,
         sandbox: &substrate_wire::ConfinementRequest,
-    ) -> Result<Vec<&'a crate::egress::EgressAperture>, DriverError> {
+    ) -> Result<Vec<crate::egress::RunAperture>, DriverError> {
+        const KEY_ADDRESS: &str = "sandbox.local_endpoint_key";
+        if sandbox
+            .local_endpoint_key
+            .as_deref()
+            .is_some_and(|key| !substrate_wire::valid_local_endpoint_key(key))
+        {
+            return Err(DriverError::refused(
+                "request.schema-invalid",
+                format!(
+                    "A local endpoint key is 1 to {} bytes of [a-z0-9] then [a-z0-9-].",
+                    substrate_wire::MAX_LOCAL_ENDPOINT_KEY_BYTES
+                ),
+                KEY_ADDRESS,
+            ));
+        }
+        let local_refusal = |code: &str, address: &str| {
+            let refusal = substrate_wire::exec_start_refusal(code)
+                .unwrap_or(substrate_wire::LOCAL_ENDPOINT_REFUSALS[1]);
+            match refusal.class {
+                substrate_wire::ErrorClass::Unserved => {
+                    DriverError::unserved(refusal.code, refusal.message, address)
+                }
+                _ => DriverError::refused(refusal.code, refusal.message, address),
+            }
+        };
+        let without_endpoint = || {
+            local_refusal(
+                substrate_wire::EXEC_LOCAL_ENDPOINT_KEY_WITHOUT_ENDPOINT,
+                KEY_ADDRESS,
+            )
+        };
         let listed = !sandbox.apertures.is_empty();
         // A list is held to the same per-name rules as one `aperture`, answered at the list's
         // address (design 26 § 2).
@@ -2782,28 +2832,58 @@ impl ProcessRuntime {
             sandbox.aperture.as_deref().into_iter().collect()
         };
         if names.is_empty() {
+            if sandbox.local_endpoint_key.is_some() {
+                return Err(without_endpoint());
+            }
             return Ok(Vec::new());
+        }
+        let is_published = |name: &str| {
+            published.is_some_and(|published| published.iter().any(|fact| fact.name == name))
+        };
+        // ADR 0054 decision 9: a declared local endpoint the mechanism did not prove is absent
+        // from the fact, so it is named here from the configuration, before the fact is read.
+        if names.iter().any(|name| {
+            config
+                .local_endpoints
+                .iter()
+                .any(|endpoint| endpoint.name == *name)
+                && !is_published(name)
+        }) {
+            return Err(local_refusal(
+                substrate_wire::EXEC_LOCAL_ENDPOINTS_UNSERVED,
+                name_address,
+            ));
         }
         // Configured intent is not a fact. An unverified mechanism leaves the capability absent,
         // and every aperture request is then `unserved` rather than quietly getting no network.
-        let Some(published) = published else {
+        if published.is_none() {
             return Err(DriverError::unserved(
                 "exec.egress-apertures-unserved",
                 "Egress apertures are not served by this host.",
                 "exec.network-aperture",
             ));
-        };
+        }
         let declared = |name: &str| {
-            published
+            if !is_published(name) {
+                return None;
+            }
+            config
+                .egress_apertures
                 .iter()
-                .any(|fact| fact.name == name)
-                .then(|| {
+                .find(|aperture| aperture.name == name)
+                .map(|aperture| crate::egress::RunAperture::tcp(aperture.clone()))
+                .or_else(|| {
                     config
-                        .egress_apertures
+                        .local_endpoints
                         .iter()
-                        .find(|aperture| aperture.name == name)
+                        .find(|endpoint| endpoint.name == name)
+                        .map(|endpoint| {
+                            crate::egress::RunAperture::local(
+                                endpoint.clone(),
+                                sandbox.local_endpoint_key.clone(),
+                            )
+                        })
                 })
-                .flatten()
         };
         let undeclared = |name: &str| {
             DriverError::unserved(
@@ -2821,7 +2901,12 @@ impl ProcessRuntime {
         // A host the generated mapping would hold twice is reached by its first line only, so the
         // later aperture would be installed and unreachable by its name: refused before anything
         // exists. The published fact names destinations, not hosts, so this is the driver's.
-        if crate::egress::a_host_is_mapped_twice(selected.iter().copied()) {
+        if sandbox.local_endpoint_key.is_some()
+            && !selected.iter().any(crate::egress::RunAperture::is_local)
+        {
+            return Err(without_endpoint());
+        }
+        if crate::egress::a_host_is_mapped_twice(selected.iter()) {
             let refusal =
                 substrate_wire::exec_start_refusal(substrate_wire::EXEC_APERTURE_HOST_LISTED_TWICE)
                     .unwrap_or(substrate_wire::APERTURE_LIST_REFUSALS[3]);
@@ -2832,6 +2917,41 @@ impl ProcessRuntime {
             ));
         }
         Ok(selected)
+    }
+
+    /// Claims the socket of every local endpoint in `apertures` for the run `id` (ADR 0054
+    /// decision 6): the start's key, else the run id.
+    ///
+    /// # Errors
+    ///
+    /// `exec.local-endpoint-key-in-use` (class `conflict`) when another live run holds the socket
+    /// on the same local endpoint. Every claim made before it is released on return.
+    fn claim_local_endpoints(
+        &self,
+        id: &str,
+        apertures: &[crate::egress::RunAperture],
+    ) -> Result<Vec<crate::local_endpoint::Claim>, DriverError> {
+        let mut claims = Vec::new();
+        for aperture in apertures {
+            let Some(socket) = aperture.local_socket(id) else {
+                continue;
+            };
+            let Some(claim) = self.local_endpoint_claims.claim(&aperture.name, socket) else {
+                let refusal = substrate_wire::exec_start_refusal(
+                    substrate_wire::EXEC_LOCAL_ENDPOINT_KEY_IN_USE,
+                )
+                .unwrap_or(substrate_wire::LOCAL_ENDPOINT_REFUSALS[2]);
+                return Err(DriverError {
+                    class: crate::DriverErrorClass::Conflict,
+                    code: refusal.code,
+                    message: refusal.message.to_owned(),
+                    address: Some("sandbox.local_endpoint_key".to_owned()),
+                    retriable: false,
+                });
+            };
+            claims.push(claim);
+        }
+        Ok(claims)
     }
 
     /// Every aperture this start runs with, in the order that gives each its listen address.
@@ -2847,12 +2967,9 @@ impl ProcessRuntime {
         published: Option<&Vec<substrate_wire::EgressApertureFact>>,
         sandbox: &substrate_wire::ConfinementRequest,
         listed: Option<&[String]>,
-    ) -> Result<Vec<crate::egress::EgressAperture>, DriverError> {
+    ) -> Result<Vec<crate::egress::RunAperture>, DriverError> {
         let Some(listed) = listed else {
-            return Ok(Self::admit_egress_aperture(config, published, sandbox)?
-                .into_iter()
-                .cloned()
-                .collect());
+            return Self::admit_egress_aperture(config, published, sandbox);
         };
         if listed.is_empty() {
             let refusal =
@@ -2870,10 +2987,7 @@ impl ProcessRuntime {
             apertures: listed.to_vec(),
             ..sandbox.clone()
         };
-        Ok(Self::admit_egress_aperture(config, published, &request)?
-            .into_iter()
-            .cloned()
-            .collect())
+        Self::admit_egress_aperture(config, published, &request)
     }
 
     /// Admits a start and returns the pinned workspace directory and read-only roots it binds.
@@ -3931,7 +4045,11 @@ fn applied_network_of(mut applied: Vec<substrate_wire::AppliedAperture>) -> Appl
         0 => AppliedNetwork::None,
         1 => {
             let mut only = applied.remove(0);
-            only.listen = None;
+            // A local endpoint's single form states its listen address (ADR 0054 decision 8);
+            // a TCP aperture's stays the `0.20.0` record.
+            if only.mechanism != substrate_wire::ApertureMechanism::LocalEndpointForwarder {
+                only.listen = None;
+            }
             AppliedNetwork::Aperture(only)
         }
         _ => AppliedNetwork::Apertures(applied),
@@ -5665,6 +5783,7 @@ mod tests {
                     required: true,
                     exec_subpaths: None,
                     exec_denied_paths: Vec::new(),
+                    local_endpoint_key: None,
                 },
                 applied: None,
                 exit: None,
@@ -5795,6 +5914,7 @@ mod tests {
             required: true,
             exec_subpaths: None,
             exec_denied_paths: Vec::new(),
+            local_endpoint_key: None,
         }
     }
 
@@ -5806,6 +5926,185 @@ mod tests {
         let error =
             ProcessRuntime::admit_egress_aperture(config, published, sandbox).expect_err("refused");
         (error.class, error.code, error.address)
+    }
+
+    /// `listed_config` with a local endpoint `agent` on port 7000 beside the TCP apertures, and
+    /// the fact as a host whose local mechanism was proved, or not, publishes it.
+    fn local_config(
+        directory: &std::path::Path,
+        local_proved: bool,
+    ) -> (HostConfig, Vec<substrate_wire::EgressApertureFact>) {
+        let (mut config, _) = listed_config();
+        std::fs::set_permissions(
+            directory,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .expect("mode");
+        config.local_endpoints =
+            vec![crate::LocalEndpoint::open("agent", 7000, directory).expect("declared")];
+        let published = crate::egress::apertures_fact(
+            &config.egress_apertures,
+            true,
+            &config.local_endpoints,
+            local_proved,
+        )
+        .expect("published");
+        (config, published)
+    }
+
+    /// ADR 0054 at the driver's admission: the key's shape first, then a declared local endpoint
+    /// the mechanism did not prove, then a key beside no selected local endpoint; an admitted
+    /// local endpoint carries the start's key, in listed order beside a TCP aperture.
+    #[test]
+    fn a_local_endpoint_is_admitted_by_name_and_its_key_is_held_to_its_rules() {
+        let directory = tempfile::tempdir().expect("directory");
+        let (config, published) = local_config(directory.path(), true);
+        let with_key = |aperture: Option<&str>, apertures: &[&str], key: Option<&str>| {
+            let mut request = list_request(aperture, apertures);
+            request.local_endpoint_key = key.map(str::to_owned);
+            if aperture.is_none() && apertures.is_empty() {
+                request.network = NetworkMode::None;
+            }
+            request
+        };
+        let key_address = Some("sandbox.local_endpoint_key".to_owned());
+        for key in [
+            "",
+            "Worker",
+            "worker_1",
+            "-worker",
+            "a.b",
+            "a/b",
+            &"k".repeat(65),
+        ] {
+            assert_eq!(
+                list_refusal(
+                    &config,
+                    Some(&published),
+                    &with_key(Some("agent"), &[], Some(key))
+                ),
+                (
+                    crate::DriverErrorClass::Refused,
+                    "request.schema-invalid",
+                    key_address.clone()
+                ),
+                "{key:?}"
+            );
+        }
+        let without_endpoint = (
+            crate::DriverErrorClass::Refused,
+            substrate_wire::EXEC_LOCAL_ENDPOINT_KEY_WITHOUT_ENDPOINT,
+            key_address.clone(),
+        );
+        assert_eq!(
+            list_refusal(
+                &config,
+                Some(&published),
+                &with_key(None, &[], Some("worker-1"))
+            ),
+            without_endpoint
+        );
+        assert_eq!(
+            list_refusal(
+                &config,
+                Some(&published),
+                &with_key(Some("model"), &[], Some("worker-1"))
+            ),
+            without_endpoint
+        );
+
+        let (unproved, tcp_only) = local_config(directory.path(), false);
+        assert_eq!(
+            list_refusal(
+                &unproved,
+                Some(&tcp_only),
+                &with_key(Some("agent"), &[], None)
+            ),
+            (
+                crate::DriverErrorClass::Unserved,
+                substrate_wire::EXEC_LOCAL_ENDPOINTS_UNSERVED,
+                Some("sandbox.network.aperture".to_owned())
+            )
+        );
+        // Named before the apertures fact is read, so a host with no fact at all says the same.
+        assert_eq!(
+            list_refusal(&unproved, None, &with_key(None, &["model", "agent"], None)),
+            (
+                crate::DriverErrorClass::Unserved,
+                substrate_wire::EXEC_LOCAL_ENDPOINTS_UNSERVED,
+                Some("sandbox.apertures".to_owned())
+            )
+        );
+
+        let selected = ProcessRuntime::admit_egress_aperture(
+            &config,
+            Some(&published),
+            &with_key(None, &["model", "agent"], Some("worker-1")),
+        )
+        .expect("admitted");
+        let names: Vec<&str> = selected.iter().map(|one| one.name.as_str()).collect();
+        assert_eq!(names, ["model", "agent"]);
+        assert_eq!(selected[0].local_socket("ex_run"), None);
+        assert_eq!(selected[1].local_socket("ex_run"), Some("worker-1"));
+        let selected = ProcessRuntime::admit_egress_aperture(
+            &config,
+            Some(&published),
+            &with_key(Some("agent"), &[], None),
+        )
+        .expect("admitted");
+        assert_eq!(
+            selected[0].local_socket("ex_run"),
+            Some("ex_run"),
+            "a start without a key relays to the socket named by its run id"
+        );
+    }
+
+    /// ADR 0054 decision 6: one live run holds a socket name per local endpoint, and a second
+    /// claim of it is `exec.local-endpoint-key-in-use` (409, `conflict`) at the key's address;
+    /// the name is free again once the first run's claims are dropped.
+    #[test]
+    fn a_key_held_by_a_live_run_is_refused_until_that_run_ends() {
+        let root = tempfile::tempdir().expect("root");
+        let directory = tempfile::tempdir().expect("directory");
+        let (config, published) = local_config(directory.path(), true);
+        let mut runtime_config = HostConfig::minimum(root.path());
+        runtime_config.local_endpoints = config.local_endpoints.clone();
+        runtime_config.egress_apertures = config.egress_apertures.clone();
+        let runtime = ProcessRuntime::new(runtime_config, confined_exec_capability("sha256:0"))
+            .expect("runtime");
+        let mut request = list_request(Some("agent"), &[]);
+        request.local_endpoint_key = Some("worker-1".to_owned());
+        let keyed = ProcessRuntime::admit_egress_aperture(&config, Some(&published), &request)
+            .expect("admitted");
+        let first = runtime
+            .claim_local_endpoints("ex_first", &keyed)
+            .expect("a free key is claimed");
+        assert_eq!(first.len(), 1);
+        let refusal = runtime
+            .claim_local_endpoints("ex_second", &keyed)
+            .expect_err("a held key is refused");
+        assert_eq!(
+            (refusal.class, refusal.code, refusal.address.as_deref()),
+            (
+                crate::DriverErrorClass::Conflict,
+                substrate_wire::EXEC_LOCAL_ENDPOINT_KEY_IN_USE,
+                Some("sandbox.local_endpoint_key")
+            )
+        );
+        let keyless = ProcessRuntime::admit_egress_aperture(
+            &config,
+            Some(&published),
+            &list_request(Some("agent"), &[]),
+        )
+        .expect("admitted");
+        let by_id = runtime
+            .claim_local_endpoints("ex_second", &keyless)
+            .expect("a run id is its own socket name");
+        drop(first);
+        let again = runtime
+            .claim_local_endpoints("ex_third", &keyed)
+            .expect("the key is free once the first run's claims are dropped");
+        drop((by_id, again));
     }
 
     /// Design 26 § 2 at the driver: a list is held to its shape and each name to its declaration,
@@ -5934,6 +6233,7 @@ mod tests {
             required: true,
             exec_subpaths: None,
             exec_denied_paths: Vec::new(),
+            local_endpoint_key: None,
         };
         let error =
             ProcessRuntime::select_apertures(&config, Some(&published), &sandbox, Some(&[]))
@@ -6218,6 +6518,7 @@ mod tests {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -6537,6 +6838,7 @@ mod tests {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -6823,6 +7125,7 @@ mod tests {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -8419,6 +8722,7 @@ mod tests {
             bytes: substrate_wire::ApertureBytes::default(),
             max_bytes: None,
             listen: Some(listen.to_owned()),
+            key: None,
         };
         assert_eq!(applied_network_of(Vec::new()), AppliedNetwork::None);
         assert_eq!(
@@ -8504,7 +8808,7 @@ mod tests {
         let published = crate::egress::egress_apertures_fact(&config.egress_apertures, true)
             .expect("a verified mechanism publishes");
         let mut sandbox = pty_exec_input("sha256:0").sandbox;
-        let names = |selected: Vec<crate::egress::EgressAperture>| -> Vec<String> {
+        let names = |selected: Vec<crate::egress::RunAperture>| -> Vec<String> {
             selected.into_iter().map(|aperture| aperture.name).collect()
         };
 
@@ -10848,6 +11152,7 @@ mod adversary_unknown_exec_retry {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -11007,6 +11312,7 @@ mod limit_tests {
                     required: true,
                     exec_subpaths: None,
                     exec_denied_paths: Vec::new(),
+                    local_endpoint_key: None,
                 },
                 applied: None,
                 exit: None,

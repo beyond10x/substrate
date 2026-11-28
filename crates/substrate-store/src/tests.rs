@@ -170,6 +170,7 @@ pub(crate) fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             applied: None,
             exit: None,

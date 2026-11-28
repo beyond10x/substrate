@@ -13,7 +13,7 @@ families and facts.
 
 | Contract | Used by | Defined in | Checked by |
 |---|---|---|---|
-| Wire contract: HTTP and WebSocket | the [Rust SDK](../guides/rust-sdk.md), the [command line](../guides/cli.md), the [MCP adapter](../guides/mcp-adapter.md), other callers of the daemon | immutable versioned bundles in `contracts/substrate-wire/`, newest `0.29.0`, published as the signed OCI artifact `ghcr.io/beyond10x/b10x-substrate-wire` | the full gate; every response names its bundle and digest in headers |
+| Wire contract: HTTP and WebSocket | the [Rust SDK](../guides/rust-sdk.md), the [command line](../guides/cli.md), the [MCP adapter](../guides/mcp-adapter.md), other callers of the daemon | immutable versioned bundles in `contracts/substrate-wire/`, newest `0.30.0`, published as the signed OCI artifact `ghcr.io/beyond10x/b10x-substrate-wire` | the full gate; every response names its bundle and digest in headers |
 | Confinement contract | embedders of the `b10x-substrate-host` crate and `b10x-substrate confine run` | the ESS domain `substrate.confinement` in `spec/confinement/` | `cargo xtask check-ess` against the interpreted reference, and each adapter's lane against the adapter |
 | Confinement consumer surface | Rust code that calls `substrate_host::confinement` | `tests/confinement-public-items.txt` in the host crate | `tests/confinement_public_items.rs` and `tests/consumer_surface.rs` |
 | Command line | people and scripts in a shell | the ESS domain `substrate.client` and its `ess-cli/2` binding in `spec/client/` | `cargo xtask check-ess` against the generated package in `spec/generated/cli` |

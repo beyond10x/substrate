@@ -457,6 +457,19 @@ pub(super) fn validate_exec_input(
     if !shape_valid {
         return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
     }
+    // ADR 0054 decision 3: the key's shape, a schema rule, at its own address as the driver says.
+    if input
+        .sandbox
+        .local_endpoint_key
+        .as_deref()
+        .is_some_and(|key| !substrate_wire::valid_local_endpoint_key(key))
+    {
+        return Err(schema_invalid(
+            request_id,
+            Some(&mutation.op),
+            "sandbox.local_endpoint_key",
+        ));
+    }
     // One snapshot: the digest the start names is compared with, and every check below reads the
     // facts of, the same reading of the driver (design 34 § 6.3).
     let machine = app.driver.machine();
@@ -475,7 +488,13 @@ pub(super) fn validate_exec_input(
     }
     check_exec_lists(&facts, &input.sandbox, mutation, request_id)?;
     check_confinement_requires(&facts, &input.sandbox, mutation, request_id)?;
-    check_egress_aperture(&facts, &input.sandbox, mutation, request_id)?;
+    check_egress_aperture(
+        &facts,
+        &app.local_endpoints,
+        &input.sandbox,
+        mutation,
+        request_id,
+    )?;
     check_secret_slots(&facts, mutation, request_id)?;
     check_read_only_files(private, &facts, mutation, request_id)?;
     check_writable_roots(app, &facts, mutation, request_id)?;
@@ -711,12 +730,40 @@ fn capsule_unserved() -> substrate_wire::UnservedRefusal {
 /// declared names and their pinned destinations, so this needs no access to daemon configuration
 /// and gets none. A list is held to the same per-name rules as one `aperture`, answered at the
 /// list's address, and every name in it must be declared.
+///
+/// A name may select a local endpoint (ADR 0054). One this daemon declared whose mechanism the
+/// fact leaves out is `exec.local-endpoints-unserved`, named from `local_endpoints`, the
+/// declared names, before the fact is read; a key beside no selected local endpoint is
+/// `exec.local-endpoint-key-without-endpoint`. A published element is a local endpoint when its
+/// destination is `local:<port>`.
+#[allow(clippy::too_many_lines)] // One admission sequence, in the driver's order.
 fn check_egress_aperture(
     facts: &substrate_wire::CapabilityFacts,
+    local_endpoints: &[String],
     sandbox: &substrate_wire::ConfinementRequest,
     mutation: &BoundMutation<ExecStartInput>,
     request_id: &str,
 ) -> Result<(), Response> {
+    let local_refusal = |code: &str, address: &str| {
+        let refusal = substrate_wire::exec_start_refusal(code)
+            .unwrap_or(substrate_wire::LOCAL_ENDPOINT_REFUSALS[1]);
+        failure(
+            StatusCode::from_u16(refusal.status).unwrap_or(StatusCode::UNPROCESSABLE_ENTITY),
+            request_id,
+            Some(&mutation.op),
+            refusal.class,
+            refusal.code,
+            refusal.message,
+            Some(address),
+            false,
+        )
+    };
+    let without_endpoint = || {
+        local_refusal(
+            substrate_wire::EXEC_LOCAL_ENDPOINT_KEY_WITHOUT_ENDPOINT,
+            "sandbox.local_endpoint_key",
+        )
+    };
     let listed = !sandbox.apertures.is_empty();
     if let Err(error) = substrate_wire::validate_aperture_selection(sandbox) {
         let name_address = if listed {
@@ -778,7 +825,30 @@ fn check_egress_aperture(
         sandbox.aperture.as_deref().into_iter().collect()
     };
     if names.is_empty() {
+        if sandbox.local_endpoint_key.is_some() {
+            return Err(without_endpoint());
+        }
         return Ok(());
+    }
+    let is_published = |name: &str| {
+        facts
+            .exec_egress_apertures
+            .as_ref()
+            .is_some_and(|published| published.iter().any(|fact| fact.name == name))
+    };
+    if names
+        .iter()
+        .any(|name| local_endpoints.iter().any(|declared| declared == name) && !is_published(name))
+    {
+        let name_address = if listed {
+            "sandbox.apertures"
+        } else {
+            "sandbox.network.aperture"
+        };
+        return Err(local_refusal(
+            substrate_wire::EXEC_LOCAL_ENDPOINTS_UNSERVED,
+            name_address,
+        ));
     }
     let Some(published) = facts.exec_egress_apertures.as_ref() else {
         return Err(failure(
@@ -808,6 +878,18 @@ fn check_egress_aperture(
             Some("exec.network-aperture"),
             false,
         ));
+    }
+    if sandbox.local_endpoint_key.is_some()
+        && !names.iter().any(|name| {
+            published.iter().any(|fact| {
+                fact.name == *name
+                    && fact
+                        .destination
+                        .starts_with(substrate_wire::LOCAL_ENDPOINT_DESTINATION_PREFIX)
+            })
+        })
+    {
+        return Err(without_endpoint());
     }
     Ok(())
 }

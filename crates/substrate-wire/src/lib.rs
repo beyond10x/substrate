@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.29.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.30.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "65bde1870351dfb72d4431d2dd88f0f641e91cc814007d01e0a5250517539bfd";
+    "187ac7a7e9202a4626d29f2241e26c6151f79cb07884016d6160dc5a739db255";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 /// Most characters of `old_text` and `new_text` in a v2 file edit and of `text` in a line-patch
 /// edit: the `maxLength` their input schemas publish, which JSON Schema counts in characters, not
@@ -202,6 +202,21 @@ pub const EXEC_APERTURE_LISTED_TWICE: &str = "exec.aperture-listed-twice";
 /// An aperture list naming two apertures whose declared hosts are one host name, so the generated
 /// host mapping could reach only one of them by that name (design 26 § 2).
 pub const EXEC_APERTURE_HOST_LISTED_TWICE: &str = "exec.aperture-host-listed-twice";
+/// A start selected a declared local endpoint whose mechanism this host has not proved
+/// (ADR 0054 decision 9).
+pub const EXEC_LOCAL_ENDPOINTS_UNSERVED: &str = "exec.local-endpoints-unserved";
+/// A start named `sandbox.local_endpoint_key` and selected no local endpoint (ADR 0054
+/// decision 9).
+pub const EXEC_LOCAL_ENDPOINT_KEY_WITHOUT_ENDPOINT: &str =
+    "exec.local-endpoint-key-without-endpoint";
+/// A start named a key another live run holds on the same local endpoint (ADR 0054 decision 6).
+pub const EXEC_LOCAL_ENDPOINT_KEY_IN_USE: &str = "exec.local-endpoint-key-in-use";
+/// The longest `sandbox.local_endpoint_key`, in bytes (ADR 0054 decision 3). The key is the name
+/// of a socket in the declared directory, so it is short and holds no `.` and no `/`.
+pub const MAX_LOCAL_ENDPOINT_KEY_BYTES: usize = 64;
+/// What a local endpoint's `destination` begins with, in the fact and the applied aperture: the
+/// declared port follows (ADR 0054 decisions 7 and 8). No host path is ever published.
+pub const LOCAL_ENDPOINT_DESTINATION_PREFIX: &str = "local:";
 /// How many host directories one start may declare read-only (ADR 0010, amended 2026-11-20).
 ///
 /// Small on purpose. A closure that needs many roots is a closure that should be assembled rather
@@ -1854,6 +1869,13 @@ pub struct ConfinementRequest {
     /// explicit empty list therefore reads as an absent one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apertures: Vec<String>,
+    /// The name of the socket a selected local endpoint relays to, in the directory the operator
+    /// declared (ADR 0054 decision 3). Absent: the run's own id. Checked by
+    /// [`valid_local_endpoint_key`]; a key while no local endpoint is selected is refused
+    /// [`EXEC_LOCAL_ENDPOINT_KEY_WITHOUT_ENDPOINT`]. Skipped when absent, so an unchanged start
+    /// hashes as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_endpoint_key: Option<String>,
     pub profile: SandboxProfile,
     #[serde(rename = "require")]
     pub required: bool,
@@ -2136,10 +2158,16 @@ pub struct AppliedAperture {
     pub max_bytes: Option<u64>,
     /// The loopback `address:port` the forwarder listened on inside the run (design 26 § 2).
     ///
-    /// Present only on the elements of the array form: the n-th listed aperture listens on
-    /// `127.0.0.n`. A single `aperture` keeps the record it always had, without this member.
+    /// Present on the elements of the array form: the n-th listed aperture listens on
+    /// `127.0.0.n`. A single TCP `aperture` keeps the record it always had, without this member;
+    /// a single local endpoint states it (ADR 0054 decision 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
+    /// The name of the socket a local endpoint relayed to in its declared directory: the start's
+    /// `sandbox.local_endpoint_key`, else the run's id (ADR 0054 decision 8). Present exactly for
+    /// [`ApertureMechanism::LocalEndpointForwarder`]; never a host path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2148,7 +2176,7 @@ pub enum ApertureMode {
     Aperture,
 }
 
-/// How the aperture was installed. One value today, and named rather than assumed: a client that
+/// How the aperture was installed, named rather than assumed: a client that
 /// reads this is reading an observation, not selecting an implementation (invariant 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApertureMechanism {
@@ -2156,6 +2184,10 @@ pub enum ApertureMechanism {
     /// (`docs/design/10-destination-bound-egress.md` § 4 option (c)).
     #[serde(rename = "loopback-forwarder")]
     LoopbackForwarder,
+    /// The same listener, relayed to a Unix socket in an operator-declared directory, named by
+    /// the start's key or the run's id (ADR 0054).
+    #[serde(rename = "local-endpoint-forwarder")]
+    LocalEndpointForwarder,
 }
 
 /// Byte accounting for one applied aperture, from the only place that sees the bytes.
@@ -5892,6 +5924,49 @@ pub const APERTURE_LIST_REFUSALS: [ExecStartRefusal; 4] = [
     },
 ];
 
+/// The three local-endpoint refusals of ADR 0054 decision 9, in its order. Like every row of
+/// [`exec_start_refusal`], a message names neither the endpoint nor the key.
+pub const LOCAL_ENDPOINT_REFUSALS: [ExecStartRefusal; 3] = [
+    ExecStartRefusal {
+        code: EXEC_LOCAL_ENDPOINTS_UNSERVED,
+        status: 501,
+        class: ErrorClass::Unserved,
+        message: "A selected local endpoint is not served by this host: its mechanism was not proved.",
+    },
+    ExecStartRefusal {
+        code: EXEC_LOCAL_ENDPOINT_KEY_WITHOUT_ENDPOINT,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "A local endpoint key is named only beside a selected local endpoint.",
+    },
+    ExecStartRefusal {
+        code: EXEC_LOCAL_ENDPOINT_KEY_IN_USE,
+        status: 409,
+        class: ErrorClass::Conflict,
+        message: "The local endpoint key is held by another live run on the same local endpoint.",
+    },
+];
+
+/// A local endpoint key: 1 to [`MAX_LOCAL_ENDPOINT_KEY_BYTES`] bytes matching
+/// `^[a-z0-9][a-z0-9-]*$` (ADR 0054 decision 3).
+///
+/// No `.` and no `/`, so a key names one entry of the declared directory and nothing above or
+/// beneath it; no `_`, so a key is never a run id, every one of which holds one.
+#[must_use]
+pub fn valid_local_endpoint_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= MAX_LOCAL_ENDPOINT_KEY_BYTES
+        && key.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || (index > 0 && byte == b'-')
+        })
+}
+
+/// The `destination` a local endpoint declared on `port` publishes (ADR 0054 decision 7).
+#[must_use]
+pub fn local_endpoint_destination(port: u16) -> String {
+    format!("{LOCAL_ENDPOINT_DESTINATION_PREFIX}{port}")
+}
+
 /// The eight writable-root refusals of ADR 0038: six lexical (422), then the two unserved kinds
 /// (501).
 ///
@@ -6075,12 +6150,14 @@ pub fn writable_root_refusal(error: &WireValidationError) -> Option<(ExecStartRe
     Some((refusal, message))
 }
 
-/// Looks up one of the design 26 or ADR 0038 start refusals by its code.
+/// Looks up one of the design 26, ADR 0038 or ADR 0054 start refusals by its code; a message with
+/// `{name}` is returned as a template.
 pub fn exec_start_refusal(code: &str) -> Option<ExecStartRefusal> {
     WORKDIR_REFUSALS
         .iter()
         .chain(APERTURE_LIST_REFUSALS.iter())
         .chain(WRITABLE_ROOT_REFUSALS.iter())
+        .chain(LOCAL_ENDPOINT_REFUSALS.iter())
         .find(|refusal| refusal.code == code)
         .copied()
 }
@@ -7134,8 +7211,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.29.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.29.0/bundle.json");
+        assert_eq!(version, "0.30.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.30.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
@@ -7514,6 +7591,7 @@ mod egress_aperture_tests {
             },
             max_bytes: None,
             listen: None,
+            key: None,
         });
         let rendered = serde_json::to_value(applied.clone()).unwrap();
         assert_eq!(rendered["mode"], "aperture");
@@ -7579,6 +7657,7 @@ mod egress_aperture_tests {
             required: true,
             exec_subpaths: None,
             exec_denied_paths: Vec::new(),
+            local_endpoint_key: None,
         };
         let rendered = serde_json::to_value(&request).unwrap();
         assert!(
@@ -7625,6 +7704,7 @@ mod egress_aperture_tests {
             },
             max_bytes: None,
             listen: None,
+            key: None,
         };
         let rendered = serde_json::to_value(&applied).unwrap();
         assert!(
@@ -7685,6 +7765,7 @@ mod egress_aperture_tests {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             applied: None,
             exit: None,

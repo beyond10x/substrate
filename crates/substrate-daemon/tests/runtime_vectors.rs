@@ -53,9 +53,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.29.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.30.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "65bde1870351dfb72d4431d2dd88f0f641e91cc814007d01e0a5250517539bfd";
+    "187ac7a7e9202a4626d29f2241e26c6151f79cb07884016d6160dc5a739db255";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2991,7 +2991,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.29.0/operations.json");
+            .join("contracts/substrate-wire/0.30.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -9067,12 +9067,462 @@ async fn a_dynamically_linked_helper_stops_the_daemon_before_it_listens() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Local endpoints (ADR 0054)
+// ---------------------------------------------------------------------------------------------
+
+/// The local endpoint the function's daemon declares, and the port its listener takes in a run.
+const LOCAL_ENDPOINT_NAME: &str = "agent";
+const LOCAL_ENDPOINT_PORT: u16 = 7000;
+
+/// What a run prints from the local endpoint: one connection to its listener, read to its end;
+/// exit 7 when nothing listens. Bash's own `/dev/tcp`, so the run needs no other program.
+const LOCAL_ENDPOINT_READ: &str = "{ cat <&3; } 3<>/dev/tcp/127.0.0.1/7000 || exit 7";
+
+/// `input` with `sandbox.local_endpoint_key` set to `key`.
+fn with_local_endpoint_key(mut input: Value, key: &str) -> Value {
+    input["sandbox"]["local_endpoint_key"] = json!(key);
+    input
+}
+
+/// Answers every connection to a socket in the endpoint's directory with `reply`, until dropped.
+struct LocalSocket {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: Option<std::thread::JoinHandle<usize>>,
+}
+
+impl LocalSocket {
+    fn serve(directory: &Path, name: &str, reply: &'static [u8]) -> Self {
+        let listener =
+            std::os::unix::net::UnixListener::bind(directory.join(name)).expect("bind the socket");
+        listener.set_nonblocking(true).expect("non-blocking");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = std::sync::Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = std::io::Write::write_all(&mut stream, reply);
+                        served += 1;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            served
+        });
+        Self {
+            stop,
+            server: Some(server),
+        }
+    }
+
+    /// Stops serving and returns how many connections it answered.
+    fn served(mut self) -> usize {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.server
+            .take()
+            .map_or(0, |server| server.join().expect("socket server"))
+    }
+}
+
+impl Drop for LocalSocket {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(server) = self.server.take() {
+            let _ = server.join();
+        }
+    }
+}
+
+/// The refusals both lanes answer: a key of the wrong shape is `request.schema-invalid` at the
+/// key, and a key beside no selected local endpoint is
+/// `exec.local-endpoint-key-without-endpoint` (422), each before dispatch and recorded refused.
+async fn check_local_endpoint_key_refusals(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+) -> usize {
+    let mut passed = 0;
+    for (index, key) in ["Worker", "a.b", &"k".repeat(65)].into_iter().enumerate() {
+        expect_error_at(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    &format!("req_local_key_shape_{index}"),
+                    Some(&mutation(
+                        &format!("01JLOCALENDPOINTKEYSHAPE{index}"),
+                        &with_local_endpoint_key(
+                            ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                                .aperture(LOCAL_ENDPOINT_NAME)
+                                .build(),
+                            key,
+                        ),
+                    )),
+                )
+                .await,
+            422,
+            "request.schema-invalid",
+            "sandbox.local_endpoint_key",
+        );
+    }
+    passed += 1;
+    expect_error_at(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_local_key_without_endpoint",
+                Some(&mutation(
+                    "01JLOCALENDPOINTKEYALONE",
+                    &with_local_endpoint_key(
+                        ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true).build(),
+                        "worker-1",
+                    ),
+                )),
+            )
+            .await,
+        422,
+        "exec.local-endpoint-key-without-endpoint",
+        "sandbox.local_endpoint_key",
+    );
+    passed += 1;
+    passed
+}
+
+/// One exec start that waits, returning the answer.
+async fn local_endpoint_run(
+    daemon: &Daemon,
+    request: &str,
+    operation: &str,
+    input: &Value,
+) -> Value {
+    let (status, run) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            request,
+            Some(&mutation(operation, input)),
+        )
+        .await;
+    assert_eq!(status, 200, "{run}");
+    run
+}
+
+/// The delegated cases: what a run reaches through a local endpoint, what its record says, and
+/// which socket a live run holds.
+#[allow(clippy::too_many_lines)] // One case after another, each against the same daemon.
+async fn check_confined_local_endpoints(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    machine: &Value,
+    directory: &Path,
+) -> usize {
+    let mut passed = 0;
+    let read: &[&str] = &["/usr/bin/bash", "-c", LOCAL_ENDPOINT_READ];
+    let directory_text = directory.display().to_string();
+
+    // The fact names the endpoint and its port, never the directory.
+    let facts = &machine["result"]["facts"]["exec.egress-apertures"];
+    assert!(
+        facts
+            .as_array()
+            .expect("the apertures fact")
+            .iter()
+            .any(|fact| fact["name"] == LOCAL_ENDPOINT_NAME
+                && fact["destination"] == format!("local:{LOCAL_ENDPOINT_PORT}")),
+        "{machine}"
+    );
+    assert!(!machine.to_string().contains(&directory_text), "{machine}");
+    passed += 1;
+
+    // Two runs, each with its own key: each reaches only its own socket, which the agent made
+    // before the start, at the run's first instruction.
+    let first = LocalSocket::serve(directory, "worker-a", b"reply-a");
+    let second = LocalSocket::serve(directory, "worker-b", b"reply-b");
+    let mut runs = Vec::new();
+    for (index, (key, reply)) in [("worker-a", "reply-a"), ("worker-b", "reply-b")]
+        .into_iter()
+        .enumerate()
+    {
+        let run = local_endpoint_run(
+            daemon,
+            &format!("req_local_reach_{index}"),
+            &format!("01JLOCALENDPOINTREACH{index}"),
+            &with_local_endpoint_key(
+                ExecInput::new(workspace, snapshot, read, true)
+                    .aperture(LOCAL_ENDPOINT_NAME)
+                    .build(),
+                key,
+            ),
+        )
+        .await;
+        assert_eq!(run["result"]["exit"]["code"], 0, "{run}");
+        let output = read_output(daemon, &text(&run["result"]["id"]), "stdout").await;
+        assert_eq!(decoded(&output), reply.as_bytes(), "{run}");
+        runs.push(run);
+    }
+    assert_eq!(first.served(), 1, "the first socket answered another run");
+    assert_eq!(second.served(), 1, "the second socket answered another run");
+    passed += 1;
+
+    // The applied aperture: the mechanism, `local:<port>`, the listen address and the key, on
+    // the answer and on the record read back, and no host path anywhere in either.
+    let id = text(&runs[0]["result"]["id"]);
+    let (status, recorded) = daemon
+        .call("GET", &format!("/v1/execs/{id}"), "req_local_record", None)
+        .await;
+    assert_eq!(status, 200, "{recorded}");
+    for observed in [&runs[0], &recorded] {
+        let applied = &observed["result"]["applied"]["network"];
+        assert_eq!(applied["mode"], "aperture", "{observed}");
+        assert_eq!(applied["name"], LOCAL_ENDPOINT_NAME, "{observed}");
+        assert_eq!(
+            applied["mechanism"], "local-endpoint-forwarder",
+            "{observed}"
+        );
+        assert_eq!(
+            applied["destination"],
+            format!("local:{LOCAL_ENDPOINT_PORT}"),
+            "{observed}"
+        );
+        assert_eq!(
+            applied["listen"],
+            format!("127.0.0.1:{LOCAL_ENDPOINT_PORT}"),
+            "{observed}"
+        );
+        assert_eq!(applied["key"], "worker-a", "{observed}");
+        assert_eq!(
+            observed["result"]["requested"]["local_endpoint_key"], "worker-a",
+            "{observed}"
+        );
+        assert!(
+            !observed.to_string().contains(&directory_text),
+            "{observed}"
+        );
+    }
+    passed += 1;
+
+    // A run that names no local endpoint has no listener for it.
+    let run = local_endpoint_run(
+        daemon,
+        "req_local_none",
+        "01JLOCALENDPOINTNONE",
+        &ExecInput::new(workspace, snapshot, read, true).build(),
+    )
+    .await;
+    assert_eq!(run["result"]["exit"]["code"], 7, "{run}");
+    passed += 1;
+
+    // An absent socket: the listener accepts, the relay finds nothing to connect to and closes
+    // the connection, so the run reads nothing.
+    let run = local_endpoint_run(
+        daemon,
+        "req_local_absent",
+        "01JLOCALENDPOINTABSENT",
+        &with_local_endpoint_key(
+            ExecInput::new(workspace, snapshot, read, true)
+                .aperture(LOCAL_ENDPOINT_NAME)
+                .build(),
+            "nobody",
+        ),
+    )
+    .await;
+    assert_eq!(run["result"]["exit"]["code"], 0, "{run}");
+    let output = read_output(daemon, &text(&run["result"]["id"]), "stdout").await;
+    assert!(decoded(&output).is_empty(), "{run}");
+    passed += 1;
+
+    // Without a key the socket is named by the run id, which the caller learns from the answer.
+    let late: &[&str] = &[
+        "/usr/bin/bash",
+        "-c",
+        "sleep 1; { cat <&3; } 3<>/dev/tcp/127.0.0.1/7000 || exit 7",
+    ];
+    let (status, started) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_local_by_id",
+            Some(&mutation(
+                "01JLOCALENDPOINTBYID",
+                &ExecInput::new(workspace, snapshot, late, false)
+                    .aperture(LOCAL_ENDPOINT_NAME)
+                    .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 202, "{started}");
+    let id = text(&started["result"]["id"]);
+    assert_eq!(
+        started["result"]["applied"]["network"]["key"], id,
+        "{started}"
+    );
+    let by_id = LocalSocket::serve(directory, &id, b"reply-id");
+    let finished = wait_for_exec_terminal(daemon, &id).await;
+    assert_eq!(finished["result"]["exit"]["code"], 0, "{finished}");
+    let output = read_output(daemon, &id, "stdout").await;
+    assert_eq!(decoded(&output), b"reply-id", "{finished}");
+    assert_eq!(by_id.served(), 1);
+    passed += 1;
+
+    // One live run holds a key: a second start naming it is refused before anything is
+    // spawned, and the key is free again once the first run ended.
+    let held: &[&str] = &["/usr/bin/sleep", "30"];
+    let (status, holding) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_local_held",
+            Some(&mutation(
+                "01JLOCALENDPOINTHELD",
+                &with_local_endpoint_key(
+                    ExecInput::new(workspace, snapshot, held, false)
+                        .timeout_ms(30_000)
+                        .aperture(LOCAL_ENDPOINT_NAME)
+                        .build(),
+                    "held",
+                ),
+            )),
+        )
+        .await;
+    assert_eq!(status, 202, "{holding}");
+    let holding_id = text(&holding["result"]["id"]);
+    let keyed = with_local_endpoint_key(
+        ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+            .aperture(LOCAL_ENDPOINT_NAME)
+            .build(),
+        "held",
+    );
+    expect_error_at(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_local_held_again",
+                Some(&mutation("01JLOCALENDPOINTHELDAGAIN", &keyed)),
+            )
+            .await,
+        409,
+        "exec.local-endpoint-key-in-use",
+        "sandbox.local_endpoint_key",
+    );
+    let (status, cancelled) = daemon
+        .call(
+            "POST",
+            &format!("/v1/execs/{holding_id}/signal"),
+            "req_local_held_signal",
+            Some(&mutation(
+                "01JLOCALENDPOINTHELDSIGNAL",
+                &json!({ "signal": "TERM", "grace_ms": 100 }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{cancelled}");
+    assert_eq!(cancelled["result"]["state"], "cancelled", "{cancelled}");
+    let freed =
+        local_endpoint_run(daemon, "req_local_freed", "01JLOCALENDPOINTFREED", &keyed).await;
+    assert_eq!(freed["result"]["exit"]["code"], 0, "{freed}");
+    passed += 1;
+    passed
+}
+
+/// Polls an exec until it is no longer running and returns its record.
+async fn wait_for_exec_terminal(daemon: &Daemon, id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, observed) = daemon
+            .call("GET", &format!("/v1/execs/{id}"), "req_local_wait", None)
+            .await;
+        assert_eq!(status, 200, "{observed}");
+        if observed["result"]["state"] != "running" && observed["result"]["state"] != "accepted" {
+            return observed;
+        }
+        assert!(Instant::now() < deadline, "{observed}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// ADR 0054 through the shipped daemon, declared with `--local-endpoint` on a private directory.
+/// On both lanes a key is held to its shape and to a selected local endpoint; the portable lane
+/// proves no mechanism, so a start naming the endpoint is `exec.local-endpoints-unserved` (501)
+/// at the name's address. The delegated lane runs [`check_confined_local_endpoints`].
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_clean_room_relays_local_endpoints_to_their_runs() {
+    const PART: &str = "local endpoints";
+    let delegated = DelegatedCgroup::acquire();
+    let temporary = clean_room("substrate-local-endpoint-");
+    // Apart from the daemon's root, which is its state directory: startup refuses a local
+    // endpoint directory that meets a path the daemon owns (ADR 0054 decision 2).
+    let agent = clean_room("substrate-local-endpoint-agent-");
+    let directory = agent.path().join("agent");
+    std::fs::create_dir(&directory).expect("the endpoint's directory");
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+        .expect("a private directory");
+    let extra = vec![
+        "--local-endpoint".to_owned(),
+        format!(
+            "{LOCAL_ENDPOINT_NAME}={LOCAL_ENDPOINT_PORT}:{}",
+            directory.display()
+        ),
+    ];
+    let daemon = Daemon::start_with_arguments(
+        temporary.path(),
+        delegated.as_ref().map(DelegatedCgroup::path),
+        &[],
+        &[],
+        &[],
+        false,
+        &[],
+        &extra,
+    )
+    .await;
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_local_machine", None)
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    let snapshot = text(&machine["result"]["snapshot"]);
+    let workspace =
+        create_empty_workspace(&daemon, "01JLOCALENDPOINTWORKSPACE", "req_local_ws").await;
+    let mut passed = check_local_endpoint_key_refusals(&daemon, &workspace, &snapshot).await;
+    if delegated.is_some() {
+        passed +=
+            check_confined_local_endpoints(&daemon, &workspace, &snapshot, &machine, &directory)
+                .await;
+    } else {
+        expect_error_at(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    "req_local_unserved",
+                    Some(&mutation(
+                        "01JLOCALENDPOINTUNSERVED",
+                        &ExecInput::new(&workspace, &snapshot, &["/usr/bin/true"], true)
+                            .aperture(LOCAL_ENDPOINT_NAME)
+                            .build(),
+                    )),
+                )
+                .await,
+            501,
+            "exec.local-endpoints-unserved",
+            "sandbox.network.aperture",
+        );
+        passed += 1;
+    }
+    daemon.close().await;
+    LOCAL_ENDPOINT_CASES.assert_passed(PART, passed, delegated.is_some());
+}
+
+// ---------------------------------------------------------------------------------------------
 // The lane
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 147;
-const DELEGATED_CASES: usize = 222;
+const PORTABLE_CASES: usize = 150;
+const DELEGATED_CASES: usize = 231;
 
 /// The cases one test function of a lane executes.
 ///
@@ -9116,6 +9566,13 @@ const EXEC_LIST_CASES: LaneCases = LaneCases {
     portable: 6,
     delegated: 16,
 };
+/// [`runtime_clean_room_relays_local_endpoints_to_their_runs`]: the key's two refusals on both
+/// lanes, the unserved endpoint on the portable one, and on the delegated lane the fact, the
+/// relay, the record and the key held by a live run (ADR 0054).
+const LOCAL_ENDPOINT_CASES: LaneCases = LaneCases {
+    portable: 3,
+    delegated: 9,
+};
 
 // The parts are the whole lane: this file does not compile when their counts and a lane's
 // inventory disagree.
@@ -9126,6 +9583,7 @@ const _: () = assert!(
         + ADOPTED_WORKSPACE_CASES.portable
         + GIT_ROOT_CASES.portable
         + EXEC_LIST_CASES.portable
+        + LOCAL_ENDPOINT_CASES.portable
         == PORTABLE_CASES,
     "the portable counts of the lane's test functions do not sum to PORTABLE_CASES"
 );
@@ -9136,6 +9594,7 @@ const _: () = assert!(
         + ADOPTED_WORKSPACE_CASES.delegated
         + GIT_ROOT_CASES.delegated
         + EXEC_LIST_CASES.delegated
+        + LOCAL_ENDPOINT_CASES.delegated
         == DELEGATED_CASES,
     "the delegated counts of the lane's test functions do not sum to DELEGATED_CASES"
 );
