@@ -558,7 +558,7 @@ accepts no other uid, and makes the directory one of the daemon's private host p
 The listener is installed as an aperture's: the helper joins the namespace, binds `127.0.0.n:<port>`,
 hands the listener out. The forwarder connects to **`<directory>/<key>`** when the start names
 `sandbox.local_endpoint_key`, and to **`<directory>/<run id>`** when it does not, the run id being the id
-of the exec, session or workload that owns the namespace (at most 32 characters); a workload's is stable
+of the exec (for a session, of the exec it runs) or workload that owns the namespace (at most 32 characters); a workload's is stable
 across restarts. The key is 1 to 64 bytes matching `^[a-z0-9][a-z0-9-]*$`; every run id holds `_`, so a key
 never names another run's id. The stakeholder decided the key on 2026-11-28: an instance's first call
 often comes at startup, the socket named by a minted id may not exist yet, and the caller knows its

@@ -468,7 +468,7 @@ a list, and the six lexical writable-root refusals (422) of ADR 0038 with
 `exec.writable-roots-host-unserved` and `exec.writable-roots-git-unserved` (501), which both lanes
 answer for a host root the daemon did not declare and for every Git root, and the portable lane
 also for the one host root the runner declares, which it cannot prove without confinement — across
-147 cases, and its delegated lane 222, whose four writable-root cases bind that declared root and
+150 cases, and its delegated lane 231, whose four writable-root cases bind that declared root and
 check the host side: the write lands, its parent and sibling do not change, a working directory
 beneath the mount runs there, and the declared path swapped for a symlink is
 `exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and nine roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 8}` (bundle `0.27.0`), eight roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a ninth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a
@@ -528,6 +528,16 @@ copy `SUBSTRATE_EXEC_GATE_DYNAMIC` names and requires `config.exec-gate-invalid`
 status other than 0 and no socket; it answers no request and is counted in no lane.
 `exec.sandbox-place-unserved` is published and not executed: no lane has a volume whose place
 it refuses.
+A seventh lane function, `runtime_clean_room_relays_local_endpoints_to_their_runs`, starts its
+daemon with `--local-endpoint` on a private directory (ADR 0054). Both lanes refuse a key of the
+wrong shape `request.schema-invalid` and a key beside no local endpoint
+`exec.local-endpoint-key-without-endpoint` (422), each at `sandbox.local_endpoint_key`; the
+portable lane refuses the endpoint `exec.local-endpoints-unserved` (501). The delegated lane reads
+the fact's `local:7000` and no host path, runs two keyed runs that each read only their own
+socket, reads the applied record (mechanism, destination, listen address and key, no host path),
+finds no listener in a run that names none, reads nothing through an absent socket, reaches the
+socket named by the exec id from a run without a key, and refuses a key a live run holds
+`exec.local-endpoint-key-in-use` (409) until that run is cancelled.
 Both totals include
 one route/refusal probe for every operation in the promoted registry (the seven host-process routes
 of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on
@@ -547,9 +557,9 @@ absent and a symlinked one refused `exec.workdir-missing` before dispatch, and a
 refused `exec.aperture-undeclared` for an undeclared name, run with two apertures each reporting its
 `listen` address, and refused `exec.aperture-host-listed-twice` for `localhost` listed second
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Each
-lane spans six test functions of that binary, so that none outlasts the 60 s test budget: the
-journey, the two exec-retention cases (delegated only), the adopted workspace, writable Git roots
-and the executable lists.
+lane spans seven test functions of that binary, so that none outlasts the 60 s test budget: the
+journey, the two exec-retention cases (delegated only), the adopted workspace, writable Git roots,
+the executable lists and the local endpoints.
 Each starts a daemon of its own and asserts its own count (`LaneCases`); the file does not compile
 unless the counts sum to the two totals, and `scripts/delegated-lane.sh` refuses a run whose
 functions did not report the whole delegated inventory. Its delegated lane runs only when

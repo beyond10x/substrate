@@ -230,6 +230,10 @@ pub struct App {
     pub(super) pipe_attachment_limits: Arc<PipeAttachmentLimits>,
     pub(super) pipe_session_policy: PipeSessionPolicy,
     pub allow_unrecorded_sessions: bool,
+    /// The names of the local endpoints this daemon declared (ADR 0054 decision 9). A start that
+    /// selects one the published fact leaves out is `exec.local-endpoints-unserved`, said from
+    /// here because an unproved endpoint is absent from the fact. Set by the composition root.
+    pub local_endpoints: Vec<String>,
     /// The host paths this daemon keeps private. A start whose read-only root or read-only file
     /// names a source that meets one is refused before dispatch (ADR 0010 and ADR 0033,
     /// amendments of 2026-11-22). Given at construction and never set afterwards: the
@@ -404,6 +408,7 @@ impl App {
             ),
             pipe_session_policy,
             allow_unrecorded_sessions: false,
+            local_endpoints: Vec::new(),
             private_host_paths,
             host_processes: None,
             host_process_logs: None,

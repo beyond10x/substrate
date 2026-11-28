@@ -54,9 +54,11 @@ before the start, so a name the caller chooses lets its agent create the socket 
    optional on the sandbox of an exec start and of a session start's exec, beside `aperture` and
    `apertures`, because it qualifies what they select: 1 to `MAX_LOCAL_ENDPOINT_KEY_BYTES` (64)
    bytes matching `^[a-z0-9][a-z0-9-]*$`, so it holds no `.` and no `/` and names an entry of the
-   directory and nothing beneath or above it. Anything else is `request.schema-invalid` (422).
-   Without a key the name is the id substrate minted for the run: the exec id, the session id, and
-   a workload's id when workloads are served. Every such id holds `_`, which no key holds, so a key
+   directory and nothing beneath or above it. Anything else is `request.schema-invalid` (422)
+   at `sandbox.local_endpoint_key`. Without a key the name is the id substrate minted for the run:
+   the exec id; for a session, the id of the exec it runs, which the session start's answer
+   names, since the host driver knows a session by that id; and a workload's id when workloads
+   are served. Every such id holds `_`, which no key holds, so a key
    never names the socket of another run's id. The key is part of the request hash like every
    start member; a start without it serializes and hashes as on `0.29.0`.
 
@@ -103,9 +105,9 @@ before the start, so a name the caller chooses lets its agent create the socket 
 
    | code | status | class | when |
    |---|---|---|---|
-   | `exec.local-endpoints-unserved` | 501 | `unserved` | a start names a declared local endpoint whose mechanism is not proved; before dispatch, named |
-   | `exec.local-endpoint-key-without-endpoint` | 422 | `refused` | a start names a key and selects no local endpoint; before dispatch |
-   | `exec.local-endpoint-key-in-use` | 409 | `conflict` | decision 6 |
+   | `exec.local-endpoints-unserved` | 501 | `unserved` | a start names a declared local endpoint whose mechanism is not proved; before dispatch, at `sandbox.network.aperture` or `sandbox.apertures` |
+   | `exec.local-endpoint-key-without-endpoint` | 422 | `refused` | a start names a key and selects no local endpoint; before dispatch, at `sandbox.local_endpoint_key` |
+   | `exec.local-endpoint-key-in-use` | 409 | `conflict` | decision 6, at `sandbox.local_endpoint_key` |
 
    The daemon answers the first two before dispatch; it reads the declared names from its own
    configuration, because an unproved endpoint is absent from the fact. The host driver answers

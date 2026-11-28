@@ -370,6 +370,7 @@ aperture.rs: struct EgressAperture > pub host: String,
 aperture.rs: struct EgressAperture > pub port: u16,
 aperture.rs: struct EgressAperture > pub pinned: SocketAddr,
 aperture.rs: struct EgressAperture > pub max_bytes: Option<u64>,
+egress.rs: impl MappedHost for EgressAperture
 generated/confinement.rs: #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)] pub enum AdapterName
 generated/confinement.rs: enum AdapterName > #[serde(rename = "linux")] Linux,
 generated/confinement.rs: enum AdapterName > #[serde(rename = "local")] Local,
@@ -432,6 +433,7 @@ lib.rs: struct HostConfig > pub max_current_execs: u64,
 lib.rs: struct HostConfig > pub snapshot_provenance_events: u64,
 lib.rs: struct HostConfig > pub secret_slots: Vec<SecretSlot>,
 lib.rs: struct HostConfig > pub egress_apertures: Vec<EgressAperture>,
+lib.rs: struct HostConfig > pub local_endpoints: Vec<LocalEndpoint>,
 lib.rs: struct HostConfig > pub aperture_root: PathBuf,
 lib.rs: struct HostConfig > pub ca_bundle: Option<PathBuf>,
 lib.rs: struct HostConfig > pub project_quota_ids: Option<(u32, u32)>,
@@ -442,6 +444,11 @@ lib.rs: struct HostConfig > pub writable_roots: Vec<DeclaredWritableRoot>,
 lib.rs: struct HostConfig > pub tmp_bytes: Option<u64>,
 lib.rs: struct HostConfig > pub exec_gate: Option<PathBuf>,
 lib.rs: impl HostConfig > pub fn minimum(workspace_root: impl Into<PathBuf>) -> Self
+local_endpoint.rs: #[derive(Debug, Clone)] pub struct LocalEndpoint
+local_endpoint.rs: struct LocalEndpoint > pub name: String,
+local_endpoint.rs: struct LocalEndpoint > pub port: u16,
+local_endpoint.rs: struct LocalEndpoint > (private fields)
+local_endpoint.rs: impl LocalEndpoint > pub fn open(name: &str, port: u16, directory: &Path) -> Result<Self, DriverError>
 observation.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum PipeStream
 observation.rs: enum PipeStream > Stdout,
 observation.rs: enum PipeStream > Stderr,

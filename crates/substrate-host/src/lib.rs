@@ -33,6 +33,9 @@ mod git;
 #[cfg(target_os = "linux")]
 mod git_baselines;
 pub mod host_process;
+// The operator's local endpoint declaration (ADR 0054), which configuration names on every
+// platform.
+pub mod local_endpoint;
 mod observation;
 // Which bytes of a bounded output stream a run keeps (design 29). Published through `confinement`,
 // which re-exports its public types.
@@ -101,6 +104,7 @@ pub use aperture::EgressAperture;
 pub use backend::{
     BackendKind, BackendLedger, BackendName, BackendRecord, BackendRole, UidBinding,
 };
+pub use local_endpoint::LocalEndpoint;
 pub use observation::{EndOfRun, ExecObservation, PipeFrame, PipeStream};
 use output_retention::OutputRetention;
 // The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
@@ -345,6 +349,10 @@ pub struct HostConfig {
     /// Every egress aperture this operator declared, each already resolved to a pinned address
     /// (ADR 0013). Empty means the capability is absent and the sandbox keeps `--unshare-net`.
     pub egress_apertures: Vec<EgressAperture>,
+    /// Every local endpoint this operator declared (ADR 0054), each with its directory already
+    /// opened and held by descriptor. They share the aperture names, the run bound and the
+    /// deployment bound with `egress_apertures`. Empty means no `local:` entry is published.
+    pub local_endpoints: Vec<LocalEndpoint>,
     /// The owner-private directory each aperture run's generated resolution is written beneath.
     ///
     /// `HostDriver::open` creates it only when `egress_apertures` is non-empty, so a host with no
@@ -604,6 +612,7 @@ impl HostConfig {
             snapshot_provenance_events: substrate_wire::MAX_SNAPSHOT_PROVENANCE_EVENTS,
             secret_slots: Vec::new(),
             egress_apertures: Vec::new(),
+            local_endpoints: Vec::new(),
             ca_bundle: None,
             project_quota_ids: None,
             git_sources: Vec::new(),
@@ -1204,7 +1213,7 @@ impl HostDriver {
             })?;
         // A host without an egress aperture writes no aperture state anywhere. Stale entries
         // under an existing root are still reconciled by the process runtime either way.
-        if !config.egress_apertures.is_empty() {
+        if !config.egress_apertures.is_empty() || !config.local_endpoints.is_empty() {
             std::fs::create_dir_all(&config.aperture_root).map_err(|error| {
                 DriverError::failed("aperture.root-failed", format!("aperture root: {error}"))
             })?;

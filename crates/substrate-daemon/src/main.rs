@@ -8,8 +8,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use clap::Parser;
 use substrate_daemon::{
     DaemonConfig, DelegatedContextKey, DriverSelection, EgressAperture, GitSourceConfig,
-    HostedIdentityConfig, OpsListenerConfig, SecretSlot, TcpDaemonConfig, TlsDaemonConfig,
-    WritableRootConfig, serve,
+    HostedIdentityConfig, LocalEndpointConfig, OpsListenerConfig, SecretSlot, TcpDaemonConfig,
+    TlsDaemonConfig, WritableRootConfig, serve,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -184,6 +184,40 @@ fn parse_egress_aperture(value: &str) -> Result<EgressAperture, String> {
     })
 }
 
+/// Parses one `--local-endpoint name=port:directory` (ADR 0054 decision 1).
+///
+/// The name is an aperture name and shares their name space; the port is the one its listener
+/// takes inside a run; the directory is the host directory of Unix sockets, absolute. Whether the
+/// directory may be used is decided where it is opened, at startup.
+fn parse_local_endpoint(value: &str) -> Result<LocalEndpointConfig, String> {
+    let (name, declaration) = value
+        .split_once('=')
+        .ok_or_else(|| "a local endpoint is declared as name=port:directory".to_owned())?;
+    if !substrate_wire::valid_aperture_name(name) {
+        return Err("a local endpoint name must match [a-z][a-z0-9_]{0,63}".to_owned());
+    }
+    let (port, directory) = declaration
+        .split_once(':')
+        .ok_or_else(|| format!("local endpoint {name} must declare port:directory"))?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| format!("local endpoint {name} declares no usable port"))?;
+    if port == 0 {
+        return Err(format!("local endpoint {name} declares no usable port"));
+    }
+    let directory = PathBuf::from(directory);
+    if !directory.is_absolute() {
+        return Err(format!(
+            "local endpoint {name} must name an absolute directory"
+        ));
+    }
+    Ok(LocalEndpointConfig {
+        name: name.to_owned(),
+        port,
+        directory,
+    })
+}
+
 /// Parses one `--delegated-context-key kid=issuer=base64url-ed25519-public-key`.
 ///
 /// Public material only. Substrate mints no delegated context, so there is no shape of this flag
@@ -260,6 +294,7 @@ struct Arguments {
             "git_sources",
             "secret_slots",
             "egress_apertures",
+            "local_endpoints",
             "writable_roots",
             "ca_bundle",
             "exec_gate",
@@ -364,6 +399,21 @@ struct Arguments {
         value_parser = parse_egress_aperture
     )]
     egress_apertures: Vec<EgressAperture>,
+
+    /// Declare a local endpoint as `name=port:directory` (repeatable). ADR 0054.
+    ///
+    /// An aperture whose connections are relayed to a Unix socket in `directory`: the start's
+    /// `sandbox.local_endpoint_key`, else the run id. It shares the egress apertures' names and
+    /// their deployment bound. Startup refuses a directory that is not owned by this daemon's user
+    /// or is writable by its group or by others; it is opened once and held.
+    #[arg(
+        long = "local-endpoint",
+        env = "SUBSTRATE_LOCAL_ENDPOINT",
+        value_name = "NAME=PORT:DIRECTORY",
+        value_delimiter = ',',
+        value_parser = parse_local_endpoint
+    )]
+    local_endpoints: Vec<LocalEndpointConfig>,
 
     /// Declare a writable host root as `name=path` (repeatable). ADR 0038 kind 1.
     ///
@@ -592,6 +642,7 @@ impl From<Arguments> for DaemonConfig {
             event_retention: arguments.event_retention,
             secret_slots: arguments.secret_slots,
             egress_apertures: arguments.egress_apertures,
+            local_endpoints: arguments.local_endpoints,
             writable_roots: arguments.writable_roots,
             ca_bundle: arguments.ca_bundle,
             exec_gate: arguments.exec_gate,
@@ -645,7 +696,10 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use clap::Parser as _;
 
-    use super::{Arguments, parse_egress_aperture, parse_project_quota_ids, parse_writable_root};
+    use super::{
+        Arguments, parse_egress_aperture, parse_local_endpoint, parse_project_quota_ids,
+        parse_writable_root,
+    };
 
     const REQUIRED: [&str; 9] = [
         "substrate-daemon",
@@ -843,6 +897,7 @@ mod tests {
             ["--git-source", "origin=https://git.invalid/"],
             ["--secret-slot", "token=/run/token"],
             ["--egress-aperture", "model=127.0.0.1:443/tcp"],
+            ["--local-endpoint", "agent=7000:/run/agent"],
             ["--writable-root", "cache=/srv/cache"],
             ["--ca-bundle", "/etc/ca.pem"],
             ["--exec-gate", "/usr/libexec/substrate-exec-gate"],
@@ -851,6 +906,46 @@ mod tests {
                 .and_then(Arguments::validated);
             assert!(refused.is_err(), "{host_only:?} beside --driver kubernetes");
         }
+    }
+
+    /// ADR 0054 decision 1: `name=port:directory`, an aperture name, a port other than zero and
+    /// an absolute directory; anything else is refused before startup opens a directory.
+    #[test]
+    fn a_local_endpoint_is_declared_as_name_port_directory() {
+        assert_eq!(
+            parse_local_endpoint("agent=7000:/run/agent"),
+            Ok(super::LocalEndpointConfig {
+                name: "agent".to_owned(),
+                port: 7000,
+                directory: std::path::PathBuf::from("/run/agent"),
+            })
+        );
+        for invalid in [
+            "agent",
+            "Agent=7000:/run/agent",
+            "agent=0:/run/agent",
+            "agent=70000:/run/agent",
+            "agent=x:/run/agent",
+            "agent=7000",
+            "agent=7000:run/agent",
+            "agent=7000:",
+        ] {
+            assert!(parse_local_endpoint(invalid).is_err(), "{invalid:?}");
+        }
+        let parsed = Arguments::try_parse_from(REQUIRED.into_iter().chain([
+            "--local-endpoint",
+            "agent=7000:/run/agent,audit=7001:/run/audit",
+        ]))
+        .expect("parsed");
+        let config = super::DaemonConfig::from(parsed);
+        assert_eq!(
+            config
+                .local_endpoints
+                .iter()
+                .map(|endpoint| endpoint.name.as_str())
+                .collect::<Vec<_>>(),
+            ["agent", "audit"]
+        );
     }
 
     #[test]

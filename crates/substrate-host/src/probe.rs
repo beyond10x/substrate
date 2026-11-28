@@ -141,10 +141,15 @@ pub(crate) fn probe_host(
     // readiness check that dialled somebody else's endpoint would make this daemon's readiness
     // their uptime (`docs/design/10-destination-bound-egress.md` § 9 decision 6). Nothing is probed
     // at all when no aperture is declared, so a daemon that wants none pays nothing.
-    let egress_apertures = crate::egress::egress_apertures_fact(
+    // A local endpoint is listed beside them only after its own mechanism ran the same way, to a
+    // socket in a private directory through that directory's descriptor (ADR 0054 decision 7).
+    let egress_apertures = crate::egress::apertures_fact(
         &config.egress_apertures,
         exec && !config.egress_apertures.is_empty()
             && crate::egress::mechanism_is_provable(&config.bubblewrap),
+        &config.local_endpoints,
+        exec && !config.local_endpoints.is_empty()
+            && crate::egress::local_mechanism_is_provable(&config.bubblewrap),
     );
     // The whole mechanism in a throwaway sandbox, and never an optimistic constant: a pair
     // allocated, made controlling *inside* the sandbox after bubblewrap's `setsid`, and a size

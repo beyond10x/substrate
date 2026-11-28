@@ -19,6 +19,6 @@ pub use delegation::{ContextRefusal, DelegatedContextPolicy, TrustedKey, Verifie
 pub use hosted::HostedIdentityConfig;
 pub use runtime::{
     DaemonConfig, DelegatedContextKey, DriverSelection, EgressAperture, GitSourceConfig,
-    OpsListenerConfig, SecretSlot, TcpDaemonConfig, WritableRootConfig, serve,
+    LocalEndpointConfig, OpsListenerConfig, SecretSlot, TcpDaemonConfig, WritableRootConfig, serve,
 };
 pub use tls::TlsDaemonConfig;

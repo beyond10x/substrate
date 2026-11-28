@@ -2176,7 +2176,7 @@ pub enum ApertureMode {
     Aperture,
 }
 
-/// How the aperture was installed. One value today, and named rather than assumed: a client that
+/// How the aperture was installed, named rather than assumed: a client that
 /// reads this is reading an observation, not selecting an implementation (invariant 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApertureMechanism {
