@@ -542,6 +542,7 @@ mod imp {
                     required: true,
                     exec_subpaths: None,
                     exec_denied_paths: Vec::new(),
+                    local_endpoint_key: None,
                 },
                 limits: ExecLimits {
                     timeout_ms: bounds.timeout_ms,
@@ -1500,6 +1501,7 @@ mod imp {
                         required: true,
                         exec_subpaths: None,
                         exec_denied_paths: Vec::new(),
+                        local_endpoint_key: None,
                     },
                     applied: None,
                     exit: (state != ExecState::Running).then_some(substrate_wire::ExecExit {

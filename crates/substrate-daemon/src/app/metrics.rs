@@ -765,6 +765,7 @@ mod tests {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             applied: None,
             exit: Some(ExecExit {

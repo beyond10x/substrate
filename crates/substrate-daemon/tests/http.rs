@@ -243,6 +243,7 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
             required: true,
             exec_subpaths: None,
             exec_denied_paths: Vec::new(),
+            local_endpoint_key: None,
         },
         applied: None,
         exit: Some(ExecExit {

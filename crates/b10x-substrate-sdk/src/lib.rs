@@ -1611,6 +1611,7 @@ impl PipeSessionBuilder {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: policy
                 .wire()
@@ -2106,6 +2107,7 @@ impl CommandBuilder {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: policy
                 .wire()
@@ -2808,6 +2810,7 @@ mod tests {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: substrate_wire::ExecLimits {
                 timeout_ms: 1_000,

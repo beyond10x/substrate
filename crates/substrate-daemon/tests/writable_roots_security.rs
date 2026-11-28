@@ -822,6 +822,7 @@ async fn a_git_root_of_an_exec_accepted_before_dispatch_is_not_destroyed() {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             applied: None,
             exit: None,

@@ -50,6 +50,7 @@ fn start(snapshot: &str) -> ExecStartInput {
             required: true,
             exec_subpaths: None,
             exec_denied_paths: Vec::new(),
+            local_endpoint_key: None,
         },
         limits: ExecLimits {
             timeout_ms: 30_000,

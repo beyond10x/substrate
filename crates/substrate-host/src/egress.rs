@@ -429,6 +429,7 @@ impl InstalledAperture {
             bytes: self.counters.read(),
             max_bytes: self.max_bytes,
             listen: Some(self.listen().to_string()),
+            key: None,
         }
     }
 
@@ -2337,6 +2338,7 @@ mod tests {
             required: true,
             exec_subpaths: None,
             exec_denied_paths: Vec::new(),
+            local_endpoint_key: None,
         }
     }
 

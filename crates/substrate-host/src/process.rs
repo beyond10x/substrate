@@ -5665,6 +5665,7 @@ mod tests {
                     required: true,
                     exec_subpaths: None,
                     exec_denied_paths: Vec::new(),
+                    local_endpoint_key: None,
                 },
                 applied: None,
                 exit: None,
@@ -5795,6 +5796,7 @@ mod tests {
             required: true,
             exec_subpaths: None,
             exec_denied_paths: Vec::new(),
+            local_endpoint_key: None,
         }
     }
 
@@ -5934,6 +5936,7 @@ mod tests {
             required: true,
             exec_subpaths: None,
             exec_denied_paths: Vec::new(),
+            local_endpoint_key: None,
         };
         let error =
             ProcessRuntime::select_apertures(&config, Some(&published), &sandbox, Some(&[]))
@@ -6218,6 +6221,7 @@ mod tests {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -6537,6 +6541,7 @@ mod tests {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -6823,6 +6828,7 @@ mod tests {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -8419,6 +8425,7 @@ mod tests {
             bytes: substrate_wire::ApertureBytes::default(),
             max_bytes: None,
             listen: Some(listen.to_owned()),
+            key: None,
         };
         assert_eq!(applied_network_of(Vec::new()), AppliedNetwork::None);
         assert_eq!(
@@ -10848,6 +10855,7 @@ mod adversary_unknown_exec_retry {
                 required: true,
                 exec_subpaths: None,
                 exec_denied_paths: Vec::new(),
+                local_endpoint_key: None,
             },
             limits: ExecLimits {
                 timeout_ms: 5_000,
@@ -11007,6 +11015,7 @@ mod limit_tests {
                     required: true,
                     exec_subpaths: None,
                     exec_denied_paths: Vec::new(),
+                    local_endpoint_key: None,
                 },
                 applied: None,
                 exit: None,
