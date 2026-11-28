@@ -58,3 +58,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0050](0050-the-floor-refuses-the-ioctl-requests-that-exchange-file-blocks.md) | The floor refuses the `ioctl` requests that exchange file blocks | accepted |
 | [0052](0052-the-workspace-root-is-the-directory-dot-on-the-v1-directory-page.md) | The workspace root is the directory `.` on the v1 directory page | accepted |
 | [0053](0053-a-mutation-is-refused-before-dispatch-when-its-success-result-cannot-be-recorded.md) | A mutation is refused before dispatch when its success result cannot be recorded | accepted |
+| [0054](0054-a-local-endpoint-is-an-aperture-relayed-to-a-per-run-socket.md) | A local endpoint is an aperture relayed to a per-run socket | accepted |
