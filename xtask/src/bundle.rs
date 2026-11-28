@@ -47,6 +47,7 @@ use crate::report::Report;
 mod confinement_facts;
 mod exec_lists;
 mod host_process;
+mod local_endpoints;
 mod namespace_driver;
 mod omitted_entries;
 mod process_events;
@@ -903,8 +904,11 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     check_standing_additions(version, released, failures);
+    if local_endpoints::binds(version) {
+        local_endpoints::check_introduction(released, failures);
+        return;
+    }
     if exec_lists::binds(version) {
-        exec_lists::check(released, failures);
         exec_lists::check_introduction(released, failures);
         return;
     }
@@ -960,8 +964,8 @@ fn check_standing_additions(version: &str, released: &Tree, failures: &mut Vec<S
     if confinement_facts::applies_to(version) {
         // Design 37 § 6 answers `confinement.fact-unserved` at the two list addresses too. Where
         // `exec_lists` holds those vectors to their row, design 30's check counts the one at
-        // `sandbox.requires.facts` it published; in a later bundle it counts every one.
-        if exec_lists::binds(version) {
+        // `sandbox.requires.facts` it published, in that bundle and in every later one.
+        if exec_lists::applies_to(version) {
             let held = exec_lists::without_list_fact_vectors(released);
             confinement_facts::check(version, &held, failures);
         } else {
@@ -976,6 +980,14 @@ fn check_standing_additions(version: &str, released: &Tree, failures: &mut Vec<S
     // The result bound of ADR 0053 binds every bundle from `0.28.0` on.
     if result_bound::applies_to(version) {
         result_bound::check(version, released, failures);
+    }
+    // Design 37 binds every bundle from `0.29.0` on.
+    if exec_lists::applies_to(version) {
+        exec_lists::check(version, released, failures);
+    }
+    // ADR 0054 binds every bundle from `0.30.0` on.
+    if local_endpoints::applies_to(version) {
+        local_endpoints::check(version, released, failures);
     }
 }
 
@@ -5972,7 +5984,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 29, "every released bundle must be checked");
+        assert_eq!(checked, 30, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

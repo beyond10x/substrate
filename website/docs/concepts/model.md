@@ -8,7 +8,7 @@ description: The implemented subsystems, resource and event coverage, and the bo
 Substrate has an explicit wire contract and implemented resource lifecycles. An initial ESS specification now describes the accepted-operation ledger lifecycle; it does not generate the entire service or replace the wire contract. Its definitions live in Rust types, versioned contract sources, route handlers and durable
 store transitions. Conformance checks connect those definitions; they do not replace them.
 
-This page describes the implementation in release `0.29.0`, which advertises the `substrate-wire/0.29.0` development contract:
+This page describes the implementation in release `0.29.0`, which advertises the `substrate-wire/0.30.0` development contract:
 the Linux host driver and, as a development profile, a Kubernetes namespace driver
 behind the same daemon. See [status](../status.md) for availability and
 [the route reference](../reference/contract.md) for addresses.

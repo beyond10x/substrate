@@ -1,0 +1,23 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "client_visible_changes": [
+    "0.30.0 adds no route and preserves the 45 routes of 0.29.0 (ADR 0054). It publishes the local endpoint: an operator-declared aperture whose destination is a directory of Unix sockets, selected by name through sandbox.aperture or sandbox.apertures like every aperture. It adds one optional member to the sandbox of an exec start and of a session start's exec, the same member on the exec record's requested sandbox, a second value of an applied aperture's mechanism with two members it states, and a published refusal with a vector for each of three codes.",
+    "A local endpoint is listed in the exec.egress-apertures fact with destination local:<port>, and only after its mechanism was proved in a throwaway sandbox at startup; it shares the aperture names, the run bound of 8, the deployment bound of 12 and the listen addresses: the n-th selected aperture listens on 127.0.0.n:<port>. Its applied aperture has mechanism local-endpoint-forwarder, destination local:<port>, listen also on the single form, and key, the name of the socket its connections were relayed to. No host path is published.",
+    "sandbox.local_endpoint_key (common.json local-endpoint-key) names that socket: 1 to 64 bytes matching ^[a-z0-9][a-z0-9-]*$ (MAX_LOCAL_ENDPOINT_KEY_BYTES); anything else is request.schema-invalid (422). Absent, the socket is named by the run's id. A start without the member serializes and hashes as on 0.29.0. A connection whose socket is absent is closed, and no other socket is tried.",
+    "A start can earn exec.local-endpoints-unserved (501) at the name's address for a declared local endpoint whose mechanism is not proved, and exec.local-endpoint-key-without-endpoint (422) at sandbox.local_endpoint_key for a key beside no selected local endpoint; both are answered before the operation is accepted, which is recorded as refused. exec.local-endpoint-key-in-use (409, class conflict) at sandbox.local_endpoint_key is answered by the host driver for a key another live run holds on the same local endpoint, before anything is spawned; the accepted operation's recorded state is terminal with the refusal as its error. The key is free again when that run ends."
+  ],
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.30.0"
+}

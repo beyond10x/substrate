@@ -19,7 +19,7 @@ Release `0.25.0` is at commit `ca9cdc4`, tag-push release run
 [`45116015427`](https://github.com/beyond10x/substrate/actions/runs/45116015427), and release
 `0.24.0` at commit `85da2e2`, tag-push release run
 [`45025006989`](https://github.com/beyond10x/substrate/actions/runs/45025006989).
-Release `0.29.0` advertises `substrate-wire/0.29.0` (`ADVERTISED_CONTRACT_BUNDLE` in
+Release `0.29.0` advertises `substrate-wire/0.30.0` (`ADVERTISED_CONTRACT_BUNDLE` in
 `crates/substrate-wire/src/lib.rs`). The release before it, `0.28.0`, advertised the same
 bundle at its tag; `0.27.0` advertised `substrate-wire/0.28.0`. `cargo xtask check-docs` holds these lines, and
 the two below that name the latest tag and release, to the workspace version. The rows below were
