@@ -1898,6 +1898,20 @@ pub fn pin_workspace_directory_beneath(
     )
 }
 
+/// `openat2` of `path` beneath `directory` with the guarded resolve flags: beneath the
+/// descriptor, no symbolic link and no magic link followed in any component, no mount crossed.
+/// It answers the kernel's own error, so a caller tells `ELOOP` (a link on the way), `ENOENT`
+/// and `EEXIST` apart. This is the layer the image unpacker of the host driver creates and opens
+/// every entry through (design 38 § 3.3).
+pub fn openat2_beneath(
+    directory: std::os::fd::BorrowedFd<'_>,
+    path: &CStr,
+    flags: i32,
+    mode: libc::mode_t,
+) -> std::io::Result<OwnedFd> {
+    openat2_resolved(directory.as_raw_fd(), path, flags, mode, GUARDED_RESOLVE)
+}
+
 /// Opens one component of a writable subtree beneath the pinned directory `directory`, without
 /// following a link, and reports what it is.
 pub fn open_component_beneath(
@@ -2200,6 +2214,31 @@ mod tests {
             }
         }
         all
+    }
+
+    #[test]
+    fn openat2_beneath_answers_the_kernels_error_for_a_link_an_escape_and_an_absent_name() {
+        use std::os::fd::AsFd as _;
+        let root = tempdir().expect("root");
+        std::fs::create_dir(root.path().join("dir")).expect("dir");
+        std::fs::write(root.path().join("dir/file"), "bytes").expect("file");
+        symlink("dir", root.path().join("link")).expect("link");
+        let directory = std::fs::File::open(root.path()).expect("open root");
+        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        let open = |path: &str| {
+            super::openat2_beneath(
+                directory.as_fd(),
+                &CString::new(path).expect("path"),
+                flags,
+                0,
+            )
+            .map(drop)
+            .map_err(|error| error.raw_os_error())
+        };
+        assert_eq!(open("dir/file"), Ok(()));
+        assert_eq!(open("link/file"), Err(Some(libc::ELOOP)));
+        assert_eq!(open("../outside"), Err(Some(libc::EXDEV)));
+        assert_eq!(open("dir/absent"), Err(Some(libc::ENOENT)));
     }
 
     #[test]
