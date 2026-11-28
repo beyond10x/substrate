@@ -23,6 +23,8 @@ mod unpack;
 #[cfg(test)]
 mod test_archive;
 #[cfg(test)]
+mod security_tests;
+#[cfg(test)]
 mod tests;
 
 use std::fmt;
