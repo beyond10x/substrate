@@ -9,7 +9,9 @@ owner: substrate
 tags:
 - glovebox
 - network
-revision: 1
+relations:
+- decomposes: epic:long-lived-service-on-the-host-driver
+revision: 3
 ---
 # Story: one declared inbound port is served from a confined exec
 
@@ -73,3 +75,26 @@ Part of Glovebox (atlas `initiative:glovebox`, `docs/design/glovebox.md`), wave 
 - Blocked on the ADR above (invariant 8). No code before it is accepted.
 - Depends on nothing outside Substrate. Mantle's `story:manifest-declares-the-box` consumes it and
   refuses the inbound-port field until a Substrate release serves it.
+
+## Consumer requirement of 2026-11-28
+
+Second requirement, 2026-11-28: consumer gap 2 of the `weft` repository (`cloudspec`
+`docs/platform-ports.md` § 10, commit `2ed72c2`): "An inbound endpoint into a confined exec or
+workload (N4): the edge's backends, HTTP and TCP checks, links." Its shape:
+`expose(key, port, exposure loopback|node) -> observed address; a TCP connection to it reaches
+the confined process`. The stakeholder of that requirement is the session that maintains `weft`.
+
+The mechanism is put to the operator as decision D3 of
+`epic:long-lived-service-on-the-host-driver` (default: a relay that mirrors the egress aperture,
+daemon accepts on the host and hands each connection into the run's namespace, so
+`exec.no-egress` stays true). `docs/design/01-contract.md` § 3.5 already states that `node`/LAN
+exposure is refused unless daemon configuration allows it, and that the answer carries the observed
+address.
+
+Additional acceptance a weft test (`weft` story `ports-node-endpoints-local`) can check:
+
+- Expose port 8080 of a confined exec (and, once `story:host-driver-supervised-workload` lands, of
+  a workload) with `exposure: loopback`: the answer carries an observed `127.0.0.1:<port>`; an
+  HTTP GET to it returns the child's response.
+- `exposure: node` on a daemon whose configuration does not allow it is refused by name.
+- After the exec ends (or the workload stops) a connection to the observed address is refused.
