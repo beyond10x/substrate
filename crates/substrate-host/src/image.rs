@@ -21,9 +21,9 @@ mod tar;
 mod unpack;
 
 #[cfg(test)]
-mod test_archive;
-#[cfg(test)]
 mod security_tests;
+#[cfg(test)]
+mod test_archive;
 #[cfg(test)]
 mod tests;
 
@@ -44,6 +44,10 @@ pub const MAX_IMAGE_PATH_BYTES: usize = 4_095;
 pub const MAX_IMAGE_PATH_COMPONENT_BYTES: usize = 255;
 /// The longest target text of a symbolic link, in bytes (design 38 § 3.3).
 pub const MAX_IMAGE_LINK_TARGET_BYTES: usize = 4_095;
+/// The most bytes of paths an unpack keeps for the directories it made, whose modes it sets
+/// once every entry is in. It bounds the memory one unpack holds (design 38 § 3.3 names no
+/// such bound; the three it names allow about 268 MB of such paths).
+pub const MAX_IMAGE_DIRECTORY_PATH_BYTES: u64 = 16_777_216;
 /// The longest pax extended header the reader takes, in bytes. It holds `path`, `linkpath` and
 /// `size` records, each bounded above, and the records the unpack ignores.
 pub const MAX_IMAGE_PAX_HEADER_BYTES: u64 = 65_536;
@@ -85,6 +89,7 @@ pub enum ImageBound {
     ArchiveBytes,
     UnpackedBytes,
     Entries,
+    DirectoryPathBytes,
 }
 
 impl fmt::Display for ImageBound {
@@ -93,6 +98,7 @@ impl fmt::Display for ImageBound {
             Self::ArchiveBytes => "max_archive_bytes",
             Self::UnpackedBytes => "max_unpacked_bytes",
             Self::Entries => "max_entries",
+            Self::DirectoryPathBytes => "MAX_IMAGE_DIRECTORY_PATH_BYTES",
         })
     }
 }

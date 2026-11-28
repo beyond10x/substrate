@@ -297,9 +297,9 @@ fn a_symbolic_link_chain_is_never_followed_by_a_later_entry() {
 
 #[test]
 fn an_entry_over_an_earlier_one_is_a_path_named_twice_whatever_the_two_kinds() {
+    type Build = fn(&mut Tar, &str);
     let fixture = Fixture::new();
     let beside = outer_text(&fixture, "beside");
-    type Build = fn(&mut Tar, &str);
     let kinds: [(&str, Build); 4] = [
         ("file", |tar, name| {
             tar.file(name, 0o644, b"x");
@@ -554,13 +554,12 @@ fn walk(root: &Path) -> Vec<(PathBuf, std::fs::Metadata)> {
 // Invariant 3: every bound holds against a hostile archive.
 
 #[test]
-#[ignore = "finding 1: a header whose size runs past the stream is accepted when the size is within 511 of u64::MAX"]
 fn a_size_field_near_the_top_of_its_range_cannot_hide_a_header_in_an_entrys_data() {
     // A directory entry states 2^64 - 1 bytes of data. Whatever follows is that entry's data,
     // and the stream ends inside it, so the archive is refused and the header after it is
     // never read as an entry.
     let fixture = Fixture::new();
-    for flag in [b'5', b'2'] {
+    for &flag in b"52" {
         let mut bytes = Vec::new();
         let mut header = raw_header(b"carrier", flag, 0o755, base256_size(u64::MAX), 0);
         if flag == b'2' {
@@ -918,7 +917,6 @@ fn open_follows_no_link_in_place_of_an_area_or_a_tree() {
 }
 
 #[test]
-#[ignore = "finding 2: open accepts a directory holding entries it did not make and removes trash/ and staging/ content there"]
 fn open_refuses_a_store_root_that_holds_an_entry_it_did_not_make() {
     let outer = tempfile::tempdir().expect("temporary directory");
     let root = outer.path().join("not-a-store");

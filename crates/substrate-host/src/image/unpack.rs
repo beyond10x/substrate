@@ -6,6 +6,13 @@
 //! created `O_CREAT | O_EXCL | O_NOFOLLOW`; a symbolic link is `symlinkat` and is never
 //! followed; a hard link is `linkat` without `AT_SYMLINK_FOLLOW`, to a regular file the archive
 //! already unpacked. A name that exists already is a path named twice.
+//!
+//! **Memory.** Beside one 64 KiB copy buffer, one pax header of at most
+//! [`MAX_IMAGE_PAX_HEADER_BYTES`](super::MAX_IMAGE_PAX_HEADER_BYTES) and the paths of the entry being
+//! read, an unpack holds the map of the directories it made, whose modes it sets once every entry
+//! is in: at most [`MAX_IMAGE_DIRECTORY_PATH_BYTES`] bytes of paths, 16 MiB, and a fixed overhead
+//! for each of at most [`MAX_IMAGE_ENTRIES`](super::MAX_IMAGE_ENTRIES) directories, a few MiB more.
+//! An archive whose directories need more paths is `image.archive-limit` naming the bound.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, OsStr};
@@ -21,8 +28,8 @@ use substrate_guarded::fs::openat2_beneath;
 
 use super::tar::{Entry, Kind, TarReader};
 use super::{
-    EntryRefusal, ImageBound, ImageError, ImageLimits, MAX_IMAGE_LINK_TARGET_BYTES,
-    MAX_IMAGE_PATH_BYTES, MAX_IMAGE_PATH_COMPONENT_BYTES,
+    EntryRefusal, ImageBound, ImageError, ImageLimits, MAX_IMAGE_DIRECTORY_PATH_BYTES,
+    MAX_IMAGE_LINK_TARGET_BYTES, MAX_IMAGE_PATH_BYTES, MAX_IMAGE_PATH_COMPONENT_BYTES,
 };
 
 const DIRECTORY_FLAGS: i32 =
@@ -78,6 +85,8 @@ struct Unpacker<'a> {
     entries: u64,
     content_bytes: u64,
     directories: HashMap<Vec<u8>, Directory>,
+    /// The bytes of every key of `directories`.
+    directory_path_bytes: u64,
     root_mode: Option<u32>,
     root_named: bool,
 }
@@ -95,6 +104,7 @@ pub(super) fn unpack<R: Read>(
         entries: 0,
         content_bytes: 0,
         directories: HashMap::new(),
+        directory_path_bytes: 0,
         root_mode: None,
         root_named: false,
     };
@@ -151,6 +161,19 @@ impl Unpacker<'_> {
         }
     }
 
+    /// Records a directory the unpack made, within [`MAX_IMAGE_DIRECTORY_PATH_BYTES`] of paths.
+    fn remember(&mut self, path: Vec<u8>, directory: Directory) -> Result<(), ImageError> {
+        self.directory_path_bytes = self.directory_path_bytes.saturating_add(path.len() as u64);
+        if self.directory_path_bytes > MAX_IMAGE_DIRECTORY_PATH_BYTES {
+            return Err(ImageError::ArchiveLimit {
+                bound: ImageBound::DirectoryPathBytes,
+                limit: MAX_IMAGE_DIRECTORY_PATH_BYTES,
+            });
+        }
+        self.directories.insert(path, directory);
+        Ok(())
+    }
+
     fn count_entry(&mut self) -> Result<(), ImageError> {
         self.entries += 1;
         if self.entries > self.limits.max_entries {
@@ -185,13 +208,13 @@ impl Unpacker<'_> {
                             Mode::from_bits_truncate(WORKING_DIRECTORY_MODE),
                         )
                         .map_err(|errno| ImageError::io("creating a directory", errno.into()))?;
-                        self.directories.insert(
+                        self.remember(
                             parent_path[..end].to_vec(),
                             Directory {
                                 named: false,
                                 mode: IMPLIED_DIRECTORY_MODE,
                             },
-                        );
+                        )?;
                         openat2_beneath(current.as_fd(), &name, DIRECTORY_FLAGS, 0)
                             .map_err(|error| ImageError::io("opening a directory", error))?
                     }
@@ -274,13 +297,13 @@ impl Unpacker<'_> {
             Mode::from_bits_truncate(WORKING_DIRECTORY_MODE),
         )
         .map_err(|errno| exists_or_io(errno, entry, "creating a directory"))?;
-        self.directories.insert(
+        self.remember(
             path.to_vec(),
             Directory {
                 named: true,
                 mode: entry.mode,
             },
-        );
+        )?;
         Ok(())
     }
 

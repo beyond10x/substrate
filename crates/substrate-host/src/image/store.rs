@@ -1,12 +1,20 @@
 //! The owner-private, content-addressed store of unpacked trees (design 38 § 3.4).
 //!
-//! Layout beneath the directory the operator names: `staging/<ulid>/` holds one upload's
-//! `archive` and, once its digest matched, the `tree/` being unpacked; `trees/<sha256 hex>/` is a
-//! published tree; `trash/<ulid>/` is a tree being removed. A tree is published by one
-//! `renameat2` with `RENAME_NOREPLACE`, so a reader sees a whole tree or none, and a second
-//! upload of a digest that is already published drops its own staging. Opening the store removes
-//! every well-formed `staging/` and `trash/` entry an earlier process left, and refuses to open
-//! over anything else.
+//! Layout beneath the directory the operator names: the marker `.substrate-image-store`, written
+//! when the store is first opened on an empty directory; `staging/<ulid>/` holds one upload's
+//! `archive`; `trees/.unpack-<ulid>/` is the tree of that upload being unpacked, once its digest
+//! matched; `trees/<sha256 hex>/` is a published tree; `trash/<ulid>/` is a tree being removed.
+//!
+//! A tree gets every final mode, its root's included, and then is published by one `renameat2`
+//! with `RENAME_NOREPLACE` within `trees/`, so a reader sees a whole, read-only tree or none, and
+//! nothing after the rename can fail. The tree is unpacked in `trees/` and not in `staging/`
+//! because the kernel moves a directory to another parent only when the directory grants its
+//! owner write, which a finished root does not. A second upload of a digest already published
+//! drops its own tree.
+//!
+//! Opening the store refuses a directory that holds anything but the marker and the three areas,
+//! and areas holding anything but these names, before it creates or removes anything; then it
+//! removes every upload, unpack and removal an earlier process left.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -34,7 +42,10 @@ const DIRECTORY_FLAGS: i32 =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 const PATH_FLAGS: i32 = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 const ARCHIVE: &CStr = c"archive";
-const TREE: &CStr = c"tree";
+/// The file the store writes into the empty directory it is first opened on.
+const MARKER: &CStr = c".substrate-image-store";
+/// The prefix of a tree being unpacked in `trees/`, before the ULID of its upload.
+const UNPACK_PREFIX: &str = ".unpack-";
 /// The mode of a published tree's root when the archive names no root entry.
 const ROOT_MODE: u32 = 0o555;
 /// The most entries one listing of `staging/`, `trash/` or `trees/` takes when the store opens.
@@ -88,6 +99,8 @@ pub struct ImageTree {
 pub struct ImageUpload {
     store: ImageStore,
     name: CString,
+    /// `.unpack-<ulid>`, the name of the tree being unpacked in `trees/`.
+    unpack_name: CString,
     archive: File,
     hasher: Sha256,
     received: u64,
@@ -145,10 +158,32 @@ impl ImageStore {
             .map_err(|error| ImageError::io("opening the image store", error))?
             .into();
         check_private(root.as_fd(), "the image store")?;
+        claim_root(root.as_fd())?;
         let staging = open_area(root.as_fd(), c"staging")?;
         let trees = open_area(root.as_fd(), c"trees")?;
         let trash = open_area(root.as_fd(), c"trash")?;
-        let store = Self {
+        // Every entry of the three areas is judged before any is removed.
+        let staging_left = left_over(staging.as_fd(), "staging", is_ulid)?;
+        let trash_left = left_over(trash.as_fd(), "trash", is_ulid)?;
+        let trees_left = left_over(trees.as_fd(), "trees", |name| {
+            if digest_hex(&format!("sha256:{name}")).is_ok() {
+                Some(false)
+            } else {
+                name.strip_prefix(UNPACK_PREFIX)
+                    .filter(|ulid| is_ulid(ulid) == Some(true))
+                    .map(|_| true)
+            }
+        })?;
+        for (area, names) in [
+            (staging.as_fd(), staging_left),
+            (trash.as_fd(), trash_left),
+            (trees.as_fd(), trees_left),
+        ] {
+            for name in names {
+                remove_entry(area, &name)?;
+            }
+        }
+        Ok(Self {
             inner: Arc::new(Inner {
                 staging,
                 trees,
@@ -156,18 +191,7 @@ impl ImageStore {
                 limits: limits.effective(),
                 holds: Mutex::new(HashMap::new()),
             }),
-        };
-        remove_left_over(store.inner.staging.as_fd(), "staging")?;
-        remove_left_over(store.inner.trash.as_fd(), "trash")?;
-        for (name, kind) in list(store.inner.trees.as_fd(), MAX_STORE_LISTING, "trees")? {
-            let text = name.to_str().unwrap_or_default();
-            if kind != SFlag::S_IFDIR || digest_hex(&format!("sha256:{text}")).is_err() {
-                return Err(ImageError::StoreInvalid {
-                    reason: format!("trees/ holds an entry the store did not make: {name:?}"),
-                });
-            }
-        }
-        Ok(store)
+        })
     }
 
     /// The limits this store applies.
@@ -199,6 +223,7 @@ impl ImageStore {
         match created {
             Ok(archive) => Ok(ImageUpload {
                 store: self.clone(),
+                unpack_name: unpack_name(&name),
                 name,
                 archive,
                 hasher: Sha256::new(),
@@ -329,6 +354,13 @@ impl ImageStore {
     }
 }
 
+/// `.unpack-<ulid>` for the upload `staging/<ulid>`.
+fn unpack_name(upload: &CStr) -> CString {
+    let mut name = UNPACK_PREFIX.as_bytes().to_vec();
+    name.extend_from_slice(upload.to_bytes());
+    CString::new(name).expect("a ULID holds no NUL")
+}
+
 /// A fresh, well-formed name for an entry of `staging/` or `trash/`.
 fn fresh_name() -> CString {
     CString::new(Ulid::generate().to_string()).expect("a ULID holds no NUL")
@@ -339,18 +371,76 @@ fn hex_name(hex: &str) -> CString {
     CString::new(hex).expect("hex holds no NUL")
 }
 
-/// Removes every entry of `staging/` or `trash/`, each a directory with a ULID for its name, and
-/// refuses anything else, leaving it in place.
-fn remove_left_over(area: BorrowedFd<'_>, label: &str) -> Result<(), ImageError> {
+/// `Some(true)` for a ULID in its canonical form, which names an entry of `staging/` or `trash/`
+/// that an earlier process left; `None` for any other name.
+fn is_ulid(name: &str) -> Option<bool> {
+    Ulid::from_string(name)
+        .is_ok_and(|ulid| ulid.to_string() == name)
+        .then_some(true)
+}
+
+/// The entries of an area to remove when the store opens. Every entry must be a directory whose
+/// name `judge` knows: `Some(true)` is left over and removed, `Some(false)` is kept. Anything else
+/// refuses the open before anything is removed.
+fn left_over(
+    area: BorrowedFd<'_>,
+    label: &str,
+    judge: impl Fn(&str) -> Option<bool>,
+) -> Result<Vec<CString>, ImageError> {
+    let mut remove = Vec::new();
     for (name, kind) in list(area, MAX_STORE_LISTING, label)? {
-        let text = name.to_str().unwrap_or_default();
-        let well_formed = Ulid::from_string(text).is_ok_and(|ulid| ulid.to_string() == text);
-        if kind != SFlag::S_IFDIR || !well_formed {
+        let verdict = name.to_str().ok().and_then(&judge);
+        match verdict {
+            Some(true) if kind == SFlag::S_IFDIR => remove.push(name),
+            Some(false) if kind == SFlag::S_IFDIR => {}
+            _ => {
+                return Err(ImageError::StoreInvalid {
+                    reason: format!("{label}/ holds an entry the store did not make: {name:?}"),
+                });
+            }
+        }
+    }
+    Ok(remove)
+}
+
+/// Claims the store's root before anything is created or removed in it. An empty directory gets
+/// the marker [`MARKER`]; otherwise the root must hold the marker as a regular file and nothing
+/// but it and the directories `staging/`, `trees/` and `trash/`. So the store never creates its
+/// areas in, nor removes anything from, a directory it did not make.
+fn claim_root(root: BorrowedFd<'_>) -> Result<(), ImageError> {
+    let entries = list(root, MAX_STORE_LISTING, "the image store")?;
+    if entries.is_empty() {
+        let marker = openat2_beneath(
+            root,
+            MARKER,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+        .map_err(|error| ImageError::io("marking the image store", error))?;
+        nix::unistd::fsync(&marker)
+            .map_err(|errno| ImageError::io("marking the image store", errno.into()))?;
+        return sync(root);
+    }
+    let mut marked = false;
+    for (name, kind) in &entries {
+        let known = match name.as_bytes() {
+            b"staging" | b"trees" | b"trash" => *kind == SFlag::S_IFDIR,
+            _ if name.as_c_str() == MARKER => {
+                marked = *kind == SFlag::S_IFREG;
+                marked
+            }
+            _ => false,
+        };
+        if !known {
             return Err(ImageError::StoreInvalid {
-                reason: format!("{label}/ holds an entry the store did not make: {name:?}"),
+                reason: format!("the image store holds an entry the store did not make: {name:?}"),
             });
         }
-        remove_entry(area, &name)?;
+    }
+    if !marked {
+        return Err(ImageError::StoreInvalid {
+            reason: "the image store's directory is not empty and holds no store marker".to_owned(),
+        });
     }
     Ok(())
 }
@@ -386,9 +476,10 @@ impl ImageUpload {
     }
 
     /// Compares the size and then the digest of the bytes received, before anything is parsed;
-    /// unpacks the archive into the upload's staging directory; and publishes the tree as
-    /// `trees/<hex>`, read-only. A digest already published is reused and the upload's staging
-    /// dropped. The staging directory is removed on every path.
+    /// unpacks the archive into `trees/.unpack-<ulid>`; gives it its final modes; and publishes it
+    /// as `trees/<hex>`, read-only. A digest already published is reused and the upload's tree
+    /// dropped. The staging directory, and the unpacked tree where it is not published, are
+    /// removed on every path.
     ///
     /// # Errors
     ///
@@ -434,11 +525,17 @@ impl ImageUpload {
                 root,
             });
         }
-        let directory = openat2_beneath(inner.staging.as_fd(), &self.name, DIRECTORY_FLAGS, 0)
-            .map_err(|error| ImageError::io("opening a staging directory", error))?;
-        nix::sys::stat::mkdirat(directory.as_fd(), TREE, Mode::from_bits_truncate(0o700))
-            .map_err(|errno| ImageError::io("creating a staging tree", errno.into()))?;
-        let tree = openat2_beneath(directory.as_fd(), TREE, DIRECTORY_FLAGS, 0)
+        // The tree is unpacked in `trees/` itself: the kernel moves a directory to another
+        // parent only when the directory grants its owner write, and the root of a finished
+        // tree does not.
+        let trees = inner.trees.as_fd();
+        nix::sys::stat::mkdirat(
+            trees,
+            self.unpack_name.as_c_str(),
+            Mode::from_bits_truncate(0o700),
+        )
+        .map_err(|errno| ImageError::io("creating a staging tree", errno.into()))?;
+        let tree = openat2_beneath(trees, &self.unpack_name, DIRECTORY_FLAGS, 0)
             .map_err(|error| ImageError::io("opening a staging tree", error))?;
 
         let mut archive = self
@@ -459,10 +556,17 @@ impl ImageUpload {
             return Err(ImageError::invalid("bytes follow the gzip stream"));
         }
 
+        // Every mode, the root's included, is final before the tree is published, and nothing
+        // after the rename can fail.
+        let root_mode = unpacked.root_mode.map_or(ROOT_MODE, directory_mode);
+        nix::sys::stat::fchmod(&tree, Mode::from_bits_truncate(root_mode))
+            .map_err(|errno| ImageError::io("setting a tree's mode", errno.into()))?;
         nix::unistd::syncfs(&tree)
             .map_err(|errno| ImageError::io("syncing the staging tree", errno.into()))?;
+        let root = openat2_beneath(trees, &self.unpack_name, PATH_FLAGS, 0)
+            .map_err(|error| ImageError::io("opening a staging tree", error))?;
         let published = hex_name(&observed);
-        match rename_noreplace_at(directory.as_fd(), TREE, inner.trees.as_fd(), &published) {
+        match rename_noreplace_at(trees, &self.unpack_name, trees, &published) {
             Ok(()) => {}
             // Another upload of the same bytes published first.
             Err(Errno::EEXIST | Errno::ENOTEMPTY) => {
@@ -479,14 +583,9 @@ impl ImageUpload {
             }
             Err(errno) => return Err(ImageError::io("publishing a tree", errno.into())),
         }
-        let root_mode = unpacked.root_mode.map_or(ROOT_MODE, directory_mode);
-        nix::sys::stat::fchmod(&tree, Mode::from_bits_truncate(root_mode))
-            .map_err(|errno| ImageError::io("setting a tree's mode", errno.into()))?;
-        sync(inner.trees.as_fd())?;
-        let root = self
-            .store
-            .open_tree(&observed)?
-            .ok_or(ImageError::NotFound)?;
+        // Best effort: the tree is whole and final. A rename the disk loses leaves an unpacked
+        // tree under its upload's name, which the next open removes, and nothing published.
+        let _ = nix::unistd::fsync(trees);
         Ok(ImageTree {
             digest,
             archive_bytes: self.received,
@@ -504,6 +603,10 @@ impl Drop for ImageUpload {
     fn drop(&mut self) {
         // Best effort: what is left is removed when the store next opens.
         drop(remove_entry(self.store.inner.staging.as_fd(), &self.name));
+        drop(remove_entry(
+            self.store.inner.trees.as_fd(),
+            &self.unpack_name,
+        ));
     }
 }
 

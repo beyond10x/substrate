@@ -9,8 +9,8 @@ use sha2::Digest as _;
 
 use super::test_archive::{Header, Tar, digest, gzip};
 use super::{
-    EntryRefusal, ImageBound, ImageError, ImageLimits, ImageStore, MAX_IMAGE_LINK_TARGET_BYTES,
-    MAX_IMAGE_PATH_BYTES, RefusedKind,
+    EntryRefusal, ImageBound, ImageError, ImageLimits, ImageStore, MAX_IMAGE_DIRECTORY_PATH_BYTES,
+    MAX_IMAGE_LINK_TARGET_BYTES, MAX_IMAGE_PATH_BYTES, RefusedKind,
 };
 
 /// A directory holding the store and, beside it, files no unpack may touch.
@@ -752,18 +752,24 @@ fn an_interrupted_upload_is_removed_when_the_store_opens_again() {
         .expect("append");
     // A process that ends here runs no destructor.
     std::mem::forget(upload);
-    // And one that ended inside an unpack left a half-written, partly read-only tree.
-    let left = fixture
+    // And one that ended inside an unpack left its archive and a half-written, partly
+    // read-only tree, its root read-only too.
+    let ulid = ulid::Ulid::generate().to_string();
+    let left = fixture.store_path().join("staging").join(&ulid);
+    std::fs::create_dir_all(&left).expect("left upload");
+    std::fs::write(left.join("archive"), "x").expect("left archive");
+    let unpacking = fixture
         .store_path()
-        .join("staging")
-        .join(ulid::Ulid::generate().to_string());
-    std::fs::create_dir_all(left.join("tree/usr/bin")).expect("left tree");
-    std::fs::write(left.join("tree/usr/bin/tool"), "x").expect("left file");
-    std::fs::set_permissions(
-        left.join("tree/usr/bin"),
-        std::fs::Permissions::from_mode(0o555),
-    )
-    .expect("read-only");
+        .join("trees")
+        .join(format!(".unpack-{ulid}"));
+    std::fs::create_dir_all(unpacking.join("usr/bin")).expect("left tree");
+    std::fs::write(unpacking.join("usr/bin/tool"), "x").expect("left file");
+    for (path, mode) in [
+        (unpacking.join("usr/bin"), 0o555),
+        (unpacking.clone(), 0o555),
+    ] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("read-only");
+    }
     let trashed = fixture
         .store_path()
         .join("trash")
@@ -880,4 +886,124 @@ fn delete_follows_no_link_in_the_tree() {
     );
     assert!(fixture.published().is_empty());
     fixture.staging_and_trash_are_empty();
+}
+
+#[test]
+fn the_directories_an_unpack_keeps_are_bounded_by_their_path_bytes() {
+    // Fifteen shared components of 250 bytes, then one of 200 per directory: each directory's
+    // path is 3,965 bytes, so 4,300 of them pass 16 MiB well inside the entry, archive and
+    // inflated bounds.
+    let prefix = vec!["p".repeat(250); 15].join("/");
+    let mut tar = Tar::default();
+    for at in 0..4_300 {
+        let path = format!("{prefix}/{at:0200}");
+        assert_eq!(path.len(), 3_965);
+        tar.pax(&[("path", path.as_bytes())])
+            .directory("short", 0o755);
+    }
+    let fixture = Fixture::new();
+    let error = fixture.refused(&tar.gzip());
+    assert!(
+        matches!(
+            error,
+            ImageError::ArchiveLimit {
+                bound: ImageBound::DirectoryPathBytes,
+                limit: MAX_IMAGE_DIRECTORY_PATH_BYTES,
+            }
+        ),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("MAX_IMAGE_DIRECTORY_PATH_BYTES"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_entry_whose_size_exceeds_the_inflated_bound_is_refused_at_its_header() {
+    let fixture = Fixture::with_limits(ImageLimits {
+        max_unpacked_bytes: 64 * 1024,
+        ..ImageLimits::default()
+    });
+    let mut tar = Tar::default();
+    tar.header(&Header {
+        size: 64 * 1024 + 1,
+        ..Header::new(b"large", b'0')
+    });
+    let error = fixture.refused(&tar.gzip());
+    assert!(
+        matches!(
+            error,
+            ImageError::ArchiveLimit {
+                bound: ImageBound::UnpackedBytes,
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_store_marks_an_empty_directory_and_reopens_only_what_it_marked() {
+    let outer = tempfile::tempdir().expect("temporary directory");
+    let root = outer.path().join("store");
+    std::fs::create_dir(&root).expect("root");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    ImageStore::open(&root, ImageLimits::default()).expect("first open");
+    let mut names: Vec<String> = std::fs::read_dir(&root)
+        .expect("root")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [".substrate-image-store", "staging", "trash", "trees"]
+    );
+    ImageStore::open(&root, ImageLimits::default()).expect("reopen");
+
+    // Without the marker, the three areas alone are not the store's.
+    std::fs::remove_file(root.join(".substrate-image-store")).expect("unmark");
+    let error = ImageStore::open(&root, ImageLimits::default())
+        .err()
+        .expect("refused");
+    assert_eq!(error.code(), "image.store-invalid", "{error}");
+    assert!(!root.join(".substrate-image-store").exists());
+
+    // A marker that is not a regular file is not the marker.
+    std::fs::create_dir(root.join(".substrate-image-store")).expect("directory marker");
+    let error = ImageStore::open(&root, ImageLimits::default())
+        .err()
+        .expect("refused");
+    assert_eq!(error.code(), "image.store-invalid", "{error}");
+}
+
+#[test]
+fn an_unpack_name_the_store_did_not_make_refuses_the_open() {
+    let fixture = Fixture::new();
+    let stray = fixture.store_path().join("trees/.unpack-not-a-ulid");
+    std::fs::create_dir(&stray).expect("stray");
+    let error = ImageStore::open(&fixture.store_path(), ImageLimits::default())
+        .err()
+        .expect("refused");
+    assert_eq!(error.code(), "image.store-invalid", "{error}");
+    assert!(stray.exists(), "a stray entry was removed");
+}
+
+#[test]
+fn a_published_root_is_read_only_and_no_unpack_name_is_left() {
+    let fixture = Fixture::new();
+    let mut tar = Tar::default();
+    tar.directory("./", 0o750).file("file", 0o644, b"x");
+    let tree = fixture.create(&tar.gzip()).expect("created");
+    let mode = std::fs::metadata(fixture.tree(&tree.digest))
+        .expect("root")
+        .mode();
+    assert_eq!(mode & 0o7777, 0o550);
+    assert_eq!(fixture.published(), [tree.digest[7..].to_owned()]);
 }

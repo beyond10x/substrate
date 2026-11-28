@@ -132,6 +132,15 @@ impl<R: Read> TarReader<R> {
                         kind = Kind::Refused(RefusedKind::Sparse);
                     }
                     let size = pax.size.unwrap_or(header.size);
+                    // Data the stream could not hold within the inflated bound is refused
+                    // before a byte of it is read, so no size reaches the arithmetic below
+                    // that it could overflow.
+                    if size > self.max_inflated {
+                        return Err(ImageError::ArchiveLimit {
+                            bound: ImageBound::UnpackedBytes,
+                            limit: self.max_inflated,
+                        });
+                    }
                     self.remaining = size;
                     self.padding = padding(size);
                     return Ok(Some(Entry {
@@ -165,7 +174,10 @@ impl<R: Read> TarReader<R> {
 
     fn skip_data(&mut self) -> Result<(), ImageError> {
         let mut scratch = [0_u8; 4 * BLOCK];
-        let mut left = self.remaining + self.padding;
+        let mut left = self
+            .remaining
+            .checked_add(self.padding)
+            .ok_or_else(|| ImageError::invalid("an entry's size overflows"))?;
         while left > 0 {
             let step = usize::try_from(left)
                 .unwrap_or(usize::MAX)
