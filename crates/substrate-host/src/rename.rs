@@ -46,6 +46,32 @@ pub(crate) fn rename_noreplace(source: &Path, target: &Path) -> Result<(), Errno
     Errno::result(result).map(drop)
 }
 
+/// Renames the entry `source` of the directory `source_directory` to `target` in
+/// `target_directory`, and refuses with `EEXIST` when `target` exists. Both names are single
+/// components of directories the caller holds by descriptor, so no path is resolved.
+pub(crate) fn rename_noreplace_at(
+    source_directory: std::os::fd::BorrowedFd<'_>,
+    source: &std::ffi::CStr,
+    target_directory: std::os::fd::BorrowedFd<'_>,
+    target: &std::ffi::CStr,
+) -> Result<(), Errno> {
+    use std::os::fd::AsRawFd as _;
+
+    // SAFETY: both descriptors are borrowed for the call and both names are NUL-terminated
+    // strings that outlive it.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            source_directory.as_raw_fd(),
+            source.as_ptr(),
+            target_directory.as_raw_fd(),
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    Errno::result(result).map(drop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
