@@ -1754,7 +1754,40 @@ pub(crate) fn mechanism_is_provable(bubblewrap: &Path) -> bool {
             destination.port(),
             &Destination::Tcp(destination),
         )
+        .is_ok()
     })
+}
+
+/// Why a startup probe did not prove its mechanism: the stage that failed and its cause, which
+/// is an errno or a refusal's fixed message and never names a host path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbeFailure {
+    pub(crate) stage: &'static str,
+    pub(crate) cause: String,
+}
+
+impl ProbeFailure {
+    fn new(stage: &'static str, cause: impl std::fmt::Display) -> Self {
+        Self {
+            stage,
+            cause: cause.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "stage {}: {}", self.stage, self.cause)
+    }
+}
+
+/// An `io::Error` as a probe may state it: the OS error and its number, without the path an
+/// error built by the standard library can carry.
+fn os_cause(error: &io::Error) -> String {
+    error.raw_os_error().map_or_else(
+        || format!("{:?}", error.kind()),
+        |errno| format!("errno {errno}: {}", io::Error::from_raw_os_error(errno)),
+    )
 }
 
 /// The port the local endpoint probe's listener takes inside its throwaway sandbox, whose network
@@ -1771,28 +1804,49 @@ const LOCAL_PROBE_SOCKET: &str = "probe";
 /// directory's descriptor. A forwarder relays to that socket through the descriptor, exactly as a
 /// run's local endpoint does, and the sentinel is read back from inside the sandbox. Nothing here
 /// touches a declared directory.
+///
+/// A failure is logged with its stage and cause, and the fact leaves the local endpoints out.
 pub(crate) fn local_mechanism_is_provable(bubblewrap: &Path) -> bool {
-    if !bubblewrap.is_file() {
-        return false;
+    match local_mechanism_proof(bubblewrap) {
+        Ok(()) => true,
+        Err(failure) => {
+            tracing::warn!(
+                %failure,
+                "local endpoints withheld from exec.egress-apertures: the startup probe did not \
+                 prove the mechanism"
+            );
+            false
+        }
     }
-    let Ok(directory) = tempfile::Builder::new()
+}
+
+/// [`local_mechanism_is_provable`], with the stage and cause of a failure.
+///
+/// The private directory is created `0700` whatever the process's umask: it is held to the rule
+/// of a declared directory, which refuses one its group or others may write.
+pub(crate) fn local_mechanism_proof(bubblewrap: &Path) -> Result<(), ProbeFailure> {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !bubblewrap.is_file() {
+        return Err(ProbeFailure::new(
+            "bubblewrap",
+            "the configured bubblewrap is not a file",
+        ));
+    }
+    let directory = tempfile::Builder::new()
         .prefix("substrate-local-endpoint-probe-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
-    else {
-        return false;
-    };
-    let Ok(endpoint) = LocalEndpoint::open("probe", LOCAL_PROBE_PORT, directory.path()) else {
-        return false;
-    };
-    let Ok(sentinel) = std::os::unix::net::UnixListener::bind(format!(
+        .map_err(|error| ProbeFailure::new("private directory", os_cause(&error)))?;
+    let endpoint = LocalEndpoint::open("probe", LOCAL_PROBE_PORT, directory.path())
+        .map_err(|error| ProbeFailure::new("declaration", error.message))?;
+    let sentinel = std::os::unix::net::UnixListener::bind(format!(
         "/proc/self/fd/{}/{LOCAL_PROBE_SOCKET}",
         endpoint.directory_number()
-    )) else {
-        return false;
-    };
-    if sentinel.set_nonblocking(true).is_err() {
-        return false;
-    }
+    ))
+    .map_err(|error| ProbeFailure::new("sentinel socket", os_cause(&error)))?;
+    sentinel
+        .set_nonblocking(true)
+        .map_err(|error| ProbeFailure::new("sentinel socket", os_cause(&error)))?;
     let accept = move || {
         sentinel.accept().map(|(stream, _)| {
             let _ = stream.set_nonblocking(false);
@@ -1816,7 +1870,7 @@ pub(crate) fn local_mechanism_is_provable(bubblewrap: &Path) -> bool {
 ///
 /// The listener is non-blocking and the wait has a deadline, so a probe that never reaches the
 /// sentinel never leaves this thread blocked.
-fn answer_while<S, F>(mut accept: F, prove: impl FnOnce() -> bool) -> bool
+fn answer_while<S, F, R>(mut accept: F, prove: impl FnOnce() -> R) -> R
 where
     S: io::Write,
     F: FnMut() -> io::Result<S> + Send + 'static,
@@ -1871,13 +1925,15 @@ fn inheritable_pipe() -> io::Result<(File, File)> {
     })
 }
 
-fn probe_through_sandbox(bubblewrap: &Path, port: u16, destination: &Destination<'_>) -> bool {
-    let Ok(info) = inheritable_pipe() else {
-        return false;
-    };
-    let Ok(block) = inheritable_pipe() else {
-        return false;
-    };
+fn probe_through_sandbox(
+    bubblewrap: &Path,
+    port: u16,
+    destination: &Destination<'_>,
+) -> Result<(), ProbeFailure> {
+    let info =
+        inheritable_pipe().map_err(|error| ProbeFailure::new("sandbox pipe", os_cause(&error)))?;
+    let block =
+        inheritable_pipe().map_err(|error| ProbeFailure::new("sandbox pipe", os_cause(&error)))?;
     let (mut info_read, info_write) = info;
     let (block_read, block_write) = block;
     let info_fd = info_write.as_raw_fd();
@@ -1914,14 +1970,18 @@ fn probe_through_sandbox(bubblewrap: &Path, port: u16, destination: &Destination
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let Ok(mut child) = command.spawn() else {
-        return false;
-    };
+    let mut child = command
+        .spawn()
+        .map_err(|error| ProbeFailure::new("sandbox spawn", os_cause(&error)))?;
     drop(info_write);
-    let proven = read_sandbox_pid(&mut info_read).is_some_and(|sandbox_pid| {
-        // A throwaway aperture pinned at the sentinel listener, installed exactly the way a run's
-        // aperture is installed — and then reached from inside the sandbox, which is the claim.
-        let installed = SharedCounters::new().ok().and_then(|counters| {
+    let proven = read_sandbox_pid(&mut info_read)
+        .ok_or_else(|| ProbeFailure::new("sandbox pid", "bubblewrap reported no child-pid"))
+        .and_then(|sandbox_pid| {
+            // A throwaway aperture pinned at the sentinel listener, installed exactly the way a
+            // run's aperture is installed — and then reached from inside the sandbox, which is the
+            // claim.
+            let counters = SharedCounters::new()
+                .map_err(|error| ProbeFailure::new("aperture counters", os_cause(&error)))?;
             let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
             let mechanism = match destination {
                 Destination::Tcp(_) => ApertureMechanism::LoopbackForwarder,
@@ -1930,8 +1990,9 @@ fn probe_through_sandbox(bubblewrap: &Path, port: u16, destination: &Destination
             // The probe proves the *mechanism*, never a declaration: no ceiling, because there is
             // no operator statement here to enforce.
             let forwarder =
-                spawn_forwarder(sandbox_pid, listen, *destination, &counters, None, None).ok()?;
-            Some(InstalledAperture {
+                spawn_forwarder(sandbox_pid, listen, *destination, &counters, None, None)
+                    .map_err(|error| ProbeFailure::new("forwarder install", error.message))?;
+            let installed = InstalledAperture {
                 forwarder,
                 counters,
                 name: String::new(),
@@ -1940,16 +2001,20 @@ fn probe_through_sandbox(bubblewrap: &Path, port: u16, destination: &Destination
                 listen,
                 mechanism,
                 key: None,
-            })
-        });
-        installed.is_some_and(|installed| {
+            };
             let reached = reaches_from_inside(sandbox_pid, port, PROBE_SENTINEL);
             // Dropped here rather than at the end of the scope: the forwarder must be gone before
             // the sandbox is, or the probe leaves the very orphan it exists to rule out.
             drop(installed);
-            reached
-        })
-    });
+            if reached {
+                Ok(())
+            } else {
+                Err(ProbeFailure::new(
+                    "reach",
+                    "the sentinel was not read back through the forwarder from inside the sandbox",
+                ))
+            }
+        });
     release_sandbox(block_write);
     let _ = child.wait();
     proven
@@ -2817,15 +2882,65 @@ mod tests {
     /// (ADR 0054 decision 7), and a backend that is not there proves nothing.
     #[test]
     fn the_local_endpoint_mechanism_is_provable_where_a_sandbox_opens() {
-        assert!(!super::local_mechanism_is_provable(Path::new(
-            "/does/not/exist/bwrap"
-        )));
+        let absent = super::local_mechanism_proof(Path::new("/does/not/exist/bwrap"))
+            .expect_err("a backend that is not there proves nothing");
+        assert_eq!(absent.stage, "bubblewrap");
         if Sandbox::open().is_none() {
             eprintln!("local endpoint startup probe: ABSENT (no bubblewrap)");
             return;
         }
-        assert!(super::local_mechanism_is_provable(Path::new(BUBBLEWRAP)));
+        if let Err(failure) = super::local_mechanism_proof(Path::new(BUBBLEWRAP)) {
+            panic!("the local endpoint mechanism was not proved: {failure}");
+        }
         eprintln!("local endpoint startup probe: executed");
+    }
+
+    const SHARED_UMASK_HELPER: &str = "egress::tests::local_probe_under_a_shared_umask_helper";
+    const SHARED_UMASK_HELPER_ENV: &str = "SUBSTRATE_TEST_LOCAL_PROBE_UMASK_HELPER";
+
+    /// The probe's private directory is `0700` whatever the umask: under `002`, which makes a
+    /// new directory writable by its group, the probe still proves the mechanism. The umask is
+    /// the process's, so the probe runs in a process of its own, this test binary running only
+    /// [`local_probe_under_a_shared_umask_helper`].
+    #[test]
+    fn the_local_endpoint_probe_proves_the_mechanism_under_a_group_writable_umask() {
+        if Sandbox::open().is_none() {
+            eprintln!("local endpoint startup probe under umask 002: ABSENT (no bubblewrap)");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                SHARED_UMASK_HELPER,
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(SHARED_UMASK_HELPER_ENV, "1")
+            .output()
+            .expect("run the helper");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let report = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "the helper failed: {report}");
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "the helper did not run exactly once: {report}"
+        );
+        eprintln!("local endpoint startup probe under umask 002: executed");
+    }
+
+    #[test]
+    #[ignore = "child process entry point: run by \
+                the_local_endpoint_probe_proves_the_mechanism_under_a_group_writable_umask"]
+    fn local_probe_under_a_shared_umask_helper() {
+        if std::env::var_os(SHARED_UMASK_HELPER_ENV).is_none() {
+            return;
+        }
+        // SAFETY: `umask` has no preconditions; this process runs this one case.
+        unsafe { libc::umask(0o002) };
+        if let Err(failure) = super::local_mechanism_proof(Path::new(BUBBLEWRAP)) {
+            panic!("the local endpoint mechanism was not proved under umask 002: {failure}");
+        }
     }
 
     #[test]
